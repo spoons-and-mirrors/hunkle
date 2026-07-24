@@ -21,7 +21,7 @@ The default `Auto` backend queries terminal capabilities and fails closed to a d
 
 - Preserve existing text, diff, source, and rendered-Markdown behavior for non-media content.
 - Treat a video preview as a thumbnail, not playback.
-- Fail closed to Unicode half-blocks. Auto accepts positively detected Sixel and iTerm2 support, but only selects Kitty when the terminal identity also establishes placeholder support. Explicit overrides remain available when SSH does not forward terminal identity variables.
+- Fail closed to Unicode half-blocks. Auto accepts detected Sixel support and recognized iTerm2 terminal hints, but only selects Kitty when the terminal identity also establishes placeholder support. Explicit overrides remain available when SSH does not forward terminal identity variables.
 - Preserve aspect ratio, account for terminal cell geometry, scale down to the preview body, and center the result without covering headers or adjacent panes.
 - Decode media and resize/encode terminal presentation away from the render loop.
 - Keep the existing generation and active-workspace checks so late file loads cannot replace the current selection. The threaded renderer also rejects stale resize results.

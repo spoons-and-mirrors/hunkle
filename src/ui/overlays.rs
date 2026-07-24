@@ -12,8 +12,8 @@ use crate::repo_path::RepoPath;
 use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
     ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch, HerdrPrompt,
-    HitTarget, MediaPreviewProtocol, PickerAction, PickerEntry, PullRequest, RemoteItems,
-    RepositoryBrowser, RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
+    HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems, RepositoryBrowser,
+    RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
     WorkspaceRenameDialog,
 };
@@ -2344,31 +2344,17 @@ pub(super) fn draw_settings(
     );
     let interval_up = Rect::new(interval_row.right().saturating_sub(3), interval_row.y, 3, 1);
 
+    let media_protocol_label = media_preview_protocol_label(settings.media_preview_protocol);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Media protocol", Style::default().fg(palette().ink)),
             Span::raw(
-                " ".repeat(usize::from(media_preview_row.width).saturating_sub(
-                    "Media protocol".len()
-                        + match settings.media_preview_protocol {
-                            MediaPreviewProtocol::Auto => "Auto".len(),
-                            MediaPreviewProtocol::Halfblocks => "Unicode".len(),
-                            MediaPreviewProtocol::Kitty => "Kitty (Ghostty)".len(),
-                            MediaPreviewProtocol::Iterm2 => "iTerm2 (WezTerm)".len(),
-                            MediaPreviewProtocol::Sixel => "Sixel (Windows Terminal)".len(),
-                        },
-                )),
+                " ".repeat(
+                    usize::from(media_preview_row.width)
+                        .saturating_sub("Media protocol".len() + media_protocol_label.len()),
+                ),
             ),
-            Span::styled(
-                match settings.media_preview_protocol {
-                    MediaPreviewProtocol::Auto => "Auto",
-                    MediaPreviewProtocol::Halfblocks => "Unicode",
-                    MediaPreviewProtocol::Kitty => "Kitty (Ghostty)",
-                    MediaPreviewProtocol::Iterm2 => "iTerm2 (WezTerm)",
-                    MediaPreviewProtocol::Sixel => "Sixel (Windows Terminal)",
-                },
-                Style::default().fg(palette().accent),
-            ),
+            Span::styled(media_protocol_label, Style::default().fg(palette().accent)),
         ]))
         .style(Style::default().bg(if selection == 4 {
             palette().selected
@@ -2558,6 +2544,16 @@ pub(super) fn draw_settings(
         agent_harness: agent_harness_row,
         media_preview: media_preview_row,
         editor: editor_row,
+    }
+}
+
+fn media_preview_protocol_label(protocol: crate::app::MediaPreviewProtocol) -> &'static str {
+    match protocol {
+        crate::app::MediaPreviewProtocol::Auto => "Auto",
+        crate::app::MediaPreviewProtocol::Halfblocks => "Unicode",
+        crate::app::MediaPreviewProtocol::Kitty => "Kitty (Ghostty)",
+        crate::app::MediaPreviewProtocol::Iterm2 => "iTerm2 (WezTerm)",
+        crate::app::MediaPreviewProtocol::Sixel => "Sixel (Windows Terminal)",
     }
 }
 

@@ -919,7 +919,11 @@ impl App {
         self.changes.preview_presentation.hide_media();
     }
 
-    pub(crate) fn take_media_terminal_output(&mut self) -> Vec<u8> {
+    pub(crate) fn take_media_terminal_cleanup(&mut self) -> Vec<u8> {
+        self.changes.preview_presentation.take_terminal_cleanup()
+    }
+
+    pub(crate) fn take_media_terminal_output(&mut self) -> crate::ui::preview::MediaTerminalOutput {
         self.changes.preview_presentation.take_terminal_output()
     }
 
@@ -2109,13 +2113,7 @@ impl App {
     }
 
     fn toggle_media_preview_protocol(&mut self) {
-        self.settings.media_preview_protocol = match self.settings.media_preview_protocol {
-            MediaPreviewProtocol::Auto => MediaPreviewProtocol::Halfblocks,
-            MediaPreviewProtocol::Halfblocks => MediaPreviewProtocol::Kitty,
-            MediaPreviewProtocol::Kitty => MediaPreviewProtocol::Iterm2,
-            MediaPreviewProtocol::Iterm2 => MediaPreviewProtocol::Sixel,
-            MediaPreviewProtocol::Sixel => MediaPreviewProtocol::Auto,
-        };
+        self.settings.media_preview_protocol = self.settings.media_preview_protocol.next();
         self.reset_media_presentation();
         self.settings_changed();
     }

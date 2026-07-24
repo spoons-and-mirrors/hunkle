@@ -44,6 +44,12 @@ pub(crate) struct KittyTransmission {
     bytes: Vec<u8>,
 }
 
+#[derive(Default)]
+pub(crate) struct MediaTerminalOutput {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) kitty: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ActiveKittyImage {
     generation: u64,
@@ -141,7 +147,8 @@ pub(crate) struct PreviewPresentation {
     media_error: Option<String>,
     active_kitty_image: Option<ActiveKittyImage>,
     active_inline_image: Option<ActiveInlineImage>,
-    pending_terminal_output: Vec<u8>,
+    pending_terminal_cleanup: Vec<u8>,
+    pending_terminal_output: MediaTerminalOutput,
 }
 
 struct PreviewCache {
@@ -185,7 +192,8 @@ impl Default for PreviewPresentation {
             media_error: None,
             active_kitty_image: None,
             active_inline_image: None,
-            pending_terminal_output: Vec::new(),
+            pending_terminal_cleanup: Vec::new(),
+            pending_terminal_output: MediaTerminalOutput::default(),
         }
     }
 }
@@ -198,10 +206,12 @@ impl PreviewPresentation {
 
     pub(crate) fn hide_media(&mut self) {
         if self.active_kitty_image.take().is_some() {
-            self.pending_terminal_output
+            self.pending_terminal_cleanup
                 .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
         }
-        self.active_inline_image = None;
+        if let Some(active) = self.active_inline_image.take() {
+            append_clear_area(&mut self.pending_terminal_cleanup, active.area);
+        }
         if self.media_generation.take().is_some() {
             self.media_state.empty_protocol();
         }
@@ -240,11 +250,18 @@ impl PreviewPresentation {
         area: Rect,
         transmission: Option<KittyTransmission>,
     ) {
-        self.active_inline_image = None;
+        if let Some(active) = self.active_inline_image.take() {
+            append_clear_area(&mut self.pending_terminal_cleanup, active.area);
+        }
         if let Some(transmission) = transmission {
-            self.pending_terminal_output
+            self.pending_terminal_cleanup
                 .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
-            append_positioned_output(&mut self.pending_terminal_output, area, &transmission.bytes);
+            append_positioned_output(
+                &mut self.pending_terminal_output.bytes,
+                area,
+                &transmission.bytes,
+            );
+            self.pending_terminal_output.kitty = true;
             self.active_kitty_image = Some(ActiveKittyImage {
                 generation,
                 image_id: transmission.image_id,
@@ -263,17 +280,18 @@ impl PreviewPresentation {
         if active.area == area {
             return;
         }
-        self.pending_terminal_output
+        self.pending_terminal_cleanup
             .extend_from_slice(KITTY_DELETE_PLACEMENTS.as_bytes());
         let placement = format!(
             "\u{1b}_Ga=p,i={},c={},r={},C=1,q=2\u{1b}\\",
             active.image_id, area.width, area.height
         );
         append_positioned_output(
-            &mut self.pending_terminal_output,
+            &mut self.pending_terminal_output.bytes,
             area,
             placement.as_bytes(),
         );
+        self.pending_terminal_output.kitty = true;
         active.area = area;
     }
 
@@ -295,20 +313,28 @@ impl PreviewPresentation {
         if self.active_inline_image == Some(next) {
             return;
         }
+        if let Some(active) = self.active_inline_image.take() {
+            append_clear_area(&mut self.pending_terminal_cleanup, active.area);
+        }
         if self.active_kitty_image.take().is_some() {
-            self.pending_terminal_output
+            self.pending_terminal_cleanup
                 .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
         }
-        append_positioned_output(&mut self.pending_terminal_output, area, &transmission);
+        append_positioned_output(&mut self.pending_terminal_output.bytes, area, &transmission);
         self.active_inline_image = Some(next);
     }
 
-    pub(crate) fn take_terminal_output(&mut self) -> Vec<u8> {
+    pub(crate) fn take_terminal_cleanup(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending_terminal_cleanup)
+    }
+
+    pub(crate) fn take_terminal_output(&mut self) -> MediaTerminalOutput {
         std::mem::take(&mut self.pending_terminal_output)
     }
 
     pub(crate) fn terminal_restarted(&mut self) {
-        self.pending_terminal_output.clear();
+        self.pending_terminal_output = MediaTerminalOutput::default();
+        self.pending_terminal_cleanup.clear();
         self.active_kitty_image = None;
         self.active_inline_image = None;
         if self.media_generation.take().is_some() {
@@ -653,6 +679,21 @@ fn append_positioned_output(output: &mut Vec<u8>, area: Rect, command: &[u8]) {
     output.extend_from_slice(b"\x1b[s");
     output.extend_from_slice(format!("\x1b[{};{}H", area.y + 1, area.x + 1).as_bytes());
     output.extend_from_slice(command);
+    output.extend_from_slice(b"\x1b[u");
+}
+
+fn append_clear_area(output: &mut Vec<u8>, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    output.extend_from_slice(b"\x1b[s");
+    output.extend_from_slice(format!("\x1b[{};{}H", area.y + 1, area.x + 1).as_bytes());
+    for row in 0..area.height {
+        output.extend_from_slice(format!("\x1b[{}X", area.width).as_bytes());
+        if row + 1 < area.height {
+            output.extend_from_slice(b"\x1b[1B");
+        }
+    }
     output.extend_from_slice(b"\x1b[u");
 }
 
@@ -1042,6 +1083,9 @@ fn rendered_hunk_rows(
 
 #[cfg(test)]
 mod tests {
+    use image::{ImageBuffer, Rgba};
+    use ratatui_image::ResizeEncodeRender;
+
     use super::*;
 
     #[test]
@@ -1091,20 +1135,25 @@ mod tests {
             }),
         );
 
-        let output = String::from_utf8(preview.take_terminal_output()).unwrap();
-        assert!(output.starts_with(KITTY_DELETE_ALL));
+        let output = preview.take_terminal_output();
+        assert!(output.kitty);
+        let output = String::from_utf8(output.bytes).unwrap();
+        assert_eq!(preview.take_terminal_cleanup(), KITTY_DELETE_ALL.as_bytes());
         assert!(output.contains("\x1b[s\x1b[4;3H"));
         assert!(output.contains("i=42,a=T,U=1,c=10,r=4"));
         assert!(output.ends_with("\x1b[u"));
 
         preview.queue_kitty_frame(7, Rect::new(4, 5, 10, 4), None);
-        let reposition = String::from_utf8(preview.take_terminal_output()).unwrap();
-        assert!(reposition.starts_with(KITTY_DELETE_PLACEMENTS));
+        let reposition = String::from_utf8(preview.take_terminal_output().bytes).unwrap();
+        assert_eq!(
+            preview.take_terminal_cleanup(),
+            KITTY_DELETE_PLACEMENTS.as_bytes()
+        );
         assert!(reposition.contains("\x1b[s\x1b[6;5H"));
         assert!(reposition.contains("a=p,i=42,c=10,r=4,C=1,q=2"));
 
         preview.hide_media();
-        assert_eq!(preview.take_terminal_output(), KITTY_DELETE_ALL.as_bytes());
+        assert_eq!(preview.take_terminal_cleanup(), KITTY_DELETE_ALL.as_bytes());
     }
 
     #[test]
@@ -1135,6 +1184,31 @@ mod tests {
     }
 
     #[test]
+    fn real_inline_encoders_produce_extractable_terminal_payloads() {
+        let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(2, 2, Rgba([255, 0, 0, 255])));
+        for protocol in [MediaPreviewProtocol::Iterm2, MediaPreviewProtocol::Sixel] {
+            let mut picker = Picker::halfblocks();
+            picker.set_protocol_type(match protocol {
+                MediaPreviewProtocol::Iterm2 => ProtocolType::Iterm2,
+                MediaPreviewProtocol::Sixel => ProtocolType::Sixel,
+                _ => unreachable!(),
+            });
+            let mut state = picker.new_resize_protocol(image.clone());
+            state.resize_encode(&Resize::Fit(None), Size::new(2, 1));
+            state.last_encoding_result().unwrap().unwrap();
+            let payload = match state.protocol_type() {
+                StatefulProtocolType::ITerm2(encoded) => &encoded.data,
+                StatefulProtocolType::Sixel(encoded) => &encoded.data,
+                _ => unreachable!(),
+            };
+            let area = Rect::new(1, 1, 2, 1);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 5, 5));
+            buffer.cell_mut((1, 1)).unwrap().set_symbol(payload);
+            assert!(take_inline_transmission(&mut buffer, area, protocol).is_some());
+        }
+    }
+
+    #[test]
     fn queues_inline_output_only_when_placement_changes() {
         let mut preview = PreviewPresentation::default();
         let area = Rect::new(2, 3, 10, 4);
@@ -1144,7 +1218,9 @@ mod tests {
             area,
             Some(b"inline-image".to_vec()),
         );
-        let output = String::from_utf8(preview.take_terminal_output()).unwrap();
+        let output = preview.take_terminal_output();
+        assert!(!output.kitty);
+        let output = String::from_utf8(output.bytes).unwrap();
         assert!(output.contains("\u{1b}[s\u{1b}[4;3Hinline-image\u{1b}[u"));
 
         preview.queue_inline_frame(
@@ -1153,7 +1229,7 @@ mod tests {
             area,
             Some(b"inline-image".to_vec()),
         );
-        assert!(preview.take_terminal_output().is_empty());
+        assert!(preview.take_terminal_output().bytes.is_empty());
 
         preview.queue_inline_frame(
             7,
@@ -1161,7 +1237,15 @@ mod tests {
             Rect::new(4, 5, 10, 4),
             Some(b"inline-image".to_vec()),
         );
-        assert!(!preview.take_terminal_output().is_empty());
+        let cleanup = String::from_utf8(preview.take_terminal_cleanup()).unwrap();
+        assert!(cleanup.starts_with("\u{1b}[s\u{1b}[4;3H\u{1b}[10X"));
+        assert!(cleanup.ends_with("\u{1b}[u"));
+        assert!(!preview.take_terminal_output().bytes.is_empty());
+
+        preview.hide_media();
+        let cleanup = String::from_utf8(preview.take_terminal_cleanup()).unwrap();
+        assert!(cleanup.starts_with("\u{1b}[s\u{1b}[6;5H\u{1b}[10X"));
+        assert!(cleanup.ends_with("\u{1b}[u"));
     }
 
     #[test]

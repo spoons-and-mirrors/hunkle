@@ -39,6 +39,16 @@ impl MediaPreviewProtocol {
             Self::Sixel => "sixel",
         }
     }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Halfblocks,
+            Self::Halfblocks => Self::Kitty,
+            Self::Kitty => Self::Iterm2,
+            Self::Iterm2 => Self::Sixel,
+            Self::Sixel => Self::Auto,
+        }
+    }
 }
 
 impl Settings {

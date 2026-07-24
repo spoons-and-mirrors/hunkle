@@ -67,7 +67,10 @@ fn main() -> Result<()> {
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
     let mut app = App::opening(path.clone());
-    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    if std::env::var_os("HERDR_ENV").is_some() {
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+    }
     app.configure_media_picker(picker, auto_kitty_supported());
     let mut dirty = true;
     let mut restart_request: Option<PathBuf> = None;
@@ -104,7 +107,16 @@ fn main() -> Result<()> {
         }
         if dirty {
             let _activity = diagnostics::activity("draw", app.diagnostic_context());
-            terminal.draw(|frame| ui::draw(frame, &mut app))?;
+            let mut cleanup_error = None;
+            terminal.draw(|frame| {
+                ui::draw(frame, &mut app);
+                if let Err(error) = write_media_terminal_cleanup(&mut app) {
+                    cleanup_error = Some(error);
+                }
+            })?;
+            if let Some(error) = cleanup_error {
+                return Err(error);
+            }
             write_media_terminal_output(&mut app)?;
             dirty = false;
         }
@@ -150,7 +162,10 @@ fn main() -> Result<()> {
                     app.handle_paste(&text);
                     (true, false)
                 }
-                Event::Resize(_, _) => (true, true),
+                Event::Resize(_, _) => {
+                    app.reset_media_presentation();
+                    (true, true)
+                }
                 _ => (false, false),
             };
             dirty |= changed;
@@ -261,6 +276,8 @@ fn restore_terminal() {
         PopKeyboardEnhancementFlags,
         DisableBracketedPaste,
         DisableMouseCapture,
+        Clear(ClearType::All),
+        MoveTo(0, 0),
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
@@ -285,10 +302,23 @@ fn auto_kitty_supported() -> bool {
 
 fn write_media_terminal_output(app: &mut App) -> Result<()> {
     let output = app.take_media_terminal_output();
+    if output.bytes.is_empty() {
+        return Ok(());
+    }
+    if output.kitty {
+        KITTY_MEDIA_EMITTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(&output.bytes)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn write_media_terminal_cleanup(app: &mut App) -> Result<()> {
+    let output = app.take_media_terminal_cleanup();
     if output.is_empty() {
         return Ok(());
     }
-    KITTY_MEDIA_EMITTED.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut stdout = io::stdout().lock();
     stdout.write_all(&output)?;
     stdout.flush()?;
