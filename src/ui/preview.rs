@@ -8,6 +8,7 @@ use std::{
 
 use image::DynamicImage;
 use ratatui::{
+    buffer::Buffer,
     layout::{Rect, Size},
     style::Style,
     text::{Line, Span},
@@ -16,6 +17,7 @@ use ratatui_image::{
     Resize,
     errors::Errors as ImageError,
     picker::{Picker, ProtocolType},
+    protocol::{StatefulProtocol, StatefulProtocolType, kitty::StatefulKitty},
     thread::{ResizeRequest, ResizeResponse, ThreadProtocol},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -32,6 +34,48 @@ const MAX_CACHED_PREVIEW_LINES: usize = 30_000;
 const MAX_CACHED_PREVIEW_BYTES: usize = 512 * 1024;
 const MARKDOWN_LINE_GUTTER_WIDTH: usize = 7;
 const MIN_NUMBERED_MARKDOWN_WIDTH: usize = 12;
+
+const KITTY_DELETE_ALL: &str = "\u{1b}_Ga=d,d=A,q=2\u{1b}\\";
+const KITTY_DELETE_PLACEMENTS: &str = "\u{1b}_Ga=d,d=a,q=2\u{1b}\\";
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct KittyTransmission {
+    image_id: u32,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActiveKittyImage {
+    generation: u64,
+    image_id: u32,
+    area: Rect,
+}
+
+pub(crate) fn take_kitty_transmission(
+    buffer: &mut Buffer,
+    area: Rect,
+) -> Option<KittyTransmission> {
+    const COMBINED_TRANSMIT: &str = ",a=T,U=1,f=32";
+    let cell = buffer.cell((area.x, area.y))?;
+    let symbol = cell.symbol().to_owned();
+    let placeholders = symbol.find("\u{1b}[s")?;
+    let transmission = &symbol[..placeholders];
+    buffer
+        .cell_mut((area.x, area.y))?
+        .set_symbol(&symbol[placeholders..]);
+    let id_start = transmission.find("_Gq=2,i=")? + "_Gq=2,i=".len();
+    let id_end = id_start + transmission[id_start..].find(',')?;
+    let image_id = transmission[id_start..id_end].parse().ok()?;
+    let superfile_marker = format!(",a=T,U=1,c={},r={},f=32", area.width, area.height);
+    let raw_transmission = transmission.replacen(COMBINED_TRANSMIT, &superfile_marker, 1);
+    if raw_transmission == transmission {
+        return None;
+    }
+    Some(KittyTransmission {
+        image_id,
+        bytes: raw_transmission.into_bytes(),
+    })
+}
 
 pub(crate) struct PreviewInput<'a> {
     pub(crate) content: &'a str,
@@ -60,6 +104,8 @@ pub(crate) struct PreviewPresentation {
     media_protocol: Option<MediaPreviewProtocol>,
     media_size: Size,
     media_error: Option<String>,
+    active_kitty_image: Option<ActiveKittyImage>,
+    pending_terminal_output: Vec<u8>,
 }
 
 struct PreviewCache {
@@ -98,6 +144,8 @@ impl Default for PreviewPresentation {
             media_protocol: None,
             media_size: Size::default(),
             media_error: None,
+            active_kitty_image: None,
+            pending_terminal_output: Vec::new(),
         }
     }
 }
@@ -109,6 +157,10 @@ impl PreviewPresentation {
     }
 
     pub(crate) fn hide_media(&mut self) {
+        if self.active_kitty_image.take().is_some() {
+            self.pending_terminal_output
+                .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
+        }
         if self.media_generation.take().is_some() {
             self.media_state.empty_protocol();
         }
@@ -141,6 +193,63 @@ impl PreviewPresentation {
         self.media_error.as_deref()
     }
 
+    pub(crate) fn queue_kitty_frame(
+        &mut self,
+        generation: u64,
+        area: Rect,
+        transmission: Option<KittyTransmission>,
+    ) {
+        if let Some(transmission) = transmission {
+            self.pending_terminal_output
+                .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
+            append_positioned_output(&mut self.pending_terminal_output, area, &transmission.bytes);
+            self.active_kitty_image = Some(ActiveKittyImage {
+                generation,
+                image_id: transmission.image_id,
+                area,
+            });
+            return;
+        }
+
+        let Some(active) = self.active_kitty_image.as_mut() else {
+            return;
+        };
+        if active.generation != generation {
+            self.hide_media();
+            return;
+        }
+        if active.area == area {
+            return;
+        }
+        self.pending_terminal_output
+            .extend_from_slice(KITTY_DELETE_PLACEMENTS.as_bytes());
+        let placement = format!(
+            "\u{1b}_Ga=p,i={},c={},r={},C=1,q=2\u{1b}\\",
+            active.image_id, area.width, area.height
+        );
+        append_positioned_output(
+            &mut self.pending_terminal_output,
+            area,
+            placement.as_bytes(),
+        );
+        active.area = area;
+    }
+
+    pub(crate) fn take_terminal_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending_terminal_output)
+    }
+
+    pub(crate) fn terminal_restarted(&mut self) {
+        self.pending_terminal_output.clear();
+        self.active_kitty_image = None;
+        if self.media_generation.take().is_some() {
+            self.media_state.empty_protocol();
+        }
+        self.media_protocol = None;
+        self.media_size = Size::default();
+        self.media_error = None;
+    }
+
     pub(crate) fn media_state(
         &mut self,
         generation: u64,
@@ -150,11 +259,19 @@ impl PreviewPresentation {
     ) -> (Rect, &mut ThreadProtocol) {
         if self.media_generation != Some(generation) || self.media_protocol != Some(protocol) {
             let mut picker = Picker::halfblocks();
-            if protocol == MediaPreviewProtocol::Kitty {
-                picker.set_protocol_type(ProtocolType::Kitty);
-            }
-            self.media_state
-                .replace_protocol(picker.new_resize_protocol((**image).clone()));
+            let state = if protocol == MediaPreviewProtocol::Kitty {
+                let image_id = ((generation % 99_999) + 1) as u32;
+                StatefulProtocol::new(
+                    (**image).clone(),
+                    picker.font_size(),
+                    None,
+                    StatefulProtocolType::Kitty(StatefulKitty::new(image_id, false)),
+                )
+            } else {
+                picker.set_protocol_type(ProtocolType::Halfblocks);
+                picker.new_resize_protocol((**image).clone())
+            };
+            self.media_state.replace_protocol(state);
             self.media_generation = Some(generation);
             self.media_protocol = Some(protocol);
             self.media_size = Size::default();
@@ -434,6 +551,13 @@ impl PreviewPresentation {
             .as_ref()
             .is_some_and(|cache| !cache.fully_styled && !cache.lines.is_empty())
     }
+}
+
+fn append_positioned_output(output: &mut Vec<u8>, area: Rect, command: &[u8]) {
+    output.extend_from_slice(b"\x1b[s");
+    output.extend_from_slice(format!("\x1b[{};{}H", area.y + 1, area.x + 1).as_bytes());
+    output.extend_from_slice(command);
+    output.extend_from_slice(b"\x1b[u");
 }
 
 fn wrapped_styled_line_starts(lines: &[Line<'static>], width: usize) -> Vec<usize> {
@@ -823,6 +947,69 @@ fn rendered_hunk_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_superfile_style_kitty_transmission_after_placeholders() {
+        let command =
+            "\u{1b}_Gq=2,i=42,a=T,U=1,f=32,t=d,s=80,v=48,m=0;data\u{1b}\\\u{1b}[splaceholders";
+        let area = Rect::new(2, 3, 10, 3);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 10));
+        buffer.cell_mut((2, 3)).unwrap().set_symbol(command);
+        buffer.cell_mut((3, 3)).unwrap().set_symbol("placeholder");
+
+        let transmission = take_kitty_transmission(&mut buffer, area).unwrap();
+
+        let patched = String::from_utf8(transmission.bytes).unwrap();
+        assert_eq!(transmission.image_id, 42);
+        assert!(patched.contains("i=42,a=T,U=1,c=10,r=3,f=32,"));
+        assert!(!patched.contains("\u{10eeee}"));
+        assert_eq!(
+            buffer.cell((2, 3)).unwrap().symbol(),
+            "\u{1b}[splaceholders"
+        );
+        assert_eq!(buffer.cell((3, 3)).unwrap().symbol(), "placeholder");
+
+        buffer
+            .cell_mut((2, 3))
+            .unwrap()
+            .set_symbol("\u{1b}[s\u{10eeee}placeholder");
+        buffer.cell_mut((3, 3)).unwrap().set_symbol("placeholder");
+        assert!(take_kitty_transmission(&mut buffer, area).is_none());
+        assert_eq!(
+            buffer.cell((2, 3)).unwrap().symbol(),
+            "\u{1b}[s\u{10eeee}placeholder"
+        );
+        assert_eq!(buffer.cell((3, 3)).unwrap().symbol(), "placeholder");
+    }
+
+    #[test]
+    fn queues_kitty_output_outside_the_ratatui_buffer() {
+        let mut preview = PreviewPresentation::default();
+        let area = Rect::new(2, 3, 10, 4);
+        preview.queue_kitty_frame(
+            7,
+            area,
+            Some(KittyTransmission {
+                image_id: 42,
+                bytes: b"\x1b_Gq=2,i=42,a=T,U=1,c=10,r=4;data\x1b\\".to_vec(),
+            }),
+        );
+
+        let output = String::from_utf8(preview.take_terminal_output()).unwrap();
+        assert!(output.starts_with(KITTY_DELETE_ALL));
+        assert!(output.contains("\x1b[s\x1b[4;3H"));
+        assert!(output.contains("i=42,a=T,U=1,c=10,r=4"));
+        assert!(output.ends_with("\x1b[u"));
+
+        preview.queue_kitty_frame(7, Rect::new(4, 5, 10, 4), None);
+        let reposition = String::from_utf8(preview.take_terminal_output()).unwrap();
+        assert!(reposition.starts_with(KITTY_DELETE_PLACEMENTS));
+        assert!(reposition.contains("\x1b[s\x1b[6;5H"));
+        assert!(reposition.contains("a=p,i=42,c=10,r=4,C=1,q=2"));
+
+        preview.hide_media();
+        assert_eq!(preview.take_terminal_output(), KITTY_DELETE_ALL.as_bytes());
+    }
 
     #[test]
     fn wrapped_source_continuations_stay_after_the_line_number_gutter() {

@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     fill, history, palette,
-    preview::{PreparedPreview, PreviewInput},
+    preview::{PreparedPreview, PreviewInput, take_kitty_transmission},
     text::word_wrapped_height,
     truncate_width,
 };
@@ -987,6 +987,14 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
                 area,
                 state,
             );
+            if protocol == crate::app::MediaPreviewProtocol::Kitty {
+                let transmission = take_kitty_transmission(frame.buffer_mut(), area);
+                app.changes
+                    .preview_presentation
+                    .queue_kitty_frame(generation, area, transmission);
+            }
+        } else if protocol == crate::app::MediaPreviewProtocol::Kitty {
+            app.changes.preview_presentation.hide_media();
         }
         if let Some(error) = app.changes.preview_presentation.media_error() {
             frame.render_widget(

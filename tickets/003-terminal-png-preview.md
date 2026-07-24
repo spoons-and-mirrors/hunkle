@@ -1,14 +1,14 @@
 # Ticket 003: Terminal Media Preview
 
-**Status:** Implemented; native Kitty acceptance pending
+**Status:** Implemented; native Kitty verified in Ghostty
 
-**Blocked by:** Manual verification through a Herdr pane attached from WezTerm with Herdr's experimental Kitty graphics enabled.
+**Blocked by:** Nothing. Native compatibility outside Ghostty remains terminal-dependent.
 
 ## What Was Built
 
 Render static previews for selected image and video files inside the existing Files preview pane. Images are decoded directly. Videos are converted to a representative still frame by a bounded `ffmpeg` subprocess. Both sources then share the same asynchronous image rendering path.
 
-The default backend is a deterministic true-color Unicode half-block reconstruction. Users on the verified Herdr path can select `Kitty (Herdr)` under Settings -> Media protocol to render native pixels through Kitty virtual placements.
+The default backend is a deterministic true-color Unicode half-block reconstruction. Ghostty users can select `Kitty (Ghostty)` under Settings -> Media protocol to render native pixels through Kitty virtual placements.
 
 ## Supported Media
 
@@ -21,7 +21,7 @@ The default backend is a deterministic true-color Unicode half-block reconstruct
 
 - Preserve existing text, diff, source, and rendered-Markdown behavior for non-media content.
 - Treat a video preview as a thumbnail, not playback.
-- Fail closed to Unicode half-blocks. Kitty is enabled only by an explicit user setting and is labelled for the Herdr path rather than inferred from `TERM` or direct WezTerm detection.
+- Fail closed to Unicode half-blocks. Kitty is enabled only by an explicit user setting and labelled for the verified Ghostty path rather than inferred from terminal environment variables.
 - Preserve aspect ratio, account for terminal cell geometry, scale down to the preview body, and center the result without covering headers or adjacent panes.
 - Decode media and resize/encode terminal presentation away from the render loop.
 - Keep the existing generation and active-workspace checks so late file loads cannot replace the current selection. The threaded renderer also rejects stale resize results.
@@ -35,8 +35,9 @@ The default backend is a deterministic true-color Unicode half-block reconstruct
 - Corrupt, unsupported, excessive, and unavailable media produce text errors rather than exposing binary bytes.
 - Symlinks, directories, and special files retain the existing safe text description instead of being followed as media.
 - `ratatui-image` 11.0.6 matches Hunkle's Ratatui 0.30 and Crossterm 0.29 versions and provides both Kitty virtual placements and the half-block fallback.
-- Herdr's Kitty graphics support is experimental and disabled by default. Native-pixel acceptance requires `[experimental] kitty_graphics = true` and a newly attached WezTerm client.
-- Direct WezTerm is not treated as Kitty-capable because its virtual-placeholder support is incomplete. Herdr consumes those placeholders and re-emits ordinary clipped Kitty placements.
+- Native-pixel image preview is manually verified in Ghostty running as a Windows GUI WSL terminal.
+- Direct WezTerm did not render the Kitty preview in manual testing because its virtual-placeholder support is incomplete.
+- Herdr did not render the Kitty preview in manual testing even with `[experimental] kitty_graphics = true`; it therefore uses the Unicode fallback unless its graphics forwarding path is fixed independently.
 - Kitty cleanup is emitted before terminal restoration when the native backend is enabled.
 
 ## Acceptance Criteria
@@ -51,8 +52,8 @@ The default backend is a deterministic true-color Unicode half-block reconstruct
 - [x] Existing text, diff, source, Markdown, wrapping, scrolling, and large-preview behavior remain covered by the full test suite.
 - [x] Full-surface Ratatui tests force half-block rendering and cover async rendering, bounds, image-to-text replacement, overlay cleanup, and corrupt content.
 - [x] Settings persistence fails closed to half-blocks and preserves explicit Kitty selection.
-- [ ] A minimal Kitty image displays as native pixels in the exact installed Herdr-to-WezTerm environment.
-- [ ] Manual Herdr acceptance covers image and video thumbnails, resize/repaint, rapid selection changes, overlays, editor suspend/resume, and clean shutdown.
+- [x] A selected PNG displays as native pixels in Ghostty.
+- [ ] Manual Ghostty acceptance covers video thumbnails, resize/repaint, rapid selection changes, overlays, editor suspend/resume, and clean shutdown.
 - [ ] A manual run with Herdr Kitty graphics disabled confirms the default fallback is readable and emits no protocol artifacts.
 
 ## Not In This Ticket

@@ -2352,14 +2352,14 @@ pub(super) fn draw_settings(
                     "Media protocol".len()
                         + match settings.media_preview_protocol {
                             MediaPreviewProtocol::Halfblocks => "Unicode".len(),
-                            MediaPreviewProtocol::Kitty => "Kitty (Herdr)".len(),
+                            MediaPreviewProtocol::Kitty => "Kitty (Ghostty)".len(),
                         },
                 )),
             ),
             Span::styled(
                 match settings.media_preview_protocol {
                     MediaPreviewProtocol::Halfblocks => "Unicode",
-                    MediaPreviewProtocol::Kitty => "Kitty (Herdr)",
+                    MediaPreviewProtocol::Kitty => "Kitty (Ghostty)",
                 },
                 Style::default().fg(palette().accent),
             ),

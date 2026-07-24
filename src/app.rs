@@ -919,6 +919,14 @@ impl App {
         self.changes.preview_presentation.hide_media();
     }
 
+    pub(crate) fn take_media_terminal_output(&mut self) -> Vec<u8> {
+        self.changes.preview_presentation.take_terminal_output()
+    }
+
+    pub(crate) fn media_terminal_restarted(&mut self) {
+        self.changes.preview_presentation.terminal_restarted();
+    }
+
     fn prefetch_commit_summaries(&mut self) {
         let Some(repo) = self.session.data().filter(|repo| !repo.is_local()) else {
             return;

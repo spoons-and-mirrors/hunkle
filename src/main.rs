@@ -13,7 +13,13 @@ mod theme;
 mod tree;
 mod ui;
 
-use std::{io, path::PathBuf, process::Command, thread, time::Duration};
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+    process::Command,
+    thread,
+    time::Duration,
+};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -60,9 +66,6 @@ fn main() -> Result<()> {
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
     let mut app = App::opening(path.clone());
-    set_kitty_media_enabled(
-        app.settings.media_preview_protocol == app::MediaPreviewProtocol::Kitty,
-    );
     let mut dirty = true;
     let mut restart_request: Option<PathBuf> = None;
     let mut restarting = false;
@@ -99,6 +102,7 @@ fn main() -> Result<()> {
         if dirty {
             let _activity = diagnostics::activity("draw", app.diagnostic_context());
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
+            write_media_terminal_output(&mut app)?;
             dirty = false;
         }
         let ready = {
@@ -154,9 +158,6 @@ fn main() -> Result<()> {
                 break;
             }
         }
-        set_kitty_media_enabled(
-            app.settings.media_preview_protocol == app::MediaPreviewProtocol::Kitty,
-        );
         if let Some(text) = app.take_copy_request() {
             app.notice = Some(match selection::copy_to_clipboard(&text) {
                 Ok(()) => "Copied selection".to_owned(),
@@ -168,7 +169,8 @@ fn main() -> Result<()> {
             restore_terminal();
             let result = run_editor(request);
             terminal = start_terminal()?;
-            app.reset_media_presentation();
+            KITTY_MEDIA_EMITTED.store(false, std::sync::atomic::Ordering::Relaxed);
+            app.media_terminal_restarted();
             app.editor_finished(result);
             dirty = true;
         }
@@ -247,9 +249,9 @@ fn start_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn restore_terminal() {
     // Keyboard enhancement was pushed inside the alternate screen, so unwind it first.
-    if KITTY_MEDIA_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-        use std::io::Write;
+    if KITTY_MEDIA_EMITTED.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = io::stdout().write_all(b"\x1b_Ga=d,d=A,q=2\x1b\\");
+        let _ = io::stdout().flush();
     }
     let _ = execute!(
         io::stdout(),
@@ -261,11 +263,19 @@ fn restore_terminal() {
     let _ = disable_raw_mode();
 }
 
-static KITTY_MEDIA_ENABLED: std::sync::atomic::AtomicBool =
+static KITTY_MEDIA_EMITTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn set_kitty_media_enabled(enabled: bool) {
-    KITTY_MEDIA_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+fn write_media_terminal_output(app: &mut App) -> Result<()> {
+    let output = app.take_media_terminal_output();
+    if output.is_empty() {
+        return Ok(());
+    }
+    KITTY_MEDIA_EMITTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(&output)?;
+    stdout.flush()?;
+    Ok(())
 }
 
 fn install_panic_hook() {
