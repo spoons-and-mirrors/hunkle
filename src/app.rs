@@ -29,8 +29,8 @@ pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserEffect,
 };
-pub use settings::Settings;
 pub(crate) use settings::SettingsStore;
+pub use settings::{MediaPreviewProtocol, Settings};
 pub(crate) use workspace_panel::{
     AgentStatus, DEFAULT_WIDTH as DEFAULT_WORKSPACE_PANEL_WIDTH,
     MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, SPINNER_FRAMES, SnapshotLoadDialog,
@@ -197,6 +197,7 @@ pub struct Regions {
     pub file_dialog_primary: Option<Rect>,
     pub file_dialog_secondary: Option<Rect>,
     pub editor_setting: Option<Rect>,
+    pub media_preview_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub workspace_panel_setting: Option<Rect>,
     pub agent_harness_setting: Option<Rect>,
@@ -910,7 +911,12 @@ impl App {
         changed |= self
             .changes
             .poll_preview(self.session.data().map(|repo| repo.root.as_path()));
+        changed |= self.changes.preview_presentation.poll_media();
         changed
+    }
+
+    pub(crate) fn reset_media_presentation(&mut self) {
+        self.changes.preview_presentation.hide_media();
     }
 
     fn prefetch_commit_summaries(&mut self) {
@@ -1289,10 +1295,10 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('s') => self.mode = Mode::Normal,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                self.settings_selection = (self.settings_selection + 1) % 5;
+                self.settings_selection = (self.settings_selection + 1) % 6;
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                self.settings_selection = (self.settings_selection + 4) % 5;
+                self.settings_selection = (self.settings_selection + 5) % 6;
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 0 => {
                 self.toggle_auto_fetch();
@@ -1312,6 +1318,9 @@ impl App {
                 self.toggle_agent_harness();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 4 => {
+                self.toggle_media_preview_protocol();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 5 => {
                 self.open_editor_setting();
             }
             _ => {}
@@ -2081,6 +2090,15 @@ impl App {
         self.settings_changed();
     }
 
+    fn toggle_media_preview_protocol(&mut self) {
+        self.settings.media_preview_protocol = match self.settings.media_preview_protocol {
+            MediaPreviewProtocol::Halfblocks => MediaPreviewProtocol::Kitty,
+            MediaPreviewProtocol::Kitty => MediaPreviewProtocol::Halfblocks,
+        };
+        self.reset_media_presentation();
+        self.settings_changed();
+    }
+
     fn change_fetch_interval(&mut self, delta: i16) {
         self.settings.fetch_interval_minutes =
             (self.settings.fetch_interval_minutes as i16 + delta).clamp(1, 1440) as u16;
@@ -2339,6 +2357,7 @@ impl App {
     pub(crate) fn markdown_preview_available(&self) -> bool {
         self.view == View::Changes
             && self.changes.pane == LeftPane::Files
+            && self.changes.preview_image.is_none()
             && self
                 .selected_explorer_file_path()
                 .is_some_and(is_markdown_path)
@@ -3051,6 +3070,7 @@ mod tests {
                 workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
                 history_height: 7,
                 editor_command: None,
+                media_preview_protocol: MediaPreviewProtocol::Halfblocks,
             }
         );
         assert_eq!(app.settings_store.load(), app.settings);
@@ -3061,6 +3081,13 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.settings.show_agent_harness);
+        assert_eq!(app.settings_store.load(), app.settings);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.settings.media_preview_protocol,
+            MediaPreviewProtocol::Kitty
+        );
         assert_eq!(app.settings_store.load(), app.settings);
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

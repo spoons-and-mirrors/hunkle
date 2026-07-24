@@ -1,68 +1,64 @@
-# Ticket 003: Terminal PNG Preview
+# Ticket 003: Terminal Media Preview
 
-**Status:** Ready for implementation
+**Status:** Implemented; native Kitty acceptance pending
 
-**Blocked by:** None - begin with the WezTerm/Herdr tracer-bullet check described below.
+**Blocked by:** Manual verification through a Herdr pane attached from WezTerm with Herdr's experimental Kitty graphics enabled.
 
-## What to Build
+## What Was Built
 
-Render a PNG selected in Files inside the existing preview pane instead of treating its bytes as source text. Use Kitty graphics when the terminal path confirms support so that the user sees the image's real pixels, scaled to the pane. Fall back to a true-color Unicode half-block reconstruction when native graphics are unavailable.
+Render static previews for selected image and video files inside the existing Files preview pane. Images are decoded directly. Videos are converted to a representative still frame by a bounded `ffmpeg` subprocess. Both sources then share the same asynchronous image rendering path.
 
-The verified target path is Hunkle through Herdr to WezTerm. Herdr already captures pane Kitty graphics and re-emits clipped, positioned Kitty images when its experimental graphics support is enabled, and WezTerm implements the Kitty image protocol. Before building the full preview, prove that exact installed path with a minimal Kitty PNG rendered inside a Herdr pane.
+The default backend is a deterministic true-color Unicode half-block reconstruction. Users on the verified Herdr path can select `Kitty (Herdr)` under Settings -> Media protocol to render native pixels through Kitty virtual placements.
+
+## Supported Media
+
+- Images: BMP, GIF, ICO, JPEG, PNG, PNM/PBM/PGM/PPM, QOI, TGA, TIFF, and WebP.
+- Videos: 3GP, AVI, FLV, M4V, MKV, MOV, MP4, MPEG/MPG, OGV, WebM, and WMV.
+- GIF previews use the decoded still frame; animation is not attempted.
+- Video previews require `ffmpeg` on `PATH`. Its absence or failure produces an informative in-pane error.
 
 ## Product Decisions
 
-- Scope the first version to PNG files selected in Files. Preserve current text, diff, and rendered-Markdown behavior everywhere else.
-- Use native Kitty graphics only after a positive capability response or explicit supported configuration. Do not infer support from `TERM=xterm-256color`, which is also the value visible inside Herdr.
-- Use a Ratatui-compatible image library that provides Kitty and Unicode half-block backends if it supports the repository's Ratatui version and deterministic backend selection in tests. Do not implement a new terminal graphics protocol unless that integration proves unsuitable.
-- Preserve image aspect ratio, account for terminal cell geometry, scale down to the preview body, and center the result without covering the header, borders, or adjacent panes.
-- Treat image output as stateful overlay content. Replace or clear native placements when the selection, preview geometry, pane, interaction, workspace, suspend state, or application lifecycle changes.
-- Decode PNGs away from the render loop. Bound source size and decoded dimensions so malformed or very large images cannot exhaust memory or stall navigation.
-- Change preview loading to return typed text, image, or error content instead of forcing all file data into a string. Preserve the current generation and active-workspace checks so stale background results cannot replace the current selection.
-- Cache decoded image content and regenerate presentation only when the image or preview geometry changes.
-- Keep scrolling and Markdown/source controls out of image mode. Continue to show the selected path and read-only state in the preview header.
-- Show an informative in-pane error for an unreadable, corrupt, unsupported, or excessive PNG. Never expose raw binary data or unsupported protocol bytes as text.
-
-## Required Experience
-
-- Selecting a valid PNG in Files replaces the text preview with an image preview.
-- Through a compatible Herdr-to-WezTerm session, the preview uses the original decoded image pixels rather than character art.
-- With Kitty graphics unavailable or disabled, the same file produces a recognizable true-color half-block reconstruction.
-- Resizing Hunkle rescales and repositions the preview while preserving aspect ratio.
-- Moving quickly between PNGs and text files always shows the current selection and leaves no stale image behind.
-- Switching panes, interactions, or workspaces and exiting Hunkle removes all image placements cleanly.
-- Loading and decoding remain asynchronous and do not interrupt navigation or input.
+- Preserve existing text, diff, source, and rendered-Markdown behavior for non-media content.
+- Treat a video preview as a thumbnail, not playback.
+- Fail closed to Unicode half-blocks. Kitty is enabled only by an explicit user setting and is labelled for the Herdr path rather than inferred from `TERM` or direct WezTerm detection.
+- Preserve aspect ratio, account for terminal cell geometry, scale down to the preview body, and center the result without covering headers or adjacent panes.
+- Decode media and resize/encode terminal presentation away from the render loop.
+- Keep the existing generation and active-workspace checks so late file loads cannot replace the current selection. The threaded renderer also rejects stale resize results.
+- Clear native presentation state when selection, geometry, interaction, workspace, terminal session, or application lifecycle changes.
+- Hide text wrapping, scrolling, and Markdown controls in media mode while preserving the selected path and read-only state in the header.
 
 ## Compatibility and Safety
 
-- Herdr's Kitty graphics support is experimental and disabled by default. Native-pixel acceptance requires `[experimental] kitty_graphics = true` in Herdr and a newly attached client using WezTerm.
-- WezTerm supports the Kitty image operations needed for static PNG transmission and placement, but its broader Kitty compatibility tracker remains open. The tracer-bullet and final manual acceptance test are therefore mandatory.
-- Windows Terminal supports Sixel but not the Kitty output Herdr currently emits. It must receive the Unicode fallback unless Herdr gains a separate Sixel host backend.
-- Capability detection must fail closed. An absent, malformed, or timed-out response selects the Unicode backend.
-- Native graphics cleanup must also run on error and shutdown paths so the shell is restored without graphical artifacts.
-- Keep decoded image memory bounded and release cached images when their workspace or selection is no longer active.
+- Direct image sources are limited to 100 MB, 16384x16384 dimensions, and 256 MB decoder allocation. Decoded previews are bounded to 3840x2160.
+- Video extraction has an 8-second timeout and bounded stdout/stderr capture. Process groups/job objects ensure timed-out `ffmpeg` work is terminated.
+- Corrupt, unsupported, excessive, and unavailable media produce text errors rather than exposing binary bytes.
+- Symlinks, directories, and special files retain the existing safe text description instead of being followed as media.
+- `ratatui-image` 11.0.6 matches Hunkle's Ratatui 0.30 and Crossterm 0.29 versions and provides both Kitty virtual placements and the half-block fallback.
+- Herdr's Kitty graphics support is experimental and disabled by default. Native-pixel acceptance requires `[experimental] kitty_graphics = true` and a newly attached WezTerm client.
+- Direct WezTerm is not treated as Kitty-capable because its virtual-placeholder support is incomplete. Herdr consumes those placeholders and re-emits ordinary clipped Kitty placements.
+- Kitty cleanup is emitted before terminal restoration when the native backend is enabled.
 
 ## Acceptance Criteria
 
-- [ ] A minimal Kitty PNG displays as native pixels in the exact installed Hunkle-adjacent environment: a Herdr pane attached through WezTerm with experimental Kitty graphics enabled.
-- [ ] Selecting a valid PNG in Files displays it in the preview body with its aspect ratio preserved.
-- [ ] A positively detected Kitty path uses native image pixels; an unsupported, disabled, or inconclusive path uses the Unicode fallback without showing raw escape data.
-- [ ] Wide, tall, tiny, transparent, and indexed-color PNG fixtures render within the pane without distortion or overflow.
-- [ ] Resizing the terminal updates image size and placement without leaving stale pixels.
-- [ ] Switching between two images, from image to text, away from Files, between workspaces, and out of Hunkle clears obsolete placements.
-- [ ] A late asynchronous result cannot replace a newer selection or a different workspace's preview.
-- [ ] Corrupt, unreadable, and excessive PNGs show useful errors and leave Hunkle responsive.
-- [ ] Existing text, diff, source, Markdown, wrapping, scrolling, and large-preview behavior remain unchanged for non-image content.
-- [ ] Full-application Ratatui surface tests force the deterministic Unicode backend and cover selection, scaling across pane shapes, resize, replacement, cleanup, errors, and stale-result rejection.
-- [ ] Focused tests cover protocol selection and native-placement cleanup where the Ratatui test backend cannot observe host graphics.
-- [ ] Manual WezTerm/Herdr acceptance covers native rendering, resize/repaint, rapid selection changes, suspend/resume if supported, and clean shutdown.
-- [ ] A manual run with Herdr Kitty graphics disabled confirms that fallback output is readable and no protocol artifacts appear.
+- [x] Selecting a supported raster image displays it in the Files preview body with preserved aspect ratio.
+- [x] With Kitty disabled, images render using true-color Unicode half-block cells.
+- [x] Selecting a supported video requests a bounded `ffmpeg` thumbnail and renders it through the image path.
+- [x] Missing `ffmpeg`, corrupt images, and unsupported media failures show useful in-pane errors.
+- [x] Media loading, decoding, and terminal resize encoding remain asynchronous.
+- [x] Rapid selection and resize results retain generation-based stale-result rejection.
+- [x] Switching from image to text and opening an overlay clears image presentation.
+- [x] Existing text, diff, source, Markdown, wrapping, scrolling, and large-preview behavior remain covered by the full test suite.
+- [x] Full-surface Ratatui tests force half-block rendering and cover async rendering, bounds, image-to-text replacement, overlay cleanup, and corrupt content.
+- [x] Settings persistence fails closed to half-blocks and preserves explicit Kitty selection.
+- [ ] A minimal Kitty image displays as native pixels in the exact installed Herdr-to-WezTerm environment.
+- [ ] Manual Herdr acceptance covers image and video thumbnails, resize/repaint, rapid selection changes, overlays, editor suspend/resume, and clean shutdown.
+- [ ] A manual run with Herdr Kitty graphics disabled confirms the default fallback is readable and emits no protocol artifacts.
 
-## Not in This Ticket
+## Not In This Ticket
 
-- JPEG, GIF, WebP, AVIF, SVG, video, or other media formats.
-- Animation or playback.
+- Animated image presentation or video playback.
+- PDF, PostScript, SVG, document, archive, or 3D-model preview providers.
 - Image editing, cropping, exporting, or mutation.
-- Rendering images from historical commits or binary diffs in Changes or Graph.
-- Adding Sixel output to Herdr or native image support to Windows Terminal through Herdr's current Kitty-only path.
-- Replacing Hunkle's existing source, diff, or rendered-Markdown presentation.
+- Rendering media from historical commits or binary diffs in Changes or Graph.
+- Adding a Sixel or iTerm2 output path.

@@ -60,6 +60,9 @@ fn main() -> Result<()> {
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
     let mut app = App::opening(path.clone());
+    set_kitty_media_enabled(
+        app.settings.media_preview_protocol == app::MediaPreviewProtocol::Kitty,
+    );
     let mut dirty = true;
     let mut restart_request: Option<PathBuf> = None;
     let mut restarting = false;
@@ -151,6 +154,9 @@ fn main() -> Result<()> {
                 break;
             }
         }
+        set_kitty_media_enabled(
+            app.settings.media_preview_protocol == app::MediaPreviewProtocol::Kitty,
+        );
         if let Some(text) = app.take_copy_request() {
             app.notice = Some(match selection::copy_to_clipboard(&text) {
                 Ok(()) => "Copied selection".to_owned(),
@@ -162,6 +168,7 @@ fn main() -> Result<()> {
             restore_terminal();
             let result = run_editor(request);
             terminal = start_terminal()?;
+            app.reset_media_presentation();
             app.editor_finished(result);
             dirty = true;
         }
@@ -240,6 +247,10 @@ fn start_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn restore_terminal() {
     // Keyboard enhancement was pushed inside the alternate screen, so unwind it first.
+    if KITTY_MEDIA_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        use std::io::Write;
+        let _ = io::stdout().write_all(b"\x1b_Ga=d,d=A,q=2\x1b\\");
+    }
     let _ = execute!(
         io::stdout(),
         PopKeyboardEnhancementFlags,
@@ -248,6 +259,13 @@ fn restore_terminal() {
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
+}
+
+static KITTY_MEDIA_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn set_kitty_media_enabled(enabled: bool) {
+    KITTY_MEDIA_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn install_panic_hook() {

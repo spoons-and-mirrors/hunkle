@@ -3,8 +3,10 @@ mod preview_loader;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
+    sync::Arc,
 };
 
+use image::DynamicImage;
 use ratatui::widgets::ListState;
 
 use crate::{
@@ -14,7 +16,7 @@ use crate::{
     ui::preview::PreviewPresentation,
 };
 
-use preview_loader::PreviewLoader;
+use preview_loader::{LoadedPreview, PreviewLoader};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeftPane {
@@ -77,6 +79,7 @@ pub struct ChangesState {
     worktree_tree_fingerprint: Option<u64>,
     change_codes: HashMap<RepoPath, char>,
     pub(crate) preview_content_generation: u64,
+    pub(crate) preview_image: Option<Arc<DynamicImage>>,
     pub(crate) preview_presentation: PreviewPresentation,
     preview_loader: PreviewLoader,
 }
@@ -129,6 +132,7 @@ impl ChangesState {
             worktree_tree_fingerprint: repo.map(|repo| repo.changes_fingerprint),
             change_codes: repo.map_or_else(HashMap::new, |repo| change_codes(&repo.changes)),
             preview_content_generation: 0,
+            preview_image: None,
             preview_presentation: PreviewPresentation::default(),
             preview_loader: PreviewLoader::new(),
         };
@@ -1018,7 +1022,10 @@ impl ChangesState {
         let Some(content) = self.preview_loader.poll(active_root) else {
             return false;
         };
-        self.set_diff(content);
+        match content {
+            LoadedPreview::Text(content) | LoadedPreview::Error(content) => self.set_diff(content),
+            LoadedPreview::Image(image) => self.set_image(image),
+        }
         if let Some(pending) = self.pending_hunk_selection.take() {
             let count = hunk_count(&self.diff);
             self.hunk_selection = (count > 0).then(|| pending.index.min(count - 1));
@@ -1071,6 +1078,16 @@ impl ChangesState {
 
     pub(crate) fn set_diff(&mut self, content: String) {
         self.diff = content;
+        self.preview_image = None;
+        self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
+        self.preview_presentation.clear();
+    }
+
+    fn set_image(&mut self, image: Arc<DynamicImage>) {
+        self.diff.clear();
+        self.preview_image = Some(image);
+        self.diff_scroll = 0;
+        self.markdown_rendered = false;
         self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
         self.preview_presentation.clear();
     }

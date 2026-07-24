@@ -1,9 +1,27 @@
+use std::{
+    sync::{
+        Arc,
+        mpsc::{self, Receiver},
+    },
+    thread,
+};
+
+use image::DynamicImage;
 use ratatui::{
+    layout::{Rect, Size},
     style::Style,
     text::{Line, Span},
 };
+use ratatui_image::{
+    Resize,
+    errors::Errors as ImageError,
+    picker::{Picker, ProtocolType},
+    thread::{ResizeRequest, ResizeResponse, ThreadProtocol},
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+use crate::app::MediaPreviewProtocol;
 
 use super::text::{
     diff_display_line_count, markdown_prefix_style, styled_diff, styled_diff_window,
@@ -34,9 +52,14 @@ pub(crate) struct PreparedPreview {
     pub(crate) wrapped: bool,
 }
 
-#[derive(Default)]
 pub(crate) struct PreviewPresentation {
     cache: Option<PreviewCache>,
+    media_state: ThreadProtocol,
+    media_receiver: Receiver<Result<ResizeResponse, ImageError>>,
+    media_generation: Option<u64>,
+    media_protocol: Option<MediaPreviewProtocol>,
+    media_size: Size,
+    media_error: Option<String>,
 }
 
 struct PreviewCache {
@@ -56,9 +79,106 @@ struct PreviewCache {
     wrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
 }
 
+impl Default for PreviewPresentation {
+    fn default() -> Self {
+        let (request_sender, request_receiver) = mpsc::channel::<ResizeRequest>();
+        let (result_sender, media_receiver) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(request) = request_receiver.recv() {
+                if result_sender.send(request.resize_encode()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            cache: None,
+            media_state: ThreadProtocol::new(request_sender, None),
+            media_receiver,
+            media_generation: None,
+            media_protocol: None,
+            media_size: Size::default(),
+            media_error: None,
+        }
+    }
+}
+
 impl PreviewPresentation {
     pub(crate) fn clear(&mut self) {
         self.cache = None;
+        self.hide_media();
+    }
+
+    pub(crate) fn hide_media(&mut self) {
+        if self.media_generation.take().is_some() {
+            self.media_state.empty_protocol();
+        }
+        self.media_protocol = None;
+        self.media_size = Size::default();
+        self.media_error = None;
+    }
+
+    pub(crate) fn poll_media(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.media_receiver.try_recv() {
+            match result {
+                Ok(response) => {
+                    let accepted = self.media_state.update_resized_protocol(response);
+                    if accepted {
+                        self.media_error = None;
+                    }
+                    changed |= accepted;
+                }
+                Err(error) => {
+                    self.media_error = Some(format!("Could not render media preview: {error}"));
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    pub(crate) fn media_error(&self) -> Option<&str> {
+        self.media_error.as_deref()
+    }
+
+    pub(crate) fn media_state(
+        &mut self,
+        generation: u64,
+        image: &Arc<DynamicImage>,
+        protocol: MediaPreviewProtocol,
+        available: Rect,
+    ) -> (Rect, &mut ThreadProtocol) {
+        if self.media_generation != Some(generation) || self.media_protocol != Some(protocol) {
+            let mut picker = Picker::halfblocks();
+            if protocol == MediaPreviewProtocol::Kitty {
+                picker.set_protocol_type(ProtocolType::Kitty);
+            }
+            self.media_state
+                .replace_protocol(picker.new_resize_protocol((**image).clone()));
+            self.media_generation = Some(generation);
+            self.media_protocol = Some(protocol);
+            self.media_size = Size::default();
+            self.media_error = None;
+        }
+        if let Some(size) = self
+            .media_state
+            .size_for(Resize::Fit(None), available.into())
+        {
+            self.media_size = size;
+        }
+        let width = self.media_size.width.min(available.width);
+        let height = self.media_size.height.min(available.height);
+        let area = Rect::new(
+            available
+                .x
+                .saturating_add(available.width.saturating_sub(width) / 2),
+            available
+                .y
+                .saturating_add(available.height.saturating_sub(height) / 2),
+            width,
+            height,
+        );
+        (area, &mut self.media_state)
     }
 
     pub(crate) fn prepare(

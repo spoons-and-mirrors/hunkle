@@ -930,10 +930,17 @@ impl App {
             self.toggle_agent_harness();
         } else if self
             .regions
-            .editor_setting
+            .media_preview_setting
             .is_some_and(|rect| rect.contains(point))
         {
             self.settings_selection = 4;
+            self.toggle_media_preview_protocol();
+        } else if self
+            .regions
+            .editor_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 5;
             self.open_editor_setting();
         }
     }

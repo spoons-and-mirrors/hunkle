@@ -16,6 +16,23 @@ pub struct Settings {
     pub workspace_panel_width: u16,
     pub history_height: u16,
     pub editor_command: Option<String>,
+    pub media_preview_protocol: MediaPreviewProtocol,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MediaPreviewProtocol {
+    #[default]
+    Halfblocks,
+    Kitty,
+}
+
+impl MediaPreviewProtocol {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Halfblocks => "halfblocks",
+            Self::Kitty => "kitty",
+        }
+    }
 }
 
 impl Settings {
@@ -35,6 +52,7 @@ impl Default for Settings {
             workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
             history_height: 7,
             editor_command: None,
+            media_preview_protocol: MediaPreviewProtocol::Halfblocks,
         }
     }
 }
@@ -86,7 +104,7 @@ impl SettingsStore {
         fs::write(
             path,
             format!(
-                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nworkspace_panel_width={}\nhistory_height={}\neditor_command={}\n",
+                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nworkspace_panel_width={}\nhistory_height={}\neditor_command={}\nmedia_preview_protocol={}\n",
                 settings.auto_fetch,
                 settings.fetch_interval_minutes,
                 settings.worktree_width,
@@ -94,7 +112,8 @@ impl SettingsStore {
                 settings.show_agent_harness,
                 settings.workspace_panel_width,
                 settings.history_height,
-                settings.editor_command.as_deref().unwrap_or_default()
+                settings.editor_command.as_deref().unwrap_or_default(),
+                settings.media_preview_protocol.as_str(),
             ),
         )
     }
@@ -158,6 +177,12 @@ fn load(path: &Path) -> Settings {
                 let command = value.trim();
                 settings.editor_command = (!command.is_empty()).then(|| command.to_owned());
             }
+            "media_preview_protocol" => {
+                settings.media_preview_protocol = match value.trim() {
+                    "kitty" => MediaPreviewProtocol::Kitty,
+                    _ => MediaPreviewProtocol::Halfblocks,
+                };
+            }
             _ => {}
         }
     }
@@ -182,6 +207,7 @@ mod tests {
             workspace_panel_width: 33,
             history_height: 9,
             editor_command: Some("code --wait".to_owned()),
+            media_preview_protocol: MediaPreviewProtocol::Kitty,
         };
 
         store.save(&settings).unwrap();
@@ -189,7 +215,7 @@ mod tests {
 
         fs::write(
             path,
-            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nworkspace_panel_width=2\nhistory_height=1\n",
+            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nworkspace_panel_width=2\nhistory_height=1\nmedia_preview_protocol=unknown\n",
         )
         .unwrap();
         let loaded = store.load();
@@ -197,5 +223,9 @@ mod tests {
         assert_eq!(loaded.worktree_width, 24);
         assert_eq!(loaded.workspace_panel_width, MINIMUM_WORKSPACE_PANEL_WIDTH);
         assert_eq!(loaded.history_height, 3);
+        assert_eq!(
+            loaded.media_preview_protocol,
+            MediaPreviewProtocol::Halfblocks
+        );
     }
 }

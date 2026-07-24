@@ -12,8 +12,8 @@ use crate::repo_path::RepoPath;
 use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
     ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch, HerdrPrompt,
-    HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems, RepositoryBrowser,
-    RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
+    HitTarget, MediaPreviewProtocol, PickerAction, PickerEntry, PullRequest, RemoteItems,
+    RepositoryBrowser, RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
     WorkspaceRenameDialog,
 };
@@ -33,6 +33,7 @@ pub(super) struct SettingsRegions {
     pub(super) fetch_interval_up: Rect,
     pub(super) workspace_panel: Rect,
     pub(super) agent_harness: Rect,
+    pub(super) media_preview: Rect,
     pub(super) editor: Rect,
 }
 
@@ -2278,7 +2279,7 @@ pub(super) fn draw_settings(
     selection: usize,
     fetch_running: bool,
 ) -> SettingsRegions {
-    let area = centered_min(frame.area(), 58, 0, 48, 22);
+    let area = centered_min(frame.area(), 58, 0, 48, 24);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -2333,7 +2334,8 @@ pub(super) fn draw_settings(
     let interval_row = Rect::new(inner.x, area.y.saturating_add(9), inner.width, 1);
     let workspace_panel_row = Rect::new(inner.x, area.y.saturating_add(14), inner.width, 1);
     let agent_harness_row = Rect::new(inner.x, area.y.saturating_add(16), inner.width, 1);
-    let editor_row = Rect::new(inner.x, area.y.saturating_add(18), inner.width, 1);
+    let media_preview_row = Rect::new(inner.x, area.y.saturating_add(18), inner.width, 1);
+    let editor_row = Rect::new(inner.x, area.y.saturating_add(20), inner.width, 1);
     let interval_down = Rect::new(
         interval_row.right().saturating_sub(15),
         interval_row.y,
@@ -2341,6 +2343,34 @@ pub(super) fn draw_settings(
         1,
     );
     let interval_up = Rect::new(interval_row.right().saturating_sub(3), interval_row.y, 3, 1);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Media protocol", Style::default().fg(palette().ink)),
+            Span::raw(
+                " ".repeat(usize::from(media_preview_row.width).saturating_sub(
+                    "Media protocol".len()
+                        + match settings.media_preview_protocol {
+                            MediaPreviewProtocol::Halfblocks => "Unicode".len(),
+                            MediaPreviewProtocol::Kitty => "Kitty (Herdr)".len(),
+                        },
+                )),
+            ),
+            Span::styled(
+                match settings.media_preview_protocol {
+                    MediaPreviewProtocol::Halfblocks => "Unicode",
+                    MediaPreviewProtocol::Kitty => "Kitty (Herdr)",
+                },
+                Style::default().fg(palette().accent),
+            ),
+        ]))
+        .style(Style::default().bg(if selection == 4 {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        media_preview_row,
+    );
 
     frame.render_widget(
         Paragraph::new(Line::styled(
@@ -2504,7 +2534,7 @@ pub(super) fn draw_settings(
                 }),
             ),
         ]))
-        .style(Style::default().bg(if selection == 4 {
+        .style(Style::default().bg(if selection == 5 {
             palette().selected
         } else {
             palette().surface_alt
@@ -2520,6 +2550,7 @@ pub(super) fn draw_settings(
         fetch_interval_up: interval_up,
         workspace_panel: workspace_panel_row,
         agent_harness: agent_harness_row,
+        media_preview: media_preview_row,
         editor: editor_row,
     }
 }

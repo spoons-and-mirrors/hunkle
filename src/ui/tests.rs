@@ -1200,6 +1200,8 @@ fn renders_every_primary_surface() {
     assert!(settings_screen.contains("Fetch interval"));
     assert!(settings_screen.contains("Workspace pane"));
     assert!(settings_screen.contains("Agent harness"));
+    assert!(settings_screen.contains("Media protocol"));
+    assert!(settings_screen.contains("Unicode"));
     assert!(settings_screen.contains("Editor command"));
     assert!(!settings_screen.contains('┌'));
     let auto_fetch = app.regions.auto_fetch.unwrap();
@@ -1213,9 +1215,11 @@ fn renders_every_primary_surface() {
     assert!(app.regions.fetch_interval_up.is_some());
     let workspace_setting = app.regions.workspace_panel_setting.unwrap();
     let agent_harness_setting = app.regions.agent_harness_setting.unwrap();
+    let media_preview_setting = app.regions.media_preview_setting.unwrap();
     let editor_setting = app.regions.editor_setting.unwrap();
     assert_eq!(agent_harness_setting.y, workspace_setting.y + 2);
-    assert_eq!(editor_setting.y, agent_harness_setting.y + 2);
+    assert_eq!(media_preview_setting.y, agent_harness_setting.y + 2);
+    assert_eq!(editor_setting.y, media_preview_setting.y + 2);
     let switch_x = workspace_setting.right().saturating_sub(6);
     assert_eq!(buffer[(switch_x + 3, workspace_setting.y)].symbol(), "◼");
     assert!(
@@ -2604,12 +2608,120 @@ fn selects_visible_text_and_suppresses_clicks_after_dragging() {
 fn wait_for_preview(app: &mut App) {
     for _ in 0..100 {
         let _ = app.poll_worker();
-        if app.changes.diff != "Loading preview…" {
+        if app.changes.diff != "Loading preview…" || app.changes.preview_image.is_some() {
             return;
         }
         thread::sleep(Duration::from_millis(2));
     }
     panic!("preview did not complete");
+}
+
+#[test]
+fn renders_static_media_and_clears_it_for_text_and_overlays() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let image = image::RgbaImage::from_fn(40, 40, |_x, y| {
+        if (y / 10) % 2 == 0 {
+            image::Rgba([220, 40, 30, 255])
+        } else {
+            image::Rgba([20, 80, 210, 255])
+        }
+    });
+    image.save(root.join("a-preview.png")).unwrap();
+    fs::write(root.join("b-notes.txt"), "plain text preview\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    assert_eq!(
+        app.selected_explorer_file_path().map(|path| path.display()),
+        Some("a-preview.png".to_string())
+    );
+    wait_for(&mut app, |app| app.changes.preview_image.is_some());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    wait_for_halfblock_render(&mut terminal, &mut app);
+    let preview_body = app.regions.diff.unwrap();
+    let image_cells: Vec<_> = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| cell.symbol() == "▀")
+        .collect();
+    assert!(!image_cells.is_empty());
+    assert!(image_cells.iter().all(|(index, _)| {
+        let x = (*index % 100) as u16;
+        let y = (*index / 100) as u16;
+        x >= preview_body.x
+            && x < preview_body.right()
+            && y >= preview_body.y
+            && y < preview_body.bottom()
+    }));
+
+    app.mode = Mode::Settings;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol() == "▀")
+    );
+
+    app.mode = Mode::Normal;
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    wait_for(&mut app, |app| {
+        app.changes.preview_image.is_none() && app.changes.diff == "plain text preview\n"
+    });
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("plain text preview"));
+    assert!(!screen.contains('▀'));
+}
+
+#[test]
+fn corrupt_image_shows_an_error_as_text() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("broken.png"), b"not a png\0\xff").unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    wait_for(&mut app, |app| {
+        app.changes
+            .diff
+            .starts_with("Could not read image dimensions:")
+    });
+    assert!(app.changes.preview_image.is_none());
+    assert!(
+        app.changes
+            .diff
+            .starts_with("Could not read image dimensions:")
+    );
+}
+
+fn wait_for_halfblock_render(terminal: &mut Terminal<TestBackend>, app: &mut App) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = app.poll_worker();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        if terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol() == "▀")
+        {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("media preview did not render");
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 }
 
 fn wait_for(app: &mut App, predicate: impl Fn(&App) -> bool) {

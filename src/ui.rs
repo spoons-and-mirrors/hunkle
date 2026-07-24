@@ -39,6 +39,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     );
 
     if frame.area().width < 60 || frame.area().height < 16 {
+        app.reset_media_presentation();
         frame.render_widget(
             Paragraph::new("hunkle needs at least 60 columns and 16 rows\n\nq  quit")
                 .alignment(Alignment::Center)
@@ -185,6 +186,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.fetch_interval_up = Some(regions.fetch_interval_up);
             app.regions.workspace_panel_setting = Some(regions.workspace_panel);
             app.regions.agent_harness_setting = Some(regions.agent_harness);
+            app.regions.media_preview_setting = Some(regions.media_preview);
             app.regions.editor_setting = Some(regions.editor);
         }
         Mode::RepositoryBrowser => {

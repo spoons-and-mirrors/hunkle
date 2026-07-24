@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, List, ListItem, Paragraph, Wrap},
 };
+use ratatui_image::{Resize, StatefulImage};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
@@ -875,7 +876,10 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             .bottom()
             .saturating_sub(preview_header.y.saturating_add(3)),
     );
-    let wrap_label = if app.changes.diff_wrap {
+    let media_loaded = app.changes.preview_image.is_some();
+    let wrap_label = if media_loaded {
+        ""
+    } else if app.changes.diff_wrap {
         "  alt+w:on"
     } else {
         "  alt+w:off"
@@ -958,11 +962,49 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             button,
         );
     }
-    let path = app
-        .selected_explorer_file_path()
-        .map_or_else(String::new, RepoPath::display);
-    let preview = prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered);
-    render_scrollable_content(frame, app, columns[1], preview_body, preview);
+    let media_visible = media_loaded && app.view == View::Changes && app.mode == Mode::Normal;
+    if media_visible {
+        app.regions.diff_scroll_max = 0;
+        app.regions.diff_scrollbar = None;
+        app.regions.diff_scroll_thumb = None;
+        let image = app
+            .changes
+            .preview_image
+            .as_ref()
+            .expect("media preview was checked")
+            .clone();
+        let generation = app.changes.preview_content_generation;
+        let protocol = app.settings.media_preview_protocol;
+        let (area, state) = app.changes.preview_presentation.media_state(
+            generation,
+            &image,
+            protocol,
+            preview_body,
+        );
+        if !area.is_empty() {
+            frame.render_stateful_widget(
+                StatefulImage::new().resize(Resize::Fit(None)),
+                area,
+                state,
+            );
+        }
+        if let Some(error) = app.changes.preview_presentation.media_error() {
+            frame.render_widget(
+                Paragraph::new(error.to_owned())
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(palette().red).bg(palette().panel)),
+                preview_body,
+            );
+        }
+    } else {
+        app.changes.preview_presentation.hide_media();
+        let path = app
+            .selected_explorer_file_path()
+            .map_or_else(String::new, RepoPath::display);
+        let preview =
+            prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered);
+        render_scrollable_content(frame, app, columns[1], preview_body, preview);
+    }
 }
 
 fn prepare_preview_lines(
