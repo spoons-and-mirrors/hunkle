@@ -39,6 +39,7 @@ use crossterm::{
     },
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui_image::picker::Picker;
 
 fn main() -> Result<()> {
     let path = std::env::args_os()
@@ -66,6 +67,8 @@ fn main() -> Result<()> {
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
     let mut app = App::opening(path.clone());
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    app.configure_media_picker(picker, auto_kitty_supported());
     let mut dirty = true;
     let mut restart_request: Option<PathBuf> = None;
     let mut restarting = false;
@@ -265,6 +268,20 @@ fn restore_terminal() {
 
 static KITTY_MEDIA_EMITTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+fn auto_kitty_supported() -> bool {
+    if std::env::var_os("HERDR_ENV").is_some() {
+        return false;
+    }
+    ["TERM", "TERM_PROGRAM"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("ghostty") || value.contains("kitty")
+        })
+        || std::env::var_os("KITTY_WINDOW_ID").is_some()
+}
 
 fn write_media_terminal_output(app: &mut App) -> Result<()> {
     let output = app.take_media_terminal_output();

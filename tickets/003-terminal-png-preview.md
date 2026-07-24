@@ -1,6 +1,6 @@
 # Ticket 003: Terminal Media Preview
 
-**Status:** Implemented; native Kitty verified in Ghostty
+**Status:** Implemented; native Kitty verified in Ghostty, iTerm2 and Sixel pending manual acceptance
 
 **Blocked by:** Nothing. Native compatibility outside Ghostty remains terminal-dependent.
 
@@ -8,7 +8,7 @@
 
 Render static previews for selected image and video files inside the existing Files preview pane. Images are decoded directly. Videos are converted to a representative still frame by a bounded `ffmpeg` subprocess. Both sources then share the same asynchronous image rendering path.
 
-The default backend is a deterministic true-color Unicode half-block reconstruction. Ghostty users can select `Kitty (Ghostty)` under Settings -> Media protocol to render native pixels through Kitty virtual placements.
+The default `Auto` backend queries terminal capabilities and fails closed to a deterministic true-color Unicode half-block reconstruction when the terminal path is ambiguous. Users can explicitly select `Kitty (Ghostty)`, `iTerm2 (WezTerm)`, or `Sixel (Windows Terminal)` under Settings -> Media protocol.
 
 ## Supported Media
 
@@ -21,7 +21,7 @@ The default backend is a deterministic true-color Unicode half-block reconstruct
 
 - Preserve existing text, diff, source, and rendered-Markdown behavior for non-media content.
 - Treat a video preview as a thumbnail, not playback.
-- Fail closed to Unicode half-blocks. Kitty is enabled only by an explicit user setting and labelled for the verified Ghostty path rather than inferred from terminal environment variables.
+- Fail closed to Unicode half-blocks. Auto accepts positively detected Sixel and iTerm2 support, but only selects Kitty when the terminal identity also establishes placeholder support. Explicit overrides remain available when SSH does not forward terminal identity variables.
 - Preserve aspect ratio, account for terminal cell geometry, scale down to the preview body, and center the result without covering headers or adjacent panes.
 - Decode media and resize/encode terminal presentation away from the render loop.
 - Keep the existing generation and active-workspace checks so late file loads cannot replace the current selection. The threaded renderer also rejects stale resize results.
@@ -34,9 +34,11 @@ The default backend is a deterministic true-color Unicode half-block reconstruct
 - Video extraction has an 8-second timeout and bounded stdout/stderr capture. Process groups/job objects ensure timed-out `ffmpeg` work is terminated.
 - Corrupt, unsupported, excessive, and unavailable media produce text errors rather than exposing binary bytes.
 - Symlinks, directories, and special files retain the existing safe text description instead of being followed as media.
-- `ratatui-image` 11.0.6 matches Hunkle's Ratatui 0.30 and Crossterm 0.29 versions and provides both Kitty virtual placements and the half-block fallback.
+- `ratatui-image` 11.0.6 matches Hunkle's Ratatui 0.30 and Crossterm 0.29 versions and provides Kitty, iTerm2, Sixel, and half-block backends.
 - Native-pixel image preview is manually verified in Ghostty running as a Windows GUI WSL terminal.
 - Direct WezTerm did not render the Kitty preview in manual testing because its virtual-placeholder support is incomplete.
+- WezTerm therefore uses its iTerm2 inline-image compatibility path rather than Kitty placeholders.
+- Windows Terminal uses Sixel because it does not implement Kitty graphics.
 - Herdr did not render the Kitty preview in manual testing even with `[experimental] kitty_graphics = true`; it therefore uses the Unicode fallback unless its graphics forwarding path is fixed independently.
 - Kitty cleanup is emitted before terminal restoration when the native backend is enabled.
 
@@ -51,9 +53,11 @@ The default backend is a deterministic true-color Unicode half-block reconstruct
 - [x] Switching from image to text and opening an overlay clears image presentation.
 - [x] Existing text, diff, source, Markdown, wrapping, scrolling, and large-preview behavior remain covered by the full test suite.
 - [x] Full-surface Ratatui tests force half-block rendering and cover async rendering, bounds, image-to-text replacement, overlay cleanup, and corrupt content.
-- [x] Settings persistence fails closed to half-blocks and preserves explicit Kitty selection.
+- [x] Settings persistence supports Auto, Unicode, Kitty, iTerm2, and Sixel while unknown values fail closed to Unicode.
 - [x] A selected PNG displays as native pixels in Ghostty.
 - [ ] Manual Ghostty acceptance covers video thumbnails, resize/repaint, rapid selection changes, overlays, editor suspend/resume, and clean shutdown.
+- [ ] Manual WezTerm acceptance covers the iTerm2 backend over the intended SSH path.
+- [ ] Manual Windows Terminal acceptance covers the Sixel backend over the intended SSH path.
 - [ ] A manual run with Herdr Kitty graphics disabled confirms the default fallback is readable and emits no protocol artifacts.
 
 ## Not In This Ticket
@@ -62,4 +66,3 @@ The default backend is a deterministic true-color Unicode half-block reconstruct
 - PDF, PostScript, SVG, document, archive, or 3D-model preview providers.
 - Image editing, cropping, exporting, or mutation.
 - Rendering media from historical commits or binary diffs in Changes or Graph.
-- Adding a Sixel or iTerm2 output path.

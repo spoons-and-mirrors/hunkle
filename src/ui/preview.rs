@@ -8,7 +8,7 @@ use std::{
 
 use image::DynamicImage;
 use ratatui::{
-    buffer::Buffer,
+    buffer::{Buffer, CellDiffOption},
     layout::{Rect, Size},
     style::Style,
     text::{Line, Span},
@@ -51,6 +51,13 @@ struct ActiveKittyImage {
     area: Rect,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActiveInlineImage {
+    generation: u64,
+    protocol: MediaPreviewProtocol,
+    area: Rect,
+}
+
 pub(crate) fn take_kitty_transmission(
     buffer: &mut Buffer,
     area: Rect,
@@ -77,6 +84,31 @@ pub(crate) fn take_kitty_transmission(
     })
 }
 
+pub(crate) fn take_inline_transmission(
+    buffer: &mut Buffer,
+    area: Rect,
+    protocol: MediaPreviewProtocol,
+) -> Option<Vec<u8>> {
+    let marker = match protocol {
+        MediaPreviewProtocol::Iterm2 => "]1337;File=",
+        MediaPreviewProtocol::Sixel => "\u{1b}P",
+        _ => return None,
+    };
+    let symbol = buffer.cell((area.x, area.y))?.symbol().to_owned();
+    if !symbol.contains(marker) {
+        return None;
+    }
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_symbol(" ");
+                cell.set_diff_option(CellDiffOption::Skip);
+            }
+        }
+    }
+    Some(symbol.into_bytes())
+}
+
 pub(crate) struct PreviewInput<'a> {
     pub(crate) content: &'a str,
     pub(crate) generation: u64,
@@ -100,11 +132,15 @@ pub(crate) struct PreviewPresentation {
     cache: Option<PreviewCache>,
     media_state: ThreadProtocol,
     media_receiver: Receiver<Result<ResizeResponse, ImageError>>,
+    media_picker: Picker,
+    allow_auto_kitty: bool,
     media_generation: Option<u64>,
     media_protocol: Option<MediaPreviewProtocol>,
+    effective_media_protocol: MediaPreviewProtocol,
     media_size: Size,
     media_error: Option<String>,
     active_kitty_image: Option<ActiveKittyImage>,
+    active_inline_image: Option<ActiveInlineImage>,
     pending_terminal_output: Vec<u8>,
 }
 
@@ -140,11 +176,15 @@ impl Default for PreviewPresentation {
             cache: None,
             media_state: ThreadProtocol::new(request_sender, None),
             media_receiver,
+            media_picker: Picker::halfblocks(),
+            allow_auto_kitty: false,
             media_generation: None,
             media_protocol: None,
+            effective_media_protocol: MediaPreviewProtocol::Halfblocks,
             media_size: Size::default(),
             media_error: None,
             active_kitty_image: None,
+            active_inline_image: None,
             pending_terminal_output: Vec::new(),
         }
     }
@@ -161,6 +201,7 @@ impl PreviewPresentation {
             self.pending_terminal_output
                 .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
         }
+        self.active_inline_image = None;
         if self.media_generation.take().is_some() {
             self.media_state.empty_protocol();
         }
@@ -199,6 +240,7 @@ impl PreviewPresentation {
         area: Rect,
         transmission: Option<KittyTransmission>,
     ) {
+        self.active_inline_image = None;
         if let Some(transmission) = transmission {
             self.pending_terminal_output
                 .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
@@ -235,6 +277,32 @@ impl PreviewPresentation {
         active.area = area;
     }
 
+    pub(crate) fn queue_inline_frame(
+        &mut self,
+        generation: u64,
+        protocol: MediaPreviewProtocol,
+        area: Rect,
+        transmission: Option<Vec<u8>>,
+    ) {
+        let Some(transmission) = transmission else {
+            return;
+        };
+        let next = ActiveInlineImage {
+            generation,
+            protocol,
+            area,
+        };
+        if self.active_inline_image == Some(next) {
+            return;
+        }
+        if self.active_kitty_image.take().is_some() {
+            self.pending_terminal_output
+                .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
+        }
+        append_positioned_output(&mut self.pending_terminal_output, area, &transmission);
+        self.active_inline_image = Some(next);
+    }
+
     pub(crate) fn take_terminal_output(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending_terminal_output)
     }
@@ -242,6 +310,7 @@ impl PreviewPresentation {
     pub(crate) fn terminal_restarted(&mut self) {
         self.pending_terminal_output.clear();
         self.active_kitty_image = None;
+        self.active_inline_image = None;
         if self.media_generation.take().is_some() {
             self.media_state.empty_protocol();
         }
@@ -250,16 +319,35 @@ impl PreviewPresentation {
         self.media_error = None;
     }
 
+    pub(crate) fn configure_media_picker(&mut self, picker: Picker, allow_auto_kitty: bool) {
+        self.terminal_restarted();
+        self.media_picker = picker;
+        self.allow_auto_kitty = allow_auto_kitty;
+    }
+
+    fn effective_protocol(&self, requested: MediaPreviewProtocol) -> MediaPreviewProtocol {
+        if requested != MediaPreviewProtocol::Auto {
+            return requested;
+        }
+        match self.media_picker.protocol_type() {
+            ProtocolType::Kitty if self.allow_auto_kitty => MediaPreviewProtocol::Kitty,
+            ProtocolType::Iterm2 => MediaPreviewProtocol::Iterm2,
+            ProtocolType::Sixel => MediaPreviewProtocol::Sixel,
+            ProtocolType::Halfblocks | ProtocolType::Kitty => MediaPreviewProtocol::Halfblocks,
+        }
+    }
+
     pub(crate) fn media_state(
         &mut self,
         generation: u64,
         image: &Arc<DynamicImage>,
         protocol: MediaPreviewProtocol,
         available: Rect,
-    ) -> (Rect, &mut ThreadProtocol) {
+    ) -> (Rect, MediaPreviewProtocol, &mut ThreadProtocol) {
+        let effective_protocol = self.effective_protocol(protocol);
         if self.media_generation != Some(generation) || self.media_protocol != Some(protocol) {
-            let mut picker = Picker::halfblocks();
-            let state = if protocol == MediaPreviewProtocol::Kitty {
+            let mut picker = self.media_picker.clone();
+            let state = if effective_protocol == MediaPreviewProtocol::Kitty {
                 let image_id = ((generation % 99_999) + 1) as u32;
                 StatefulProtocol::new(
                     (**image).clone(),
@@ -268,12 +356,20 @@ impl PreviewPresentation {
                     StatefulProtocolType::Kitty(StatefulKitty::new(image_id, false)),
                 )
             } else {
-                picker.set_protocol_type(ProtocolType::Halfblocks);
+                picker.set_protocol_type(match effective_protocol {
+                    MediaPreviewProtocol::Auto | MediaPreviewProtocol::Halfblocks => {
+                        ProtocolType::Halfblocks
+                    }
+                    MediaPreviewProtocol::Kitty => ProtocolType::Kitty,
+                    MediaPreviewProtocol::Iterm2 => ProtocolType::Iterm2,
+                    MediaPreviewProtocol::Sixel => ProtocolType::Sixel,
+                });
                 picker.new_resize_protocol((**image).clone())
             };
             self.media_state.replace_protocol(state);
             self.media_generation = Some(generation);
             self.media_protocol = Some(protocol);
+            self.effective_media_protocol = effective_protocol;
             self.media_size = Size::default();
             self.media_error = None;
         }
@@ -295,7 +391,7 @@ impl PreviewPresentation {
             width,
             height,
         );
-        (area, &mut self.media_state)
+        (area, self.effective_media_protocol, &mut self.media_state)
     }
 
     pub(crate) fn prepare(
@@ -1009,6 +1105,88 @@ mod tests {
 
         preview.hide_media();
         assert_eq!(preview.take_terminal_output(), KITTY_DELETE_ALL.as_bytes());
+    }
+
+    #[test]
+    fn extracts_inline_protocols_for_out_of_band_output() {
+        let area = Rect::new(2, 3, 3, 2);
+        for (protocol, payload) in [
+            (
+                MediaPreviewProtocol::Iterm2,
+                "clear\u{1b}]1337;File=inline=1:data\u{7}",
+            ),
+            (MediaPreviewProtocol::Sixel, "clear\u{1b}Pqdata\u{1b}\\"),
+        ] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 10));
+            buffer.cell_mut((2, 3)).unwrap().set_symbol(payload);
+            buffer.cell_mut((3, 3)).unwrap().set_symbol("covered");
+
+            let extracted = take_inline_transmission(&mut buffer, area, protocol).unwrap();
+
+            assert_eq!(extracted, payload.as_bytes());
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    let cell = buffer.cell((x, y)).unwrap();
+                    assert_eq!(cell.symbol(), " ");
+                    assert_eq!(cell.diff_option, CellDiffOption::Skip);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn queues_inline_output_only_when_placement_changes() {
+        let mut preview = PreviewPresentation::default();
+        let area = Rect::new(2, 3, 10, 4);
+        preview.queue_inline_frame(
+            7,
+            MediaPreviewProtocol::Iterm2,
+            area,
+            Some(b"inline-image".to_vec()),
+        );
+        let output = String::from_utf8(preview.take_terminal_output()).unwrap();
+        assert!(output.contains("\u{1b}[s\u{1b}[4;3Hinline-image\u{1b}[u"));
+
+        preview.queue_inline_frame(
+            7,
+            MediaPreviewProtocol::Iterm2,
+            area,
+            Some(b"inline-image".to_vec()),
+        );
+        assert!(preview.take_terminal_output().is_empty());
+
+        preview.queue_inline_frame(
+            7,
+            MediaPreviewProtocol::Iterm2,
+            Rect::new(4, 5, 10, 4),
+            Some(b"inline-image".to_vec()),
+        );
+        assert!(!preview.take_terminal_output().is_empty());
+    }
+
+    #[test]
+    fn auto_uses_detected_protocols_but_requires_a_known_kitty_terminal() {
+        let mut preview = PreviewPresentation::default();
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Iterm2);
+        preview.configure_media_picker(picker, false);
+        assert_eq!(
+            preview.effective_protocol(MediaPreviewProtocol::Auto),
+            MediaPreviewProtocol::Iterm2
+        );
+
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        preview.configure_media_picker(picker.clone(), false);
+        assert_eq!(
+            preview.effective_protocol(MediaPreviewProtocol::Auto),
+            MediaPreviewProtocol::Halfblocks
+        );
+        preview.configure_media_picker(picker, true);
+        assert_eq!(
+            preview.effective_protocol(MediaPreviewProtocol::Auto),
+            MediaPreviewProtocol::Kitty
+        );
     }
 
     #[test]

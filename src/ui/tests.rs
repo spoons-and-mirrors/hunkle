@@ -1201,7 +1201,7 @@ fn renders_every_primary_surface() {
     assert!(settings_screen.contains("Workspace pane"));
     assert!(settings_screen.contains("Agent harness"));
     assert!(settings_screen.contains("Media protocol"));
-    assert!(settings_screen.contains("Unicode"));
+    assert!(settings_screen.contains("Auto"));
     assert!(settings_screen.contains("Editor command"));
     assert!(!settings_screen.contains('┌'));
     let auto_fetch = app.regions.auto_fetch.unwrap();

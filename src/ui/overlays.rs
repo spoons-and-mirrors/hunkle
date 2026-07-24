@@ -2351,15 +2351,21 @@ pub(super) fn draw_settings(
                 " ".repeat(usize::from(media_preview_row.width).saturating_sub(
                     "Media protocol".len()
                         + match settings.media_preview_protocol {
+                            MediaPreviewProtocol::Auto => "Auto".len(),
                             MediaPreviewProtocol::Halfblocks => "Unicode".len(),
                             MediaPreviewProtocol::Kitty => "Kitty (Ghostty)".len(),
+                            MediaPreviewProtocol::Iterm2 => "iTerm2 (WezTerm)".len(),
+                            MediaPreviewProtocol::Sixel => "Sixel (Windows Terminal)".len(),
                         },
                 )),
             ),
             Span::styled(
                 match settings.media_preview_protocol {
+                    MediaPreviewProtocol::Auto => "Auto",
                     MediaPreviewProtocol::Halfblocks => "Unicode",
                     MediaPreviewProtocol::Kitty => "Kitty (Ghostty)",
+                    MediaPreviewProtocol::Iterm2 => "iTerm2 (WezTerm)",
+                    MediaPreviewProtocol::Sixel => "Sixel (Windows Terminal)",
                 },
                 Style::default().fg(palette().accent),
             ),

@@ -927,6 +927,16 @@ impl App {
         self.changes.preview_presentation.terminal_restarted();
     }
 
+    pub(crate) fn configure_media_picker(
+        &mut self,
+        picker: ratatui_image::picker::Picker,
+        allow_auto_kitty: bool,
+    ) {
+        self.changes
+            .preview_presentation
+            .configure_media_picker(picker, allow_auto_kitty);
+    }
+
     fn prefetch_commit_summaries(&mut self) {
         let Some(repo) = self.session.data().filter(|repo| !repo.is_local()) else {
             return;
@@ -2100,8 +2110,11 @@ impl App {
 
     fn toggle_media_preview_protocol(&mut self) {
         self.settings.media_preview_protocol = match self.settings.media_preview_protocol {
+            MediaPreviewProtocol::Auto => MediaPreviewProtocol::Halfblocks,
             MediaPreviewProtocol::Halfblocks => MediaPreviewProtocol::Kitty,
-            MediaPreviewProtocol::Kitty => MediaPreviewProtocol::Halfblocks,
+            MediaPreviewProtocol::Kitty => MediaPreviewProtocol::Iterm2,
+            MediaPreviewProtocol::Iterm2 => MediaPreviewProtocol::Sixel,
+            MediaPreviewProtocol::Sixel => MediaPreviewProtocol::Auto,
         };
         self.reset_media_presentation();
         self.settings_changed();
@@ -3078,7 +3091,7 @@ mod tests {
                 workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
                 history_height: 7,
                 editor_command: None,
-                media_preview_protocol: MediaPreviewProtocol::Halfblocks,
+                media_preview_protocol: MediaPreviewProtocol::Auto,
             }
         );
         assert_eq!(app.settings_store.load(), app.settings);
@@ -3094,7 +3107,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             app.settings.media_preview_protocol,
-            MediaPreviewProtocol::Kitty
+            MediaPreviewProtocol::Halfblocks
         );
         assert_eq!(app.settings_store.load(), app.settings);
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));

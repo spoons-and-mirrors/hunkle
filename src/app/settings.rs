@@ -22,15 +22,21 @@ pub struct Settings {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MediaPreviewProtocol {
     #[default]
+    Auto,
     Halfblocks,
     Kitty,
+    Iterm2,
+    Sixel,
 }
 
 impl MediaPreviewProtocol {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Halfblocks => "halfblocks",
             Self::Kitty => "kitty",
+            Self::Iterm2 => "iterm2",
+            Self::Sixel => "sixel",
         }
     }
 }
@@ -52,7 +58,7 @@ impl Default for Settings {
             workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
             history_height: 7,
             editor_command: None,
-            media_preview_protocol: MediaPreviewProtocol::Halfblocks,
+            media_preview_protocol: MediaPreviewProtocol::Auto,
         }
     }
 }
@@ -179,7 +185,10 @@ fn load(path: &Path) -> Settings {
             }
             "media_preview_protocol" => {
                 settings.media_preview_protocol = match value.trim() {
+                    "auto" => MediaPreviewProtocol::Auto,
                     "kitty" => MediaPreviewProtocol::Kitty,
+                    "iterm2" => MediaPreviewProtocol::Iterm2,
+                    "sixel" => MediaPreviewProtocol::Sixel,
                     _ => MediaPreviewProtocol::Halfblocks,
                 };
             }
@@ -207,11 +216,17 @@ mod tests {
             workspace_panel_width: 33,
             history_height: 9,
             editor_command: Some("code --wait".to_owned()),
-            media_preview_protocol: MediaPreviewProtocol::Kitty,
+            media_preview_protocol: MediaPreviewProtocol::Sixel,
         };
 
         store.save(&settings).unwrap();
         assert_eq!(store.load(), settings);
+
+        fs::write(&path, "media_preview_protocol=iterm2\n").unwrap();
+        assert_eq!(
+            store.load().media_preview_protocol,
+            MediaPreviewProtocol::Iterm2
+        );
 
         fs::write(
             path,
