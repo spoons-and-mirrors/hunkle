@@ -348,6 +348,7 @@ fn workspace_path(workspace: &Value, snapshot: &Value) -> Option<PathBuf> {
 fn parse_agent(value: &Value) -> Option<HerdrAgent> {
     Some(HerdrAgent {
         name: value.get("agent")?.as_str()?.to_owned(),
+        session_name: parse_agent_session_name(value),
         workspace_id: value.get("workspace_id")?.as_str()?.to_owned(),
         tab_id: value.get("tab_id")?.as_str()?.to_owned(),
         pane_id: value.get("pane_id")?.as_str()?.to_owned(),
@@ -356,7 +357,28 @@ fn parse_agent(value: &Value) -> Option<HerdrAgent> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         status: parse_agent_status(value.get("agent_status").and_then(Value::as_str)),
+        state_change_seq: value
+            .get("state_change_seq")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
     })
+}
+
+fn parse_agent_session_name(value: &Value) -> Option<String> {
+    let title = value
+        .get("terminal_title_stripped")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("terminal_title").and_then(Value::as_str))
+        .or_else(|| value.get("title").and_then(Value::as_str))?;
+    let title = title
+        .split_once(" | ")
+        .map_or(title, |(_, session_name)| session_name);
+    let title = title
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    let title = title.trim();
+    (!title.is_empty()).then(|| title.to_owned())
 }
 
 fn parse_agent_status(value: Option<&str>) -> AgentStatus {
@@ -602,6 +624,8 @@ mod tests {
                 "agents": [{
                     "agent": "opencode",
                     "agent_status": "blocked",
+                    "state_change_seq": 17,
+                    "terminal_title_stripped": "OC | Refine workspace timers",
                     "focused": true,
                     "pane_id": "pane-3",
                     "tab_id": "tab-3",
@@ -627,5 +651,10 @@ mod tests {
         );
         assert_eq!(workspaces[2].status, AgentStatus::Done);
         assert_eq!(agents[0].status, AgentStatus::Blocked);
+        assert_eq!(agents[0].state_change_seq, 17);
+        assert_eq!(
+            agents[0].session_name.as_deref(),
+            Some("Refine workspace timers")
+        );
     }
 }

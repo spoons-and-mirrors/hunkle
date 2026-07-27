@@ -1298,14 +1298,26 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
                     "focused": true,
                     "agent_status": "working"
                 }],
-                "agents": [{
-                    "agent": "opencode",
-                    "agent_status": "working",
-                    "focused": true,
-                    "pane_id": "w1:p1",
-                    "tab_id": "w1:t1",
-                    "workspace_id": "w1"
-                }]
+                "agents": [
+                    {
+                        "agent": "opencode",
+                        "agent_status": "working",
+                        "focused": true,
+                        "pane_id": "w1:p1",
+                        "tab_id": "w1:t1",
+                        "terminal_title_stripped": "OC | Refine workspace timers",
+                        "workspace_id": "w1"
+                    },
+                    {
+                        "agent": "opencode",
+                        "agent_status": "idle",
+                        "focused": false,
+                        "pane_id": "w1:p2",
+                        "tab_id": "w1:t1",
+                        "terminal_title_stripped": "OC | Review panel spacing",
+                        "workspace_id": "w1"
+                    }
+                ]
             }
         }
     }));
@@ -1366,25 +1378,37 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(rendered_with_harness.contains("opencode / HUNKLE"));
-    for target in [
-        WorkspacePanelHitTarget::Workspace(0),
-        WorkspacePanelHitTarget::Agent(0),
-    ] {
-        let row = app
-            .regions
-            .hit_target_rect(HitTarget::WorkspacePanel(target))
-            .unwrap();
-        let status = &terminal.backend().buffer()[(row.right() - 1, row.y)];
-        assert_eq!(status.symbol(), "⠋");
-        assert_eq!(status.fg, super::palette().yellow);
-    }
+    assert!(rendered_with_harness.contains("0:00 opencode /"));
+    assert!(rendered_with_harness.contains("Refine workspace"));
+    assert!(rendered_with_harness.contains("Review panel spacing"));
     let workspace_row = app
         .regions
         .hit_target_rect(HitTarget::WorkspacePanel(
             WorkspacePanelHitTarget::Workspace(0),
         ))
         .unwrap();
+    let workspace_status =
+        &terminal.backend().buffer()[(workspace_row.right() - 1, workspace_row.y)];
+    assert_eq!(workspace_status.symbol(), "⠋");
+    assert_eq!(workspace_status.fg, super::palette().yellow);
+    let agent_row = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)))
+        .unwrap();
+    assert_eq!(agent_row.height, 2);
+    let agent_timer = &terminal.backend().buffer()[(agent_row.x + 2, agent_row.y)];
+    assert_eq!(agent_timer.symbol(), "0");
+    let agent_status = &terminal.backend().buffer()[(agent_row.right() - 1, agent_row.y)];
+    assert_eq!(agent_status.symbol(), "⠋");
+    assert_eq!(agent_status.fg, super::palette().yellow);
+    let agent_session = &terminal.backend().buffer()[(agent_row.x + 2, agent_row.y + 1)];
+    assert_eq!(agent_session.symbol(), "R");
+    assert_eq!(agent_session.fg, super::palette().faint);
+    let second_agent_row = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(1)))
+        .unwrap();
+    assert_eq!(second_agent_row.y, agent_row.bottom() + 1);
     let branch_cell = &terminal.backend().buffer()[(workspace_row.right() - 7, workspace_row.y)];
     assert_eq!(branch_cell.symbol(), "t");
     assert_eq!(branch_cell.fg, super::palette().accent);

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
@@ -61,11 +62,76 @@ pub(crate) struct HerdrWorkspace {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrAgent {
     pub(crate) name: String,
+    pub(crate) session_name: Option<String>,
     pub(crate) workspace_id: String,
     pub(crate) tab_id: String,
     pub(crate) pane_id: String,
     pub(crate) focused: bool,
     pub(crate) status: AgentStatus,
+    state_change_seq: u64,
+}
+
+struct AgentTiming {
+    elapsed: Duration,
+    running_since: Option<Instant>,
+    status: AgentStatus,
+    state_change_seq: u64,
+}
+
+impl AgentTiming {
+    fn new(status: AgentStatus, state_change_seq: u64, now: Instant) -> Self {
+        Self {
+            elapsed: Duration::ZERO,
+            running_since: (status == AgentStatus::Working).then_some(now),
+            status,
+            state_change_seq,
+        }
+    }
+
+    fn observe(&mut self, status: AgentStatus, state_change_seq: u64, now: Instant) {
+        let sequence_changed = self.state_change_seq != 0
+            && state_change_seq != 0
+            && self.state_change_seq != state_change_seq;
+        match status {
+            AgentStatus::Working => match self.status {
+                AgentStatus::Working if sequence_changed => self.restart(now),
+                AgentStatus::Working => {}
+                AgentStatus::Blocked | AgentStatus::Unknown => self.running_since = Some(now),
+                AgentStatus::Idle | AgentStatus::Done => self.restart(now),
+            },
+            AgentStatus::Blocked | AgentStatus::Unknown => {
+                if !matches!(
+                    self.status,
+                    AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Unknown
+                ) {
+                    self.elapsed = Duration::ZERO;
+                }
+                self.pause(now);
+            }
+            AgentStatus::Idle | AgentStatus::Done => self.pause(now),
+        }
+        self.status = status;
+        self.state_change_seq = state_change_seq;
+    }
+
+    fn restart(&mut self, now: Instant) {
+        self.elapsed = Duration::ZERO;
+        self.running_since = Some(now);
+    }
+
+    fn pause(&mut self, now: Instant) {
+        if let Some(started) = self.running_since.take() {
+            self.elapsed += now.saturating_duration_since(started);
+        }
+    }
+
+    fn elapsed_at(&self, now: Instant) -> Duration {
+        self.elapsed
+            + self
+                .running_since
+                .map(|started| now.saturating_duration_since(started))
+                .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +212,7 @@ pub(crate) enum WorkspacePanelRow {
     AgentHeader,
     AgentGroup(usize),
     Agent(usize),
+    AgentSession(usize),
     EmptyAgents,
 }
 
@@ -153,6 +220,16 @@ pub(crate) enum WorkspacePanelRow {
 pub(crate) enum WorkspaceDropTarget {
     Group(usize),
     Ungrouped,
+}
+
+fn append_agent_cards(rows: &mut Vec<WorkspacePanelRow>, agents: impl IntoIterator<Item = usize>) {
+    for (position, index) in agents.into_iter().enumerate() {
+        if position > 0 {
+            rows.push(WorkspacePanelRow::Spacer);
+        }
+        rows.push(WorkspacePanelRow::Agent(index));
+        rows.push(WorkspacePanelRow::AgentSession(index));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,6 +378,7 @@ pub(crate) struct WorkspacePanel {
     next_refresh: Instant,
     spinner_frame: usize,
     next_spinner: Instant,
+    agent_timings: HashMap<String, AgentTiming>,
 }
 
 pub(crate) struct WorkspacePanelEntryState {
@@ -372,6 +450,7 @@ impl WorkspacePanel {
             next_refresh: Instant::now(),
             spinner_frame: 0,
             next_spinner: Instant::now(),
+            agent_timings: HashMap::new(),
         }
     }
 
@@ -478,14 +557,17 @@ impl WorkspacePanel {
             rows.push(WorkspacePanelRow::Spacer);
             rows.push(WorkspacePanelRow::AgentGroup(group_index));
             if group.expanded {
-                rows.extend(agents.into_iter().map(WorkspacePanelRow::Agent));
+                append_agent_cards(&mut rows, agents);
             }
         }
-        rows.extend(
-            (0..self.agents.len())
-                .filter(|agent| self.group_for_agent(*agent).is_none())
-                .map(WorkspacePanelRow::Agent),
-        );
+        let ungrouped = (0..self.agents.len())
+            .filter(|agent| self.group_for_agent(*agent).is_none())
+            .collect::<Vec<_>>();
+        if !ungrouped.is_empty() && matches!(rows.last(), Some(WorkspacePanelRow::AgentSession(_)))
+        {
+            rows.push(WorkspacePanelRow::Spacer);
+        }
+        append_agent_cards(&mut rows, ungrouped);
         rows
     }
 
@@ -580,6 +662,23 @@ impl WorkspacePanel {
     }
 
     fn apply_agent_snapshot(&mut self, agents: Vec<HerdrAgent>) {
+        self.apply_agent_snapshot_at(agents, Instant::now());
+    }
+
+    fn apply_agent_snapshot_at(&mut self, agents: Vec<HerdrAgent>, now: Instant) {
+        self.agent_timings
+            .retain(|pane_id, _| agents.iter().any(|agent| agent.pane_id == *pane_id));
+        for agent in &agents {
+            if let Some(timing) = self.agent_timings.get_mut(&agent.pane_id) {
+                timing.observe(agent.status, agent.state_change_seq, now);
+            } else if matches!(agent.status, AgentStatus::Working | AgentStatus::Blocked) {
+                self.agent_timings.insert(
+                    agent.pane_id.clone(),
+                    AgentTiming::new(agent.status, agent.state_change_seq, now),
+                );
+            }
+        }
+
         let previous = &self.agents;
         let mut ranked = agents.into_iter().enumerate().collect::<Vec<_>>();
         ranked.sort_by_key(|(incoming_index, agent)| {
@@ -600,6 +699,17 @@ impl WorkspacePanel {
             }
         });
         self.agents = ranked.into_iter().map(|(_, agent)| agent).collect();
+    }
+
+    pub(crate) fn agent_elapsed(&self, index: usize) -> Option<Duration> {
+        self.agent_elapsed_at(index, Instant::now())
+    }
+
+    fn agent_elapsed_at(&self, index: usize, now: Instant) -> Option<Duration> {
+        let agent = self.agents.get(index)?;
+        self.agent_timings
+            .get(&agent.pane_id)
+            .map(|timing| timing.elapsed_at(now))
     }
 
     pub(crate) fn spinner_frame(&self) -> usize {
@@ -1853,7 +1963,7 @@ impl WorkspacePanel {
     pub(crate) fn selected_agent_visual_row(&self) -> Option<usize> {
         let selected = self.selected?;
         self.agent_rows().iter().position(|row| {
-            matches!(row, WorkspacePanelRow::Agent(index)
+            matches!(row, WorkspacePanelRow::AgentSession(index)
                 if self.workspaces.len().saturating_add(*index) == selected)
         })
     }
@@ -1865,7 +1975,7 @@ impl WorkspacePanel {
         let (workspaces, agents) = herdr::parse_snapshot(value).unwrap();
         panel.focus.apply_snapshot(&workspaces);
         panel.workspaces = workspaces;
-        panel.agents = agents;
+        panel.apply_agent_snapshot(agents);
         panel.restore_selection(None);
         panel
     }
@@ -2061,12 +2171,75 @@ mod tests {
     fn agent(name: &str, status: AgentStatus) -> HerdrAgent {
         HerdrAgent {
             name: name.to_owned(),
+            session_name: None,
             workspace_id: "workspace".to_owned(),
             tab_id: format!("tab-{name}"),
             pane_id: format!("pane-{name}"),
             focused: false,
             status,
+            state_change_seq: 0,
         }
+    }
+
+    fn agent_at_sequence(name: &str, status: AgentStatus, state_change_seq: u64) -> HerdrAgent {
+        HerdrAgent {
+            state_change_seq,
+            ..agent(name, status)
+        }
+    }
+
+    #[test]
+    fn tracks_active_time_for_the_latest_agent_request() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.agents.clear();
+        panel.agent_timings.clear();
+        let started = Instant::now();
+
+        panel.apply_agent_snapshot_at(
+            vec![agent_at_sequence("alpha", AgentStatus::Idle, 1)],
+            started,
+        );
+        assert_eq!(panel.agent_elapsed_at(0, started), None);
+
+        panel.apply_agent_snapshot_at(
+            vec![agent_at_sequence("alpha", AgentStatus::Working, 2)],
+            started + Duration::from_secs(2),
+        );
+        assert_eq!(
+            panel.agent_elapsed_at(0, started + Duration::from_secs(7)),
+            Some(Duration::from_secs(5))
+        );
+
+        panel.apply_agent_snapshot_at(
+            vec![agent_at_sequence("alpha", AgentStatus::Blocked, 3)],
+            started + Duration::from_secs(7),
+        );
+        assert_eq!(
+            panel.agent_elapsed_at(0, started + Duration::from_secs(17)),
+            Some(Duration::from_secs(5))
+        );
+
+        panel.apply_agent_snapshot_at(
+            vec![agent_at_sequence("alpha", AgentStatus::Working, 4)],
+            started + Duration::from_secs(17),
+        );
+        panel.apply_agent_snapshot_at(
+            vec![agent_at_sequence("alpha", AgentStatus::Idle, 5)],
+            started + Duration::from_secs(20),
+        );
+        assert_eq!(
+            panel.agent_elapsed_at(0, started + Duration::from_secs(40)),
+            Some(Duration::from_secs(8))
+        );
+
+        panel.apply_agent_snapshot_at(
+            vec![agent_at_sequence("alpha", AgentStatus::Working, 6)],
+            started + Duration::from_secs(40),
+        );
+        assert_eq!(
+            panel.agent_elapsed_at(0, started + Duration::from_secs(42)),
+            Some(Duration::from_secs(2))
+        );
     }
 
     #[test]
@@ -2636,6 +2809,7 @@ mod tests {
                 WorkspacePanelRow::Spacer,
                 WorkspacePanelRow::AgentGroup(0),
                 WorkspacePanelRow::Agent(0),
+                WorkspacePanelRow::AgentSession(0),
             ]
         );
         assert!(path.exists());
@@ -2664,6 +2838,7 @@ mod tests {
                 WorkspacePanelRow::Spacer,
                 WorkspacePanelRow::AgentGroup(0),
                 WorkspacePanelRow::Agent(0),
+                WorkspacePanelRow::AgentSession(0),
             ]
         );
 

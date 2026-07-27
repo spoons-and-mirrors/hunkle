@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
-use std::path::Path;
+use std::{path::Path, time::Duration};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
@@ -249,6 +249,7 @@ pub(super) fn draw(
             }
             WorkspacePanelRow::Agent(index) => {
                 let state = panel.agent_entry_state(index, focused);
+                let elapsed = panel.agent_elapsed(index).map(format_duration);
                 let agent = &panel.agents[index];
                 let workspace = panel
                     .workspaces
@@ -262,6 +263,7 @@ pub(super) fn draw(
                 } else {
                     workspace.to_owned()
                 };
+                let label = elapsed.map_or(label.clone(), |elapsed| format!("{elapsed} {label}"));
                 draw_entry(
                     frame,
                     row_area,
@@ -278,10 +280,39 @@ pub(super) fn draw(
                         spinner_frame,
                     },
                 );
+                let target_height = agent_list.bottom().saturating_sub(row_area.y).min(2);
                 targets.push((
                     HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index)),
-                    row_area,
+                    Rect::new(row_area.x, row_area.y, row_area.width, target_height),
                 ));
+            }
+            WorkspacePanelRow::AgentSession(index) => {
+                let state = panel.agent_entry_state(index, focused);
+                let base = state
+                    .selected
+                    .then_some(palette().selected)
+                    .map_or_else(Style::default, |color| Style::default().bg(color));
+                frame.render_widget(Block::default().style(base), row_area);
+                if let Some(session_name) = panel.agents[index].session_name.as_deref() {
+                    let session_area = Rect::new(
+                        row_area.x.saturating_add(2),
+                        row_area.y,
+                        row_area.width.saturating_sub(2),
+                        1,
+                    );
+                    frame.render_widget(
+                        Paragraph::new(truncate_width(
+                            session_name,
+                            usize::from(session_area.width),
+                        ))
+                        .style(base.fg(palette().faint)),
+                        session_area,
+                    );
+                }
+                let target = HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index));
+                if !targets.iter().any(|(existing, _)| *existing == target) {
+                    targets.push((target, row_area));
+                }
             }
             _ => {}
         }
@@ -628,7 +659,7 @@ fn draw_entry(
     frame: &mut Frame<'_>,
     area: Rect,
     label: &str,
-    branch: Option<&str>,
+    detail: Option<&str>,
     presentation: EntryPresentation,
 ) {
     let EntryPresentation {
@@ -644,19 +675,19 @@ fn draw_entry(
     let marker = if marker_active { active_marker } else { "  " };
     let status_marker = status_marker(status, spinner_frame);
     let available = usize::from(area.width).saturating_sub(4);
-    let branch = branch
-        .filter(|branch| !branch.is_empty())
-        .map(|branch| truncate_width(branch, available.saturating_sub(5).min(available / 2)));
-    let branch_width = branch
+    let detail = detail
+        .filter(|detail| !detail.is_empty())
+        .map(|detail| truncate_width(detail, available.saturating_sub(5).min(available / 2)));
+    let detail_width = detail
         .as_deref()
         .map(UnicodeWidthStr::width)
         .unwrap_or_default();
     let label = truncate_width(
         label,
-        available.saturating_sub(branch_width + usize::from(branch.is_some()) * 2),
+        available.saturating_sub(detail_width + usize::from(detail.is_some()) * 2),
     );
     let label_width = UnicodeWidthStr::width(label.as_str());
-    let padding = available.saturating_sub(label_width + branch_width);
+    let padding = available.saturating_sub(label_width + detail_width);
     let background = selected.then_some(palette().selected);
     let base = background.map_or_else(Style::default, |color| Style::default().bg(color));
     frame.render_widget(Block::default().style(base), area);
@@ -679,12 +710,22 @@ fn draw_entry(
                 },
             ),
             Span::styled(" ".repeat(padding), base),
-            Span::styled(branch.unwrap_or_default(), base.fg(palette().accent)),
+            Span::styled(detail.unwrap_or_default(), base.fg(palette().accent)),
             Span::styled(" ", base),
             Span::styled(status_marker, base.fg(status_color(status))),
         ])),
         area,
     );
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        format!("{minutes}:{:02}", seconds % 60)
+    } else {
+        format!("{}:{:02}:{:02}", minutes / 60, minutes % 60, seconds % 60)
+    }
 }
 
 fn status_marker(status: AgentStatus, spinner_frame: usize) -> &'static str {
@@ -731,6 +772,13 @@ fn keep_section_visible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_agent_durations_as_compact_clocks() {
+        assert_eq!(format_duration(Duration::ZERO), "0:00");
+        assert_eq!(format_duration(Duration::from_secs(62)), "1:02");
+        assert_eq!(format_duration(Duration::from_secs(3_661)), "1:01:01");
+    }
 
     #[test]
     fn status_indicators_distinguish_attention_states() {
