@@ -292,6 +292,13 @@ impl Explorer {
     }
 
     pub(super) fn reload(&mut self) {
+        self.directory_index.clear();
+        self.index_rx = None;
+        self.searching = false;
+        self.reload_directory();
+    }
+
+    fn reload_directory(&mut self) {
         self.invalidate_targets();
         self.error = None;
         self.loading = true;
@@ -382,7 +389,7 @@ impl Explorer {
         self.directory = path;
         self.set_path_input(display_search_path(&self.directory));
         self.surroundings_focused = false;
-        self.reload();
+        self.reload_directory();
     }
 
     pub(super) fn activate_surrounding(&mut self, index: usize) {
@@ -1237,6 +1244,25 @@ mod tests {
         picker.index_rx = Some(receiver);
 
         picker.navigate(second);
+
+        assert!(picker.directory_index.is_empty());
+        assert!(picker.index_rx.is_none());
+    }
+
+    #[test]
+    fn explicit_reload_invalidates_the_fuzzy_index_for_the_same_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut picker = Explorer::new(temp.path().to_path_buf());
+        picker.directory_index.push(IndexedDirectory {
+            path: temp.path().join("stale"),
+            name_lower: "stale".to_owned(),
+            depth: 1,
+            is_repo: false,
+        });
+        let (_, receiver) = mpsc::channel();
+        picker.index_rx = Some(receiver);
+
+        picker.reload();
 
         assert!(picker.directory_index.is_empty());
         assert!(picker.index_rx.is_none());

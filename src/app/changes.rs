@@ -568,6 +568,7 @@ impl ChangesState {
         let Some(repo) = repo else {
             return;
         };
+        let previous = self.preview_selection();
         if self.pane == LeftPane::Files {
             move_list(
                 &mut self.explorer_state,
@@ -589,13 +590,18 @@ impl ChangesState {
                 worktree_viewport,
             );
         }
-        self.refresh_diff(Some(repo));
+        if self.preview_selection() != previous {
+            self.refresh_diff(Some(repo));
+        }
     }
 
     pub(super) fn move_history_selection(&mut self, repo: &RepositoryData, delta: isize) {
+        let previous = self.preview_selection();
         self.history_focused = true;
         move_list(&mut self.history_state, repo.history.len(), delta);
-        self.refresh_diff(Some(repo));
+        if self.preview_selection() != previous {
+            self.refresh_diff(Some(repo));
+        }
     }
 
     pub(super) fn select_first(
@@ -607,6 +613,7 @@ impl ChangesState {
         let Some(repo) = repo else {
             return;
         };
+        let previous = self.preview_selection();
         if self.pane == LeftPane::Files {
             self.explorer_state
                 .select((!self.explorer_rows().is_empty()).then_some(0));
@@ -626,7 +633,9 @@ impl ChangesState {
                 worktree_viewport,
             );
         }
-        self.refresh_diff(Some(repo));
+        if self.preview_selection() != previous {
+            self.refresh_diff(Some(repo));
+        }
     }
 
     pub(super) fn select_last(
@@ -638,6 +647,7 @@ impl ChangesState {
         let Some(repo) = repo else {
             return;
         };
+        let previous = self.preview_selection();
         if self.pane == LeftPane::Files {
             self.explorer_state
                 .select(self.explorer_rows().len().checked_sub(1));
@@ -656,7 +666,9 @@ impl ChangesState {
                 worktree_viewport,
             );
         }
-        self.refresh_diff(Some(repo));
+        if self.preview_selection() != previous {
+            self.refresh_diff(Some(repo));
+        }
     }
 
     pub(super) fn scroll_worktree(
@@ -1157,6 +1169,17 @@ impl ChangesState {
             .iter()
             .rposition(|row| row.change_index.is_some())
     }
+
+    fn preview_selection(&self) -> (LeftPane, bool, Option<usize>) {
+        let selected = if self.pane == LeftPane::Files {
+            self.explorer_state.selected()
+        } else if self.history_focused {
+            self.history_state.selected()
+        } else {
+            self.worktree_state.selected()
+        };
+        (self.pane, self.history_focused, selected)
+    }
 }
 
 fn hunk_count(diff: &str) -> usize {
@@ -1334,6 +1357,26 @@ mod tests {
             ["src", "app", "main.rs", "README.md"]
         );
         assert_eq!(state.explorer_rows()[1].directory_expanded, Some(false));
+    }
+
+    #[test]
+    fn boundary_navigation_keeps_the_current_preview() {
+        let repo = repository_data();
+        let mut state = ChangesState::new(Some(&repo));
+        state.pane = LeftPane::Files;
+        state.explorer_state.select(Some(0));
+
+        state.select_first(Some(&repo), 10, 10);
+        let first_generation = state.preview_content_generation;
+        state.select_first(Some(&repo), 10, 10);
+        state.move_selection(Some(&repo), -1, 10, 10);
+        assert_eq!(state.preview_content_generation, first_generation);
+
+        state.select_last(Some(&repo), 10, 10);
+        let last_generation = state.preview_content_generation;
+        state.select_last(Some(&repo), 10, 10);
+        state.move_selection(Some(&repo), 1, 10, 10);
+        assert_eq!(state.preview_content_generation, last_generation);
     }
 
     #[test]

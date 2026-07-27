@@ -5,6 +5,7 @@ use std::{
 
 use serde_json::Value;
 
+use super::super::atomic_write;
 use super::{
     HerdrWorkspace, WorkspaceGroup, WorkspaceSnapshot, WorkspaceSnapshotEntry,
     WorkspaceSnapshotGroup,
@@ -54,7 +55,7 @@ impl PresetStore {
             .collect::<Vec<_>>();
         let content = serde_json::to_string_pretty(&serde_json::json!({ "groups": groups }))
             .map_err(|error| format!("Could not serialize workspace groups: {error}"))?;
-        fs::write(path, format!("{content}\n"))
+        atomic_write(path, format!("{content}\n").as_bytes())
             .map_err(|error| format!("Could not save workspace groups: {error}"))
     }
 
@@ -101,7 +102,7 @@ impl PresetStore {
             "snapshots": snapshots,
         }))
         .map_err(|error| format!("Could not serialize workspace snapshots: {error}"))?;
-        fs::write(path, format!("{content}\n"))
+        atomic_write(path, format!("{content}\n").as_bytes())
             .map_err(|error| format!("Could not save workspace snapshots: {error}"))
     }
 }

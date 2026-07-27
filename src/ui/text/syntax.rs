@@ -6,7 +6,7 @@ use ratatui::{
 use super::super::palette;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Language {
+pub(super) enum Language {
     Rust,
     JavaScript,
     Python,
@@ -15,8 +15,7 @@ enum Language {
     Generic,
 }
 
-pub(super) fn syntax_spans<'a>(code: &'a str, path: &str) -> Vec<Span<'a>> {
-    let language = Language::from_path(path);
+pub(super) fn syntax_spans_for_language(code: &str, language: Language) -> Vec<Span<'_>> {
     let mut spans = Vec::new();
     let mut cursor = 0;
     let mut previous_word: Option<&str> = None;
@@ -129,7 +128,7 @@ pub(super) fn syntax_spans<'a>(code: &'a str, path: &str) -> Vec<Span<'a>> {
 }
 
 impl Language {
-    fn from_path(path: &str) -> Self {
+    pub(super) fn from_path(path: &str) -> Self {
         match path
             .rsplit('.')
             .next()
@@ -420,9 +419,9 @@ mod tests {
 
     #[test]
     fn highlights_rust_roles_without_losing_lifetimes() {
-        let spans = syntax_spans(
+        let spans = syntax_spans_for_language(
             "fn render<'a>(value: Option<u32>) { let Some(item) = value.map(call); }",
-            "src/main.rs",
+            Language::Rust,
         );
         let style = |token: &str| {
             spans

@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 mod markdown;
 mod syntax;
 pub(super) use markdown::{markdown_prefix_style, styled_markdown};
-use syntax::syntax_spans;
+use syntax::{Language, syntax_spans_for_language};
 
 pub(super) fn styled_source(source: &str, path: &str, width: usize) -> Vec<Line<'static>> {
     styled_source_window(source, path, width, 0, usize::MAX)
@@ -23,6 +23,7 @@ pub(super) fn styled_source_window(
     count: usize,
 ) -> Vec<Line<'static>> {
     let numbered = width >= 72;
+    let language = Language::from_path(path);
     source
         .lines()
         .enumerate()
@@ -37,7 +38,7 @@ pub(super) fn styled_source_window(
             } else {
                 Vec::new()
             };
-            for span in syntax_spans(line, path) {
+            for span in syntax_spans_for_language(line, language) {
                 push_merged_span(&mut spans, span);
             }
             finish_line(spans, width, palette().panel)
@@ -217,9 +218,9 @@ fn push_merged_span(spans: &mut Vec<Span<'static>>, span: Span<'_>) {
     }
 }
 
-fn owned_syntax_spans(code: &str, path: &str) -> Vec<Span<'static>> {
+fn owned_syntax_spans(code: &str, language: Language) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    for span in syntax_spans(code, path) {
+    for span in syntax_spans_for_language(code, language) {
         push_merged_span(&mut spans, span);
     }
     spans
@@ -242,6 +243,7 @@ pub(super) fn styled_diff_window(
     let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
     let mut in_hunk = false;
     let mut seen_header = false;
+    let language = Language::from_path(path);
 
     for line in diff.lines() {
         let file_header = line.starts_with("diff --git");
@@ -280,7 +282,7 @@ pub(super) fn styled_diff_window(
         if display_index >= start {
             lines.push(styled_diff_line(
                 line,
-                path,
+                language,
                 width,
                 numbered,
                 &mut old_line,
@@ -296,7 +298,7 @@ pub(super) fn styled_diff_window(
 
 fn styled_diff_line(
     line: &str,
-    path: &str,
+    language: Language,
     width: usize,
     numbered: bool,
     old_line: &mut Option<u32>,
@@ -390,7 +392,7 @@ fn styled_diff_line(
         *new_line = new_line.map(|value| value + 1);
         (" ", payload, palette().panel, new)
     } else {
-        return finish_line(owned_syntax_spans(line, path), width, palette().panel);
+        return finish_line(owned_syntax_spans(line, language), width, palette().panel);
     };
 
     let mut spans = if numbered {
@@ -410,7 +412,7 @@ fn styled_diff_line(
             })
             .add_modifier(Modifier::BOLD),
     ));
-    for span in syntax_spans(payload, path) {
+    for span in syntax_spans_for_language(payload, language) {
         push_merged_span(&mut spans, span);
     }
     finish_line(spans, width, background)

@@ -10,9 +10,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::repo_path::RepoPath;
 
 use crate::app::{
-    ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
-    ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch, HerdrPrompt,
-    HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems, RepositoryBrowser,
+    ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandRecord, CommandStatus,
+    Explorer, ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch,
+    HerdrPrompt, HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
     WorkspaceRenameDialog,
@@ -147,7 +147,8 @@ pub(super) fn draw_repository_browser(
         Rect::new(inner_x, area.y.saturating_add(6), inner_width, 1),
     );
 
-    let result_count = browser.result_count();
+    let result_indices = browser.result_indices();
+    let result_count = result_indices.len();
     let section_label = match browser.tab {
         BrowserTab::Branches => "LOCAL & REMOTE",
         BrowserTab::PullRequests => "OPEN PULL REQUESTS",
@@ -184,8 +185,7 @@ pub(super) fn draw_repository_browser(
     );
     let selected = browser.state.selected();
     let items: Vec<ListItem<'_>> = match browser.tab {
-        BrowserTab::Branches => browser
-            .branch_indices()
+        BrowserTab::Branches => result_indices
             .into_iter()
             .filter_map(|index| browser.branches.get(index))
             .enumerate()
@@ -213,8 +213,7 @@ pub(super) fn draw_repository_browser(
             .collect(),
         BrowserTab::PullRequests => {
             if let Some(pull_requests) = browser.pull_requests.items() {
-                browser
-                    .pull_request_indices()
+                result_indices
                     .into_iter()
                     .filter_map(|index| pull_requests.get(index))
                     .enumerate()
@@ -232,8 +231,7 @@ pub(super) fn draw_repository_browser(
         }
         BrowserTab::Issues => {
             if let Some(issues) = browser.issues.items() {
-                browser
-                    .issue_indices()
+                result_indices
                     .into_iter()
                     .filter_map(|index| issues.get(index))
                     .enumerate()
@@ -1288,15 +1286,12 @@ pub(super) fn draw_command(frame: &mut Frame<'_>, actions: &mut ActionsState) ->
             .saturating_sub(area.y.saturating_add(4))
             .saturating_sub(1),
     );
-    let rendered_height = {
-        let lines = command_lines(actions);
-        rendered_height(&lines, usize::from(output.width))
-    };
+    let lines = command_lines(actions.status, &actions.transcript, &actions.stderr);
+    let rendered_height = rendered_height(&lines, usize::from(output.width));
     actions.scroll_max = rendered_height
         .saturating_sub(usize::from(output.height))
         .min(usize::from(u16::MAX)) as u16;
     actions.scroll = actions.scroll.min(actions.scroll_max);
-    let lines = command_lines(actions);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -1448,9 +1443,13 @@ pub(super) fn draw_herdr_prompt(frame: &mut Frame<'_>, prompt: &HerdrPrompt) -> 
     area
 }
 
-fn command_lines<'a>(actions: &'a ActionsState) -> Vec<Line<'a>> {
-    if actions.status == CommandStatus::Input && actions.transcript.is_empty() {
-        return if actions.stderr.is_empty() {
+fn command_lines<'a>(
+    status: CommandStatus,
+    transcript: &'a [CommandRecord],
+    stderr: &'a str,
+) -> Vec<Line<'a>> {
+    if status == CommandStatus::Input && transcript.is_empty() {
+        return if stderr.is_empty() {
             vec![
                 Line::styled(
                     "Run any non-interactive Git command from this repository.",
@@ -1467,14 +1466,11 @@ fn command_lines<'a>(actions: &'a ActionsState) -> Vec<Line<'a>> {
                 ),
             ]
         } else {
-            vec![Line::styled(
-                actions.stderr.as_str(),
-                Style::default().fg(palette().red),
-            )]
+            vec![Line::styled(stderr, Style::default().fg(palette().red))]
         };
     }
     let mut lines = Vec::new();
-    for (index, record) in actions.transcript.iter().enumerate() {
+    for (index, record) in transcript.iter().enumerate() {
         if index > 0 {
             lines.push(Line::raw(""));
         }
@@ -1517,16 +1513,13 @@ fn command_lines<'a>(actions: &'a ActionsState) -> Vec<Line<'a>> {
             ));
         }
     }
-    if actions.status == CommandStatus::Input && !actions.stderr.is_empty() {
+    if status == CommandStatus::Input && !stderr.is_empty() {
         if !lines.is_empty() {
             lines.push(Line::raw(""));
         }
-        lines.push(Line::styled(
-            actions.stderr.as_str(),
-            Style::default().fg(palette().red),
-        ));
+        lines.push(Line::styled(stderr, Style::default().fg(palette().red)));
     }
-    if actions.status == CommandStatus::Running {
+    if status == CommandStatus::Running {
         if !lines.is_empty() {
             lines.push(Line::raw(""));
         }

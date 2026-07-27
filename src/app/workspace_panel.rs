@@ -463,6 +463,9 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn set_layout_available(&mut self, available: bool) {
+        if available && !self.layout_available && self.is_visible() {
+            self.next_refresh = Instant::now();
+        }
         self.layout_available = available;
     }
 
@@ -471,6 +474,9 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn show_left(&mut self) {
+        if !self.is_visible() && self.layout_available {
+            self.next_refresh = Instant::now();
+        }
         self.placement = WorkspacePanelPlacement::Left;
     }
 
@@ -479,11 +485,15 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn cycle_placement(&mut self) {
+        let was_visible = self.is_visible();
         self.placement = match self.placement {
             WorkspacePanelPlacement::Off => WorkspacePanelPlacement::Left,
             WorkspacePanelPlacement::Left => WorkspacePanelPlacement::Right,
             WorkspacePanelPlacement::Right => WorkspacePanelPlacement::Off,
         };
+        if !was_visible && self.is_visible() && self.layout_available {
+            self.next_refresh = Instant::now();
+        }
     }
 
     pub(crate) fn entry_count(&self) -> usize {
@@ -648,7 +658,7 @@ impl WorkspacePanel {
             }
         }
 
-        if !self.snapshot_loading && !self.loading && Instant::now() >= self.next_refresh {
+        if self.should_start_snapshot(Instant::now()) {
             self.start_snapshot();
             changed = true;
         }
@@ -738,6 +748,14 @@ impl WorkspacePanel {
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
         self.next_spinner = now + SPINNER_INTERVAL;
         true
+    }
+
+    fn should_start_snapshot(&self, now: Instant) -> bool {
+        self.is_visible()
+            && self.layout_available
+            && !self.snapshot_loading
+            && !self.loading
+            && now >= self.next_refresh
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -2166,6 +2184,25 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn snapshots_are_scheduled_only_while_the_panel_can_be_seen() {
+        let mut panel = WorkspacePanel::new(true, None, None);
+        let now = Instant::now();
+        panel.next_refresh = now;
+
+        assert!(!panel.should_start_snapshot(now));
+        panel.set_layout_available(true);
+        assert!(panel.should_start_snapshot(Instant::now()));
+
+        panel.hide();
+        assert!(!panel.should_start_snapshot(Instant::now()));
+        panel.show_left();
+        assert!(panel.should_start_snapshot(Instant::now()));
+
+        panel.loading = true;
+        assert!(!panel.should_start_snapshot(Instant::now()));
     }
 
     fn agent(name: &str, status: AgentStatus) -> HerdrAgent {

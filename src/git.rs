@@ -25,6 +25,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 const GIT_NETWORK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const COMMAND_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const DIFF_PREVIEW_LIMIT: usize = 2 * 1024 * 1024;
+const UNTRACKED_FILE_LINE_LIMIT: u64 = 8 * 1024 * 1024;
+const UNTRACKED_TOTAL_LINE_LIMIT: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryKind {
@@ -1112,11 +1114,31 @@ fn parse_status(bytes: &[u8]) -> Result<Vec<Change>> {
 }
 
 fn populate_diff_stats(root: &Path, changes: &mut [Change]) -> Result<()> {
-    let staged = diff_stats(root, true)?;
-    let unstaged = diff_stats(root, false)?;
+    let staged = if changes.iter().any(|change| change.staged) {
+        diff_stats(root, true)?
+    } else {
+        HashMap::new()
+    };
+    let unstaged = if changes
+        .iter()
+        .any(|change| !change.staged && change.code != '?')
+    {
+        diff_stats(root, false)?
+    } else {
+        HashMap::new()
+    };
+    let mut untracked_budget = UNTRACKED_TOTAL_LINE_LIMIT;
     for change in changes {
         if change.code == '?' && !change.staged {
-            change.additions = count_file_lines(&root.join(&change.path)).unwrap_or(0);
+            if untracked_budget > 0
+                && let Ok((lines, bytes_read)) = count_file_lines(
+                    &root.join(&change.path),
+                    untracked_budget.min(UNTRACKED_FILE_LINE_LIMIT),
+                )
+            {
+                change.additions = lines;
+                untracked_budget = untracked_budget.saturating_sub(bytes_read);
+            }
             continue;
         }
         let stats = if change.staged { &staged } else { &unstaged };
@@ -1157,8 +1179,12 @@ fn diff_stats(root: &Path, staged: bool) -> Result<HashMap<RepoPath, (u64, u64)>
     Ok(stats)
 }
 
-fn count_file_lines(path: &Path) -> Result<u64> {
-    let (file, _) = open_regular_file(path)?;
+fn count_file_lines(path: &Path, byte_limit: u64) -> Result<(u64, u64)> {
+    let (file, metadata) = open_regular_file(path)?;
+    let file_len = metadata.len();
+    if file_len > byte_limit {
+        return Ok((0, 0));
+    }
     let mut reader = BufReader::new(file);
     let mut lines = 0u64;
     let mut has_bytes = false;
@@ -1169,7 +1195,7 @@ fn count_file_lines(path: &Path) -> Result<u64> {
             break;
         }
         if buffer.contains(&0) {
-            return Ok(0);
+            return Ok((0, file_len));
         }
         has_bytes = true;
         lines = lines.saturating_add(buffer.iter().filter(|byte| **byte == b'\n').count() as u64);
@@ -1177,7 +1203,7 @@ fn count_file_lines(path: &Path) -> Result<u64> {
         let consumed = buffer.len();
         reader.consume(consumed);
     }
-    Ok(lines + u64::from(has_bytes && !ends_with_newline))
+    Ok((lines + u64::from(has_bytes && !ends_with_newline), file_len))
 }
 
 fn open_regular_file(path: &Path) -> Result<(fs::File, fs::Metadata)> {
@@ -1453,6 +1479,16 @@ mod tests {
         assert_eq!(parsed[0].original_path.as_ref().unwrap(), "old.rs");
     }
 
+    #[test]
+    fn untracked_line_counts_respect_the_read_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("new.txt");
+        fs::write(&path, "a\nb\n").unwrap();
+
+        assert_eq!(count_file_lines(&path, 4).unwrap(), (2, 4));
+        assert_eq!(count_file_lines(&path, 3).unwrap(), (0, 0));
+    }
+
     #[cfg(unix)]
     #[test]
     fn untracked_symlink_preview_does_not_read_its_target() {
@@ -1509,7 +1545,7 @@ mod tests {
                 .unwrap()
                 .contains("Untracked special file")
         );
-        assert!(count_file_lines(&fifo).is_err());
+        assert!(count_file_lines(&fifo, u64::MAX).is_err());
     }
 
     #[test]

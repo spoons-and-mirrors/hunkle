@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use super::{DEFAULT_WORKSPACE_PANEL_WIDTH, MINIMUM_WORKSPACE_PANEL_WIDTH};
+use super::{DEFAULT_WORKSPACE_PANEL_WIDTH, MINIMUM_WORKSPACE_PANEL_WIDTH, atomic_write};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -117,7 +117,7 @@ impl SettingsStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(
+        atomic_write(
             path,
             format!(
                 "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nworkspace_panel_width={}\nhistory_height={}\neditor_command={}\nmedia_preview_protocol={}\n",
@@ -130,7 +130,8 @@ impl SettingsStore {
                 settings.history_height,
                 settings.editor_command.as_deref().unwrap_or_default(),
                 settings.media_preview_protocol.as_str(),
-            ),
+            )
+            .as_bytes(),
         )
     }
 }

@@ -14,7 +14,7 @@ mod settings;
 mod text_input;
 mod workspace_panel;
 
-pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
+pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandRecord, CommandStatus};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub(crate) use changes::ChangesHitTarget;
 pub use changes::{ChangesState, LeftPane};
@@ -47,6 +47,12 @@ use std::{
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
+
+fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
+    file.write_all(content)?;
+    file.commit()
+}
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -892,7 +898,12 @@ impl App {
                     }
                     self.show_graph_if_diff_empty();
                     self.prefetch_repository_browser();
-                    if self.notice.as_deref() == Some("Refreshing…") {
+                    if self.notice.as_deref() == Some("Refreshing…")
+                        || self
+                            .notice
+                            .as_deref()
+                            .is_some_and(|notice| notice.ends_with(" (retrying queued refresh…)"))
+                    {
                         self.notice = Some("Refreshed".to_owned());
                     }
                     if let Some(scope) = self.reload_queued.take() {
@@ -901,8 +912,13 @@ impl App {
                 }
                 (LoadKind::Reload, Err(error)) => {
                     self.pending_reload = None;
-                    self.reload_queued = None;
-                    self.notice = Some(error);
+                    let queued = self.reload_queued.take();
+                    if let Some(scope) = queued {
+                        self.reload(scope);
+                        self.notice = Some(format!("{error} (retrying queued refresh…)"));
+                    } else {
+                        self.notice = Some(error);
+                    }
                 }
             }
         }
@@ -2183,10 +2199,7 @@ impl App {
                 Err(error) => Err(error),
             }
         } else {
-            atomic_write_file::AtomicWriteFile::open(path).and_then(|mut file| {
-                file.write_all(self.commit_input.text().as_bytes())?;
-                file.commit()
-            })
+            atomic_write(path, self.commit_input.text().as_bytes())
         };
         if let Err(error) = result {
             self.commit_draft_due = Some(Instant::now() + Duration::from_secs(1));

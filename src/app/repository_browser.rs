@@ -469,10 +469,14 @@ impl RepositoryBrowser {
     }
 
     pub(crate) fn result_count(&self) -> usize {
+        self.result_indices().len()
+    }
+
+    pub(crate) fn result_indices(&self) -> Vec<usize> {
         match self.tab {
-            BrowserTab::Branches => self.branch_indices().len(),
-            BrowserTab::PullRequests => self.pull_request_indices().len(),
-            BrowserTab::Issues => self.issue_indices().len(),
+            BrowserTab::Branches => self.branch_indices(),
+            BrowserTab::PullRequests => self.pull_request_indices(),
+            BrowserTab::Issues => self.issue_indices(),
         }
     }
 
