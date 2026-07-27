@@ -962,6 +962,22 @@ fn renders_every_primary_surface() {
         super::palette().surface_alt
     );
     assert!(app.regions.graph_table.is_none());
+    app.changes.diff_scroll = 2;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let scrolled_commit_diff: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(
+        !scrolled_commit_diff.contains("MESSAGE"),
+        "commit metadata should scroll with the patch"
+    );
+    assert!(scrolled_commit_diff.contains("CHANGES"));
+    app.changes.diff_scroll = 0;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let mut wrapped_patch_file_summary = String::new();

@@ -384,6 +384,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .or(live_summary.as_ref());
     let summary_unavailable =
         selected_commit.is_some_and(|commit| app.commit_summaries.failed(&commit.oid));
+    let scrolled_commit_message = selected_commit.map(|commit| commit.message.clone());
+    let scrolled_summary = summary.cloned();
     let maximum_summary_height = columns[1]
         .height
         .saturating_sub(8_u16.saturating_add(message_height))
@@ -401,20 +403,28 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         0
     };
     let metadata_bottom_margin = u16::from(metadata_height > 0);
+    let scrollable_metadata_height = if inspecting_commit {
+        metadata_height.saturating_add(metadata_bottom_margin)
+    } else {
+        0
+    };
+    let fixed_metadata_height = if inspecting_commit {
+        0
+    } else {
+        metadata_height.saturating_add(metadata_bottom_margin)
+    };
     let diff_body = Rect::new(
         diff_header.x,
         diff_header
             .y
             .saturating_add(2)
-            .saturating_add(metadata_height)
-            .saturating_add(metadata_bottom_margin),
+            .saturating_add(fixed_metadata_height),
         diff_header.width,
         columns[1].bottom().saturating_sub(
             diff_header
                 .y
                 .saturating_add(3)
-                .saturating_add(metadata_height)
-                .saturating_add(metadata_bottom_margin),
+                .saturating_add(fixed_metadata_height),
         ),
     );
     let wrap_label = if app.changes.diff_wrap {
@@ -460,53 +470,31 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ])),
         diff_header,
     );
-    let metadata_card = Rect::new(
-        diff_header.x,
-        diff_header.y.saturating_add(2),
-        diff_header.width,
-        metadata_height,
-    );
-    if !metadata_card.is_empty() {
-        fill(frame, metadata_card, palette().surface_alt);
-    }
-    let metadata_content = Rect::new(
-        metadata_card.x.saturating_add(1),
-        metadata_card.y.saturating_add(1),
-        metadata_card.width.saturating_sub(2),
-        metadata_card.height.saturating_sub(1),
-    );
-    if let Some(commit) = selected_commit
-        && message_height > 0
-    {
-        draw_commit_message(
+    if !inspecting_commit {
+        draw_metadata_card(
             frame,
             Rect::new(
-                metadata_content.x,
-                metadata_content.y,
-                metadata_content.width,
-                message_height.saturating_sub(1),
-            ),
-            &commit.message,
-        );
-    }
-    if show_summary {
-        draw_diff_summary(
-            frame,
-            Rect::new(
-                metadata_content.x,
-                metadata_content.y.saturating_add(message_height),
-                metadata_content.width,
-                summary_height.saturating_sub(1),
+                diff_header.x,
+                diff_header.y.saturating_add(2),
+                diff_header.width,
+                metadata_height,
             ),
             summary,
             summary_unavailable,
-            true,
+            summary_height,
         );
     }
     let show_hunk_actions =
         !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
-    let mut preview =
-        prepare_preview_lines(app, diff_body, &syntax_path, true, inspecting_commit, false);
+    let mut preview = prepare_preview_lines(
+        app,
+        diff_body,
+        &syntax_path,
+        true,
+        inspecting_commit,
+        false,
+        scrollable_metadata_height,
+    );
     let (hunk_rows, rendered_height) = if show_hunk_actions {
         app.changes
             .preview_presentation
@@ -522,8 +510,15 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let old_scroll = app.changes.diff_scroll;
         app.changes.diff_scroll = scroll_to_row(*row, rendered_height);
         if app.changes.diff_scroll != old_scroll {
-            preview =
-                prepare_preview_lines(app, diff_body, &syntax_path, true, inspecting_commit, false);
+            preview = prepare_preview_lines(
+                app,
+                diff_body,
+                &syntax_path,
+                true,
+                inspecting_commit,
+                false,
+                scrollable_metadata_height,
+            );
         }
     }
     let visible_hunks = visible_hunks(
@@ -532,7 +527,29 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_body,
         app.changes.diff_scroll,
     );
-    render_scrollable_content(frame, app, columns[1], diff_body, preview);
+    render_scrollable_content(
+        frame,
+        app,
+        columns[1],
+        diff_body,
+        preview,
+        scrollable_metadata_height,
+    );
+    if let Some(message) = scrolled_commit_message.as_deref() {
+        draw_scrolled_metadata_card(
+            frame,
+            diff_body,
+            app.changes.diff_scroll,
+            CommitMetadata {
+                height: metadata_height,
+                message,
+                message_height,
+                summary: scrolled_summary.as_ref(),
+                summary_unavailable,
+                summary_height,
+            },
+        );
+    }
     draw_hunk_actions(frame, app, diff_body, visible_hunks);
     if !local_workspace {
         draw_commit_message_action(frame, actions_row, app, has_changes);
@@ -1027,8 +1044,8 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             .selected_explorer_file_path()
             .map_or_else(String::new, RepoPath::display);
         let preview =
-            prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered);
-        render_scrollable_content(frame, app, columns[1], preview_body, preview);
+            prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered, 0);
+        render_scrollable_content(frame, app, columns[1], preview_body, preview, 0);
     }
 }
 
@@ -1039,8 +1056,13 @@ fn prepare_preview_lines(
     is_diff: bool,
     show_initial_diff_header: bool,
     markdown: bool,
+    leading_height: u16,
 ) -> PreparedPreview {
-    app.changes.preview_presentation.prepare(
+    let mut content_scroll = app
+        .changes
+        .diff_scroll
+        .saturating_sub(usize::from(leading_height));
+    let preview = app.changes.preview_presentation.prepare(
         PreviewInput {
             content: &app.changes.diff,
             generation: app.changes.preview_content_generation,
@@ -1053,8 +1075,12 @@ fn prepare_preview_lines(
             wrapped: app.changes.diff_wrap,
             hunk_selected: app.changes.hunk_selection.is_some(),
         },
-        &mut app.changes.diff_scroll,
-    )
+        &mut content_scroll,
+    );
+    if app.changes.diff_scroll >= usize::from(leading_height) {
+        app.changes.diff_scroll = usize::from(leading_height).saturating_add(content_scroll);
+    }
+    preview
 }
 
 fn render_scrollable_content(
@@ -1063,13 +1089,15 @@ fn render_scrollable_content(
     panel: Rect,
     body: Rect,
     preview: PreparedPreview,
+    leading_height: u16,
 ) {
     let rendered_height = preview.rendered_height;
     let paragraph = Paragraph::new(preview.lines).style(Style::default().bg(palette().panel));
     let viewport_height = usize::from(body.height);
-    let max_scroll = rendered_height.saturating_sub(viewport_height);
+    let total_height = usize::from(leading_height).saturating_add(rendered_height);
+    let max_scroll = total_height.saturating_sub(viewport_height);
     let scroll_limit = if app.changes.hunk_selection.is_some() {
-        rendered_height.saturating_sub(1)
+        total_height.saturating_sub(1)
     } else {
         max_scroll
     };
@@ -1080,13 +1108,20 @@ fn render_scrollable_content(
     app.regions.diff_scroll_thumb = (max_scroll > 0).then(|| {
         diff_scroll_thumb(
             scrollbar,
-            rendered_height,
+            total_height,
             viewport_height,
             app.changes.diff_scroll.min(max_scroll),
             max_scroll,
         )
     });
-    frame.render_widget(paragraph, body);
+    let preview_offset = usize::from(leading_height).saturating_sub(app.changes.diff_scroll);
+    let preview_body = Rect::new(
+        body.x,
+        body.y.saturating_add(preview_offset as u16),
+        body.width,
+        body.height.saturating_sub(preview_offset as u16),
+    );
+    frame.render_widget(paragraph, preview_body);
     if let Some(thumb) = app.regions.diff_scroll_thumb {
         frame.render_widget(
             Paragraph::new(Text::from(
@@ -1150,28 +1185,123 @@ fn commit_message_height(message: &str, width: u16, maximum: u16) -> u16 {
     content_height.saturating_add(2).min(maximum)
 }
 
-fn draw_commit_message(frame: &mut Frame<'_>, area: Rect, message: &str) {
-    if area.is_empty() {
+fn draw_metadata_card(
+    frame: &mut Frame<'_>,
+    card: Rect,
+    summary: Option<&DiffSummary>,
+    summary_unavailable: bool,
+    summary_height: u16,
+) {
+    if card.is_empty() {
         return;
     }
-    frame.render_widget(
-        Paragraph::new("MESSAGE").style(
-            Style::default()
-                .fg(palette().muted)
-                .add_modifier(Modifier::BOLD),
+    fill(frame, card, palette().surface_alt);
+    draw_diff_summary(
+        frame,
+        Rect::new(
+            card.x.saturating_add(1),
+            card.y.saturating_add(1),
+            card.width.saturating_sub(2),
+            summary_height.saturating_sub(1),
         ),
-        Rect::new(area.x, area.y, area.width, 1),
+        summary,
+        summary_unavailable,
+        true,
     );
-    if area.height > 1 {
-        frame.render_widget(
-            Paragraph::new(commit_message_text(message)).wrap(Wrap { trim: false }),
-            Rect::new(
-                area.x,
-                area.y.saturating_add(1),
-                area.width,
-                area.height.saturating_sub(1),
-            ),
-        );
+}
+
+struct CommitMetadata<'a> {
+    height: u16,
+    message: &'a str,
+    message_height: u16,
+    summary: Option<&'a DiffSummary>,
+    summary_unavailable: bool,
+    summary_height: u16,
+}
+
+fn draw_scrolled_metadata_card(
+    frame: &mut Frame<'_>,
+    viewport: Rect,
+    scroll: usize,
+    metadata: CommitMetadata<'_>,
+) {
+    let scroll = scroll.min(usize::from(u16::MAX)) as u16;
+    if scroll >= metadata.height {
+        return;
+    }
+    let visible_height = metadata.height.saturating_sub(scroll).min(viewport.height);
+    let card = Rect::new(viewport.x, viewport.y, viewport.width, visible_height);
+    fill(frame, card, palette().surface_alt);
+
+    let content_x = card.x.saturating_add(1);
+    let content_width = card.width.saturating_sub(2);
+    let mut message_lines = vec![Line::styled(
+        "MESSAGE",
+        Style::default()
+            .fg(palette().muted)
+            .add_modifier(Modifier::BOLD),
+    )];
+    message_lines.extend(commit_message_text(metadata.message).lines);
+    draw_scrolled_text(
+        frame,
+        card,
+        Rect::new(
+            content_x,
+            1,
+            content_width,
+            metadata.message_height.saturating_sub(1),
+        ),
+        scroll,
+        Text::from(message_lines),
+        true,
+    );
+    draw_scrolled_text(
+        frame,
+        card,
+        Rect::new(
+            content_x,
+            metadata.message_height.saturating_add(1),
+            content_width,
+            metadata.summary_height.saturating_sub(1),
+        ),
+        scroll,
+        diff_summary_text(
+            metadata.summary,
+            metadata.summary_unavailable,
+            true,
+            content_width,
+            metadata.summary_height.saturating_sub(1),
+        ),
+        false,
+    );
+}
+
+fn draw_scrolled_text(
+    frame: &mut Frame<'_>,
+    viewport: Rect,
+    content: Rect,
+    scroll: u16,
+    text: Text<'static>,
+    wrapped: bool,
+) {
+    let visible_start = content.y.max(scroll);
+    let visible_end = content.bottom().min(scroll.saturating_add(viewport.height));
+    if visible_start >= visible_end {
+        return;
+    }
+    let area = Rect::new(
+        content.x,
+        viewport
+            .y
+            .saturating_add(visible_start.saturating_sub(scroll)),
+        content.width,
+        visible_end.saturating_sub(visible_start),
+    );
+    let paragraph = Paragraph::new(text).scroll((visible_start.saturating_sub(content.y), 0));
+    if wrapped {
+        frame.render_widget(paragraph.wrap(Wrap { trim: false }), area);
+    } else {
+        frame.render_widget(paragraph, area);
     }
 }
 
@@ -1182,21 +1312,33 @@ fn draw_diff_summary(
     unavailable: bool,
     wrapped: bool,
 ) {
-    let stats_area = Rect::new(area.x, area.y, area.width, 1);
-    let files_area = Rect::new(
-        area.x,
-        area.y.saturating_add(1),
-        area.width,
-        area.height.saturating_sub(1),
+    frame.render_widget(
+        Paragraph::new(diff_summary_text(
+            summary,
+            unavailable,
+            wrapped,
+            area.width,
+            area.height,
+        )),
+        area,
     );
+}
+
+fn diff_summary_text(
+    summary: Option<&DiffSummary>,
+    unavailable: bool,
+    wrapped: bool,
+    width: u16,
+    height: u16,
+) -> Text<'static> {
     let Some(summary) = summary else {
         let state = if unavailable {
             "unavailable"
         } else {
             "loading…"
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
+        return Text::from(vec![
+            Line::from(vec![
                 Span::styled(
                     "CHANGES  ",
                     Style::default()
@@ -1204,17 +1346,12 @@ fn draw_diff_summary(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(state, Style::default().fg(palette().faint)),
-            ])),
-            stats_area,
-        );
-        frame.render_widget(
-            Paragraph::new(Line::styled(
+            ]),
+            Line::styled(
                 format!("FILES  {state}"),
                 Style::default().fg(palette().faint),
-            )),
-            files_area,
-        );
-        return;
+            ),
+        ]);
     };
 
     let file_count = summary.files.len();
@@ -1223,37 +1360,38 @@ fn draw_diff_summary(
         file_count,
         if summary.files_truncated { "+" } else { "" }
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "CHANGES  ",
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "CHANGES  ",
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("+{}", summary.additions),
+            Style::default().fg(palette().green),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("-{}", summary.deletions),
+            Style::default().fg(palette().red),
+        ),
+        Span::styled(
+            format!(
+                "  {displayed_file_count} {}",
+                if file_count == 1 { "file" } else { "files" }
             ),
-            Span::styled(
-                format!("+{}", summary.additions),
-                Style::default().fg(palette().green),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("-{}", summary.deletions),
-                Style::default().fg(palette().red),
-            ),
-            Span::styled(
-                format!(
-                    "  {displayed_file_count} {}",
-                    if file_count == 1 { "file" } else { "files" }
-                ),
-                Style::default().fg(palette().faint),
-            ),
-        ])),
-        stats_area,
-    );
+            Style::default().fg(palette().faint),
+        ),
+    ])];
     let label = "FILES  ";
-    let available = usize::from(area.width).saturating_sub(label.len());
+    let available = usize::from(width).saturating_sub(label.len());
     let file_lines = if wrapped {
-        wrapped_file_summary(&summary.files, available, usize::from(files_area.height))
+        wrapped_file_summary(
+            &summary.files,
+            available,
+            usize::from(height.saturating_sub(1)),
+        )
     } else {
         vec![truncate_width(
             &summary
@@ -1265,22 +1403,18 @@ fn draw_diff_summary(
             available,
         )]
     };
-    let lines = file_lines
-        .into_iter()
-        .enumerate()
-        .map(|(index, files)| {
-            Line::from(vec![
-                Span::styled(
-                    if index == 0 { label } else { "       " },
-                    Style::default()
-                        .fg(palette().muted)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(files, Style::default().fg(palette().cyan)),
-            ])
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(Text::from(lines)), files_area);
+    lines.extend(file_lines.into_iter().enumerate().map(|(index, files)| {
+        Line::from(vec![
+            Span::styled(
+                if index == 0 { label } else { "       " },
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(files, Style::default().fg(palette().cyan)),
+        ])
+    }));
+    Text::from(lines)
 }
 
 fn diff_summary_height(
