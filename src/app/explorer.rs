@@ -2,7 +2,8 @@ use std::{
     collections::{HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -12,7 +13,6 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::fuzzy::{fuzzy_text_score, fuzzy_text_score_lower};
 
-const MAX_COMPLETION_SCAN: usize = 5_000;
 const MAX_PREVIEW_ENTRIES: usize = 200;
 const MAX_SURROUNDING_SIBLINGS: usize = 200;
 
@@ -61,9 +61,13 @@ pub struct Explorer {
     pub(crate) surroundings_state: ListState,
     pub(crate) surroundings_focused: bool,
     pub(crate) preview_entries: Vec<PickerEntry>,
-    directory_index: Vec<IndexedDirectory>,
+    directory_index: Arc<Vec<IndexedDirectory>>,
     index_roots: Vec<PathBuf>,
     index_rx: Option<Receiver<Vec<IndexedDirectory>>>,
+    match_generation: u64,
+    match_pending: Arc<Mutex<Option<MatchRequest>>>,
+    match_wake: SyncSender<()>,
+    match_rx: Receiver<MatchResult>,
     browse_rx: Option<Receiver<Result<BrowseResult, String>>>,
     content_generation: u64,
 }
@@ -90,6 +94,22 @@ struct IndexedDirectory {
     is_repo: bool,
 }
 
+#[derive(Debug)]
+struct MatchRequest {
+    generation: u64,
+    query: String,
+    directory: PathBuf,
+    index: Arc<Vec<IndexedDirectory>>,
+    selected_path: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct MatchResult {
+    generation: u64,
+    matches: Vec<PickerEntry>,
+    selected_path: Option<PathBuf>,
+}
+
 pub(super) enum PickerCommand {
     None,
     Close,
@@ -100,6 +120,29 @@ pub(super) enum PickerCommand {
 impl Explorer {
     pub(super) fn new(directory: PathBuf) -> Self {
         let index_roots = search_roots(&directory);
+        let match_pending = Arc::new(Mutex::new(None::<MatchRequest>));
+        let worker_pending = Arc::clone(&match_pending);
+        let (match_wake, wake_rx) = mpsc::sync_channel::<()>(1);
+        let (match_tx, match_rx) = mpsc::channel();
+        thread::spawn(move || {
+            while wake_rx.recv().is_ok() {
+                let Some(request) = worker_pending.lock().ok().and_then(|mut slot| slot.take())
+                else {
+                    continue;
+                };
+                let matches =
+                    if request.query.contains(['/', '\\']) || request.query.starts_with('~') {
+                        path_completion_candidates(&request.query, &request.directory)
+                    } else {
+                        indexed_directory_matches(&request.query, &request.index)
+                    };
+                let _ = match_tx.send(MatchResult {
+                    generation: request.generation,
+                    matches,
+                    selected_path: request.selected_path,
+                });
+            }
+        });
         let mut picker = Self {
             path_input: display_search_path(&directory),
             path_cursor: display_search_path(&directory).len(),
@@ -116,9 +159,13 @@ impl Explorer {
             surroundings_state: ListState::default(),
             surroundings_focused: false,
             preview_entries: Vec::new(),
-            directory_index: Vec::new(),
+            directory_index: Arc::new(Vec::new()),
             index_roots,
             index_rx: None,
+            match_generation: 0,
+            match_pending,
+            match_wake,
+            match_rx,
             browse_rx: None,
             content_generation: 0,
         };
@@ -131,6 +178,7 @@ impl Explorer {
             match key.code {
                 KeyCode::Esc => {
                     self.invalidate_targets();
+                    self.cancel_match_search();
                     self.editing_path = false;
                     self.set_path_input(display_search_path(&self.directory));
                     self.matches.clear();
@@ -292,7 +340,8 @@ impl Explorer {
     }
 
     pub(super) fn reload(&mut self) {
-        self.directory_index.clear();
+        self.cancel_match_search();
+        self.directory_index = Arc::new(Vec::new());
         self.index_rx = None;
         self.searching = false;
         self.reload_directory();
@@ -348,12 +397,22 @@ impl Explorer {
             .as_ref()
             .and_then(|receiver| receiver.try_recv().ok())
         {
-            self.directory_index = index;
+            self.directory_index = Arc::new(index);
             self.index_rx = None;
             self.searching = false;
             if self.editing_path {
                 self.refresh_matches();
             }
+            changed = true;
+        }
+        while let Ok(result) = self.match_rx.try_recv() {
+            if result.generation != self.match_generation {
+                continue;
+            }
+            self.matches = result.matches;
+            self.select_match(result.selected_path.as_deref());
+            self.refresh_preview();
+            self.searching = self.index_rx.is_some();
             changed = true;
         }
         if let Some(result) = self
@@ -379,9 +438,10 @@ impl Explorer {
     }
 
     pub(super) fn navigate(&mut self, path: PathBuf) {
+        self.cancel_match_search();
         let index_roots = search_roots(&path);
         if self.index_roots != index_roots {
-            self.directory_index.clear();
+            self.directory_index = Arc::new(Vec::new());
             self.index_rx = None;
             self.index_roots = index_roots;
             self.searching = false;
@@ -519,19 +579,16 @@ impl Explorer {
             .selected()
             .and_then(|index| self.matches.get(index))
             .map(|entry| entry.path.clone());
-        let query = self.path_input.trim();
+        let query = self.path_input.trim().to_owned();
         if query.is_empty() {
-            self.searching = false;
+            self.cancel_match_search();
             self.matches.clear();
             self.preview_entries.clear();
             self.match_state.select(None);
             return;
         }
         if query.contains(['/', '\\']) || query.starts_with('~') {
-            self.searching = false;
-            self.matches = path_completion_candidates(query, &self.directory);
-            self.select_match(selected_path.as_deref());
-            self.refresh_preview();
+            self.start_match_search(query, selected_path);
             return;
         }
         if !query.contains(['/', '\\'])
@@ -546,54 +603,38 @@ impl Explorer {
                 let _ = sender.send(index_directories(&roots));
             });
         }
-        self.searching = self.directory_index.is_empty() && self.index_rx.is_some();
-
-        let query_lower = query.to_lowercase();
-        let mut candidates = Vec::with_capacity(12);
-        let compare =
-            |(left_score, left_depth, left_index): &(u32, usize, usize),
-             (right_score, right_depth, right_index): &(u32, usize, usize)| {
-                right_score
-                    .cmp(left_score)
-                    .then_with(|| left_depth.cmp(right_depth))
-                    .then_with(|| {
-                        self.directory_index[*left_index]
-                            .path
-                            .cmp(&self.directory_index[*right_index].path)
-                    })
-            };
-        for (index, directory) in self.directory_index.iter().enumerate() {
-            let Some(score) = fuzzy_text_score_lower(&query_lower, &directory.name_lower) else {
-                continue;
-            };
-            let candidate = (
-                score + if directory.is_repo { 750 } else { 0 },
-                directory.depth,
-                index,
-            );
-            if candidates.len() < 12 {
-                candidates.push(candidate);
-            } else if let Some((worst, _)) = candidates
-                .iter()
-                .enumerate()
-                .max_by(|(_, left), (_, right)| compare(left, right))
-                && compare(&candidate, &candidates[worst]).is_lt()
-            {
-                candidates[worst] = candidate;
-            }
+        if self.directory_index.is_empty() {
+            self.searching = self.index_rx.is_some();
+            self.matches.clear();
+            self.preview_entries.clear();
+            self.match_state.select(None);
+            return;
         }
-        candidates.sort_by(compare);
-        self.matches = candidates
-            .into_iter()
-            .map(|(_, _, index)| PickerEntry {
-                label: display_search_path(&self.directory_index[index].path),
-                is_repo: self.directory_index[index].is_repo,
-                path: self.directory_index[index].path.clone(),
-                action: PickerAction::Navigate,
-            })
-            .collect();
-        self.select_match(selected_path.as_deref());
-        self.refresh_preview();
+        self.start_match_search(query, selected_path);
+    }
+
+    fn start_match_search(&mut self, query: String, selected_path: Option<PathBuf>) {
+        self.match_generation = self.match_generation.wrapping_add(1);
+        self.searching = true;
+        let request = MatchRequest {
+            generation: self.match_generation,
+            query,
+            directory: self.directory.clone(),
+            index: Arc::clone(&self.directory_index),
+            selected_path,
+        };
+        if let Ok(mut pending) = self.match_pending.lock() {
+            *pending = Some(request);
+            let _ = self.match_wake.try_send(());
+        }
+    }
+
+    fn cancel_match_search(&mut self) {
+        self.match_generation = self.match_generation.wrapping_add(1);
+        if let Ok(mut pending) = self.match_pending.lock() {
+            *pending = None;
+        }
+        self.searching = false;
     }
 
     fn accept_completion(&mut self) {
@@ -771,7 +812,6 @@ fn load_child_directories(directory: &Path, limit: usize) -> Vec<PickerEntry> {
             (file_type.is_dir() || file_type.is_symlink()).then_some(entry)
         })
         .filter(|entry| entry.file_name() != ".git")
-        .take(limit)
         .map(|entry| {
             let path = entry.path();
             let is_repo = path.join(".git").exists();
@@ -784,7 +824,51 @@ fn load_child_directories(directory: &Path, limit: usize) -> Vec<PickerEntry> {
         })
         .collect();
     directories.sort_by_cached_key(|entry| entry.label.to_lowercase());
+    directories.truncate(limit);
     directories
+}
+
+fn indexed_directory_matches(query: &str, index: &[IndexedDirectory]) -> Vec<PickerEntry> {
+    let query_lower = query.to_lowercase();
+    let mut candidates = Vec::with_capacity(12);
+    let compare =
+        |(left_score, left_depth, left_index): &(u32, usize, usize),
+         (right_score, right_depth, right_index): &(u32, usize, usize)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_depth.cmp(right_depth))
+                .then_with(|| index[*left_index].path.cmp(&index[*right_index].path))
+        };
+    for (directory_index, directory) in index.iter().enumerate() {
+        let Some(score) = fuzzy_text_score_lower(&query_lower, &directory.name_lower) else {
+            continue;
+        };
+        let candidate = (
+            score + if directory.is_repo { 750 } else { 0 },
+            directory.depth,
+            directory_index,
+        );
+        if candidates.len() < 12 {
+            candidates.push(candidate);
+        } else if let Some((worst, _)) = candidates
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| compare(left, right))
+            && compare(&candidate, &candidates[worst]).is_lt()
+        {
+            candidates[worst] = candidate;
+        }
+    }
+    candidates.sort_by(compare);
+    candidates
+        .into_iter()
+        .map(|(_, _, directory_index)| PickerEntry {
+            label: display_search_path(&index[directory_index].path),
+            is_repo: index[directory_index].is_repo,
+            path: index[directory_index].path.clone(),
+            action: PickerAction::Navigate,
+        })
+        .collect()
 }
 
 fn load_surroundings(directory: &Path) -> (Vec<SurroundingEntry>, Option<usize>) {
@@ -935,29 +1019,53 @@ fn path_completion_candidates(input: &str, base: &Path) -> Vec<PickerEntry> {
         parent
     };
     let fragment_lower = fragment.to_lowercase();
-    let mut candidates: Vec<_> = load_child_directories(&parent, MAX_COMPLETION_SCAN)
-        .into_iter()
-        .filter_map(|mut entry| {
-            let name = entry.path.file_name().unwrap_or_default().to_string_lossy();
-            let score = if fragment_lower.is_empty() {
-                0
-            } else {
-                fuzzy_text_score_lower(&fragment_lower, &name.to_lowercase())?
-            };
-            entry.label = display_search_path(&entry.path);
-            Some((score, entry))
-        })
-        .collect();
-    candidates.sort_by(|(left_score, left), (right_score, right)| {
+    let compare = |(left_score, left): &(u32, PickerEntry),
+                   (right_score, right): &(u32, PickerEntry)| {
         right_score
             .cmp(left_score)
             .then_with(|| left.path.cmp(&right.path))
-    });
-    candidates
-        .into_iter()
-        .take(12)
-        .map(|(_, entry)| entry)
-        .collect()
+    };
+    let mut candidates = Vec::with_capacity(12);
+    let Ok(entries) = fs::read_dir(&parent) else {
+        return Vec::new();
+    };
+    for entry in entries.filter_map(Result::ok).filter(|entry| {
+        entry.file_name() != ".git"
+            && entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() || kind.is_symlink())
+    }) {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(score) = (if fragment_lower.is_empty() {
+            Some(0)
+        } else {
+            fuzzy_text_score_lower(&fragment_lower, &name.to_string_lossy().to_lowercase())
+        }) else {
+            continue;
+        };
+        let candidate = (
+            score,
+            PickerEntry {
+                label: display_search_path(&path),
+                is_repo: path.join(".git").exists(),
+                path,
+                action: PickerAction::Navigate,
+            },
+        );
+        if candidates.len() < 12 {
+            candidates.push(candidate);
+        } else if let Some((worst, _)) = candidates
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| compare(left, right))
+            && compare(&candidate, &candidates[worst]).is_lt()
+        {
+            candidates[worst] = candidate;
+        }
+    }
+    candidates.sort_by(compare);
+    candidates.into_iter().map(|(_, entry)| entry).collect()
 }
 
 fn completion_path(path: &Path) -> String {
@@ -1061,6 +1169,17 @@ fn move_list(state: &mut ListState, len: usize, delta: isize) {
 mod tests {
     use super::*;
 
+    fn wait_for_matches(picker: &mut Explorer) {
+        for _ in 0..100 {
+            picker.poll_index();
+            if !picker.searching {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("Explorer search did not finish");
+    }
+
     #[test]
     fn fuzzy_repository_paths_resolve_and_complete() {
         let temp = tempfile::tempdir().unwrap();
@@ -1074,8 +1193,9 @@ mod tests {
         assert_eq!(resolve_fuzzy_path("cod/hunk", root), Some(hunkle.clone()));
 
         let mut picker = Explorer::new(root.to_path_buf());
-        picker.directory_index = index_directories(&[root.to_path_buf()]);
+        picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]));
         picker.begin_search(Some("hnk"));
+        wait_for_matches(&mut picker);
         assert_eq!(picker.matches[0].path, hunkle);
         assert!(picker.matches[0].is_repo);
         assert!(fuzzy_text_score("hunkle", "go-genai-streamed-function-args").is_none());
@@ -1133,8 +1253,9 @@ mod tests {
         assert!(!paths.contains(&&root.join(".cache")));
 
         let mut picker = Explorer::new(root.to_path_buf());
-        picker.directory_index = index;
+        picker.directory_index = Arc::new(index);
         picker.begin_search(Some("opencode"));
+        wait_for_matches(&mut picker);
         assert_eq!(picker.matches[0].path, opencode);
     }
 
@@ -1149,6 +1270,7 @@ mod tests {
 
         let mut picker = Explorer::new(root.to_path_buf());
         picker.begin_search(Some(&format!("{}/.conf", root.display())));
+        wait_for_matches(&mut picker);
         assert_eq!(picker.matches[0].path, config);
         assert!(
             picker
@@ -1158,6 +1280,7 @@ mod tests {
         );
 
         picker.accept_completion();
+        wait_for_matches(&mut picker);
         assert!(
             picker
                 .path_input
@@ -1234,12 +1357,12 @@ mod tests {
         fs::create_dir_all(&second).unwrap();
 
         let mut picker = Explorer::new(first.clone());
-        picker.directory_index.push(IndexedDirectory {
+        picker.directory_index = Arc::new(vec![IndexedDirectory {
             path: first.join("stale"),
             name_lower: "stale".to_owned(),
             depth: 1,
             is_repo: false,
-        });
+        }]);
         let (_, receiver) = mpsc::channel();
         picker.index_rx = Some(receiver);
 
@@ -1253,12 +1376,12 @@ mod tests {
     fn explicit_reload_invalidates_the_fuzzy_index_for_the_same_root() {
         let temp = tempfile::tempdir().unwrap();
         let mut picker = Explorer::new(temp.path().to_path_buf());
-        picker.directory_index.push(IndexedDirectory {
+        picker.directory_index = Arc::new(vec![IndexedDirectory {
             path: temp.path().join("stale"),
             name_lower: "stale".to_owned(),
             depth: 1,
             is_repo: false,
-        });
+        }]);
         let (_, receiver) = mpsc::channel();
         picker.index_rx = Some(receiver);
 
@@ -1314,23 +1437,26 @@ mod tests {
     #[test]
     fn fuzzy_search_keeps_only_the_best_twelve_matches() {
         let mut picker = Explorer::new(PathBuf::from("/"));
-        picker.directory_index = (0..30)
-            .map(|index| {
-                let name = if index == 29 {
-                    "needle".to_owned()
-                } else {
-                    format!("needle-{index:02}")
-                };
-                IndexedDirectory {
-                    path: PathBuf::from("/").join(&name),
-                    name_lower: name,
-                    depth: 1,
-                    is_repo: false,
-                }
-            })
-            .collect();
+        picker.directory_index = Arc::new(
+            (0..30)
+                .map(|index| {
+                    let name = if index == 29 {
+                        "needle".to_owned()
+                    } else {
+                        format!("needle-{index:02}")
+                    };
+                    IndexedDirectory {
+                        path: PathBuf::from("/").join(&name),
+                        name_lower: name,
+                        depth: 1,
+                        is_repo: false,
+                    }
+                })
+                .collect(),
+        );
 
         picker.begin_search(Some("needle"));
+        wait_for_matches(&mut picker);
 
         assert_eq!(picker.matches.len(), 12);
         assert_eq!(picker.matches[0].path, Path::new("/needle"));

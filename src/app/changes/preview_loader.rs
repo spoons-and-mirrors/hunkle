@@ -3,8 +3,8 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -33,19 +33,23 @@ pub(super) enum LoadedPreview {
 
 pub(super) struct PreviewLoader {
     generation: u64,
-    sender: Sender<Request>,
+    pending: Arc<Mutex<Option<Request>>>,
+    wake: SyncSender<()>,
     receiver: Receiver<Completion>,
 }
 
 impl PreviewLoader {
     pub(super) fn new() -> Self {
-        let (sender, request_rx) = mpsc::channel::<Request>();
+        let pending = Arc::new(Mutex::new(None::<Request>));
+        let worker_pending = Arc::clone(&pending);
+        let (wake, request_rx) = mpsc::sync_channel::<()>(1);
         let (result_tx, receiver) = mpsc::channel();
         thread::spawn(move || {
-            while let Ok(mut request) = request_rx.recv() {
-                while let Ok(latest) = request_rx.try_recv() {
-                    request = latest;
-                }
+            while request_rx.recv().is_ok() {
+                let Some(request) = worker_pending.lock().ok().and_then(|mut slot| slot.take())
+                else {
+                    continue;
+                };
                 let content = match &request.task {
                     Task::File(path) => load_file_preview(&request.root, path),
                     Task::Commit(oid) => git::commit_diff(&request.root, oid)
@@ -69,7 +73,8 @@ impl PreviewLoader {
         });
         Self {
             generation: 0,
-            sender,
+            pending,
+            wake,
             receiver,
         }
     }
@@ -104,11 +109,15 @@ impl PreviewLoader {
 
     fn request(&mut self, root: &Path, task: Task) {
         self.invalidate();
-        let _ = self.sender.send(Request {
+        let request = Request {
             generation: self.generation,
             root: root.to_path_buf(),
             task,
-        });
+        };
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = Some(request);
+            let _ = self.wake.try_send(());
+        }
     }
 }
 

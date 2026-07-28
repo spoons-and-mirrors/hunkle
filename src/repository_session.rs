@@ -866,6 +866,7 @@ impl RepositorySession {
         None
     }
 
+    #[cfg(test)]
     pub(crate) fn note_activity(&mut self) {
         self.status_activity_generation = self.status_activity_generation.wrapping_add(1);
         self.status_interval = MIN_STATUS_INTERVAL;

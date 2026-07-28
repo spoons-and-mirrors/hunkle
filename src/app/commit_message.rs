@@ -3,6 +3,7 @@ use std::{
     ffi::OsString,
     fs,
     io::Write,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc::{self, Receiver, Sender},
@@ -102,7 +103,7 @@ impl CommitMessageGenerator {
         thread::Builder::new()
             .name("hunkle-commit-message".to_owned())
             .spawn(move || {
-                let result = generate_message(&worker_root);
+                let result = catch_generation_panic(|| generate_message(&worker_root));
                 let _ = sender.send(CommitMessageCompletion {
                     root: worker_root,
                     baseline: worker_baseline,
@@ -124,6 +125,13 @@ impl CommitMessageGenerator {
         self.running = false;
         Some(completion)
     }
+}
+
+fn catch_generation_panic(
+    generate: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    catch_unwind(AssertUnwindSafe(generate))
+        .unwrap_or_else(|_| Err("OpenCode commit message generation panicked".to_owned()))
 }
 
 #[cfg(not(test))]
@@ -410,6 +418,16 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn converts_worker_panics_into_completions() {
+        let result = catch_generation_panic(|| panic!("worker failed"));
+
+        assert_eq!(
+            result.unwrap_err(),
+            "OpenCode commit message generation panicked"
+        );
+    }
 
     #[test]
     fn builds_low_reasoning_opencode_command() {

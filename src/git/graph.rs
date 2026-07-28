@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use super::{Commit, GraphCell};
 
 pub(super) const GRAPH_COMMIT_LIMIT: usize = 5_000;
+const MAX_GRAPH_LANES: usize = 64;
 
 pub(super) struct PreparedGraph {
     pub(super) commits: Vec<Commit>,
@@ -11,8 +12,8 @@ pub(super) struct PreparedGraph {
 }
 
 pub(super) fn prepare(commits: Vec<Commit>) -> PreparedGraph {
-    let (mut commits, truncated) = cap(commits);
-    layout(&mut commits);
+    let (mut commits, commit_truncated) = cap(commits);
+    let lane_truncated = layout(&mut commits);
     let width = commits
         .iter()
         .map(|commit| commit.graph.len())
@@ -21,7 +22,7 @@ pub(super) fn prepare(commits: Vec<Commit>) -> PreparedGraph {
     PreparedGraph {
         commits,
         width,
-        truncated,
+        truncated: commit_truncated || lane_truncated,
     }
 }
 
@@ -36,7 +37,7 @@ const DOWN: u8 = 2;
 const LEFT: u8 = 4;
 const RIGHT: u8 = 8;
 
-pub(super) fn layout(commits: &mut [Commit]) {
+pub(super) fn layout(commits: &mut [Commit]) -> bool {
     let mut oid_ids = HashMap::new();
     let mut next_oid = 0usize;
     for commit in commits.iter() {
@@ -52,6 +53,7 @@ pub(super) fn layout(commits: &mut [Commit]) {
     let mut lanes: Vec<Option<usize>> = Vec::new();
     let mut colors: Vec<usize> = Vec::new();
     let mut next_color = 0;
+    let mut truncated = false;
 
     for commit in commits {
         let commit_id = oid_ids[&commit.oid];
@@ -68,10 +70,19 @@ pub(super) fn layout(commits: &mut [Commit]) {
                 next_color += 1;
                 index
             } else {
-                lanes.push(Some(commit_id));
-                colors.push(next_color);
-                next_color += 1;
-                lanes.len() - 1
+                if lanes.len() < MAX_GRAPH_LANES {
+                    lanes.push(Some(commit_id));
+                    colors.push(next_color);
+                    next_color += 1;
+                    lanes.len() - 1
+                } else {
+                    truncated = true;
+                    let index = MAX_GRAPH_LANES - 1;
+                    lanes[index] = Some(commit_id);
+                    colors[index] = next_color;
+                    next_color += 1;
+                    index
+                }
             }
         });
 
@@ -100,10 +111,19 @@ pub(super) fn layout(commits: &mut [Commit]) {
                         next_color += 1;
                         index
                     } else {
-                        after.push(Some(parent_id));
-                        colors.push(next_color);
-                        next_color += 1;
-                        after.len() - 1
+                        if after.len() < MAX_GRAPH_LANES {
+                            after.push(Some(parent_id));
+                            colors.push(next_color);
+                            next_color += 1;
+                            after.len() - 1
+                        } else {
+                            truncated = true;
+                            let index = MAX_GRAPH_LANES - 1;
+                            after[index] = Some(parent_id);
+                            colors[index] = next_color;
+                            next_color += 1;
+                            index
+                        }
                     }
                 });
             outgoing.push(destination);
@@ -155,6 +175,7 @@ pub(super) fn layout(commits: &mut [Commit]) {
             colors.pop();
         }
     }
+    truncated
 }
 
 fn connect(masks: &mut [u8], colors: &mut [usize], from: usize, to: usize, color: usize) {
@@ -238,6 +259,26 @@ mod tests {
                 .iter()
                 .all(|commit| commit.graph.len() == 1 && commit.graph[0].symbol == '●')
         );
+    }
+
+    #[test]
+    fn caps_pathological_graph_lane_growth() {
+        let parents = (0..MAX_GRAPH_LANES * 2)
+            .map(|index| format!("parent-{index}"))
+            .collect::<Vec<_>>();
+        let mut commits = vec![Commit {
+            oid: "merge".to_owned(),
+            parents,
+            refs: Vec::new(),
+            author: String::new(),
+            date: String::new(),
+            subject: String::new(),
+            message: String::new(),
+            graph: Vec::new(),
+        }];
+
+        assert!(layout(&mut commits));
+        assert!(commits[0].graph.len() < MAX_GRAPH_LANES * 2);
     }
 
     fn symbols(commits: &[Commit]) -> Vec<String> {

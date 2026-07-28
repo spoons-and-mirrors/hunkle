@@ -127,14 +127,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         HitTarget::Changes(app.changes.worktree_background_target()),
         worktree_list,
     );
-    let stage_all = Rect::new(
-        worktree_header.right().saturating_sub(2),
-        worktree_header.y,
-        worktree_header.width.min(2),
-        1,
-    );
-    app.regions
-        .register_hit_target(HitTarget::Changes(ChangesHitTarget::StageAll), stage_all);
     app.regions.history_bounds = Some(Rect::new(
         worktree_content.x,
         worktree_list_y.saturating_add(2),
@@ -242,6 +234,16 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     let worktree_title_width = UnicodeWidthStr::width(worktree_title.as_str());
     let title_width = worktree_title_width + 2 + files_title.len();
     let stage_width = UnicodeWidthStr::width(stage_label.as_str()) + 3;
+    let stage_target_width = worktree_header.width.min(stage_width as u16);
+    app.regions.register_hit_target(
+        HitTarget::Changes(ChangesHitTarget::StageAll),
+        Rect::new(
+            worktree_header.right().saturating_sub(stage_target_width),
+            worktree_header.y,
+            stage_target_width,
+            1,
+        ),
+    );
     let stage_padding =
         usize::from(worktree_header.width).saturating_sub(title_width + stage_width);
     frame.render_widget(

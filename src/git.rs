@@ -308,19 +308,37 @@ pub struct CommandOutput {
     pub exit_code: Option<i32>,
 }
 
+#[cfg(test)]
 pub fn discover(path: &Path) -> Result<PathBuf> {
+    match discover_workspace(path)? {
+        WorkspaceDiscovery::Repository(root) => Ok(root),
+        WorkspaceDiscovery::Local(reason) => bail!("{reason}"),
+    }
+}
+
+enum WorkspaceDiscovery {
+    Repository(PathBuf),
+    Local(String),
+}
+
+fn discover_workspace(path: &Path) -> Result<WorkspaceDiscovery> {
     let output = process::run(
         Command::new("git")
             .args(["-C"])
             .arg(path)
-            .args(["rev-parse", "--show-toplevel"]),
+            .args(["rev-parse", "--show-toplevel"])
+            .env("LC_ALL", "C"),
         git_limits(),
     )
     .with_context(|| "could not start git; make sure it is installed")?;
 
     ensure_complete(&output, "git rev-parse")?;
     if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
+        let error = clean_stderr(&output);
+        if error.contains("not a git repository") {
+            return Ok(WorkspaceDiscovery::Local(error));
+        }
+        bail!("{error}");
     }
 
     let root = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -331,13 +349,13 @@ pub fn discover(path: &Path) -> Result<PathBuf> {
     let root = fs::canonicalize(root).context("could not resolve repository root")?;
     let requested = fs::canonicalize(path).context("could not resolve requested directory")?;
     if root != requested {
-        bail!(
+        return Ok(WorkspaceDiscovery::Local(format!(
             "{} is not a repository root (enclosing repository: {})",
             requested.display(),
             root.display()
-        );
+        )));
     }
-    Ok(root)
+    Ok(WorkspaceDiscovery::Repository(root))
 }
 
 pub(crate) fn common_git_dir(root: &Path) -> Result<PathBuf> {
@@ -603,9 +621,12 @@ pub fn load(path: &Path) -> Result<RepositoryData> {
 }
 
 pub fn load_or_local(path: &Path) -> Result<RepositoryData> {
-    match discover(path) {
-        Ok(root) => load_git_root(root),
-        Err(_) => local_workspace(path),
+    match discover_workspace(path)? {
+        WorkspaceDiscovery::Repository(root) => load_git_root(root),
+        WorkspaceDiscovery::Local(reason) => {
+            drop(reason);
+            local_workspace(path)
+        }
     }
 }
 

@@ -257,7 +257,7 @@ fn renders_every_primary_surface() {
         .regions
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::StageAll))
         .unwrap();
-    assert_eq!(stage_all.width, 2);
+    assert!(stage_all.width > 2);
     click(&mut app, stage_all.x, stage_all.y);
     wait_for(&mut app, |app| {
         app.repository()

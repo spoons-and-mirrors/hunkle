@@ -5,7 +5,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, List, ListItem, Paragraph, Wrap},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::repo_path::RepoPath;
 
@@ -3146,17 +3147,18 @@ fn truncate_start_width(value: &str, width: usize) -> String {
     }
 
     let target = width.saturating_sub(1);
-    let mut suffix = String::new();
+    let mut suffix = Vec::new();
     let mut used = 0;
-    for character in value.chars().rev() {
-        let character_width = character.width().unwrap_or(0);
-        if used + character_width > target {
+    for grapheme in value.graphemes(true).rev() {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > target {
             break;
         }
-        suffix.insert(0, character);
-        used += character_width;
+        suffix.push(grapheme);
+        used += grapheme_width;
     }
-    format!("…{suffix}")
+    suffix.reverse();
+    format!("…{}", suffix.concat())
 }
 
 fn help_line<'a>(key: &'a str, description: &'a str) -> Line<'a> {

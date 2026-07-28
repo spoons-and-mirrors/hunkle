@@ -594,24 +594,40 @@ fn load_pull_requests(root: &Path) -> Result<Vec<PullRequest>, String> {
             "number,title,headRefName,author,isDraft",
         ],
     )?;
+    parse_pull_requests(&value)
+}
+
+fn parse_pull_requests(value: &Value) -> Result<Vec<PullRequest>, String> {
     let items = value
         .as_array()
         .ok_or_else(|| "GitHub CLI returned invalid pull request data".to_owned())?;
-    Ok(items
+    items
         .iter()
-        .filter_map(|item| {
-            Some(PullRequest {
-                number: item.get("number")?.as_u64()?,
-                title: item.get("title")?.as_str()?.to_owned(),
-                branch: item.get("headRefName")?.as_str()?.to_owned(),
+        .enumerate()
+        .map(|(index, item)| {
+            let field = |name: &str| {
+                item.get(name)
+                    .ok_or_else(|| format!("Pull request {index} has no {name}"))
+            };
+            Ok(PullRequest {
+                number: field("number")?
+                    .as_u64()
+                    .ok_or_else(|| format!("Pull request {index} has an invalid number"))?,
+                title: field("title")?
+                    .as_str()
+                    .ok_or_else(|| format!("Pull request {index} has an invalid title"))?
+                    .to_owned(),
+                branch: field("headRefName")?
+                    .as_str()
+                    .ok_or_else(|| format!("Pull request {index} has an invalid headRefName"))?
+                    .to_owned(),
                 author: author_login(item),
-                draft: item
-                    .get("isDraft")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                draft: field("isDraft")?
+                    .as_bool()
+                    .ok_or_else(|| format!("Pull request {index} has an invalid isDraft"))?,
             })
         })
-        .collect())
+        .collect()
 }
 
 fn load_issues(root: &Path) -> Result<Vec<Issue>, String> {
@@ -626,28 +642,45 @@ fn load_issues(root: &Path) -> Result<Vec<Issue>, String> {
             "number,title,author,labels",
         ],
     )?;
+    parse_issues(&value)
+}
+
+fn parse_issues(value: &Value) -> Result<Vec<Issue>, String> {
     let items = value
         .as_array()
         .ok_or_else(|| "GitHub CLI returned invalid issue data".to_owned())?;
-    Ok(items
+    items
         .iter()
-        .filter_map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             let labels = item
                 .get("labels")
                 .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|label| label.get("name").and_then(Value::as_str))
-                .collect::<Vec<_>>()
+                .ok_or_else(|| format!("Issue {index} has invalid labels"))?
+                .iter()
+                .enumerate()
+                .map(|(label_index, label)| {
+                    label.get("name").and_then(Value::as_str).ok_or_else(|| {
+                        format!("Issue {index} has an invalid label at {label_index}")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
-            Some(Issue {
-                number: item.get("number")?.as_u64()?,
-                title: item.get("title")?.as_str()?.to_owned(),
+            Ok(Issue {
+                number: item
+                    .get("number")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| format!("Issue {index} has an invalid number"))?,
+                title: item
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("Issue {index} has an invalid title"))?
+                    .to_owned(),
                 author: author_login(item),
                 labels,
             })
         })
-        .collect())
+        .collect()
 }
 
 fn author_login(item: &Value) -> String {
@@ -701,13 +734,13 @@ mod tests {
         )
         .unwrap();
 
-        let pulls = pull_requests.as_array().unwrap();
-        let pull = &pulls[0];
-        assert_eq!(pull.get("headRefName").unwrap(), "feature/browser");
-        assert_eq!(author_login(pull), "octo");
-        let issues = issues.as_array().unwrap();
-        assert_eq!(author_login(&issues[0]), "unknown");
+        let parsed_pulls = parse_pull_requests(&pull_requests).unwrap();
+        assert_eq!(parsed_pulls[0].branch, "feature/browser");
+        assert_eq!(parsed_pulls[0].author, "octo");
+        let parsed_issues = parse_issues(&issues).unwrap();
+        assert_eq!(parsed_issues[0].author, "unknown");
 
+        let pulls = pull_requests.as_array().unwrap();
         let indices = matching_indices("branch octo", pulls, |item| item.to_string());
         assert_eq!(indices, [0]);
 
@@ -741,6 +774,20 @@ mod tests {
             browser.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Some(RepositoryBrowserEffect::Close)
         );
+    }
+
+    #[test]
+    fn rejects_malformed_remote_items_instead_of_caching_partial_results() {
+        let pull_requests = serde_json::json!([
+            {"number": 1, "title": "valid", "headRefName": "one", "isDraft": false},
+            {"number": 2, "title": "missing branch", "isDraft": false}
+        ]);
+        let issues = serde_json::json!([
+            {"number": 1, "title": "bad label", "labels": [{}]}
+        ]);
+
+        assert!(parse_pull_requests(&pull_requests).is_err());
+        assert!(parse_issues(&issues).is_err());
     }
 
     #[test]

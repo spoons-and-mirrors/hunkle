@@ -60,7 +60,7 @@ pub(super) fn draw_graph(
     ];
     if repo.graph_truncated {
         graph_title.push(Span::styled(
-            format!("  first {} commits", repo.commits.len()),
+            format!("  graph limited ({} commits)", repo.commits.len()),
             Style::default().fg(palette().yellow),
         ));
     }

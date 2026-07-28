@@ -553,7 +553,6 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
-        self.session.note_activity();
         if self.selection.has_selection() {
             self.selection.clear();
             if key.code == KeyCode::Esc {

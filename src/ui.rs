@@ -15,7 +15,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
@@ -521,13 +522,13 @@ fn truncate_width(value: &str, width: usize) -> String {
     let target = width.saturating_sub(1);
     let mut result = String::new();
     let mut used = 0;
-    for character in value.chars() {
-        let character_width = character.width().unwrap_or(0);
-        if used + character_width > target {
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > target {
             break;
         }
-        result.push(character);
-        used += character_width;
+        result.push_str(grapheme);
+        used += grapheme_width;
     }
     result.push('…');
     result

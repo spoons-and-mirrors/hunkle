@@ -223,17 +223,19 @@ fn expand_directories(
         let mut candidate_limit_reached = false;
         'frontier: for relative in std::mem::take(&mut frontier) {
             let path = root.join(&relative);
-            let Ok(entries) = fs::read_dir(path) else {
-                continue;
-            };
-            for entry in entries.flatten() {
+            let entries = fs::read_dir(&path).with_context(|| {
+                format!("could not read inventory directory {}", path.display())
+            })?;
+            for entry in entries {
+                let entry = entry
+                    .with_context(|| format!("could not read an entry in {}", path.display()))?;
                 if entry.file_name() == ".git" {
                     continue;
                 }
                 let path = entry.path();
-                let Ok(metadata) = fs::symlink_metadata(&path) else {
-                    continue;
-                };
+                let metadata = fs::symlink_metadata(&path).with_context(|| {
+                    format!("could not read inventory metadata for {}", path.display())
+                })?;
                 if !metadata.is_dir() || metadata.file_type().is_symlink() {
                     continue;
                 }
@@ -312,19 +314,19 @@ pub(super) fn local_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>
     let mut truncated = false;
     let mut path_bytes = 0_usize;
     while let Some(directory) = directories.pop() {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(_) if directory != root => continue,
-            Err(error) => return Err(error).context("read repository files"),
-        };
-        for entry in entries.flatten() {
+        let entries = fs::read_dir(&directory).with_context(|| {
+            format!("could not read workspace directory {}", directory.display())
+        })?;
+        for entry in entries {
+            let entry = entry
+                .with_context(|| format!("could not read an entry in {}", directory.display()))?;
             if entry.file_name() == ".git" {
                 continue;
             }
             let path = entry.path();
-            let Ok(metadata) = fs::symlink_metadata(&path) else {
-                continue;
-            };
+            let metadata = fs::symlink_metadata(&path).with_context(|| {
+                format!("could not read workspace metadata for {}", path.display())
+            })?;
             if metadata.is_dir() {
                 if let Ok(relative) = path.strip_prefix(root) {
                     let relative = RepoPath::from(relative);
