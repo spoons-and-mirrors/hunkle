@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender},
     sync::{Arc, Mutex},
-    thread,
+    thread::{self, JoinHandle},
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -66,8 +66,9 @@ pub struct Explorer {
     index_rx: Option<Receiver<Vec<IndexedDirectory>>>,
     match_generation: u64,
     match_pending: Arc<Mutex<Option<MatchRequest>>>,
-    match_wake: SyncSender<()>,
+    match_wake: Option<SyncSender<()>>,
     match_rx: Receiver<MatchResult>,
+    match_worker: Option<JoinHandle<()>>,
     browse_rx: Option<Receiver<Result<BrowseResult, String>>>,
     content_generation: u64,
 }
@@ -124,7 +125,7 @@ impl Explorer {
         let worker_pending = Arc::clone(&match_pending);
         let (match_wake, wake_rx) = mpsc::sync_channel::<()>(1);
         let (match_tx, match_rx) = mpsc::channel();
-        thread::spawn(move || {
+        let match_worker = thread::spawn(move || {
             while wake_rx.recv().is_ok() {
                 let Some(request) = worker_pending.lock().ok().and_then(|mut slot| slot.take())
                 else {
@@ -164,8 +165,9 @@ impl Explorer {
             index_rx: None,
             match_generation: 0,
             match_pending,
-            match_wake,
+            match_wake: Some(match_wake),
             match_rx,
+            match_worker: Some(match_worker),
             browse_rx: None,
             content_generation: 0,
         };
@@ -625,7 +627,9 @@ impl Explorer {
         };
         if let Ok(mut pending) = self.match_pending.lock() {
             *pending = Some(request);
-            let _ = self.match_wake.try_send(());
+            if let Some(match_wake) = &self.match_wake {
+                let _ = match_wake.try_send(());
+            }
         }
     }
 
@@ -692,6 +696,20 @@ impl Explorer {
     fn set_path_input(&mut self, input: String) {
         self.path_input = input;
         self.path_cursor = self.path_input.len();
+    }
+
+    pub(super) fn shutdown(&mut self) {
+        self.cancel_match_search();
+        self.match_wake.take();
+        if let Some(worker) = self.match_worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for Explorer {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -1168,6 +1186,16 @@ fn move_list(state: &mut ListState, len: usize, delta: isize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_joins_the_match_worker_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut explorer = Explorer::new(directory.path().to_path_buf());
+        explorer.shutdown();
+        explorer.shutdown();
+        assert!(explorer.match_worker.is_none());
+        assert!(explorer.match_wake.is_none());
+    }
 
     fn wait_for_matches(picker: &mut Explorer) {
         for _ in 0..100 {

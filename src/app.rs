@@ -552,6 +552,12 @@ impl App {
             && !self.worktree_removal_running()
     }
 
+    pub(crate) fn shutdown(&mut self) {
+        self.changes.shutdown();
+        self.commit_summaries.shutdown();
+        self.workspace_explorer.shutdown();
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         if self.selection.has_selection() {
             self.selection.clear();

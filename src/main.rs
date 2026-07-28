@@ -55,6 +55,7 @@ fn main() -> Result<()> {
             log_path.display()
         ));
     }
+    let _diagnostics_guard = DiagnosticsGuard;
     install_panic_hook();
     #[cfg(unix)]
     let mut restart_coordinator = match restart::RestartCoordinator::start() {
@@ -201,6 +202,7 @@ fn main() -> Result<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
+    app.shutdown();
     diagnostics::event("shutdown clean".to_owned());
 
     #[cfg(unix)]
@@ -214,12 +216,21 @@ fn main() -> Result<()> {
             executable.display(),
             workspace.display()
         ));
+        diagnostics::shutdown();
         restore_terminal();
         let error = Command::new(executable).arg(workspace).exec();
         return Err(error.into());
     }
 
     Ok(())
+}
+
+struct DiagnosticsGuard;
+
+impl Drop for DiagnosticsGuard {
+    fn drop(&mut self) {
+        diagnostics::shutdown();
+    }
 }
 
 fn run_editor(request: EditorRequest) -> Result<(), String> {

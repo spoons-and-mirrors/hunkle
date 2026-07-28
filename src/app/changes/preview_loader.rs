@@ -5,7 +5,7 @@ use std::{
     process::Command,
     sync::mpsc::{self, Receiver, SyncSender},
     sync::{Arc, Mutex},
-    thread,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -34,8 +34,9 @@ pub(super) enum LoadedPreview {
 pub(super) struct PreviewLoader {
     generation: u64,
     pending: Arc<Mutex<Option<Request>>>,
-    wake: SyncSender<()>,
+    wake: Option<SyncSender<()>>,
     receiver: Receiver<Completion>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl PreviewLoader {
@@ -44,7 +45,7 @@ impl PreviewLoader {
         let worker_pending = Arc::clone(&pending);
         let (wake, request_rx) = mpsc::sync_channel::<()>(1);
         let (result_tx, receiver) = mpsc::channel();
-        thread::spawn(move || {
+        let worker = thread::spawn(move || {
             while request_rx.recv().is_ok() {
                 let Some(request) = worker_pending.lock().ok().and_then(|mut slot| slot.take())
                 else {
@@ -74,8 +75,9 @@ impl PreviewLoader {
         Self {
             generation: 0,
             pending,
-            wake,
+            wake: Some(wake),
             receiver,
+            worker: Some(worker),
         }
     }
 
@@ -116,8 +118,26 @@ impl PreviewLoader {
         };
         if let Ok(mut pending) = self.pending.lock() {
             *pending = Some(request);
-            let _ = self.wake.try_send(());
+            if let Some(wake) = &self.wake {
+                let _ = wake.try_send(());
+            }
         }
+    }
+
+    pub(super) fn shutdown(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.take();
+        }
+        self.wake.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for PreviewLoader {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -314,6 +334,15 @@ fn bound_preview_dimensions(image: DynamicImage) -> DynamicImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_joins_the_preview_worker_once() {
+        let mut loader = PreviewLoader::new();
+        loader.shutdown();
+        loader.shutdown();
+        assert!(loader.worker.is_none());
+        assert!(loader.wake.is_none());
+    }
 
     #[test]
     fn recognizes_supported_static_media() {

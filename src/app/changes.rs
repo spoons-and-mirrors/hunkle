@@ -1046,6 +1046,11 @@ impl ChangesState {
         true
     }
 
+    pub(super) fn shutdown(&mut self) {
+        self.preview_loader.shutdown();
+        self.preview_presentation.shutdown();
+    }
+
     fn rebuild_explorer_rows(&mut self, repo: Option<&RepositoryData>) {
         self.sync_repository_caches(repo);
         let rows = self.file_tree.as_ref().map_or_else(Vec::new, |tree| {

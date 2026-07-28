@@ -5,10 +5,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{SyncSender, TrySendError, sync_channel},
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,16 +17,34 @@ const SLOW_ACTIVITY: Duration = Duration::from_millis(100);
 const STALLED_ACTIVITY: Duration = Duration::from_secs(2);
 
 static DIAGNOSTICS: OnceLock<Diagnostics> = OnceLock::new();
-static DROP_REAPER: OnceLock<SyncSender<DropJob>> = OnceLock::new();
+static DROP_REAPER: OnceLock<SyncSender<DropMessage>> = OnceLock::new();
+static DROP_REAPER_WORKER: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
 static NEXT_ACTIVITY_ID: AtomicU64 = AtomicU64::new(1);
 
 type DropJob = Box<dyn FnOnce() + Send>;
 
+enum DropMessage {
+    Job(DropJob),
+    Stop,
+}
+
+enum LogMessage {
+    Line(String),
+    Stop,
+}
+
 struct Diagnostics {
-    sender: SyncSender<String>,
+    sender: SyncSender<LogMessage>,
     path: PathBuf,
     activities: Arc<Mutex<Vec<ActiveActivity>>>,
     main_thread: thread::ThreadId,
+    stop: Arc<AtomicBool>,
+    workers: Mutex<Option<DiagnosticWorkers>>,
+}
+
+struct DiagnosticWorkers {
+    log: JoinHandle<()>,
+    watchdog: JoinHandle<()>,
 }
 
 struct ActiveActivity {
@@ -56,30 +74,71 @@ pub(crate) fn init() -> io::Result<PathBuf> {
     }
     rotate_if_needed(&path)?;
     let file = OpenOptions::new().create(true).append(true).open(&path)?;
-    let (sender, receiver) = sync_channel::<String>(4096);
+    let (sender, receiver) = sync_channel::<LogMessage>(4096);
     let activities = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
     let diagnostics = Diagnostics {
         sender,
         path: path.clone(),
         activities: Arc::clone(&activities),
         main_thread: thread::current().id(),
+        stop: Arc::clone(&stop),
+        workers: Mutex::new(None),
     };
     if DIAGNOSTICS.set(diagnostics).is_err() {
         return Ok(path);
     }
-    thread::Builder::new()
+    let log = thread::Builder::new()
         .name("hunkle-log".to_owned())
         .spawn(move || {
             let mut writer = BufWriter::new(file);
-            while let Ok(line) = receiver.recv() {
-                let _ = writeln!(writer, "{line}");
-                let _ = writer.flush();
+            while let Ok(message) = receiver.recv() {
+                match message {
+                    LogMessage::Line(line) => {
+                        let _ = writeln!(writer, "{line}");
+                        let _ = writer.flush();
+                    }
+                    LogMessage::Stop => break,
+                }
             }
         })?;
-    thread::Builder::new()
+    let watchdog = match thread::Builder::new()
         .name("hunkle-watchdog".to_owned())
-        .spawn(move || watchdog(activities))?;
+        .spawn(move || watchdog(activities, stop))
+    {
+        Ok(worker) => worker,
+        Err(error) => {
+            let _ = DIAGNOSTICS
+                .get()
+                .expect("diagnostics initialized")
+                .sender
+                .send(LogMessage::Stop);
+            let _ = log.join();
+            return Err(error);
+        }
+    };
+    if let Some(diagnostics) = DIAGNOSTICS.get()
+        && let Ok(mut workers) = diagnostics.workers.lock()
+    {
+        *workers = Some(DiagnosticWorkers { log, watchdog });
+    }
     Ok(path)
+}
+
+pub(crate) fn shutdown() {
+    if let Some(diagnostics) = DIAGNOSTICS.get()
+        && let Ok(mut workers) = diagnostics.workers.lock()
+        && let Some(workers) = workers.take()
+    {
+        diagnostics.stop.store(true, Ordering::Release);
+        workers.watchdog.thread().unpark();
+        let _ = workers.watchdog.join();
+        shutdown_drop_reaper();
+        let _ = diagnostics.sender.send(LogMessage::Stop);
+        let _ = workers.log.join();
+    } else {
+        shutdown_drop_reaper();
+    }
 }
 
 pub(crate) fn event(message: impl Into<String>) {
@@ -140,24 +199,52 @@ where
             ));
         }
     });
-    match drop_reaper().try_send(job) {
+    match drop_reaper().try_send(DropMessage::Job(job)) {
         Ok(()) => {}
-        Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) => job(),
+        Err(
+            TrySendError::Full(DropMessage::Job(job))
+            | TrySendError::Disconnected(DropMessage::Job(job)),
+        ) => job(),
+        Err(
+            TrySendError::Full(DropMessage::Stop) | TrySendError::Disconnected(DropMessage::Stop),
+        ) => {}
     }
 }
 
-fn drop_reaper() -> &'static SyncSender<DropJob> {
+fn drop_reaper() -> &'static SyncSender<DropMessage> {
     DROP_REAPER.get_or_init(|| {
-        let (sender, receiver) = sync_channel::<DropJob>(2);
-        let _ = thread::Builder::new()
+        let (sender, receiver) = sync_channel::<DropMessage>(2);
+        let worker = thread::Builder::new()
             .name("hunkle-drop".to_owned())
             .spawn(move || {
-                while let Ok(job) = receiver.recv() {
-                    job();
+                while let Ok(message) = receiver.recv() {
+                    match message {
+                        DropMessage::Job(job) => job(),
+                        DropMessage::Stop => break,
+                    }
                 }
             });
+        let _ = DROP_REAPER_WORKER.set(Mutex::new(worker.ok()));
         sender
     })
+}
+
+fn shutdown_drop_reaper() {
+    let Some(sender) = DROP_REAPER.get() else {
+        return;
+    };
+    let Some(worker) = DROP_REAPER_WORKER.get() else {
+        return;
+    };
+    let Ok(mut worker) = worker.lock() else {
+        return;
+    };
+    if worker.is_some() {
+        let _ = sender.send(DropMessage::Stop);
+        if let Some(worker) = worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 impl Drop for Activity {
@@ -184,10 +271,13 @@ impl Drop for Activity {
     }
 }
 
-fn watchdog(activities: Arc<Mutex<Vec<ActiveActivity>>>) {
+fn watchdog(activities: Arc<Mutex<Vec<ActiveActivity>>>, stop: Arc<AtomicBool>) {
     let mut last_report = None;
     loop {
-        thread::sleep(Duration::from_secs(1));
+        thread::park_timeout(Duration::from_secs(1));
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         let report = activities.lock().ok().and_then(|activities| {
             let activity = activities.last()?;
             let elapsed = activity.started.elapsed();
@@ -218,7 +308,9 @@ fn watchdog(activities: Arc<Mutex<Vec<ActiveActivity>>>) {
 
 fn send(level: &str, message: String) {
     if let Some(diagnostics) = DIAGNOSTICS.get() {
-        let _ = diagnostics.sender.try_send(line(level, message));
+        let _ = diagnostics
+            .sender
+            .try_send(LogMessage::Line(line(level, message)));
     }
 }
 

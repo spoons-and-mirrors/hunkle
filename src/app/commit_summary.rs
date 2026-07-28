@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
-    thread,
+    thread::{self, JoinHandle},
 };
 
 use crate::git::{self, DiffSummary};
@@ -35,15 +35,16 @@ pub(crate) struct CommitSummaryCache {
     attempts: HashMap<String, u8>,
     queued: VecDeque<String>,
     running: bool,
-    request_sender: Sender<SummaryRequest>,
+    request_sender: Option<Sender<SummaryRequest>>,
     receiver: Receiver<SummaryResult>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl Default for CommitSummaryCache {
     fn default() -> Self {
         let (request_sender, request_receiver) = mpsc::channel::<SummaryRequest>();
         let (result_sender, receiver) = mpsc::channel();
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("hunkle-commit-summaries".to_owned())
             .spawn(move || {
                 while let Ok(request) = request_receiver.recv() {
@@ -73,8 +74,9 @@ impl Default for CommitSummaryCache {
             attempts: HashMap::new(),
             queued: VecDeque::new(),
             running: false,
-            request_sender,
+            request_sender: Some(request_sender),
             receiver,
+            worker: Some(worker),
         }
     }
 }
@@ -195,15 +197,41 @@ impl CommitSummaryCache {
             root: self.root.clone().expect("summary cache has an active root"),
             requested,
         };
-        if self.request_sender.send(request).is_ok() {
+        if self
+            .request_sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(request).is_ok())
+        {
             self.running = true;
         }
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        self.request_sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for CommitSummaryCache {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_joins_the_summary_worker_once() {
+        let mut cache = CommitSummaryCache::default();
+        cache.shutdown();
+        cache.shutdown();
+        assert!(cache.worker.is_none());
+        assert!(cache.request_sender.is_none());
+    }
 
     fn cache() -> (
         CommitSummaryCache,
@@ -223,8 +251,9 @@ mod tests {
                 attempts: HashMap::new(),
                 queued: VecDeque::new(),
                 running: false,
-                request_sender,
+                request_sender: Some(request_sender),
                 receiver,
+                worker: None,
             },
             request_receiver,
             result_sender,

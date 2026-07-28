@@ -3,7 +3,7 @@ use std::{
         Arc,
         mpsc::{self, Receiver},
     },
-    thread,
+    thread::{self, JoinHandle},
 };
 
 use image::DynamicImage;
@@ -136,8 +136,9 @@ pub(crate) struct PreparedPreview {
 
 pub(crate) struct PreviewPresentation {
     cache: Option<PreviewCache>,
-    media_state: ThreadProtocol,
+    media_state: Option<ThreadProtocol>,
     media_receiver: Receiver<Result<ResizeResponse, ImageError>>,
+    media_worker: Option<JoinHandle<()>>,
     media_picker: Picker,
     allow_auto_kitty: bool,
     media_generation: Option<u64>,
@@ -181,7 +182,7 @@ impl Default for PreviewPresentation {
     fn default() -> Self {
         let (request_sender, request_receiver) = mpsc::channel::<ResizeRequest>();
         let (result_sender, media_receiver) = mpsc::channel();
-        thread::spawn(move || {
+        let media_worker = thread::spawn(move || {
             while let Ok(request) = request_receiver.recv() {
                 if result_sender.send(request.resize_encode()).is_err() {
                     break;
@@ -190,8 +191,9 @@ impl Default for PreviewPresentation {
         });
         Self {
             cache: None,
-            media_state: ThreadProtocol::new(request_sender, None),
+            media_state: Some(ThreadProtocol::new(request_sender, None)),
             media_receiver,
+            media_worker: Some(media_worker),
             media_picker: Picker::halfblocks(),
             allow_auto_kitty: false,
             media_generation: None,
@@ -222,7 +224,10 @@ impl PreviewPresentation {
             append_clear_area(&mut self.pending_terminal_cleanup, active.area);
         }
         if self.media_generation.take().is_some() {
-            self.media_state.empty_protocol();
+            self.media_state
+                .as_mut()
+                .expect("media worker is running")
+                .empty_protocol();
         }
         self.media_protocol = None;
         self.media_size = Size::default();
@@ -234,7 +239,11 @@ impl PreviewPresentation {
         while let Ok(result) = self.media_receiver.try_recv() {
             match result {
                 Ok(response) => {
-                    let accepted = self.media_state.update_resized_protocol(response);
+                    let accepted = self
+                        .media_state
+                        .as_mut()
+                        .expect("media worker is running")
+                        .update_resized_protocol(response);
                     if accepted {
                         self.media_error = None;
                     }
@@ -347,7 +356,10 @@ impl PreviewPresentation {
         self.active_kitty_image = None;
         self.active_inline_image = None;
         if self.media_generation.take().is_some() {
-            self.media_state.empty_protocol();
+            self.media_state
+                .as_mut()
+                .expect("media worker is running")
+                .empty_protocol();
         }
         self.media_protocol = None;
         self.media_size = Size::default();
@@ -401,7 +413,10 @@ impl PreviewPresentation {
                 });
                 picker.new_resize_protocol((**image).clone())
             };
-            self.media_state.replace_protocol(state);
+            self.media_state
+                .as_mut()
+                .expect("media worker is running")
+                .replace_protocol(state);
             self.media_generation = Some(generation);
             self.media_protocol = Some(protocol);
             self.effective_media_protocol = effective_protocol;
@@ -410,6 +425,8 @@ impl PreviewPresentation {
         }
         if let Some(size) = self
             .media_state
+            .as_ref()
+            .expect("media worker is running")
             .size_for(Resize::Fit(None), available.into())
         {
             self.media_size = size;
@@ -426,7 +443,18 @@ impl PreviewPresentation {
             width,
             height,
         );
-        (area, self.effective_media_protocol, &mut self.media_state)
+        (
+            area,
+            self.effective_media_protocol,
+            self.media_state.as_mut().expect("media worker is running"),
+        )
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        self.media_state.take();
+        if let Some(worker) = self.media_worker.take() {
+            let _ = worker.join();
+        }
     }
 
     pub(crate) fn prepare(
@@ -710,6 +738,12 @@ impl PreviewPresentation {
         self.cache
             .as_ref()
             .is_some_and(|cache| !cache.fully_styled && !cache.lines.is_empty())
+    }
+}
+
+impl Drop for PreviewPresentation {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -1125,6 +1159,15 @@ mod tests {
     use ratatui_image::ResizeEncodeRender;
 
     use super::*;
+
+    #[test]
+    fn shutdown_joins_the_media_worker_once() {
+        let mut preview = PreviewPresentation::default();
+        preview.shutdown();
+        preview.shutdown();
+        assert!(preview.media_worker.is_none());
+        assert!(preview.media_state.is_none());
+    }
 
     #[test]
     fn extracts_superfile_style_kitty_transmission_after_placeholders() {
