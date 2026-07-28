@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::process::{self, Limits};
 
-use super::{AgentStatus, HerdrAgent, HerdrWorkspace};
+use super::{AgentSessionIdentity, AgentStatus, AgentTimingKey, HerdrAgent, HerdrWorkspace};
 
 pub(super) struct Environment {
     pub(super) workspace_id: Option<String>,
@@ -346,21 +346,41 @@ fn workspace_path(workspace: &Value, snapshot: &Value) -> Option<PathBuf> {
 }
 
 fn parse_agent(value: &Value) -> Option<HerdrAgent> {
+    let pane_id = value.get("pane_id")?.as_str()?.to_owned();
     Some(HerdrAgent {
         name: value.get("agent")?.as_str()?.to_owned(),
         session_name: parse_agent_session_name(value),
         workspace_id: value.get("workspace_id")?.as_str()?.to_owned(),
         tab_id: value.get("tab_id")?.as_str()?.to_owned(),
-        pane_id: value.get("pane_id")?.as_str()?.to_owned(),
+        pane_id: pane_id.clone(),
         focused: value
             .get("focused")
             .and_then(Value::as_bool)
             .unwrap_or(false),
         status: parse_agent_status(value.get("agent_status").and_then(Value::as_str)),
+        timing_key: parse_agent_session_identity(value)
+            .map(AgentTimingKey::Session)
+            .or_else(|| {
+                value
+                    .get("terminal_id")
+                    .and_then(Value::as_str)
+                    .map(|id| AgentTimingKey::Terminal(id.to_owned()))
+            })
+            .unwrap_or(AgentTimingKey::Pane(pane_id)),
         state_change_seq: value
             .get("state_change_seq")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+    })
+}
+
+fn parse_agent_session_identity(value: &Value) -> Option<AgentSessionIdentity> {
+    let session = value.get("agent_session")?;
+    Some(AgentSessionIdentity {
+        source: session.get("source")?.as_str()?.to_owned(),
+        agent: session.get("agent")?.as_str()?.to_owned(),
+        kind: session.get("kind")?.as_str()?.to_owned(),
+        value: session.get("value")?.as_str()?.to_owned(),
     })
 }
 
@@ -623,9 +643,16 @@ mod tests {
                 ],
                 "agents": [{
                     "agent": "opencode",
+                    "agent_session": {
+                        "source": "herdr:opencode",
+                        "agent": "opencode",
+                        "kind": "id",
+                        "value": "ses_timer"
+                    },
                     "agent_status": "blocked",
                     "state_change_seq": 17,
                     "terminal_title_stripped": "OC | Refine workspace timers",
+                    "terminal_id": "term-3",
                     "focused": true,
                     "pane_id": "pane-3",
                     "tab_id": "tab-3",
@@ -652,6 +679,10 @@ mod tests {
         assert_eq!(workspaces[2].status, AgentStatus::Done);
         assert_eq!(agents[0].status, AgentStatus::Blocked);
         assert_eq!(agents[0].state_change_seq, 17);
+        assert!(matches!(
+            &agents[0].timing_key,
+            AgentTimingKey::Session(session) if session.value == "ses_timer"
+        ));
         assert_eq!(
             agents[0].session_name.as_deref(),
             Some("Refine workspace timers")

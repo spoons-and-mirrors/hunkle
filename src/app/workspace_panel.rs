@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
@@ -59,6 +59,21 @@ pub(crate) struct HerdrWorkspace {
     linked_worktree: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AgentSessionIdentity {
+    source: String,
+    agent: String,
+    kind: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AgentTimingKey {
+    Session(AgentSessionIdentity),
+    Terminal(String),
+    Pane(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrAgent {
     pub(crate) name: String,
@@ -68,6 +83,7 @@ pub(crate) struct HerdrAgent {
     pub(crate) pane_id: String,
     pub(crate) focused: bool,
     pub(crate) status: AgentStatus,
+    timing_key: AgentTimingKey,
     state_change_seq: u64,
 }
 
@@ -246,7 +262,10 @@ enum SelectionKey {
 }
 
 enum Completion {
-    Snapshot(Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String>),
+    Snapshot {
+        result: Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String>,
+        observed_at: Instant,
+    },
     WorkspaceFocus {
         request_id: u64,
         result: Result<(), String>,
@@ -380,7 +399,7 @@ pub(crate) struct WorkspacePanel {
     next_refresh: Instant,
     spinner_frame: usize,
     next_spinner: Instant,
-    agent_timings: HashMap<String, AgentTiming>,
+    agent_timings: HashMap<AgentTimingKey, AgentTiming>,
 }
 
 pub(crate) struct WorkspacePanelEntryState {
@@ -626,7 +645,10 @@ impl WorkspacePanel {
         while let Ok(completion) = self.receiver.try_recv() {
             changed = true;
             match completion {
-                Completion::Snapshot(result) => {
+                Completion::Snapshot {
+                    result,
+                    observed_at,
+                } => {
                     self.loading = false;
                     if self.snapshot_loading {
                         continue;
@@ -636,7 +658,7 @@ impl WorkspacePanel {
                             let previous = self.selection_key();
                             self.focus.apply_snapshot(&workspaces);
                             self.workspaces = workspaces;
-                            self.apply_agent_snapshot(agents);
+                            self.apply_agent_snapshot_at(agents, observed_at);
                             self.error = None;
                             if self.reconcile_group_workspace_ids()
                                 && let Err(error) = self.preset_store.save_groups(&self.groups)
@@ -713,19 +735,25 @@ impl WorkspacePanel {
         )
     }
 
+    #[cfg(test)]
     fn apply_agent_snapshot(&mut self, agents: Vec<HerdrAgent>) {
         self.apply_agent_snapshot_at(agents, Instant::now());
     }
 
     fn apply_agent_snapshot_at(&mut self, agents: Vec<HerdrAgent>, now: Instant) {
+        let active_keys = agents
+            .iter()
+            .map(|agent| agent.timing_key.clone())
+            .collect::<HashSet<_>>();
         self.agent_timings
-            .retain(|pane_id, _| agents.iter().any(|agent| agent.pane_id == *pane_id));
+            .retain(|key, _| active_keys.contains(key));
         for agent in &agents {
-            if let Some(timing) = self.agent_timings.get_mut(&agent.pane_id) {
+            let key = agent.timing_key.clone();
+            if let Some(timing) = self.agent_timings.get_mut(&key) {
                 timing.observe(agent.status, agent.state_change_seq, now);
             } else if matches!(agent.status, AgentStatus::Working | AgentStatus::Blocked) {
                 self.agent_timings.insert(
-                    agent.pane_id.clone(),
+                    key,
                     AgentTiming::new(agent.status, agent.state_change_seq, now),
                 );
             }
@@ -760,7 +788,7 @@ impl WorkspacePanel {
     fn agent_elapsed_at(&self, index: usize, now: Instant) -> Option<Duration> {
         let agent = self.agents.get(index)?;
         self.agent_timings
-            .get(&agent.pane_id)
+            .get(&agent.timing_key)
             .map(|timing| timing.elapsed_at(now))
     }
 
@@ -793,11 +821,7 @@ impl WorkspacePanel {
     }
 
     fn should_start_snapshot(&self, now: Instant) -> bool {
-        self.is_visible()
-            && self.layout_available
-            && !self.snapshot_loading
-            && !self.loading
-            && now >= self.next_refresh
+        self.enabled && !self.snapshot_loading && !self.loading && now >= self.next_refresh
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -1948,11 +1972,16 @@ impl WorkspacePanel {
         self.next_refresh = Instant::now() + REFRESH_INTERVAL;
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = herdr::session_snapshot().map(|(mut workspaces, agents)| {
+            let snapshot = herdr::session_snapshot();
+            let observed_at = Instant::now();
+            let result = snapshot.map(|(mut workspaces, agents)| {
                 populate_workspace_branches(&mut workspaces);
                 (workspaces, agents)
             });
-            let _ = sender.send(Completion::Snapshot(result));
+            let _ = sender.send(Completion::Snapshot {
+                result,
+                observed_at,
+            });
         });
     }
 
@@ -2228,17 +2257,17 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_are_scheduled_only_while_the_panel_can_be_seen() {
+    fn snapshots_continue_while_the_panel_is_hidden() {
         let mut panel = WorkspacePanel::new(true, None, None);
         let now = Instant::now();
         panel.next_refresh = now;
 
-        assert!(!panel.should_start_snapshot(now));
+        assert!(panel.should_start_snapshot(now));
         panel.set_layout_available(true);
         assert!(panel.should_start_snapshot(Instant::now()));
 
         panel.hide();
-        assert!(!panel.should_start_snapshot(Instant::now()));
+        assert!(panel.should_start_snapshot(Instant::now()));
         panel.show_left();
         assert!(panel.should_start_snapshot(Instant::now()));
 
@@ -2255,6 +2284,12 @@ mod tests {
             pane_id: format!("pane-{name}"),
             focused: false,
             status,
+            timing_key: AgentTimingKey::Session(AgentSessionIdentity {
+                source: "herdr:test".to_owned(),
+                agent: name.to_owned(),
+                kind: "id".to_owned(),
+                value: format!("session-{name}"),
+            }),
             state_change_seq: 0,
         }
     }
@@ -2317,6 +2352,65 @@ mod tests {
         assert_eq!(
             panel.agent_elapsed_at(0, started + Duration::from_secs(42)),
             Some(Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn resets_timing_when_a_pane_switches_agent_sessions() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.agents.clear();
+        panel.agent_timings.clear();
+        let started = Instant::now();
+        let mut first = agent_at_sequence("alpha", AgentStatus::Working, 1);
+        first.pane_id = "shared-pane".to_owned();
+
+        panel.apply_agent_snapshot_at(vec![first.clone()], started);
+        assert_eq!(
+            panel.agent_elapsed_at(0, started + Duration::from_secs(8)),
+            Some(Duration::from_secs(8))
+        );
+
+        let mut second = first;
+        second.timing_key = AgentTimingKey::Session(AgentSessionIdentity {
+            source: "herdr:test".to_owned(),
+            agent: "alpha".to_owned(),
+            kind: "id".to_owned(),
+            value: "session-beta".to_owned(),
+        });
+        second.session_name = Some("Beta".to_owned());
+        second.status = AgentStatus::Idle;
+        second.state_change_seq = 2;
+        panel.apply_agent_snapshot_at(vec![second.clone()], started + Duration::from_secs(8));
+        assert_eq!(
+            panel.agent_elapsed_at(0, started + Duration::from_secs(8)),
+            None
+        );
+
+        second.status = AgentStatus::Working;
+        second.state_change_seq = 3;
+        panel.apply_agent_snapshot_at(vec![second], started + Duration::from_secs(10));
+        assert_eq!(
+            panel.agent_elapsed_at(0, started + Duration::from_secs(13)),
+            Some(Duration::from_secs(3))
+        );
+    }
+
+    #[test]
+    fn keeps_timing_when_a_session_moves_to_another_pane() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.agents.clear();
+        panel.agent_timings.clear();
+        let started = Instant::now();
+        let first = agent_at_sequence("alpha", AgentStatus::Working, 1);
+
+        panel.apply_agent_snapshot_at(vec![first.clone()], started);
+        let mut moved = first;
+        moved.pane_id = "replacement-pane".to_owned();
+        panel.apply_agent_snapshot_at(vec![moved], started + Duration::from_secs(5));
+
+        assert_eq!(
+            panel.agent_elapsed_at(0, started + Duration::from_secs(8)),
+            Some(Duration::from_secs(8))
         );
     }
 
@@ -2454,7 +2548,13 @@ mod tests {
         assert!(panel.workspace_is_active(1));
 
         let stale = herdr::parse_snapshot(&snapshot()).unwrap();
-        panel.sender.send(Completion::Snapshot(Ok(stale))).unwrap();
+        panel
+            .sender
+            .send(Completion::Snapshot {
+                result: Ok(stale),
+                observed_at: Instant::now(),
+            })
+            .unwrap();
         let (changed, error, _, focus_succeeded) = panel.poll();
         assert!(changed);
         assert!(error.is_none());
@@ -2469,9 +2569,10 @@ mod tests {
         confirmed["result"]["snapshot"]["workspaces"][1]["focused"] = true.into();
         panel
             .sender
-            .send(Completion::Snapshot(Ok(
-                herdr::parse_snapshot(&confirmed).unwrap()
-            )))
+            .send(Completion::Snapshot {
+                result: Ok(herdr::parse_snapshot(&confirmed).unwrap()),
+                observed_at: Instant::now(),
+            })
             .unwrap();
         panel.poll();
 
