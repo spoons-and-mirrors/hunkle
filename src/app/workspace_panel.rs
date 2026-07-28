@@ -645,6 +645,7 @@ impl WorkspacePanel {
                     warning,
                     destructive,
                 } => {
+                    self.next_refresh = Instant::now();
                     if destructive {
                         self.destructive_actions_running =
                             self.destructive_actions_running.saturating_sub(1);
@@ -652,7 +653,6 @@ impl WorkspacePanel {
                     match result {
                         Ok(()) => {
                             self.inventory_verified = false;
-                            self.next_refresh = Instant::now();
                             if action_reopen_path.is_some() {
                                 reopen_path = action_reopen_path;
                             }
@@ -1529,7 +1529,9 @@ impl WorkspacePanel {
             return WorkspacePanelEffect::None;
         }
         self.last_click = None;
-        WorkspacePanelEffect::FocusAgent(self.agents[index].pane_id.clone())
+        let pane_id = self.agents[index].pane_id.clone();
+        self.observe_agent_focus(&pane_id);
+        WorkspacePanelEffect::FocusAgent(pane_id)
     }
 
     fn is_double_click(&self, key: &SelectionKey) -> bool {
@@ -1747,12 +1749,14 @@ impl WorkspacePanel {
             return;
         }
         let agent_index = selected.saturating_sub(self.workspaces.len());
-        let Some(agent) = self.agents.get(agent_index) else {
+        let Some(pane_id) = self
+            .agents
+            .get(agent_index)
+            .map(|agent| agent.pane_id.clone())
+        else {
             return;
         };
-        self.start_action(herdr::Action::FocusAgent {
-            pane_id: agent.pane_id.clone(),
-        });
+        self.focus_agent(pane_id);
     }
 
     pub(crate) fn start_workspace_focus(&mut self, workspace_id: String) {
@@ -1794,8 +1798,23 @@ impl WorkspacePanel {
         }
     }
 
-    pub(crate) fn focus_agent(&self, pane_id: String) {
+    pub(crate) fn focus_agent(&mut self, pane_id: String) {
+        self.observe_agent_focus(&pane_id);
         self.start_action(herdr::Action::FocusAgent { pane_id });
+    }
+
+    fn observe_agent_focus(&mut self, pane_id: &str) {
+        if let Some(workspace_id) = self
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)
+            .map(|agent| agent.workspace_id.clone())
+        {
+            self.apply_focus_event(herdr::FocusEvent {
+                workspace_id,
+                pane_id: pane_id.to_owned(),
+            });
+        }
     }
 
     fn start_action(&self, action: herdr::Action) {
@@ -2578,6 +2597,10 @@ mod tests {
     #[test]
     fn every_agent_click_requests_its_pane() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.agents.push(HerdrAgent {
+            focused: true,
+            ..agent("beta", AgentStatus::Idle)
+        });
 
         for _ in 0..2 {
             assert_eq!(
@@ -2585,6 +2608,8 @@ mod tests {
                 WorkspacePanelEffect::FocusAgent("w1:p1".to_owned())
             );
             assert_eq!(panel.selected, Some(panel.workspaces.len()));
+            assert!(panel.agents[0].focused);
+            assert!(!panel.agents[1].focused);
         }
     }
 
