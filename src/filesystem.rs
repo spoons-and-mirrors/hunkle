@@ -211,7 +211,7 @@ pub(crate) fn clipboard_import_operation(
         validate_private_directory(&staging_root, "Herdr clipboard staging root")?;
         validate_private_directory(&source, "Herdr clipboard transfer")?;
 
-        let mut children = read_sorted_directory(&source)?;
+        let mut children = read_sorted_directory(&source, MAX_CLIPBOARD_FILE_ROOTS)?;
         if children.is_empty() {
             bail!("Herdr clipboard transfer is empty");
         }
@@ -241,6 +241,7 @@ struct ClipboardImportEntry {
     source: PathBuf,
     relative: PathBuf,
     file_bytes: Option<u64>,
+    identity: Option<(u64, u64)>,
 }
 
 fn import_clipboard(root: &Path, source: &Path, destination: &RepoPath) -> Result<()> {
@@ -256,7 +257,7 @@ fn import_clipboard(root: &Path, source: &Path, destination: &RepoPath) -> Resul
     #[cfg(not(unix))]
     bail!("Herdr clipboard file import is only supported on Unix");
 
-    let destination = safe_directory(root, destination)?;
+    safe_directory(root, destination)?;
     let entries = inspect_clipboard_transfer(source)?;
     let top_level = entries
         .iter()
@@ -266,7 +267,8 @@ fn import_clipboard(root: &Path, source: &Path, destination: &RepoPath) -> Resul
         bail!("Herdr clipboard transfer has an invalid number of top-level entries");
     }
     for entry in &top_level {
-        let target = destination.join(&entry.relative);
+        let target_relative = destination.join(entry.relative.as_os_str());
+        let target = safe_path(root, &target_relative)?;
         if fs::symlink_metadata(&target).is_ok() {
             bail!("{} already exists", target.display());
         }
@@ -275,10 +277,24 @@ fn import_clipboard(root: &Path, source: &Path, destination: &RepoPath) -> Resul
     let mut created_roots = Vec::new();
     let result = (|| {
         for entry in &entries {
-            let target = destination.join(&entry.relative);
+            let current_metadata = fs::symlink_metadata(&entry.source).with_context(|| {
+                format!(
+                    "could not inspect clipboard entry {}",
+                    entry.source.display()
+                )
+            })?;
+            validate_private_metadata(&current_metadata, &entry.source)?;
+            if metadata_identity(&current_metadata) != entry.identity {
+                bail!("clipboard entry changed while it was being copied");
+            }
+            let target_relative = destination.join(entry.relative.as_os_str());
+            let target = safe_path(root, &target_relative)?;
             if let Some(file_bytes) = entry.file_bytes {
-                copy_regular_file(&entry.source, &target, file_bytes)?;
+                copy_regular_file(&entry.source, &target, file_bytes, entry.identity)?;
             } else {
+                if !current_metadata.is_dir() || current_metadata.file_type().is_symlink() {
+                    bail!("clipboard directory changed while it was being copied");
+                }
                 fs::create_dir(&target)
                     .with_context(|| format!("could not create directory {}", target.display()))?;
             }
@@ -301,7 +317,7 @@ fn inspect_clipboard_transfer(root: &Path) -> Result<Vec<ClipboardImportEntry>> 
     let mut entries = Vec::new();
     let mut total_bytes = 0_u64;
     let mut total_path_bytes = 0_usize;
-    for child in read_sorted_directory(root)? {
+    for child in read_sorted_directory(root, MAX_CLIPBOARD_FILE_ROOTS)? {
         let name = child.file_name();
         validate_import_name(&name)?;
         inspect_clipboard_entry(
@@ -351,8 +367,10 @@ fn inspect_clipboard_entry(
             source: source.to_owned(),
             relative: relative.clone(),
             file_bytes: None,
+            identity: metadata_identity(&metadata),
         });
-        for child in read_sorted_directory(source)? {
+        let remaining = MAX_CLIPBOARD_FILE_ENTRIES.saturating_sub(entries.len());
+        for child in read_sorted_directory(source, remaining)? {
             let name = child.file_name();
             validate_import_name(&name)?;
             inspect_clipboard_entry(
@@ -378,15 +396,25 @@ fn inspect_clipboard_entry(
         source: source.to_owned(),
         relative,
         file_bytes: Some(metadata.len()),
+        identity: metadata_identity(&metadata),
     });
     Ok(())
 }
 
-fn read_sorted_directory(path: &Path) -> Result<Vec<fs::DirEntry>> {
-    let mut entries = fs::read_dir(path)
+fn read_sorted_directory(path: &Path, max_entries: usize) -> Result<Vec<fs::DirEntry>> {
+    let mut entries = Vec::with_capacity(max_entries.min(32));
+    for entry in fs::read_dir(path)
         .with_context(|| format!("could not read clipboard directory {}", path.display()))?
-        .collect::<std::io::Result<Vec<_>>>()
-        .with_context(|| format!("could not read clipboard directory {}", path.display()))?;
+    {
+        if entries.len() >= max_entries {
+            bail!("Herdr clipboard transfer has too many entries");
+        }
+        entries.push(
+            entry.with_context(|| {
+                format!("could not read clipboard directory {}", path.display())
+            })?,
+        );
+    }
     entries.sort_by_key(fs::DirEntry::file_name);
     Ok(entries)
 }
@@ -425,7 +453,22 @@ fn validate_private_metadata(metadata: &fs::Metadata, path: &Path) -> Result<()>
     Ok(())
 }
 
-fn copy_regular_file(source: &Path, target: &Path, expected_bytes: u64) -> Result<()> {
+fn metadata_identity(metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    return Some((metadata.dev(), metadata.ino()));
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+fn copy_regular_file(
+    source: &Path,
+    target: &Path,
+    expected_bytes: u64,
+    expected_identity: Option<(u64, u64)>,
+) -> Result<()> {
     let mut source_options = OpenOptions::new();
     source_options.read(true);
     #[cfg(unix)]
@@ -433,6 +476,16 @@ fn copy_regular_file(source: &Path, target: &Path, expected_bytes: u64) -> Resul
     let source_file = source_options
         .open(source)
         .with_context(|| format!("could not open clipboard file {}", source.display()))?;
+    let source_metadata = source_file
+        .metadata()
+        .with_context(|| format!("could not inspect clipboard file {}", source.display()))?;
+    validate_private_metadata(&source_metadata, source)?;
+    if !source_metadata.is_file()
+        || source_metadata.len() != expected_bytes
+        || metadata_identity(&source_metadata) != expected_identity
+    {
+        bail!("clipboard file changed while it was being copied");
+    }
 
     let mut target_options = OpenOptions::new();
     target_options.write(true).create_new(true);
@@ -442,7 +495,15 @@ fn copy_regular_file(source: &Path, target: &Path, expected_bytes: u64) -> Resul
     let copied = std::io::copy(
         &mut source_file.take(expected_bytes.saturating_add(1)),
         &mut target_file,
-    )?;
+    );
+    let copied = match copied {
+        Ok(copied) => copied,
+        Err(error) => {
+            drop(target_file);
+            let _ = fs::remove_file(target);
+            return Err(error).with_context(|| format!("could not copy {}", source.display()));
+        }
+    };
     if copied != expected_bytes {
         let _ = fs::remove_file(target);
         bail!("clipboard file changed while it was being copied");
