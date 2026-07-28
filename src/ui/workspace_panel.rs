@@ -223,13 +223,6 @@ pub(super) fn draw(
                 if panel.workspaces.len().saturating_add(*index) == selected)
         })
     });
-    let agent_groups = (0..panel.agents.len())
-        .map(|index| panel.group_for_agent(index))
-        .collect::<Vec<_>>();
-    let mut agent_group_counts = vec![0usize; panel.groups.len()];
-    for group in agent_groups.iter().flatten() {
-        agent_group_counts[*group] += 1;
-    }
     keep_section_visible(
         &mut panel.agent_scroll,
         selected_agent_row,
@@ -253,16 +246,6 @@ pub(super) fn draw(
             1,
         );
         match row {
-            WorkspacePanelRow::AgentGroup(index) => {
-                let group = &panel.groups[index];
-                let count = agent_group_counts[index];
-                let marker = if group.expanded { "▾" } else { "▸" };
-                draw_group(frame, row_area, marker, &group.name, count, false);
-                targets.push((
-                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Group(index)),
-                    row_area,
-                ));
-            }
             WorkspacePanelRow::EmptyAgents => {
                 frame.render_widget(
                     Paragraph::new("No agents detected")

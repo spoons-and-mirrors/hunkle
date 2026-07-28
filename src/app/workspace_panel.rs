@@ -229,7 +229,6 @@ pub(crate) enum WorkspacePanelRow {
     Workspace(usize),
     Spacer,
     AgentHeader,
-    AgentGroup(usize),
     Agent(usize),
     AgentSession(usize),
     EmptyAgents,
@@ -541,28 +540,8 @@ impl WorkspacePanel {
             return vec![WorkspacePanelRow::EmptyAgents];
         }
 
-        let mut rows = Vec::new();
-        for (group_index, group) in self.groups.iter().enumerate() {
-            let agents = (0..self.agents.len())
-                .filter(|agent| self.group_for_agent(*agent) == Some(group_index))
-                .collect::<Vec<_>>();
-            if agents.is_empty() {
-                continue;
-            }
-            rows.push(WorkspacePanelRow::Spacer);
-            rows.push(WorkspacePanelRow::AgentGroup(group_index));
-            if group.expanded {
-                append_agent_cards(&mut rows, agents);
-            }
-        }
-        let ungrouped = (0..self.agents.len())
-            .filter(|agent| self.group_for_agent(*agent).is_none())
-            .collect::<Vec<_>>();
-        if !ungrouped.is_empty() && matches!(rows.last(), Some(WorkspacePanelRow::AgentSession(_)))
-        {
-            rows.push(WorkspacePanelRow::Spacer);
-        }
-        append_agent_cards(&mut rows, ungrouped);
+        let mut rows = vec![WorkspacePanelRow::Spacer];
+        append_agent_cards(&mut rows, 0..self.agents.len());
         rows
     }
 
@@ -1554,15 +1533,6 @@ impl WorkspacePanel {
         self.group_for_workspace_id(workspace_id)
     }
 
-    pub(crate) fn group_for_agent(&self, index: usize) -> Option<usize> {
-        let workspace_id = &self.agents.get(index)?.workspace_id;
-        let workspace = self
-            .workspaces
-            .iter()
-            .position(|workspace| &workspace.id == workspace_id)?;
-        self.group_for_workspace(workspace)
-    }
-
     #[cfg(test)]
     pub(crate) fn workspace_indent(&self, index: usize) -> &'static str {
         let Some(workspace) = self.workspaces.get(index) else {
@@ -2455,7 +2425,7 @@ mod tests {
 
         panel.move_selection(2);
         assert_eq!(panel.selected, Some(2));
-        assert_eq!(panel.selected_visual_row(), Some(5));
+        assert_eq!(panel.selected_visual_row(), Some(6));
         panel.move_selection(1);
         assert_eq!(panel.selected, Some(2));
 
@@ -2979,7 +2949,6 @@ mod tests {
             panel.agent_rows(),
             [
                 WorkspacePanelRow::Spacer,
-                WorkspacePanelRow::AgentGroup(0),
                 WorkspacePanelRow::Agent(0),
                 WorkspacePanelRow::AgentSession(0),
             ]
@@ -3008,7 +2977,6 @@ mod tests {
             panel.agent_rows(),
             [
                 WorkspacePanelRow::Spacer,
-                WorkspacePanelRow::AgentGroup(0),
                 WorkspacePanelRow::Agent(0),
                 WorkspacePanelRow::AgentSession(0),
             ]
@@ -3017,7 +2985,11 @@ mod tests {
         panel.toggle_group(0);
         assert_eq!(
             panel.agent_rows(),
-            [WorkspacePanelRow::Spacer, WorkspacePanelRow::AgentGroup(0)]
+            [
+                WorkspacePanelRow::Spacer,
+                WorkspacePanelRow::Agent(0),
+                WorkspacePanelRow::AgentSession(0),
+            ]
         );
         panel.toggle_group(0);
 

@@ -1433,6 +1433,10 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)))
         .unwrap();
     assert_eq!(agent_row.height, 2);
+    assert!(
+        (agent_row.x..agent_row.right())
+            .all(|x| terminal.backend().buffer()[(x, agent_row.y - 1)].symbol() == " ")
+    );
     let agent_timer = &terminal.backend().buffer()[(agent_row.x + 2, agent_row.y)];
     assert_eq!(agent_timer.symbol(), "0");
     let agent_status = &terminal.backend().buffer()[(agent_row.right() - 1, agent_row.y)];
@@ -1698,7 +1702,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert_eq!(rendered.matches("Current work").count(), 2);
+    assert_eq!(rendered.matches("Current work").count(), 1);
 
     app.workspace_panel.cycle_placement();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
