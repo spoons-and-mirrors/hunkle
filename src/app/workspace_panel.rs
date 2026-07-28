@@ -1559,6 +1559,7 @@ impl WorkspacePanel {
         self.group_for_workspace(workspace)
     }
 
+    #[cfg(test)]
     pub(crate) fn workspace_indent(&self, index: usize) -> &'static str {
         let Some(workspace) = self.workspaces.get(index) else {
             return "";
@@ -1571,6 +1572,12 @@ impl WorkspacePanel {
             (true, false) | (false, true) => " ",
             (false, false) => "",
         }
+    }
+
+    pub(crate) fn workspace_is_linked_worktree(&self, index: usize) -> bool {
+        self.workspaces
+            .get(index)
+            .is_some_and(|workspace| workspace.linked_worktree)
     }
 
     pub(crate) fn workspace_entry_state(
@@ -1968,21 +1975,6 @@ impl WorkspacePanel {
                 self.workspaces.len().saturating_add(*index) == selected
             }
             _ => false,
-        })
-    }
-
-    pub(crate) fn selected_workspace_visual_row(&self) -> Option<usize> {
-        let selected = self.selected?;
-        self.workspace_rows().iter().position(
-            |row| matches!(row, WorkspacePanelRow::Workspace(index) if *index == selected),
-        )
-    }
-
-    pub(crate) fn selected_agent_visual_row(&self) -> Option<usize> {
-        let selected = self.selected?;
-        self.agent_rows().iter().position(|row| {
-            matches!(row, WorkspacePanelRow::AgentSession(index)
-                if self.workspaces.len().saturating_add(*index) == selected)
         })
     }
 

@@ -97,7 +97,18 @@ pub(super) fn draw(
         workspace_section.height.saturating_sub(1),
     );
     let workspace_rows = panel.workspace_rows();
-    let selected_workspace_row = panel.selected_workspace_visual_row();
+    let selected_workspace_row = panel.selected.and_then(|selected| {
+        workspace_rows.iter().position(
+            |row| matches!(row, WorkspacePanelRow::Workspace(index) if *index == selected),
+        )
+    });
+    let workspace_groups = (0..panel.workspaces.len())
+        .map(|index| panel.group_for_workspace(index))
+        .collect::<Vec<_>>();
+    let mut workspace_group_counts = vec![0usize; panel.groups.len()];
+    for group in workspace_groups.iter().flatten() {
+        workspace_group_counts[*group] += 1;
+    }
     keep_section_visible(
         &mut panel.workspace_scroll,
         selected_workspace_row,
@@ -123,12 +134,7 @@ pub(super) fn draw(
         match row {
             WorkspacePanelRow::Group(index) => {
                 let group = &panel.groups[index];
-                let count = panel
-                    .workspaces
-                    .iter()
-                    .enumerate()
-                    .filter(|(workspace, _)| panel.group_for_workspace(*workspace) == Some(index))
-                    .count();
+                let count = workspace_group_counts[index];
                 let marker = if group.expanded { "▾" } else { "▸" };
                 let drop_target =
                     panel.workspace_drag_target() == Some(WorkspaceDropTarget::Group(index));
@@ -141,11 +147,18 @@ pub(super) fn draw(
             WorkspacePanelRow::Workspace(index) => {
                 let state = panel.workspace_entry_state(index, focused, loaded_workspace_path);
                 let workspace = &panel.workspaces[index];
-                let indent = panel.workspace_indent(index);
+                let indent = match (
+                    workspace_groups[index].is_some(),
+                    panel.workspace_is_linked_worktree(index),
+                ) {
+                    (true, true) => "  ",
+                    (true, false) | (false, true) => " ",
+                    (false, false) => "",
+                };
                 let label = format!("{indent}{}", workspace.label);
                 let ungrouped_drop = panel.workspace_drag_target()
                     == Some(WorkspaceDropTarget::Ungrouped)
-                    && panel.group_for_workspace(index).is_none();
+                    && workspace_groups[index].is_none();
                 draw_entry(
                     frame,
                     row_area,
@@ -204,7 +217,19 @@ pub(super) fn draw(
         agent_section.height.saturating_sub(1),
     );
     let agent_rows = panel.agent_rows();
-    let selected_agent_row = panel.selected_agent_visual_row();
+    let selected_agent_row = panel.selected.and_then(|selected| {
+        agent_rows.iter().position(|row| {
+            matches!(row, WorkspacePanelRow::AgentSession(index)
+                if panel.workspaces.len().saturating_add(*index) == selected)
+        })
+    });
+    let agent_groups = (0..panel.agents.len())
+        .map(|index| panel.group_for_agent(index))
+        .collect::<Vec<_>>();
+    let mut agent_group_counts = vec![0usize; panel.groups.len()];
+    for group in agent_groups.iter().flatten() {
+        agent_group_counts[*group] += 1;
+    }
     keep_section_visible(
         &mut panel.agent_scroll,
         selected_agent_row,
@@ -230,9 +255,7 @@ pub(super) fn draw(
         match row {
             WorkspacePanelRow::AgentGroup(index) => {
                 let group = &panel.groups[index];
-                let count = (0..panel.agents.len())
-                    .filter(|agent| panel.group_for_agent(*agent) == Some(index))
-                    .count();
+                let count = agent_group_counts[index];
                 let marker = if group.expanded { "▾" } else { "▸" };
                 draw_group(frame, row_area, marker, &group.name, count, false);
                 targets.push((

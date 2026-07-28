@@ -52,6 +52,7 @@ pub struct RepositoryData {
     pub graph_truncated: bool,
     pub branches: Vec<Branch>,
     pub github_remote: bool,
+    pub(crate) worktree_signature: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +94,7 @@ struct WorktreeData {
     changes: Vec<Change>,
     fingerprint: u64,
     counts: (usize, usize),
+    signature: u64,
 }
 
 #[derive(Debug)]
@@ -160,6 +162,7 @@ impl RepositoryData {
             self.changes = worktree.changes;
             self.changes_fingerprint = worktree.fingerprint;
             self.change_counts = worktree.counts;
+            self.worktree_signature = Some(worktree.signature);
         }
         if let Some(inventory) = update.inventory {
             self.files = inventory.files;
@@ -180,6 +183,12 @@ impl RepositoryData {
             self.branches = refs.branches;
             self.github_remote = refs.github_remote;
         }
+    }
+}
+
+impl RepositoryUpdate {
+    pub(crate) fn worktree_signature(&self) -> Option<u64> {
+        self.worktree.as_ref().map(|worktree| worktree.signature)
     }
 }
 
@@ -392,6 +401,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         graph_truncated: graph.truncated,
         branches: refs.branches,
         github_remote: refs.github_remote,
+        worktree_signature: Some(worktree.signature),
     })
 }
 
@@ -464,11 +474,12 @@ fn join_refresh_worker<T>(
 }
 
 fn load_worktree(root: &Path) -> Result<WorktreeData> {
-    let mut changes = status(root)?;
+    let (mut changes, signature) = status(root)?;
     populate_diff_stats(root, &mut changes)?;
     Ok(WorktreeData {
         fingerprint: fingerprint(&changes),
         counts: change_counts(&changes),
+        signature,
         changes,
     })
 }
@@ -560,6 +571,7 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
         graph_truncated: false,
         branches: Vec::new(),
         github_remote: false,
+        worktree_signature: None,
     })
 }
 
@@ -587,7 +599,7 @@ fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
         root,
         &[
             "for-each-ref",
-            "--format=%(HEAD)%1f%(refname)%1f%(refname:short)%1f%(objectname:short)%1f%(upstream:short)%1f%(committerdate:relative)%1f%(subject)%1f%(symref:short)%1e",
+            "--format=%(HEAD)%00%(refname)%00%(refname:short)%00%(objectname:short)%00%(upstream:short)%00%(committerdate:relative)%00%(subject)%00%(symref:short)%00",
             "refs/heads",
             "refs/remotes",
         ],
@@ -597,20 +609,13 @@ fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
     }
     let mut default_branch = None;
     let mut default_from_origin = false;
-    let mut branches = output
-        .stdout
-        .split(|byte| *byte == 0x1e)
-        .filter_map(|record| {
-            let record = trim_ascii(record);
-            if record.is_empty() {
-                return None;
-            }
-            let fields: Vec<_> = record.split(|byte| *byte == 0x1f).collect();
-            if fields.len() != 8 {
-                return None;
-            }
+    let fields = output.stdout.split(|byte| *byte == 0);
+    let mut branches = fields
+        .collect::<Vec<_>>()
+        .chunks_exact(8)
+        .filter_map(|fields| {
             let text = |field: &[u8]| String::from_utf8_lossy(field).into_owned();
-            let refname = text(fields[1]);
+            let refname = text(trim_ascii(fields[1]));
             let name = text(fields[2]);
             if let Some(remote) = refname
                 .strip_prefix("refs/remotes/")
@@ -633,7 +638,7 @@ fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
                 date: text(fields[5]),
                 subject: text(fields[6]),
                 remote: refname.starts_with("refs/remotes/"),
-                current: fields[0] == b"*",
+                current: trim_ascii(fields[0]) == b"*",
                 default: false,
             })
         })
@@ -824,7 +829,7 @@ pub fn worktree_signature(root: &Path) -> Result<u64> {
         root,
         &[
             "status",
-            "--porcelain=v2",
+            "--porcelain=v1",
             "--branch",
             "-z",
             "--untracked-files=all",
@@ -834,14 +839,18 @@ pub fn worktree_signature(root: &Path) -> Result<u64> {
         bail!("{}", clean_stderr(&output));
     }
 
+    let changes = parse_status(&output.stdout)?;
+    Ok(status_signature(root, &output.stdout, &changes))
+}
+
+fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> u64 {
     let mut signature = DefaultHasher::new();
-    output.stdout.hash(&mut signature);
-    for record in output.stdout.split(|byte| *byte == 0) {
-        let Some(path) = porcelain_v2_path(record) else {
-            continue;
-        };
+    output.hash(&mut signature);
+    for path in changes
+        .iter()
+        .flat_map(|change| std::iter::once(&change.path).chain(change.original_path.as_ref()))
+    {
         path.hash(&mut signature);
-        let path = RepoPath::from_git_bytes(path)?;
         let path = root.join(path);
         if let Ok(metadata) = fs::symlink_metadata(path) {
             metadata.len().hash(&mut signature);
@@ -853,17 +862,7 @@ pub fn worktree_signature(root: &Path) -> Result<u64> {
                 .hash(&mut signature);
         }
     }
-    Ok(signature.finish())
-}
-
-fn porcelain_v2_path(record: &[u8]) -> Option<&[u8]> {
-    match record.first()? {
-        b'1' => record.splitn(9, |byte| *byte == b' ').nth(8),
-        b'2' => record.splitn(10, |byte| *byte == b' ').nth(9),
-        b'u' => record.splitn(11, |byte| *byte == b' ').nth(10),
-        b'?' => record.strip_prefix(b"? "),
-        _ => None,
-    }
+    signature.finish()
 }
 
 pub fn diff(root: &Path, change: &Change) -> Result<String> {
@@ -975,7 +974,7 @@ pub fn commit_summaries(root: &Path, oids: &[String]) -> Result<HashMap<String, 
         "show",
         "--numstat",
         "-z",
-        "--format=%x1e%H%x00",
+        "--format=%H%x00",
         "--no-renames",
         "--first-parent",
     ];
@@ -990,22 +989,17 @@ pub fn commit_summaries(root: &Path, oids: &[String]) -> Result<HashMap<String, 
 fn parse_commit_summaries(bytes: &[u8]) -> Result<HashMap<String, DiffSummary>> {
     const MAX_FILES_PER_SUMMARY: usize = 2_000;
     let mut summaries = HashMap::new();
-    for record in bytes.split(|byte| *byte == 0x1e) {
-        let Some(separator) = record.iter().position(|byte| *byte == 0) else {
-            continue;
-        };
-        let (oid, entries) = record.split_at(separator);
-        let entries = &entries[1..];
-        let oid = String::from_utf8_lossy(trim_ascii(oid)).into_owned();
-        if oid.is_empty() {
-            continue;
-        }
-        let mut summary = DiffSummary::default();
-        for entry in entries.split(|byte| *byte == 0) {
-            let entry = entry.strip_prefix(b"\n").unwrap_or(entry);
-            if entry.is_empty() {
-                continue;
+    let mut current: Option<(String, DiffSummary)> = None;
+    for entry in bytes.split(|byte| *byte == 0) {
+        let entry = entry.strip_prefix(b"\n").unwrap_or(entry);
+        if (40..=64).contains(&entry.len()) && entry.iter().all(u8::is_ascii_hexdigit) {
+            if let Some((oid, summary)) = current.replace((
+                String::from_utf8_lossy(entry).into_owned(),
+                DiffSummary::default(),
+            )) {
+                summaries.insert(oid, summary);
             }
+        } else if let Some((_, summary)) = current.as_mut() {
             let mut fields = entry.splitn(3, |byte| *byte == b'\t');
             let (Some(additions), Some(deletions), Some(path)) =
                 (fields.next(), fields.next(), fields.next())
@@ -1024,6 +1018,8 @@ fn parse_commit_summaries(bytes: &[u8]) -> Result<HashMap<String, DiffSummary>> 
                 summary.files_truncated = true;
             }
         }
+    }
+    if let Some((oid, summary)) = current {
         summaries.insert(oid, summary);
     }
     Ok(summaries)
@@ -1046,15 +1042,23 @@ fn branch_name(root: &Path) -> Result<String> {
     }
 }
 
-fn status(root: &Path) -> Result<Vec<Change>> {
+fn status(root: &Path) -> Result<(Vec<Change>, u64)> {
     let output = run(
         root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ],
     )?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    parse_status(&output.stdout)
+    let changes = parse_status(&output.stdout)?;
+    let signature = status_signature(root, &output.stdout, &changes);
+    Ok((changes, signature))
 }
 
 fn parse_status(bytes: &[u8]) -> Result<Vec<Change>> {
@@ -1067,7 +1071,7 @@ fn parse_status(bytes: &[u8]) -> Result<Vec<Change>> {
 
     while index < fields.len() {
         let field = fields[index];
-        if field.len() < 4 {
+        if field.len() < 4 || field.starts_with(b"## ") {
             index += 1;
             continue;
         }
@@ -1250,7 +1254,7 @@ fn branch_history(root: &Path) -> Result<Vec<Commit>> {
 }
 
 fn read_log(root: &Path, revisions: &[&str]) -> Result<Vec<Commit>> {
-    let format = "--format=%H%x1f%P%x1f%D%x1f%an%x1f%ad%x1f%s%x1f%B%x1e";
+    let format = "--format=%H%x00%P%x00%D%x00%an%x00%ad%x00%s%x00%B%x00";
     let mut args = vec![
         "log",
         format,
@@ -1276,20 +1280,14 @@ fn read_log(root: &Path, revisions: &[&str]) -> Result<Vec<Commit>> {
 
 fn parse_log(bytes: &[u8]) -> Vec<Commit> {
     bytes
-        .split(|byte| *byte == 0x1e)
-        .filter_map(|record| {
-            let record = trim_ascii(record);
-            if record.is_empty() {
-                return None;
-            }
-            let fields: Vec<&[u8]> = record.split(|byte| *byte == 0x1f).collect();
-            if fields.len() != 7 {
-                return None;
-            }
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>()
+        .chunks_exact(7)
+        .map(|fields| {
             let text = |field: &[u8]| String::from_utf8_lossy(field).into_owned();
             let decorations = text(fields[2]);
-            Some(Commit {
-                oid: text(fields[0]),
+            Commit {
+                oid: text(trim_ascii(fields[0])),
                 parents: text(fields[1])
                     .split_whitespace()
                     .map(str::to_owned)
@@ -1304,7 +1302,7 @@ fn parse_log(bytes: &[u8]) -> Vec<Commit> {
                 subject: text(fields[5]),
                 message: text(fields[6]),
                 graph: Vec::new(),
-            })
+            }
         })
         .collect()
 }
@@ -1602,12 +1600,15 @@ mod tests {
     #[test]
     fn parses_complete_multiline_commit_messages() {
         let commits = parse_log(
-            b"abc\x1fparent\x1fHEAD -> main\x1fAda\x1f2026-01-01\x1fSubject\x1fSubject\n\nBody line\n\nFinal note\x1e",
+            b"abc\0parent\0HEAD -> main\0Ada\x002026-01-01\0Subject\0Subject\n\nBody \x1f line\n\nFinal \x1e note\0",
         );
 
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "Subject");
-        assert_eq!(commits[0].message, "Subject\n\nBody line\n\nFinal note");
+        assert_eq!(
+            commits[0].message,
+            "Subject\n\nBody \u{1f} line\n\nFinal \u{1e} note"
+        );
     }
 
     #[test]
@@ -1933,21 +1934,21 @@ mod tests {
     #[test]
     fn parses_batched_commit_change_summaries() {
         let summaries = parse_commit_summaries(
-            b"\x1eabc123\0\0\n12\t3\tsrc/app.rs\0-\t-\tassets/logo.png\0\x1edef456\0\0\n4\t0\tREADME.md\0",
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0\0\n12\t3\tsrc/app.rs\0-\t-\tassets/logo\x1e.png\0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\0\0\n4\t0\tREADME.md\0",
         )
         .unwrap();
 
         assert_eq!(
-            summaries["abc123"],
+            summaries["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
             DiffSummary {
-                files: vec!["src/app.rs".into(), "assets/logo.png".into()],
+                files: vec!["src/app.rs".into(), "assets/logo\u{1e}.png".into()],
                 files_truncated: false,
                 additions: 12,
                 deletions: 3,
             }
         );
         assert_eq!(
-            summaries["def456"],
+            summaries["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
             DiffSummary {
                 files: vec!["README.md".into()],
                 files_truncated: false,
@@ -1959,13 +1960,13 @@ mod tests {
 
     #[test]
     fn bounds_paths_retained_by_commit_summaries() {
-        let mut output = b"\x1eabc123\0\0\n".to_vec();
+        let mut output = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0\0\n".to_vec();
         for index in 0..=2_000 {
             output.extend_from_slice(format!("1\t2\tfile-{index}\0").as_bytes());
         }
 
         let summaries = parse_commit_summaries(&output).unwrap();
-        let summary = &summaries["abc123"];
+        let summary = &summaries["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"];
         assert_eq!(summary.files.len(), 2_000);
         assert!(summary.files_truncated);
         assert_eq!(summary.additions, 2_001);

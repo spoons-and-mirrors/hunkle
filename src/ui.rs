@@ -129,7 +129,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         content
     };
-    changes::draw(frame, app, main_content);
+    changes::draw(
+        frame,
+        app,
+        main_content,
+        app.view != View::Graph || app.graph_commit_open,
+    );
     if app.view == View::Graph && !app.graph_commit_open {
         let graph_area = app.regions.diff.unwrap_or(main_content);
         frame.render_widget(Clear, graph_area);

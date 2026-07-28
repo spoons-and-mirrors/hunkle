@@ -164,8 +164,17 @@ struct PreviewCache {
     window_start: usize,
     display_count: usize,
     wrapped_line_starts: Option<Vec<usize>>,
+    wrapped_window: Option<WrappedWindow>,
     unwrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
     wrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
+}
+
+struct WrappedWindow {
+    first: usize,
+    end: usize,
+    local_scroll: usize,
+    viewport_height: usize,
+    lines: Vec<Line<'static>>,
 }
 
 impl Default for PreviewPresentation {
@@ -481,6 +490,7 @@ impl PreviewPresentation {
                 window_start: 0,
                 display_count,
                 wrapped_line_starts: None,
+                wrapped_window: None,
                 unwrapped_hunks: None,
                 wrapped_hunks: None,
             });
@@ -537,21 +547,49 @@ impl PreviewPresentation {
                 .max(first.saturating_add(1))
                 .min(display_count);
             let local_scroll = scroll.saturating_sub(starts[first]);
+            if let Some(window) = self
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.wrapped_window.as_ref())
+                .filter(|window| {
+                    window.first == first
+                        && window.end == end
+                        && window.local_scroll == local_scroll
+                        && window.viewport_height == input.viewport_height
+                })
+            {
+                return PreparedPreview {
+                    lines: window.lines.clone(),
+                    rendered_height,
+                    wrapped: true,
+                };
+            }
             let logical_lines = self.line_window(
                 &input,
                 first,
                 end.saturating_sub(first),
                 input.viewport_height,
             );
+            let lines = hard_wrap_lines(
+                logical_lines,
+                input.width,
+                local_scroll,
+                input.viewport_height,
+                input.is_diff,
+                render_markdown,
+            );
+            self.cache
+                .as_mut()
+                .expect("preview cache was initialized")
+                .wrapped_window = Some(WrappedWindow {
+                first,
+                end,
+                local_scroll,
+                viewport_height: input.viewport_height,
+                lines: lines.clone(),
+            });
             return PreparedPreview {
-                lines: hard_wrap_lines(
-                    logical_lines,
-                    input.width,
-                    local_scroll,
-                    input.viewport_height,
-                    input.is_diff,
-                    render_markdown,
-                ),
+                lines,
                 rendered_height,
                 wrapped: true,
             };

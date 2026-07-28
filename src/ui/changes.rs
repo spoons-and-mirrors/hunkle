@@ -22,7 +22,7 @@ use super::{
     truncate_width,
 };
 
-pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
     if app.repository().is_none() {
         super::draw_empty(frame, area, "Open a repository to inspect its changes");
         return;
@@ -46,7 +46,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.regions.split_bounds = Some(area);
     app.regions.splitter = Some(Rect::new(columns[0].right(), area.y, 1, area.height));
     fill(frame, columns[0], palette().panel);
-    fill(frame, columns[1], palette().panel);
+    if draw_details {
+        fill(frame, columns[1], palette().panel);
+    }
     if app.dragging_splitter {
         fill(
             frame,
@@ -55,7 +57,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
     }
     if app.changes.pane == LeftPane::Files {
-        draw_explorer_changes(frame, app, columns);
+        draw_explorer_changes(frame, app, columns, draw_details);
         return;
     }
 
@@ -313,6 +315,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app.mode,
         &mut app.changes.history_state,
     );
+    if !draw_details {
+        return;
+    }
 
     let selected_history = if app.changes.history_focused {
         app.changes
@@ -748,7 +753,12 @@ fn draw_commit_message_action(frame: &mut Frame<'_>, area: Rect, app: &mut App, 
     );
 }
 
-fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2]) {
+fn draw_explorer_changes(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    columns: [Rect; 2],
+    draw_details: bool,
+) {
     app.regions.worktree_list = None;
     app.regions.commit = None;
     app.regions.history_list = None;
@@ -875,6 +885,9 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             .collect()
     };
     frame.render_widget(List::new(items), list_area);
+    if !draw_details {
+        return;
+    }
 
     let selected_path = app
         .selected_explorer_file_path()

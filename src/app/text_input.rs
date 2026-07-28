@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -250,17 +250,30 @@ impl TextInput {
 }
 
 fn closest_visual_cursor(text: &str, width: usize, row: usize, column: usize) -> usize {
-    text.char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(text.len()))
-        .min_by_key(|&index| {
-            let (candidate_row, candidate_column) = visual_position(text, index, width);
-            (
-                candidate_row.abs_diff(row),
-                candidate_column.abs_diff(column),
-            )
-        })
-        .unwrap_or(0)
+    let width = width.max(1);
+    let mut visual_row = 0;
+    let mut line_width = 0;
+    let mut best = (usize::MAX, usize::MAX, 0);
+    for (index, character) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), '\0')))
+    {
+        let candidate = (
+            (visual_row + line_width / width).abs_diff(row),
+            (line_width % width).abs_diff(column),
+            index,
+        );
+        if candidate < best {
+            best = candidate;
+        }
+        if character == '\n' {
+            visual_row += line_width.saturating_sub(1) / width + 1;
+            line_width = 0;
+        } else {
+            line_width += UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+    }
+    best.2
 }
 
 fn visual_position(text: &str, cursor: usize, width: usize) -> (usize, usize) {

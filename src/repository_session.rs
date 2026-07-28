@@ -138,6 +138,7 @@ struct WorkerResult {
 #[derive(Debug)]
 struct StatusResult {
     root: PathBuf,
+    repository_generation: u64,
     baseline: Option<u64>,
     activity_generation: u64,
     result: Result<u64, String>,
@@ -158,7 +159,9 @@ enum LoadPayload {
 #[derive(Debug)]
 enum WorkerKind {
     Commit,
-    Fetch,
+    Fetch {
+        repository_generation: u64,
+    },
     Command {
         label: String,
     },
@@ -307,6 +310,7 @@ pub(crate) struct RepositorySession {
     next_status_check: Instant,
     status_interval: Duration,
     status_activity_generation: u64,
+    repository_generation: u64,
     load_generation: u64,
     load_tx: Sender<LoadResult>,
     load_rx: Receiver<LoadResult>,
@@ -329,8 +333,7 @@ impl RepositorySession {
         let (load_tx, load_rx) = mpsc::channel();
         let status_signature = data
             .as_ref()
-            .filter(|repository| !repository.is_local())
-            .and_then(|repository| git::worktree_signature(&repository.root).ok());
+            .and_then(|repository| repository.worktree_signature);
 
         Self {
             data,
@@ -344,6 +347,7 @@ impl RepositorySession {
             next_status_check: Instant::now() + MIN_STATUS_INTERVAL,
             status_interval: MIN_STATUS_INTERVAL,
             status_activity_generation: 0,
+            repository_generation: 0,
             load_generation: 0,
             load_tx,
             load_rx,
@@ -421,11 +425,13 @@ impl RepositorySession {
             self.operations.finish(Operation::Load(done.kind));
             let (result, prepared_file_tree) = match done.result {
                 Ok((payload, signature, prepared_file_tree)) => {
-                    self.status_signature = signature;
-                    self.reset_status_interval();
                     if done.kind == LoadKind::Open {
+                        self.status_signature = signature;
                         self.next_fetch_at = Instant::now() + done.fetch_interval;
+                    } else if signature.is_some() {
+                        self.status_signature = signature;
                     }
+                    self.reset_status_interval();
                     match payload {
                         LoadPayload::Open(data) => {
                             if let Some(previous) = self.data.replace(data) {
@@ -671,11 +677,14 @@ impl RepositorySession {
 
         self.operations.start(Operation::Fetch);
         self.next_fetch_at = Instant::now() + fetch_interval;
+        let repository_generation = self.repository_generation;
         let sender = self.worker_tx.clone();
         thread::spawn(move || {
             let result = git::fetch(&root).map_err(|error| error.to_string());
             let _ = sender.send(WorkerResult {
-                kind: WorkerKind::Fetch,
+                kind: WorkerKind::Fetch {
+                    repository_generation,
+                },
                 root,
                 result,
             });
@@ -696,11 +705,13 @@ impl RepositorySession {
         self.next_status_check = now + self.status_interval;
         let baseline = self.status_signature;
         let activity_generation = self.status_activity_generation;
+        let repository_generation = self.repository_generation;
         let sender = self.status_tx.clone();
         thread::spawn(move || {
             let result = git::worktree_signature(&root).map_err(|error| error.to_string());
             let _ = sender.send(StatusResult {
                 root,
+                repository_generation,
                 baseline,
                 activity_generation,
                 result,
@@ -724,7 +735,12 @@ impl RepositorySession {
                         return Some(WorkerCompletion::new(WorkerOutcome::Commit(done.result)));
                     }
                 }
-                WorkerKind::Fetch => {
+                WorkerKind::Fetch {
+                    repository_generation,
+                } => {
+                    if repository_generation != self.repository_generation {
+                        continue;
+                    }
                     self.operations.finish(Operation::Fetch);
                     self.next_fetch_at = Instant::now() + fetch_interval;
                     if active {
@@ -808,6 +824,9 @@ impl RepositorySession {
 
     pub(crate) fn next_worktree_change(&mut self) -> bool {
         while let Ok(done) = self.status_rx.try_recv() {
+            if done.repository_generation != self.repository_generation {
+                continue;
+            }
             self.operations.finish(Operation::StatusCheck);
             let active = self
                 .data
@@ -871,6 +890,11 @@ impl RepositorySession {
             ));
             return false;
         }
+        if kind == LoadKind::Open {
+            self.repository_generation = self.repository_generation.wrapping_add(1);
+            self.operations.finish(Operation::Fetch);
+            self.operations.finish(Operation::StatusCheck);
+        }
         self.load_generation = self.load_generation.wrapping_add(1);
         let generation = self.load_generation;
         let sender = self.load_tx.clone();
@@ -893,13 +917,10 @@ impl RepositorySession {
                     }
                     LoadPayload::Refresh(_) => None,
                 };
-                let is_git = match &payload {
-                    LoadPayload::Open(data) => !data.is_local(),
-                    LoadPayload::Refresh(_) => repository_kind != Some(RepositoryKind::Local),
+                let signature = match &payload {
+                    LoadPayload::Open(data) => data.worktree_signature,
+                    LoadPayload::Refresh(update) => update.worktree_signature(),
                 };
-                let signature = is_git
-                    .then(|| git::worktree_signature(&path).ok())
-                    .flatten();
                 (payload, signature, prepared_file_tree)
             })
             .map_err(|error| error.to_string());
@@ -1064,6 +1085,7 @@ mod tests {
             .status_tx
             .send(StatusResult {
                 root: PathBuf::from("/previous"),
+                repository_generation: 0,
                 baseline: Some(10),
                 activity_generation: 0,
                 result: Ok(20),
@@ -1083,6 +1105,7 @@ mod tests {
             .status_tx
             .send(StatusResult {
                 root: PathBuf::from("/active"),
+                repository_generation: 0,
                 baseline: Some(10),
                 activity_generation: 0,
                 result: Ok(30),
@@ -1092,6 +1115,46 @@ mod tests {
         assert!(!session.next_worktree_change());
         assert_eq!(session.status_signature, Some(20));
         assert!(!session.operations.is_running(Operation::StatusCheck));
+    }
+
+    #[test]
+    fn stale_background_results_do_not_clear_current_repository_operations() {
+        let mut session = session("/active", Some(10));
+        session.repository_generation = 2;
+        session.operations.start(Operation::Fetch);
+        session
+            .worker_tx
+            .send(WorkerResult {
+                kind: WorkerKind::Fetch {
+                    repository_generation: 1,
+                },
+                root: PathBuf::from("/active"),
+                result: Err("stale fetch".to_owned()),
+            })
+            .unwrap();
+        assert!(
+            session
+                .next_worker_completion(Duration::from_secs(60))
+                .is_none()
+        );
+        assert!(session.operations.is_running(Operation::Fetch));
+
+        session.operations.finish(Operation::Fetch);
+        session.operations.start(Operation::StatusCheck);
+        session
+            .status_tx
+            .send(StatusResult {
+                root: PathBuf::from("/active"),
+                repository_generation: 1,
+                baseline: Some(10),
+                activity_generation: 0,
+                result: Err("stale status".to_owned()),
+            })
+            .unwrap();
+
+        assert!(!session.next_worktree_change());
+        assert!(session.operations.is_running(Operation::StatusCheck));
+        assert_eq!(session.status_signature, Some(10));
     }
 
     #[test]
@@ -1123,6 +1186,7 @@ mod tests {
             .status_tx
             .send(StatusResult {
                 root: PathBuf::from("/active"),
+                repository_generation: 0,
                 baseline: Some(10),
                 activity_generation: 0,
                 result: Ok(10),
@@ -1212,6 +1276,7 @@ mod tests {
                 change_counts: (0, 0),
                 graph_width: 0,
                 graph_truncated: false,
+                worktree_signature: status_signature,
             }),
             operations: OperationState::default(),
             worker_tx,
@@ -1223,6 +1288,7 @@ mod tests {
             next_status_check: Instant::now(),
             status_interval: MIN_STATUS_INTERVAL,
             status_activity_generation: 0,
+            repository_generation: 0,
             load_generation: 0,
             load_tx,
             load_rx,

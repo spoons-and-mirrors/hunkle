@@ -70,117 +70,127 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
     let spawned = wrapped_command.spawn();
     *command = wrapped_command.into_command();
     let mut child = spawned?;
-    let stdout = child
-        .stdout()
-        .take()
-        .ok_or_else(|| io::Error::other("child stdout was unavailable"))?;
-    let stderr = child
-        .stderr()
-        .take()
-        .ok_or_else(|| io::Error::other("child stderr was unavailable"))?;
-    let stdout_limit = limits.stdout_bytes;
-    let stderr_limit = limits.stderr_bytes;
-    let (stdout_sender, stdout_receiver) = mpsc::sync_channel(1);
-    let (stderr_sender, stderr_receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let _ = stdout_sender.send(read_bounded(stdout, stdout_limit));
-    });
-    thread::spawn(move || {
-        let _ = stderr_sender.send(read_bounded(stderr, stderr_limit));
-    });
-    let input_receiver = input.map(|input| {
-        let mut stdin = child.stdin().take().expect("piped stdin was requested");
-        let (sender, receiver) = mpsc::sync_channel(1);
+    let result = (|| -> io::Result<Output> {
+        let stdout = child
+            .stdout()
+            .take()
+            .ok_or_else(|| io::Error::other("child stdout was unavailable"))?;
+        let stderr = child
+            .stderr()
+            .take()
+            .ok_or_else(|| io::Error::other("child stderr was unavailable"))?;
+        let stdout_limit = limits.stdout_bytes;
+        let stderr_limit = limits.stderr_bytes;
+        let (stdout_sender, stdout_receiver) = mpsc::sync_channel(1);
+        let (stderr_sender, stderr_receiver) = mpsc::sync_channel(1);
         thread::spawn(move || {
-            let _ = sender.send(stdin.write_all(&input));
+            let _ = stdout_sender.send(read_bounded(stdout, stdout_limit));
         });
-        receiver
-    });
+        thread::spawn(move || {
+            let _ = stderr_sender.send(read_bounded(stderr, stderr_limit));
+        });
+        let input_receiver = input.map(|input| {
+            let mut stdin = child.stdin().take().expect("piped stdin was requested");
+            let (sender, receiver) = mpsc::sync_channel(1);
+            thread::spawn(move || {
+                let _ = sender.send(stdin.write_all(&input));
+            });
+            receiver
+        });
 
-    let started = Instant::now();
-    let mut status = None;
-    let mut stdout_result = None;
-    let mut stderr_result = None;
-    let mut input_finished = input_receiver.is_none();
-    let timed_out = loop {
-        if status.is_none() {
-            status = child.try_wait()?;
-        }
-        receive_result(&stdout_receiver, &mut stdout_result, "child stdout reader")?;
-        receive_result(&stderr_receiver, &mut stderr_result, "child stderr reader")?;
-        if !input_finished {
-            let receiver = input_receiver.as_ref().expect("input receiver is present");
-            match receiver.try_recv() {
-                Ok(result) => {
-                    let _ = result;
-                    input_finished = true;
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    return Err(io::Error::other("child stdin writer panicked"));
-                }
-            }
-        }
-        if status.is_some() && stdout_result.is_some() && stderr_result.is_some() && input_finished
-        {
-            break false;
-        }
-        if started.elapsed() >= limits.timeout {
-            match child.start_kill() {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
+        let started = Instant::now();
+        let mut status = None;
+        let mut stdout_result = None;
+        let mut stderr_result = None;
+        let mut input_finished = input_receiver.is_none();
+        let timed_out = loop {
             if status.is_none() {
-                status = Some(child.wait()?);
+                status = child.try_wait()?;
             }
-            break true;
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-
-    if timed_out {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while (stdout_result.is_none() || stderr_result.is_none() || !input_finished)
-            && Instant::now() < deadline
-        {
             receive_result(&stdout_receiver, &mut stdout_result, "child stdout reader")?;
             receive_result(&stderr_receiver, &mut stderr_result, "child stderr reader")?;
             if !input_finished {
                 let receiver = input_receiver.as_ref().expect("input receiver is present");
                 match receiver.try_recv() {
-                    Ok(_) => input_finished = true,
+                    Ok(result) => {
+                        let _ = result;
+                        input_finished = true;
+                    }
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => {
                         return Err(io::Error::other("child stdin writer panicked"));
                     }
                 }
             }
+            if status.is_some()
+                && stdout_result.is_some()
+                && stderr_result.is_some()
+                && input_finished
+            {
+                break false;
+            }
+            if started.elapsed() >= limits.timeout {
+                match child.start_kill() {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                if status.is_none() {
+                    status = Some(child.wait()?);
+                }
+                break true;
+            }
             thread::sleep(Duration::from_millis(10));
-        }
-    }
-    let (stdout, stdout_truncated) = stdout_result.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "child stdout remained open after process-tree termination",
-        )
-    })??;
-    let (stderr, stderr_truncated) = stderr_result.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "child stderr remained open after process-tree termination",
-        )
-    })??;
-    let status = status.expect("a completed process has an exit status");
+        };
 
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-        stdout_truncated,
-        stderr_truncated,
-        timed_out,
-    })
+        if timed_out {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while (stdout_result.is_none() || stderr_result.is_none() || !input_finished)
+                && Instant::now() < deadline
+            {
+                receive_result(&stdout_receiver, &mut stdout_result, "child stdout reader")?;
+                receive_result(&stderr_receiver, &mut stderr_result, "child stderr reader")?;
+                if !input_finished {
+                    let receiver = input_receiver.as_ref().expect("input receiver is present");
+                    match receiver.try_recv() {
+                        Ok(_) => input_finished = true,
+                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Disconnected) => {
+                            return Err(io::Error::other("child stdin writer panicked"));
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let (stdout, stdout_truncated) = stdout_result.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "child stdout remained open after process-tree termination",
+            )
+        })??;
+        let (stderr, stderr_truncated) = stderr_result.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "child stderr remained open after process-tree termination",
+            )
+        })??;
+        let status = status.expect("a completed process has an exit status");
+
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+            timed_out,
+        })
+    })();
+    if result.is_err() {
+        let _ = child.start_kill();
+        let _ = child.wait();
+    }
+    result
 }
 
 fn receive_result<T>(

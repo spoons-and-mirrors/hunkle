@@ -101,7 +101,7 @@ pub(super) fn draw_graph(
         ]
     };
 
-    let visible = author_filter.visible_indices(&repo.commits);
+    let visible = author_filter.visible_indices();
     let viewport = usize::from(graph_region.height);
     let selected = state.selected();
     let mut offset = state.offset().min(visible.len().saturating_sub(1));

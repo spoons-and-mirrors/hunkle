@@ -26,6 +26,8 @@ pub(crate) struct AuthorFilter {
     root: Option<PathBuf>,
     disabled: HashSet<String>,
     entries: Vec<AuthorEntry>,
+    commit_authors: Vec<String>,
+    visible_indices: Vec<usize>,
     pub state: ListState,
 }
 
@@ -56,6 +58,8 @@ impl AuthorFilter {
                 commits,
             })
             .collect();
+        self.commit_authors = commits.iter().map(|commit| commit.author.clone()).collect();
+        self.rebuild_visible_indices();
         if let Some(selected) = self.state.selected()
             && selected >= self.entries.len()
         {
@@ -71,11 +75,16 @@ impl AuthorFilter {
         self.entries.iter().filter(|entry| entry.enabled).count()
     }
 
-    pub fn visible_indices(&self, commits: &[Commit]) -> Vec<usize> {
-        commits
+    pub fn visible_indices(&self) -> &[usize] {
+        &self.visible_indices
+    }
+
+    fn rebuild_visible_indices(&mut self) {
+        self.visible_indices = self
+            .commit_authors
             .iter()
             .enumerate()
-            .filter_map(|(index, commit)| self.matches(commit).then_some(index))
+            .filter_map(|(index, author)| (!self.disabled.contains(author)).then_some(index))
             .collect()
     }
 
@@ -88,6 +97,7 @@ impl AuthorFilter {
             && let Some(entry) = self.entries.iter_mut().find(|entry| entry.name == author)
         {
             entry.enabled = true;
+            self.rebuild_visible_indices();
         }
     }
 
@@ -117,6 +127,7 @@ impl AuthorFilter {
         } else {
             self.disabled.insert(entry.name.clone());
         }
+        self.rebuild_visible_indices();
         true
     }
 
@@ -125,6 +136,7 @@ impl AuthorFilter {
         for entry in &mut self.entries {
             entry.enabled = true;
         }
+        self.rebuild_visible_indices();
     }
 
     pub fn disable_all(&mut self) {
@@ -136,6 +148,7 @@ impl AuthorFilter {
         for entry in &mut self.entries {
             entry.enabled = false;
         }
+        self.rebuild_visible_indices();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<AuthorFilterEffect> {
@@ -198,9 +211,9 @@ mod tests {
         filter.open(Path::new("/one"), &commits);
         assert_eq!(filter.entries()[0].commits, 2);
         assert!(filter.toggle(0));
-        assert_eq!(filter.visible_indices(&commits), vec![1]);
+        assert_eq!(filter.visible_indices(), &[1]);
 
         filter.open(Path::new("/two"), &commits);
-        assert_eq!(filter.visible_indices(&commits), vec![0, 1, 2]);
+        assert_eq!(filter.visible_indices(), &[0, 1, 2]);
     }
 }

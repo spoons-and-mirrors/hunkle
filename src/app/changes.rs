@@ -1304,6 +1304,7 @@ mod tests {
             branch: "main".to_owned(),
             branches: Vec::new(),
             github_remote: false,
+            worktree_signature: None,
             changes: vec![Change {
                 path: "src/main.rs".into(),
                 original_path: None,

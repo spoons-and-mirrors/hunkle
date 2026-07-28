@@ -43,10 +43,17 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver},
+    thread,
     time::{Duration, Instant},
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
+
+struct CommitDraftResult {
+    root: PathBuf,
+    result: Result<(PathBuf, Option<String>), String>,
+}
 
 fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
@@ -255,6 +262,7 @@ pub struct App {
     pub(crate) commit_message_generator: CommitMessageGenerator,
     commit_draft_path: Option<PathBuf>,
     commit_draft_due: Option<Instant>,
+    commit_draft_rx: Option<Receiver<CommitDraftResult>>,
     pub dragging_splitter: bool,
     pub dragging_workspace_panel_splitter: bool,
     pub dragging_history: bool,
@@ -365,6 +373,7 @@ impl App {
             commit_message_generator: CommitMessageGenerator::detect(),
             commit_draft_path: None,
             commit_draft_due: None,
+            commit_draft_rx: None,
             dragging_splitter: false,
             dragging_workspace_panel_splitter: false,
             dragging_history: false,
@@ -429,10 +438,12 @@ impl App {
         )
     }
 
-    pub(crate) fn visible_graph_indices(&self) -> Vec<usize> {
-        self.repository().map_or_else(Vec::new, |repo| {
-            self.author_filter.visible_indices(&repo.commits)
-        })
+    pub(crate) fn visible_graph_indices(&self) -> &[usize] {
+        if self.repository().is_some() {
+            self.author_filter.visible_indices()
+        } else {
+            &[]
+        }
     }
 
     pub(crate) fn selected_graph_commit(&self) -> Option<&git::Commit> {
@@ -631,6 +642,34 @@ impl App {
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        if let Some(done) = self
+            .commit_draft_rx
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.commit_draft_rx = None;
+            if self
+                .repository()
+                .is_some_and(|repo| same_workspace_path(&repo.root, &done.root))
+            {
+                changed = true;
+                match done.result {
+                    Ok((path, message)) => {
+                        self.commit_draft_path = Some(path);
+                        if self.commit_draft_due.is_none()
+                            && self.commit_input.is_empty()
+                            && let Some(message) = message
+                        {
+                            self.commit_input.set(message);
+                        }
+                    }
+                    Err(error) => {
+                        self.commit_draft_due = None;
+                        self.notice = Some(format!("Could not load commit draft: {error}"));
+                    }
+                }
+            }
+        }
         changed |= self
             .herdr_prompt
             .input
@@ -867,7 +906,7 @@ impl App {
                     if let Some((selection, selected_oid)) = self.pending_reload.take() {
                         let repo = self.session.data().expect("reloaded repository");
                         self.author_filter.sync(&repo.root, &repo.commits);
-                        let visible = self.author_filter.visible_indices(&repo.commits);
+                        let visible = self.author_filter.visible_indices();
                         let commit_index = selected_oid.and_then(|oid| {
                             visible
                                 .iter()
@@ -967,7 +1006,7 @@ impl App {
                 .regions
                 .graph_table
                 .map_or(40, |region| usize::from(region.height));
-            let visible = self.author_filter.visible_indices(&repo.commits);
+            let visible = self.author_filter.visible_indices();
             oids.extend(
                 visible
                     .iter()
@@ -2156,18 +2195,27 @@ impl App {
         self.commit_input.clear();
         self.commit_scroll = None;
         self.commit_draft_due = None;
-        self.commit_draft_path = self
+        self.commit_draft_path = None;
+        self.commit_draft_rx = None;
+        let Some(root) = self
             .repository()
             .filter(|repo| !repo.is_local())
-            .and_then(|repo| git::commit_draft_path(&repo.root).ok());
-        let Some(path) = &self.commit_draft_path else {
+            .map(|repo| repo.root.clone())
+        else {
             return;
         };
-        match fs::read_to_string(path) {
-            Ok(message) => self.commit_input.set(message),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => self.notice = Some(format!("Could not load commit draft: {error}")),
-        }
+        let (sender, receiver) = mpsc::channel();
+        self.commit_draft_rx = Some(receiver);
+        thread::spawn(move || {
+            let result = git::commit_draft_path(&root)
+                .map_err(|error| error.to_string())
+                .and_then(|path| match fs::read_to_string(&path) {
+                    Ok(message) => Ok((path, Some(message))),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((path, None)),
+                    Err(error) => Err(error.to_string()),
+                });
+            let _ = sender.send(CommitDraftResult { root, result });
+        });
     }
 
     fn schedule_commit_draft(&mut self) {
@@ -2189,6 +2237,9 @@ impl App {
             return false;
         }
         let Some(path) = &self.commit_draft_path else {
+            if self.commit_draft_rx.is_some() {
+                return false;
+            }
             self.commit_draft_due = None;
             return false;
         };
@@ -3238,6 +3289,7 @@ mod tests {
         let draft_path = git::commit_draft_path(root).unwrap();
 
         let mut app = App::new(root.to_path_buf());
+        wait_for_state(&mut app, |app| app.commit_draft_path.is_some());
         app.mode = Mode::Commit;
         app.handle_paste("persisted subject\npersisted body");
         assert!(!draft_path.exists());
@@ -3250,6 +3302,7 @@ mod tests {
         drop(app);
 
         let mut restored = App::new(root.to_path_buf());
+        wait_for_state(&mut restored, |app| !app.commit_input.is_empty());
         assert_eq!(
             restored.commit_input.text(),
             "persisted subject\npersisted body"
@@ -3261,6 +3314,34 @@ mod tests {
         });
         assert!(restored.commit_input.is_empty());
         assert!(!draft_path.exists());
+    }
+
+    #[test]
+    fn keeps_edits_pending_until_async_draft_discovery_finishes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        let mut app = App::new(root.to_path_buf());
+        let draft_path = root.join("draft");
+        let (sender, receiver) = mpsc::channel();
+        app.commit_draft_rx = Some(receiver);
+        app.commit_draft_path = None;
+        app.commit_input.set("new message");
+        app.commit_draft_due = Some(Instant::now());
+
+        assert!(!app.flush_commit_draft());
+        assert!(app.commit_draft_due.is_some());
+        sender
+            .send(CommitDraftResult {
+                root: root.to_path_buf(),
+                result: Ok((draft_path.clone(), Some("old message".to_owned()))),
+            })
+            .unwrap();
+        app.poll_worker();
+        app.flush_commit_draft();
+
+        assert_eq!(app.commit_input.text(), "new message");
+        assert_eq!(fs::read_to_string(draft_path).unwrap(), "new message");
     }
 
     #[test]
