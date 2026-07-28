@@ -83,7 +83,6 @@ pub(crate) struct WorktreeRepository {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorktreeManagerRow {
-    Repository(usize),
     Worktree { repository: usize, worktree: usize },
     Status(usize),
 }
@@ -448,7 +447,6 @@ impl WorktreeManager {
             if matching.is_empty() && (!repository_matches || repository.error.is_none()) {
                 continue;
             }
-            rows.push(WorktreeManagerRow::Repository(repository_index));
             if repository.error.is_some() {
                 rows.push(WorktreeManagerRow::Status(repository_index));
             } else {
@@ -560,64 +558,63 @@ impl WorktreeManager {
         self.create_running || self.remove_running
     }
 
-    fn activate_selected(&self) -> Option<WorktreeManagerEffect> {
+    pub(crate) fn open_protection(&self, worktree: &LinkedWorktree) -> Option<String> {
         if self.operation_running() {
-            return Some(WorktreeManagerEffect::Notice(
-                "Wait for the worktree operation to finish".to_owned(),
-            ));
+            return Some("Wait for the worktree operation to finish".to_owned());
         }
-        let (_, worktree) = self.selected_worktree()?;
         if worktree.is_bare {
-            return Some(WorktreeManagerEffect::Notice(
-                "Bare repositories cannot be opened as workspaces".to_owned(),
+            return Some("Bare repositories cannot be opened as workspaces".to_owned());
+        }
+        worktree
+            .prunable
+            .then(|| "This worktree is missing and can only be pruned".to_owned())
+    }
+
+    pub(crate) fn create_protection(&self, worktree: &LinkedWorktree) -> Option<String> {
+        if self.operation_running() {
+            return Some("A worktree operation is already running".to_owned());
+        }
+        (worktree.is_bare || worktree.prunable)
+            .then(|| "Select an available checkout as the starting point".to_owned())
+    }
+
+    pub(crate) fn remove_protection(&self, worktree: &LinkedWorktree) -> Option<String> {
+        if self.operation_running() {
+            return Some("A worktree operation is already running".to_owned());
+        }
+        if self.herdr_enabled && !self.herdr_verified {
+            return Some("Waiting for Herdr to verify linked worktree ownership".to_owned());
+        }
+        if worktree.is_main {
+            return Some("The primary worktree cannot be removed".to_owned());
+        }
+        if worktree.locked {
+            return Some(worktree.locked_reason.as_ref().map_or_else(
+                || "Unlock this worktree before removing it".to_owned(),
+                |reason| format!("Worktree is locked: {reason}"),
             ));
         }
         if worktree.prunable {
-            return Some(WorktreeManagerEffect::Notice(
-                "This worktree is missing and can only be pruned".to_owned(),
-            ));
+            return Some("This missing worktree requires repository metadata pruning".to_owned());
+        }
+        self.current_path
+            .as_deref()
+            .is_some_and(|current| same_path(current, &worktree.path))
+            .then(|| "Open another worktree before removing the current one".to_owned())
+    }
+
+    fn activate_selected(&self) -> Option<WorktreeManagerEffect> {
+        let (_, worktree) = self.selected_worktree()?;
+        if let Some(reason) = self.open_protection(worktree) {
+            return Some(WorktreeManagerEffect::Notice(reason));
         }
         Some(WorktreeManagerEffect::Open(worktree.path.clone()))
     }
 
     fn begin_remove(&mut self) -> Option<WorktreeManagerEffect> {
-        if self.operation_running() {
-            return Some(WorktreeManagerEffect::Notice(
-                "A worktree operation is already running".to_owned(),
-            ));
-        }
-        if self.herdr_enabled && !self.herdr_verified {
-            return Some(WorktreeManagerEffect::Notice(
-                "Waiting for Herdr to verify linked worktree ownership".to_owned(),
-            ));
-        }
         let (repository, worktree) = self.selected_worktree()?;
-        if worktree.is_main {
-            return Some(WorktreeManagerEffect::Notice(
-                "The primary worktree cannot be removed".to_owned(),
-            ));
-        }
-        if worktree.locked {
-            return Some(WorktreeManagerEffect::Notice(
-                worktree.locked_reason.as_ref().map_or_else(
-                    || "Unlock this worktree before removing it".to_owned(),
-                    |reason| format!("Worktree is locked: {reason}"),
-                ),
-            ));
-        }
-        if worktree.prunable {
-            return Some(WorktreeManagerEffect::Notice(
-                "This missing worktree requires repository metadata pruning".to_owned(),
-            ));
-        }
-        if self
-            .current_path
-            .as_deref()
-            .is_some_and(|current| same_path(current, &worktree.path))
-        {
-            return Some(WorktreeManagerEffect::Notice(
-                "Open another worktree before removing the current one".to_owned(),
-            ));
+        if let Some(reason) = self.remove_protection(worktree) {
+            return Some(WorktreeManagerEffect::Notice(reason));
         }
         let herdr_workspace_id = self
             .herdr_worktrees
@@ -634,16 +631,9 @@ impl WorktreeManager {
     }
 
     fn begin_create(&mut self) -> Option<WorktreeManagerEffect> {
-        if self.operation_running() {
-            return Some(WorktreeManagerEffect::Notice(
-                "A worktree operation is already running".to_owned(),
-            ));
-        }
         let (repository, worktree) = self.selected_worktree()?;
-        if worktree.is_bare || worktree.prunable {
-            return Some(WorktreeManagerEffect::Notice(
-                "Select an available checkout to use as the branch starting point".to_owned(),
-            ));
+        if let Some(reason) = self.create_protection(worktree) {
+            return Some(WorktreeManagerEffect::Notice(reason));
         }
         let base_dir = worktree
             .path
@@ -817,7 +807,7 @@ impl WorktreeManager {
         }
     }
 
-    fn selected_worktree(&self) -> Option<(&WorktreeRepository, &LinkedWorktree)> {
+    pub(crate) fn selected_worktree(&self) -> Option<(&WorktreeRepository, &LinkedWorktree)> {
         let row = *self.rows().get(self.state.selected()?)?;
         let WorktreeManagerRow::Worktree {
             repository,
@@ -1151,22 +1141,19 @@ mod tests {
     }
 
     #[test]
-    fn filters_branch_and_path_while_preserving_repository_header() {
+    fn filters_branch_and_path_to_checkout_rows() {
         let mut manager = manager();
         manager.query = "modal".to_owned();
         manager.select_first();
 
         assert_eq!(
             manager.rows(),
-            [
-                WorktreeManagerRow::Repository(0),
-                WorktreeManagerRow::Worktree {
-                    repository: 0,
-                    worktree: 1,
-                },
-            ]
+            [WorktreeManagerRow::Worktree {
+                repository: 0,
+                worktree: 1,
+            }]
         );
-        assert_eq!(manager.state.selected(), Some(1));
+        assert_eq!(manager.state.selected(), Some(0));
     }
 
     #[test]
@@ -1261,7 +1248,7 @@ mod tests {
         manager.paste("feature");
 
         assert!(!manager.select_row(generation, 1));
-        assert_eq!(manager.state.selected(), Some(1));
+        assert_eq!(manager.state.selected(), Some(0));
     }
 
     #[test]

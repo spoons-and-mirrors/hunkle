@@ -2678,7 +2678,7 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
         &["worktree", "add", "-b", "feature/modal", &linked_argument],
     );
 
-    let mut app = App::new(root);
+    let mut app = App::new(root.clone());
     app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
     assert_eq!(app.mode, Mode::WorktreeManager);
     wait_for(&mut app, |app| !app.worktree_manager.loading);
@@ -2695,8 +2695,25 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
         .collect::<String>();
     assert!(screen.contains("WORKTREES"));
     assert!(screen.contains("feature/modal"));
-    assert!(screen.contains("CURRENT"));
-    assert!(screen.contains("PRIMARY"));
+    assert!(screen.contains("ACTIVE REPOSITORY"));
+    assert!(!screen.contains("PRIMARY"));
+    assert!(!screen.contains("2 CHECKOUTS"));
+    assert!(screen.contains("WORKTREE DETAILS"));
+    assert!(screen.contains("AVAILABLE ACTIONS"));
+    assert!(screen.contains("Native Git worktree"));
+
+    let mut compact_terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    compact_terminal
+        .draw(|frame| draw(frame, &mut app))
+        .unwrap();
+    let compact_screen = compact_terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(compact_screen.contains("AVAILABLE ACTIONS"));
 
     let rows = app.worktree_manager.rows();
     let linked_row = rows
@@ -2718,6 +2735,45 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
 
     app.handle_mouse(mouse(MouseEventKind::Moved, row_area.x + 1, row_area.y));
     assert_eq!(app.worktree_manager.state.selected(), Some(linked_row));
+    compact_terminal
+        .draw(|frame| draw(frame, &mut app))
+        .unwrap();
+    let row_area = app.regions.hit_target_rect(target).unwrap();
+    let buffer = compact_terminal.backend().buffer();
+    let width = usize::from(buffer.area.width);
+    let selected_cell = &buffer.content
+        [usize::from(row_area.y) * width + usize::from(row_area.x.saturating_add(1))];
+    let selected_repository_cell = &buffer.content
+        [usize::from(row_area.y) * width + usize::from(row_area.x.saturating_add(2))];
+    let selected_branch_cell = &buffer.content[usize::from(row_area.y) * width
+        + usize::from(row_area.x.saturating_add(2 + "MAIN".width() as u16 + 3))];
+    let selected_path_cell = &buffer.content[usize::from(row_area.y.saturating_add(1)) * width
+        + usize::from(row_area.x.saturating_add(4))];
+    assert_eq!(selected_cell.bg, super::palette().raised);
+    assert!(selected_repository_cell.modifier.contains(Modifier::BOLD));
+    assert_eq!(selected_branch_cell.fg, super::palette().accent);
+    assert_eq!(selected_path_cell.fg, super::palette().soft);
+
+    let current_row = rows
+        .iter()
+        .position(|row| match row {
+            WorktreeManagerRow::Worktree {
+                repository,
+                worktree,
+            } => app.worktree_manager.repositories[*repository].worktrees[*worktree].path == root,
+            _ => false,
+        })
+        .unwrap();
+    let current_area = app
+        .regions
+        .hit_target_rect(HitTarget::WorktreeManager(WorktreeManagerHitTarget::Item {
+            generation: app.worktree_manager.content_generation(),
+            row: current_row,
+        }))
+        .unwrap();
+    let current_cell = &buffer.content
+        [usize::from(current_area.y) * width + usize::from(current_area.x.saturating_add(1))];
+    assert_eq!(current_cell.bg, super::palette().add_bg);
     click(&mut app, row_area.x + 1, row_area.y);
     assert_eq!(app.mode, Mode::WorktreeManager);
 
