@@ -30,8 +30,8 @@ pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserEffect,
 };
+pub use settings::Settings;
 pub(crate) use settings::SettingsStore;
-pub use settings::{MediaPreviewProtocol, Settings};
 pub(crate) use workspace_panel::{
     AgentStatus, DEFAULT_WIDTH as DEFAULT_WORKSPACE_PANEL_WIDTH,
     MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, SPINNER_FRAMES, SnapshotLoadDialog,
@@ -46,7 +46,6 @@ pub(crate) use worktree_manager::{
 use std::{
     collections::HashMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     thread,
@@ -60,12 +59,6 @@ struct CommitDraftResult {
     result: Result<(PathBuf, Option<String>), String>,
 }
 
-fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
-    file.write_all(content)?;
-    file.commit()
-}
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Position, Rect},
@@ -73,7 +66,9 @@ use ratatui::{
 };
 
 use crate::{
-    diagnostics, formatter,
+    diagnostics,
+    filesystem::{atomic_write, same_path},
+    formatter,
     git::{self, RefreshScope, RepositoryData},
     repo_path::RepoPath,
     repository_session::{LoadKind, Mutation, RepositorySession, WorkerOutcome},
@@ -649,20 +644,19 @@ impl App {
             || (self.mode == Mode::WorktreeManager && self.workspace_panel.is_enabled())
             || self.workspace_panel.destructive_action_running()
         {
-            let (panel_changed, panel_error, panel_reopen_path, workspace_focus_succeeded) =
-                self.workspace_panel.poll();
-            changed |= panel_changed;
-            if let Some(error) = panel_error {
+            let panel_poll = self.workspace_panel.poll();
+            changed |= panel_poll.changed;
+            if let Some(error) = panel_poll.notice {
                 self.notice = Some(error);
             }
-            if let Some(path) = panel_reopen_path {
+            if let Some(path) = panel_poll.reopen_path {
                 diagnostics::event(format!(
                     "opening parent workspace after worktree removal path={}",
                     path.display()
                 ));
                 self.queue_workspace_restore(path);
             }
-            if workspace_focus_succeeded
+            if panel_poll.workspace_focus_succeeded
                 && let Some(path) = self.workspace_focus_restore_path.take()
             {
                 self.queue_workspace_restore(path);
@@ -700,7 +694,7 @@ impl App {
             self.commit_draft_rx = None;
             if self
                 .repository()
-                .is_some_and(|repo| same_workspace_path(&repo.root, &done.root))
+                .is_some_and(|repo| same_path(&repo.root, &done.root))
             {
                 changed = true;
                 match done.result {
@@ -749,7 +743,7 @@ impl App {
             changed = true;
             if !self
                 .repository()
-                .is_some_and(|repo| same_workspace_path(&repo.root, &completion.root))
+                .is_some_and(|repo| same_path(&repo.root, &completion.root))
             {
                 self.notice = Some(
                     "Generated commit message ignored because the workspace changed".to_owned(),
@@ -1876,7 +1870,7 @@ impl App {
         if let Some(path) = current_path.as_ref()
             && !candidates
                 .iter()
-                .any(|candidate| same_workspace_path(candidate, path))
+                .any(|candidate| same_path(candidate, path))
         {
             candidates.push(path.clone());
         }
@@ -1910,7 +1904,7 @@ impl App {
             WorktreeManagerEffect::Open(path) => {
                 if self
                     .repository()
-                    .is_some_and(|repository| same_workspace_path(&repository.root, &path))
+                    .is_some_and(|repository| same_path(&repository.root, &path))
                 {
                     self.mode = Mode::Normal;
                     self.open_repository_with_fetch(path);
@@ -1962,7 +1956,7 @@ impl App {
             WorktreeManagerEffect::RemoveNative { common_dir, path } => {
                 if self
                     .repository()
-                    .is_some_and(|repository| same_workspace_path(&repository.root, &path))
+                    .is_some_and(|repository| same_path(&repository.root, &path))
                     || self.session.open_running()
                     || self.worktree_removal_running()
                 {
@@ -1979,7 +1973,7 @@ impl App {
             WorktreeManagerEffect::RemoveHerdr { workspace_id, path } => {
                 if self
                     .repository()
-                    .is_some_and(|repository| same_workspace_path(&repository.root, &path))
+                    .is_some_and(|repository| same_path(&repository.root, &path))
                     || self.session.open_running()
                     || self.worktree_removal_running()
                 {
@@ -2107,9 +2101,9 @@ impl App {
                 parent_path,
             } => {
                 let removing_current = path.as_deref().is_some_and(|worktree_path| {
-                    self.session.data().is_some_and(|repository| {
-                        same_workspace_path(&repository.root, worktree_path)
-                    })
+                    self.session
+                        .data()
+                        .is_some_and(|repository| same_path(&repository.root, worktree_path))
                 });
                 if self.session.open_running()
                     || self.worktree_removal_running()
@@ -2250,7 +2244,7 @@ impl App {
         }
         if self
             .repository()
-            .is_some_and(|repository| same_workspace_path(&repository.root, path))
+            .is_some_and(|repository| same_path(&repository.root, path))
         {
             self.pending_workspace_restore = None;
             return;
@@ -2776,14 +2770,6 @@ fn fetch_is_fresh(fetched_at: Option<&Instant>, now: Instant) -> bool {
     })
 }
 
-fn same_workspace_path(left: &Path, right: &Path) -> bool {
-    left == right
-        || fs::canonicalize(left)
-            .ok()
-            .zip(fs::canonicalize(right).ok())
-            .is_some_and(|(left, right)| left == right)
-}
-
 fn first_error(stderr: &str, fallback: &str) -> String {
     stderr
         .lines()
@@ -2839,6 +2825,8 @@ fn scroll_table(state: &mut TableState, len: usize, viewport: usize, delta: isiz
 #[cfg(test)]
 mod tests {
     use std::{process::Command, thread};
+
+    use crate::media::MediaPreviewProtocol;
 
     use super::*;
 

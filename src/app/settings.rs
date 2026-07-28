@@ -4,7 +4,9 @@ use std::{
     time::Duration,
 };
 
-use super::{DEFAULT_WORKSPACE_PANEL_WIDTH, MINIMUM_WORKSPACE_PANEL_WIDTH, atomic_write};
+use crate::{filesystem::atomic_write, media::MediaPreviewProtocol};
+
+use super::{DEFAULT_WORKSPACE_PANEL_WIDTH, MINIMUM_WORKSPACE_PANEL_WIDTH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -17,38 +19,6 @@ pub struct Settings {
     pub history_height: u16,
     pub editor_command: Option<String>,
     pub media_preview_protocol: MediaPreviewProtocol,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum MediaPreviewProtocol {
-    #[default]
-    Auto,
-    Halfblocks,
-    Kitty,
-    Iterm2,
-    Sixel,
-}
-
-impl MediaPreviewProtocol {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Halfblocks => "halfblocks",
-            Self::Kitty => "kitty",
-            Self::Iterm2 => "iterm2",
-            Self::Sixel => "sixel",
-        }
-    }
-
-    pub(crate) fn next(self) -> Self {
-        match self {
-            Self::Auto => Self::Halfblocks,
-            Self::Halfblocks => Self::Kitty,
-            Self::Kitty => Self::Iterm2,
-            Self::Iterm2 => Self::Sixel,
-            Self::Sixel => Self::Auto,
-        }
-    }
 }
 
 impl Settings {

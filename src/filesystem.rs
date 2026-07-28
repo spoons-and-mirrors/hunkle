@@ -1,11 +1,26 @@
 use std::{
     fs::{self, OpenOptions},
+    io::Write,
     path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 
 use crate::repo_path::RepoPath;
+
+pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
+    file.write_all(content)?;
+    file.commit()
+}
+
+pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
+    left == right
+        || fs::canonicalize(left)
+            .ok()
+            .zip(fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum FileOperation {
@@ -191,6 +206,28 @@ fn ensure_parent_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomically_replaces_file_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state");
+        fs::write(&path, "old").unwrap();
+
+        atomic_write(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn path_identity_uses_lexical_and_canonical_equality() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("child");
+        fs::create_dir(&child).unwrap();
+
+        assert!(same_path(&child, &child));
+        assert!(same_path(&child, &directory.path().join("./child")));
+        assert!(!same_path(&child, &directory.path().join("missing")));
+    }
 
     #[test]
     fn creates_moves_renames_and_deletes_workspace_entries() {

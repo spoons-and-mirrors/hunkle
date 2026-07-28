@@ -3267,13 +3267,13 @@ pub(super) fn draw_settings(
     }
 }
 
-fn media_preview_protocol_label(protocol: crate::app::MediaPreviewProtocol) -> &'static str {
+fn media_preview_protocol_label(protocol: crate::media::MediaPreviewProtocol) -> &'static str {
     match protocol {
-        crate::app::MediaPreviewProtocol::Auto => "Auto",
-        crate::app::MediaPreviewProtocol::Halfblocks => "Unicode",
-        crate::app::MediaPreviewProtocol::Kitty => "Kitty (Ghostty)",
-        crate::app::MediaPreviewProtocol::Iterm2 => "iTerm2 (WezTerm)",
-        crate::app::MediaPreviewProtocol::Sixel => "Sixel (Windows Terminal)",
+        crate::media::MediaPreviewProtocol::Auto => "Auto",
+        crate::media::MediaPreviewProtocol::Halfblocks => "Unicode",
+        crate::media::MediaPreviewProtocol::Kitty => "Kitty (Ghostty)",
+        crate::media::MediaPreviewProtocol::Iterm2 => "iTerm2 (WezTerm)",
+        crate::media::MediaPreviewProtocol::Sixel => "Sixel (Windows Terminal)",
     }
 }
 

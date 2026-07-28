@@ -2877,7 +2877,7 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
     fs::write(root.join("b-notes.txt"), "plain text preview\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
-    app.settings.media_preview_protocol = crate::app::MediaPreviewProtocol::Halfblocks;
+    app.settings.media_preview_protocol = crate::media::MediaPreviewProtocol::Halfblocks;
     assert_eq!(
         app.selected_explorer_file_path().map(|path| path.display()),
         Some("a-preview.png".to_string())

@@ -13,8 +13,11 @@ use serde_json::Value;
 
 use super::TextInput;
 
+mod focus;
 mod herdr;
 mod presets;
+
+use focus::{WorkspaceFocusCompletion, WorkspaceFocusState};
 
 pub(super) fn send_command_below(command: String) -> Result<String, String> {
     herdr::send_command_below(command)
@@ -282,86 +285,6 @@ enum Completion {
     },
 }
 
-struct PendingWorkspaceFocus {
-    request_id: u64,
-    workspace_id: String,
-}
-
-#[derive(Default)]
-struct WorkspaceFocusState {
-    host_workspace_id: Option<String>,
-    observed_workspace_id: Option<String>,
-    pending: Option<PendingWorkspaceFocus>,
-    next_request_id: u64,
-}
-
-enum WorkspaceFocusCompletion {
-    Ignored,
-    Succeeded,
-    Failed(String),
-}
-
-impl WorkspaceFocusState {
-    fn set_host(&mut self, workspace_id: Option<String>) {
-        self.host_workspace_id = workspace_id;
-    }
-
-    fn host(&self) -> Option<&str> {
-        self.host_workspace_id.as_deref()
-    }
-
-    fn apply_snapshot(&mut self, workspaces: &[HerdrWorkspace]) {
-        self.observed_workspace_id = workspaces
-            .iter()
-            .find(|workspace| workspace.focused)
-            .map(|workspace| workspace.id.clone());
-        if self.pending.as_ref().is_some_and(|pending| {
-            !workspaces
-                .iter()
-                .any(|workspace| workspace.id == pending.workspace_id)
-        }) {
-            self.pending = None;
-        }
-    }
-
-    fn begin(&mut self, workspace_id: String) -> u64 {
-        self.next_request_id = self.next_request_id.wrapping_add(1);
-        let request_id = self.next_request_id;
-        self.pending = Some(PendingWorkspaceFocus {
-            request_id,
-            workspace_id,
-        });
-        request_id
-    }
-
-    fn complete(
-        &mut self,
-        request_id: u64,
-        result: Result<(), String>,
-    ) -> WorkspaceFocusCompletion {
-        if self
-            .pending
-            .as_ref()
-            .is_none_or(|pending| pending.request_id != request_id)
-        {
-            return WorkspaceFocusCompletion::Ignored;
-        }
-        self.pending = None;
-        match result {
-            Ok(()) => WorkspaceFocusCompletion::Succeeded,
-            Err(error) => WorkspaceFocusCompletion::Failed(error),
-        }
-    }
-
-    fn active_workspace_id(&self) -> Option<&str> {
-        self.pending
-            .as_ref()
-            .map(|pending| pending.workspace_id.as_str())
-            .or(self.observed_workspace_id.as_deref())
-            .or(self.host_workspace_id.as_deref())
-    }
-}
-
 pub(crate) struct WorkspacePanel {
     enabled: bool,
     layout_available: bool,
@@ -407,6 +330,14 @@ pub(crate) struct WorkspacePanelEntryState {
     pub(crate) active: bool,
     pub(crate) loaded: bool,
     pub(crate) selected: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct WorkspacePanelPoll {
+    pub(crate) changed: bool,
+    pub(crate) notice: Option<String>,
+    pub(crate) reopen_path: Option<PathBuf>,
+    pub(crate) workspace_focus_succeeded: bool,
 }
 
 impl WorkspacePanel {
@@ -635,9 +566,9 @@ impl WorkspacePanel {
         rows
     }
 
-    pub(crate) fn poll(&mut self) -> (bool, Option<String>, Option<PathBuf>, bool) {
+    pub(crate) fn poll(&mut self) -> WorkspacePanelPoll {
         if !self.enabled {
-            return (false, None, None, false);
+            return WorkspacePanelPoll::default();
         }
 
         let mut changed = false;
@@ -734,12 +665,12 @@ impl WorkspacePanel {
             changed = true;
         }
         changed |= self.poll_spinner(Instant::now());
-        (
+        WorkspacePanelPoll {
             changed,
-            action_error,
+            notice: action_error,
             reopen_path,
             workspace_focus_succeeded,
-        )
+        }
     }
 
     #[cfg(test)]
@@ -1668,7 +1599,9 @@ impl WorkspacePanel {
                     .path
                     .as_deref()
                     .zip(loaded_workspace_path)
-                    .is_some_and(|(workspace, loaded)| presets::same_path(workspace, loaded))
+                    .is_some_and(|(workspace, loaded)| {
+                        crate::filesystem::same_path(workspace, loaded)
+                    })
             }),
             selected: panel_focused && self.selected == Some(index),
         }
@@ -2573,10 +2506,10 @@ mod tests {
                 observed_at: Instant::now(),
             })
             .unwrap();
-        let (changed, error, _, focus_succeeded) = panel.poll();
-        assert!(changed);
-        assert!(error.is_none());
-        assert!(!focus_succeeded);
+        let poll = panel.poll();
+        assert!(poll.changed);
+        assert!(poll.notice.is_none());
+        assert!(!poll.workspace_focus_succeeded);
         assert_eq!(panel.selected, Some(1));
         assert!(!panel.workspace_is_active(0));
         assert!(panel.workspace_is_active(1));
@@ -2605,8 +2538,8 @@ mod tests {
                 result: Ok(()),
             })
             .unwrap();
-        let (_, _, _, focus_succeeded) = panel.poll();
-        assert!(focus_succeeded);
+        let poll = panel.poll();
+        assert!(poll.workspace_focus_succeeded);
         assert!(panel.focus.pending.is_none());
         assert!(!panel.workspace_is_active(0));
         assert!(panel.workspace_is_active(1));
@@ -2643,9 +2576,9 @@ mod tests {
             })
             .unwrap();
 
-        let (_, _, _, focus_succeeded) = panel.poll();
+        let poll = panel.poll();
 
-        assert!(focus_succeeded);
+        assert!(poll.workspace_focus_succeeded);
         assert!(panel.focus.pending.is_none());
         assert_eq!(panel.selected, Some(0));
         assert_eq!(panel.selected_workspace_id(), Some("w1"));
@@ -2665,8 +2598,8 @@ mod tests {
                 result: Err("old failure".to_owned()),
             })
             .unwrap();
-        let (_, error, _, _) = panel.poll();
-        assert!(error.is_none());
+        let poll = panel.poll();
+        assert!(poll.notice.is_none());
         assert_eq!(
             panel
                 .focus
@@ -2684,8 +2617,8 @@ mod tests {
                 result: Err("focus failed".to_owned()),
             })
             .unwrap();
-        let (_, error, _, _) = panel.poll();
-        assert_eq!(error.as_deref(), Some("focus failed"));
+        let poll = panel.poll();
+        assert_eq!(poll.notice.as_deref(), Some("focus failed"));
         assert!(panel.focus.pending.is_none());
         assert!(panel.workspace_is_active(0));
         assert!(!panel.workspace_is_active(1));
@@ -2833,10 +2766,10 @@ mod tests {
                 destructive: true,
             })
             .unwrap();
-        let (changed, error, reopen_path, _) = panel.poll();
-        assert!(changed);
-        assert_eq!(error, None);
-        assert_eq!(reopen_path, Some(parent.clone()));
+        let poll = panel.poll();
+        assert!(poll.changed);
+        assert_eq!(poll.notice, None);
+        assert_eq!(poll.reopen_path, Some(parent.clone()));
         assert!(!panel.destructive_action_running());
 
         panel.next_refresh = Instant::now() + Duration::from_secs(60);
@@ -2850,10 +2783,13 @@ mod tests {
                 destructive: true,
             })
             .unwrap();
-        let (changed, error, reopen_path, _) = panel.poll();
-        assert!(changed);
-        assert_eq!(error.as_deref(), Some("worktree has uncommitted changes"));
-        assert_eq!(reopen_path, None);
+        let poll = panel.poll();
+        assert!(poll.changed);
+        assert_eq!(
+            poll.notice.as_deref(),
+            Some("worktree has uncommitted changes")
+        );
+        assert_eq!(poll.reopen_path, None);
         assert!(!panel.destructive_action_running());
     }
 
@@ -2884,9 +2820,9 @@ mod tests {
             })
             .unwrap();
 
-        let (_, error, reopen_path, _) = panel.poll();
-        assert_eq!(error, None);
-        assert_eq!(reopen_path, Some(parent));
+        let poll = panel.poll();
+        assert_eq!(poll.notice, None);
+        assert_eq!(poll.reopen_path, Some(parent));
         assert!(!panel.destructive_action_running());
     }
 

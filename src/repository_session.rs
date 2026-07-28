@@ -18,6 +18,10 @@ use crate::{
     tree::PreparedFileTree,
 };
 
+mod operation_state;
+
+use operation_state::{Operation, OperationState};
+
 const MIN_STATUS_INTERVAL: Duration = Duration::from_millis(800);
 const MAX_STATUS_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -191,120 +195,6 @@ enum WorkerKind {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Operation {
-    Commit,
-    Fetch,
-    Command,
-    Mutation,
-    Format,
-    StatusCheck,
-    Load(LoadKind),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ForegroundOperation {
-    Commit,
-    Command,
-    Mutation,
-    Format,
-}
-
-#[derive(Debug, Default)]
-struct OperationState {
-    foreground: Option<ForegroundOperation>,
-    fetching: bool,
-    checking_status: bool,
-    loading: Option<LoadKind>,
-}
-
-impl OperationState {
-    fn can_start(&self, operation: Operation) -> bool {
-        match operation {
-            Operation::Commit => self.foreground.is_none() && self.loading != Some(LoadKind::Open),
-            Operation::Fetch => {
-                self.loading.is_none()
-                    && !self.fetching
-                    && !matches!(
-                        self.foreground,
-                        Some(
-                            ForegroundOperation::Command
-                                | ForegroundOperation::Mutation
-                                | ForegroundOperation::Format
-                        )
-                    )
-            }
-            Operation::Command => {
-                self.foreground.is_none() && !self.fetching && self.loading != Some(LoadKind::Open)
-            }
-            Operation::Mutation => {
-                self.foreground.is_none() && !self.fetching && self.loading.is_none()
-            }
-            Operation::Format => {
-                self.foreground.is_none() && !self.fetching && self.loading.is_none()
-            }
-            Operation::StatusCheck => {
-                self.foreground.is_none()
-                    && !self.fetching
-                    && !self.checking_status
-                    && self.loading.is_none()
-            }
-            Operation::Load(LoadKind::Open) => self.foreground.is_none() && self.loading.is_none(),
-            Operation::Load(LoadKind::Reload) => self.loading.is_none(),
-        }
-    }
-
-    fn start(&mut self, operation: Operation) -> bool {
-        if !self.can_start(operation) {
-            return false;
-        }
-        match operation {
-            Operation::Commit => self.foreground = Some(ForegroundOperation::Commit),
-            Operation::Fetch => self.fetching = true,
-            Operation::Command => self.foreground = Some(ForegroundOperation::Command),
-            Operation::Mutation => self.foreground = Some(ForegroundOperation::Mutation),
-            Operation::Format => self.foreground = Some(ForegroundOperation::Format),
-            Operation::StatusCheck => self.checking_status = true,
-            Operation::Load(kind) => self.loading = Some(kind),
-        }
-        true
-    }
-
-    fn finish(&mut self, operation: Operation) {
-        match operation {
-            Operation::Commit if self.foreground == Some(ForegroundOperation::Commit) => {
-                self.foreground = None;
-            }
-            Operation::Command if self.foreground == Some(ForegroundOperation::Command) => {
-                self.foreground = None;
-            }
-            Operation::Mutation if self.foreground == Some(ForegroundOperation::Mutation) => {
-                self.foreground = None;
-            }
-            Operation::Format if self.foreground == Some(ForegroundOperation::Format) => {
-                self.foreground = None;
-            }
-            Operation::Fetch => self.fetching = false,
-            Operation::StatusCheck => self.checking_status = false,
-            Operation::Load(kind) if self.loading == Some(kind) => self.loading = None,
-            Operation::Commit | Operation::Command | Operation::Mutation | Operation::Format => {}
-            Operation::Load(_) => {}
-        }
-    }
-
-    fn is_running(&self, operation: Operation) -> bool {
-        match operation {
-            Operation::Commit => self.foreground == Some(ForegroundOperation::Commit),
-            Operation::Fetch => self.fetching,
-            Operation::Command => self.foreground == Some(ForegroundOperation::Command),
-            Operation::Mutation => self.foreground == Some(ForegroundOperation::Mutation),
-            Operation::Format => self.foreground == Some(ForegroundOperation::Format),
-            Operation::StatusCheck => self.checking_status,
-            Operation::Load(kind) => self.loading == Some(kind),
-        }
-    }
-}
-
 pub(crate) struct RepositorySession {
     data: Option<RepositoryData>,
     operations: OperationState,
@@ -401,10 +291,7 @@ impl RepositorySession {
     }
 
     pub(crate) fn can_restart(&self) -> bool {
-        self.operations.foreground.is_none()
-            && !self.operations.fetching
-            && !self.operations.checking_status
-            && self.operations.loading.is_none()
+        self.operations.is_idle()
     }
 
     pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {

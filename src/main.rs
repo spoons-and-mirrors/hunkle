@@ -3,6 +3,7 @@ mod diagnostics;
 mod filesystem;
 mod formatter;
 mod git;
+mod media;
 mod process;
 mod repo_path;
 mod repository_session;

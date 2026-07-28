@@ -13,7 +13,7 @@ Representing those sources independently in `WorkspacePanel` allowed stale snaps
 
 `WorkspacePanel` retains row data and the local cursor. A dedicated `WorkspaceFocusState` owns the containing workspace ID, latest observed Herdr focus, pending focus request, and monotonic request sequence.
 
-The displayed active workspace is derived in this order: pending request target, containing workspace, then latest observed focus. Only the current request completion may resolve or fail a transition. Snapshots update observed focus without overriding a pending target, and snapshots remove requests whose target no longer exists.
+The displayed active workspace is derived in this order: pending request target, latest observed Herdr focus, then containing workspace. Only the current request completion may resolve or fail a transition. Snapshots update observed focus without overriding a pending target, and snapshots remove requests whose target no longer exists.
 
 After a successful outbound focus command, the hidden Hunkle process resets its cursor to its containing workspace so its buffered UI is ready when that workspace is shown again. Rendering consumes a unified entry state containing both `active` and `selected` rather than reconstructing either value.
 

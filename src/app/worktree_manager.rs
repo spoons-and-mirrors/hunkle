@@ -1,25 +1,22 @@
 use std::{
     collections::HashSet,
-    fs,
-    io::ErrorKind,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
 };
 
-#[cfg(unix)]
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-#[cfg(windows)]
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
-use serde_json::Value;
 
-use crate::git::{self, LinkedWorktree};
+use crate::{
+    filesystem::same_path,
+    git::{self, LinkedWorktree},
+};
 
-use super::atomic_write;
+mod known_repositories;
+
+use known_repositories::KnownRepositoryStore;
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
@@ -949,164 +946,12 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
-    left == right
-        || fs::canonicalize(left)
-            .ok()
-            .zip(fs::canonicalize(right).ok())
-            .is_some_and(|(left, right)| left == right)
-}
-
-struct KnownRepositoryStore {
-    path: Option<PathBuf>,
-    repositories: Vec<PathBuf>,
-    load_error: Option<String>,
-}
-
-impl KnownRepositoryStore {
-    fn new(path: Option<PathBuf>) -> Self {
-        let (repositories, load_error) = match path.as_deref().map(load_known) {
-            Some(Ok(repositories)) => (repositories, None),
-            Some(Err(error)) => (Vec::new(), Some(error)),
-            None => (Vec::new(), None),
-        };
-        Self {
-            path,
-            repositories,
-            load_error,
-        }
-    }
-
-    fn insert(&mut self, common_dir: PathBuf) -> bool {
-        if self.repositories.iter().any(|known| known == &common_dir) {
-            return false;
-        }
-        self.repositories.push(common_dir);
-        self.repositories
-            .sort_by_cached_key(|path| path.to_string_lossy().to_lowercase());
-        true
-    }
-
-    fn extend(&mut self, repositories: Vec<PathBuf>) {
-        for repository in repositories {
-            self.insert(repository);
-        }
-    }
-
-    fn extend_and_save(&mut self, repositories: Vec<PathBuf>) -> Result<(), String> {
-        let previous = self.repositories.clone();
-        self.extend(repositories);
-        if self.repositories == previous {
-            return Ok(());
-        }
-        if let Err(error) = self.save() {
-            self.repositories = previous;
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn save(&self) -> Result<(), String> {
-        if let Some(error) = self.load_error.as_deref() {
-            return Err(format!(
-                "{error}; refusing to overwrite the unreadable repository inventory"
-            ));
-        }
-        let Some(path) = self.path.as_deref() else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("Could not create Hunkle config directory: {error}"))?;
-        }
-        let repositories = self
-            .repositories
-            .iter()
-            .map(|common_dir| known_repository_value(common_dir))
-            .collect::<Vec<_>>();
-        let content = serde_json::to_string_pretty(&serde_json::json!({
-            "version": 1,
-            "repositories": repositories,
-        }))
-        .map_err(|error| format!("Could not serialize known repositories: {error}"))?;
-        atomic_write(path, format!("{content}\n").as_bytes())
-            .map_err(|error| format!("Could not save known repositories: {error}"))
-    }
-}
-
-fn load_known(path: &Path) -> Result<Vec<PathBuf>, String> {
-    let content = match fs::read(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("Could not read known repositories: {error}")),
-    };
-    let value = serde_json::from_slice::<Value>(&content)
-        .map_err(|error| format!("Could not parse known repositories: {error}"))?;
-    if value.get("version").and_then(Value::as_u64) != Some(1) {
-        return Err("Known repositories use an unsupported version".to_owned());
-    }
-    value
-        .get("repositories")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Known repositories have no repository list".to_owned())?
-        .iter()
-        .map(known_repository_path)
-        .collect()
-}
-
-fn known_repository_value(path: &Path) -> Value {
-    if let Some(path) = path.to_str() {
-        return serde_json::json!({ "common_dir": path });
-    }
-    #[cfg(unix)]
-    {
-        serde_json::json!({ "common_dir_bytes": path.as_os_str().as_bytes() })
-    }
-    #[cfg(windows)]
-    {
-        serde_json::json!({
-            "common_dir_wide": path.as_os_str().encode_wide().collect::<Vec<_>>()
-        })
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        serde_json::json!({ "common_dir": path.to_string_lossy() })
-    }
-}
-
-fn known_repository_path(value: &Value) -> Result<PathBuf, String> {
-    if let Some(path) = value.get("common_dir").and_then(Value::as_str) {
-        return Ok(PathBuf::from(path));
-    }
-    #[cfg(unix)]
-    if let Some(bytes) = value.get("common_dir_bytes").and_then(Value::as_array) {
-        let bytes = bytes
-            .iter()
-            .map(|byte| {
-                byte.as_u64()
-                    .and_then(|byte| u8::try_from(byte).ok())
-                    .ok_or_else(|| "Known repository path contains an invalid byte".to_owned())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)));
-    }
-    #[cfg(windows)]
-    if let Some(wide) = value.get("common_dir_wide").and_then(Value::as_array) {
-        let wide = wide
-            .iter()
-            .map(|unit| {
-                unit.as_u64()
-                    .and_then(|unit| u16::try_from(unit).ok())
-                    .ok_or_else(|| "Known repository path contains an invalid unit".to_owned())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(PathBuf::from(std::ffi::OsString::from_wide(&wide)));
-    }
-    Err("Known repository entry has no path".to_owned())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+
     use super::*;
 
     fn linked(path: &str, branch: &str, is_main: bool) -> LinkedWorktree {

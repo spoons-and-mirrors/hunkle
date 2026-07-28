@@ -23,7 +23,7 @@ use ratatui_image::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::MediaPreviewProtocol;
+use crate::media::MediaPreviewProtocol;
 
 use super::text::{
     diff_display_line_count, markdown_prefix_style, styled_diff, styled_diff_window,

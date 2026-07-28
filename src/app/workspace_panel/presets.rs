@@ -7,7 +7,8 @@ use std::{
 
 use serde_json::Value;
 
-use super::super::atomic_write;
+use crate::filesystem::{atomic_write, same_path};
+
 use super::{
     HerdrWorkspace, WorkspaceGroup, WorkspaceSnapshot, WorkspaceSnapshotEntry,
     WorkspaceSnapshotGroup,
@@ -367,15 +368,6 @@ pub(super) fn groups_after_recall(
 
 pub(super) fn sort_groups(groups: &mut [WorkspaceGroup]) {
     groups.sort_by_cached_key(|group| group.name.to_lowercase());
-}
-
-pub(super) fn same_path(left: &Path, right: &Path) -> bool {
-    left == right
-        || left
-            .canonicalize()
-            .ok()
-            .zip(right.canonicalize().ok())
-            .is_some_and(|(left, right)| left == right)
 }
 
 impl WorkspaceSnapshot {

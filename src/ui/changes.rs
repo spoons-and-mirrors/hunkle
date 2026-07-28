@@ -1045,7 +1045,7 @@ fn draw_explorer_changes(
                 state,
             );
             match effective_protocol {
-                crate::app::MediaPreviewProtocol::Kitty => {
+                crate::media::MediaPreviewProtocol::Kitty => {
                     let transmission = take_kitty_transmission(frame.buffer_mut(), area);
                     app.changes.preview_presentation.queue_kitty_frame(
                         generation,
@@ -1053,8 +1053,8 @@ fn draw_explorer_changes(
                         transmission,
                     );
                 }
-                crate::app::MediaPreviewProtocol::Iterm2
-                | crate::app::MediaPreviewProtocol::Sixel => {
+                crate::media::MediaPreviewProtocol::Iterm2
+                | crate::media::MediaPreviewProtocol::Sixel => {
                     let transmission =
                         take_inline_transmission(frame.buffer_mut(), area, effective_protocol);
                     app.changes.preview_presentation.queue_inline_frame(
@@ -1064,10 +1064,10 @@ fn draw_explorer_changes(
                         transmission,
                     );
                 }
-                crate::app::MediaPreviewProtocol::Auto
-                | crate::app::MediaPreviewProtocol::Halfblocks => {}
+                crate::media::MediaPreviewProtocol::Auto
+                | crate::media::MediaPreviewProtocol::Halfblocks => {}
             }
-        } else if effective_protocol != crate::app::MediaPreviewProtocol::Halfblocks {
+        } else if effective_protocol != crate::media::MediaPreviewProtocol::Halfblocks {
             app.changes.preview_presentation.hide_media();
         }
         if let Some(error) = app.changes.preview_presentation.media_error() {
