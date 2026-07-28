@@ -2,6 +2,7 @@ mod changes;
 mod history;
 mod overlays;
 pub(crate) mod preview;
+mod sqlite;
 mod text;
 mod workspace_panel;
 

@@ -417,7 +417,24 @@ impl App {
             return;
         };
         if !drag.active {
-            self.handle_primary_left_click(point);
+            let Some(repo) = self.session.data() else {
+                return;
+            };
+            let viewport = self
+                .regions
+                .explorer_list
+                .map_or(0, |rect| usize::from(rect.height));
+            if self
+                .changes
+                .select_explorer_path(repo, &drag.source.path, viewport)
+            {
+                if drag.source.is_directory {
+                    self.changes.toggle_selected_explorer_directory(Some(repo));
+                } else {
+                    self.view = View::Changes;
+                    self.graph_commit_open = false;
+                }
+            }
             return;
         }
         let Some(target) = drag.target else {

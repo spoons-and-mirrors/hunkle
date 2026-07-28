@@ -800,17 +800,7 @@ fn draw_explorer_changes(
         content.width,
         content.bottom().saturating_sub(header.y.saturating_add(2)),
     );
-    let (file_count, inventory_truncated) = app.repository().map_or((0, false), |repo| {
-        (repo.files.len(), repo.inventory_truncated)
-    });
-    let files_title = if header.width >= 30 {
-        format!(
-            "FILES  {file_count}{}",
-            if inventory_truncated { "+" } else { "" }
-        )
-    } else {
-        "FILES".to_owned()
-    };
+    let files_title = "FILES";
     let add_width = 5.min(header.width);
     let add_button = Rect::new(
         header.right().saturating_sub(add_width),
@@ -830,7 +820,7 @@ fn draw_explorer_changes(
             Span::styled("CHANGES", Style::default().fg(palette().faint)),
             Span::raw("  "),
             Span::styled(
-                files_title.clone(),
+                files_title,
                 Style::default()
                     .fg(palette().muted)
                     .add_modifier(Modifier::BOLD),
@@ -864,7 +854,7 @@ fn draw_explorer_changes(
         Rect::new(
             header.x.saturating_add(9),
             header.y,
-            UnicodeWidthStr::width(files_title.as_str()) as u16,
+            UnicodeWidthStr::width(files_title) as u16,
             1,
         ),
     );
@@ -890,11 +880,7 @@ fn draw_explorer_changes(
             .skip(app.changes.explorer_scroll)
             .take(viewport)
             .map(|(index, row)| {
-                let repo = app.repository().expect("checked above");
-                let path = row
-                    .file_index
-                    .and_then(|file_index| repo.files.get(file_index))
-                    .or(row.directory_path.as_ref());
+                let path = row.file_path.as_ref().or(row.directory_path.as_ref());
                 let code = path.and_then(|path| app.changes.explorer_change_code(path));
                 let item = explorer_item(row, code, usize::from(list_area.width));
                 if app.changes.explorer_state.selected() == Some(index) {
@@ -934,7 +920,8 @@ fn draw_explorer_changes(
             .saturating_sub(preview_header.y.saturating_add(3)),
     );
     let media_loaded = app.changes.preview_image.is_some();
-    let wrap_label = if media_loaded {
+    let database_loaded = app.changes.sqlite_browser.is_some();
+    let wrap_label = if media_loaded || database_loaded {
         ""
     } else if app.changes.diff_wrap {
         "  alt+w:on"
@@ -948,15 +935,17 @@ fn draw_explorer_changes(
         .width
         .saturating_sub(markdown_button_width)
         .saturating_sub(u16::from(markdown_available));
+    let preview_kind = if database_loaded { "DATABASE" } else { "FILE" };
     let display_path = truncate_width(
         &selected_path,
-        usize::from(header_content_width)
-            .saturating_sub(7 + "read-only".len() + UnicodeWidthStr::width(wrap_label)),
+        usize::from(header_content_width).saturating_sub(
+            preview_kind.len() + 2 + "read-only".len() + UnicodeWidthStr::width(wrap_label),
+        ),
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "FILE  ",
+                format!("{preview_kind}  "),
                 Style::default()
                     .fg(palette().muted)
                     .add_modifier(Modifier::BOLD),
@@ -1078,6 +1067,9 @@ fn draw_explorer_changes(
                 preview_body,
             );
         }
+    } else if database_loaded {
+        app.changes.preview_presentation.hide_media();
+        super::sqlite::draw(frame, app, preview_body);
     } else {
         app.changes.preview_presentation.hide_media();
         let path = app
@@ -1732,7 +1724,7 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
 }
 
 fn explorer_item(row: &ExplorerRow, change_code: Option<char>, width: usize) -> ListItem<'static> {
-    if row.file_index.is_none() {
+    if row.file_path.is_none() {
         let marker = if row.directory_expanded == Some(false) {
             "> "
         } else {

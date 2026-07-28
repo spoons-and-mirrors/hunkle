@@ -808,9 +808,7 @@ impl RepositorySession {
             }
             .map(|payload| {
                 let prepared_file_tree = match &payload {
-                    LoadPayload::Open(data) => {
-                        Some(PreparedFileTree::new(&data.files, &data.directories))
-                    }
+                    LoadPayload::Open(data) => Some(PreparedFileTree::new(&data.root)),
                     LoadPayload::Refresh(_) => None,
                 };
                 let signature = match &payload {

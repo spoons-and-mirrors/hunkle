@@ -1,4 +1,6 @@
+mod directory_loader;
 mod preview_loader;
+pub(crate) mod sqlite_browser;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -16,7 +18,10 @@ use crate::{
     ui::preview::PreviewPresentation,
 };
 
+use directory_loader::DirectoryLoader;
 use preview_loader::{LoadedPreview, PreviewLoader};
+use sqlite_browser::{SqliteBrowser, SqliteDatabase, SqlitePageKey};
+pub(crate) use sqlite_browser::{SqliteFocus, SqlitePage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeftPane {
@@ -33,6 +38,12 @@ pub(crate) enum ChangesHitTarget {
     WorktreeRow { generation: u64, index: usize },
     WorktreeStage { generation: u64, index: usize },
     HunkAction { generation: u64, index: usize },
+    SqliteObjectsPane { generation: u64 },
+    SqliteRowsPane { generation: u64 },
+    SqliteObject { generation: u64, index: usize },
+    SqliteRow { generation: u64, index: usize },
+    SqlitePreviousPage { generation: u64 },
+    SqliteNextPage { generation: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,12 +85,17 @@ pub struct ChangesState {
     worktree_rows_generation: u64,
     explorer_rows_cache: Vec<ExplorerRow>,
     file_tree: Option<FileTree>,
-    file_tree_fingerprint: Option<u64>,
+    directory_loader: DirectoryLoader,
+    directory_generation: u64,
+    loading_directories: HashSet<RepoPath>,
+    failed_directories: HashSet<RepoPath>,
+    pending_explorer_selection: Option<(RepoPath, usize)>,
     worktree_tree: Option<WorktreeTree>,
     worktree_tree_fingerprint: Option<u64>,
     change_codes: HashMap<RepoPath, char>,
     pub(crate) preview_content_generation: u64,
     pub(crate) preview_image: Option<Arc<DynamicImage>>,
+    pub(crate) sqlite_browser: Option<SqliteBrowser>,
     pub(crate) preview_presentation: PreviewPresentation,
     preview_loader: PreviewLoader,
 }
@@ -99,7 +115,7 @@ pub(super) struct ChangesSelection {
 
 impl ChangesState {
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
-        let file_tree = repo.map(|repo| FileTree::new(&repo.files, &repo.directories));
+        let file_tree = repo.map(|repo| FileTree::from_root(&repo.root));
         let mut state = Self {
             pane: if repo.is_some_and(RepositoryData::is_local) {
                 LeftPane::Files
@@ -127,17 +143,30 @@ impl ChangesState {
             worktree_rows_generation: 0,
             explorer_rows_cache: Vec::new(),
             file_tree,
-            file_tree_fingerprint: repo.map(|repo| repo.files_fingerprint),
+            directory_loader: DirectoryLoader::new(),
+            directory_generation: 0,
+            loading_directories: HashSet::new(),
+            failed_directories: HashSet::new(),
+            pending_explorer_selection: None,
             worktree_tree: repo.map(|repo| WorktreeTree::new(&repo.changes)),
             worktree_tree_fingerprint: repo.map(|repo| repo.changes_fingerprint),
             change_codes: repo.map_or_else(HashMap::new, |repo| change_codes(&repo.changes)),
             preview_content_generation: 0,
             preview_image: None,
+            sqlite_browser: None,
             preview_presentation: PreviewPresentation::default(),
             preview_loader: PreviewLoader::new(),
         };
         state.rebuild_worktree_rows(repo);
         state.rebuild_explorer_rows(repo);
+        if let Some(repo) = repo
+            && state
+                .file_tree
+                .as_ref()
+                .is_none_or(|tree| !tree.has_directory(&RepoPath::default()))
+        {
+            state.request_explorer_directory(repo, RepoPath::default());
+        }
         state.select_initial_rows(repo);
         state.refresh_diff(repo);
         state
@@ -167,17 +196,28 @@ impl ChangesState {
         self.history_focused = false;
         self.collapsed_directories.clear();
         self.expanded_explorer_directories.clear();
+        self.directory_generation = self.directory_generation.wrapping_add(1);
+        self.loading_directories.clear();
+        self.failed_directories.clear();
+        self.pending_explorer_selection = None;
         if let Some(prepared) = prepared_file_tree {
             let tree = prepared.into_tree();
             if let Some(previous) = self.file_tree.replace(tree) {
                 crate::diagnostics::drop_in_background("file-tree", previous);
             }
-            self.file_tree_fingerprint = repo.map(|repo| repo.files_fingerprint);
         } else {
-            self.sync_repository_caches(repo);
+            self.file_tree = repo.map(|repo| FileTree::from_root(&repo.root));
         }
         self.rebuild_worktree_rows(repo);
         self.rebuild_explorer_rows(repo);
+        if let Some(repo) = repo
+            && self
+                .file_tree
+                .as_ref()
+                .is_none_or(|tree| !tree.has_directory(&RepoPath::default()))
+        {
+            self.request_explorer_directory(repo, RepoPath::default());
+        }
         self.select_initial_rows(repo);
         self.refresh_diff(repo);
     }
@@ -204,6 +244,7 @@ impl ChangesState {
 
     pub(super) fn restore_selection(&mut self, repo: &RepositoryData, selection: ChangesSelection) {
         self.rebuild_worktree_rows(Some(repo));
+        self.refresh_explorer_directories(repo);
         self.rebuild_explorer_rows(Some(repo));
 
         let change_index = selection.change.and_then(|(path, staged)| {
@@ -235,10 +276,7 @@ impl ChangesState {
 
         let explorer_row = selection
             .explorer_file
-            .and_then(|path| {
-                let file_index = repo.files.iter().position(|candidate| candidate == &path)?;
-                self.row_for_explorer_file(file_index)
-            })
+            .and_then(|path| self.row_for_explorer_file(&path))
             .or_else(|| {
                 let directory = selection.explorer_directory.as_ref()?;
                 self.explorer_rows()
@@ -258,13 +296,9 @@ impl ChangesState {
         &self.explorer_rows_cache
     }
 
-    pub(crate) fn selected_explorer_file_path<'a>(
-        &self,
-        repo: &'a RepositoryData,
-    ) -> Option<&'a RepoPath> {
+    pub(crate) fn selected_explorer_file_path(&self, _repo: &RepositoryData) -> Option<&RepoPath> {
         let selected = self.explorer_state.selected()?;
-        let file_index = self.explorer_rows().get(selected)?.file_index?;
-        repo.files.get(file_index)
+        self.explorer_rows().get(selected)?.file_path.as_ref()
     }
 
     pub(super) fn selected_change_index(&self, repo: &RepositoryData) -> Option<usize> {
@@ -278,7 +312,7 @@ impl ChangesState {
                 .explorer_state
                 .selected()
                 .and_then(|index| self.explorer_rows_cache.get(index))
-                .is_some_and(|row| row.file_index.is_some() || row.directory_path.is_some()),
+                .is_some_and(|row| row.file_path.is_some() || row.directory_path.is_some()),
             LeftPane::Worktree => {
                 if self.history_focused
                     && self
@@ -329,13 +363,13 @@ impl ChangesState {
 
     pub(super) fn explorer_entry(
         &self,
-        repo: &RepositoryData,
+        _repo: &RepositoryData,
         index: usize,
     ) -> Option<ExplorerEntry> {
         let row = self.explorer_rows().get(index)?;
-        if let Some(file_index) = row.file_index {
+        if let Some(path) = &row.file_path {
             return Some(ExplorerEntry {
-                path: repo.files.get(file_index)?.clone(),
+                path: path.clone(),
                 is_directory: false,
             });
         }
@@ -352,19 +386,35 @@ impl ChangesState {
         viewport: usize,
     ) -> bool {
         expand_ancestors(&mut self.expanded_explorer_directories, path);
+        self.request_explorer_ancestors(repo, path);
         self.rebuild_explorer_rows(Some(repo));
         let row = self.explorer_rows().iter().position(|row| {
-            row.directory_path.as_ref() == Some(path)
-                || row
-                    .file_index
-                    .and_then(|index| repo.files.get(index))
-                    .is_some_and(|candidate| candidate == path)
+            row.directory_path.as_ref() == Some(path) || row.file_path.as_ref() == Some(path)
         });
         let Some(row) = row else {
-            return false;
+            let parent = path.parent().unwrap_or_default();
+            if self
+                .file_tree
+                .as_ref()
+                .is_some_and(|tree| tree.has_directory(&parent))
+                && !self.loading_directories.contains(&parent)
+            {
+                self.pending_explorer_selection = None;
+                return false;
+            }
+            self.pending_explorer_selection = Some((path.clone(), viewport));
+            if repo.files.iter().any(|candidate| candidate == path) {
+                self.preview_loader.invalidate();
+                self.set_diff("Loading preview…".to_owned());
+            }
+            return true;
         };
+        self.pending_explorer_selection = None;
         self.explorer_state.select(Some(row));
         ensure_selection_visible(&mut self.explorer_scroll, Some(row), viewport);
+        self.explorer_scroll = self
+            .explorer_scroll
+            .min(self.explorer_rows_cache.len().saturating_sub(viewport));
         self.refresh_diff(Some(repo));
         true
     }
@@ -442,6 +492,45 @@ impl ChangesState {
             ChangesHitTarget::HunkAction { generation, index } => (generation
                 == self.preview_content_generation)
                 .then_some(ChangesEffect::StageHunk(index)),
+            ChangesHitTarget::SqliteObjectsPane { generation } => {
+                let browser = self.current_sqlite_target(generation)?;
+                browser.active = true;
+                browser.focus = SqliteFocus::Objects;
+                None
+            }
+            ChangesHitTarget::SqliteRowsPane { generation } => {
+                let browser = self.current_sqlite_target(generation)?;
+                browser.active = true;
+                browser.focus = SqliteFocus::Rows;
+                None
+            }
+            ChangesHitTarget::SqliteObject { generation, index } => {
+                let browser = self.current_sqlite_target(generation)?;
+                browser.active = true;
+                let key = browser.select_object(index, 0);
+                if let Some(key) = key {
+                    self.request_sqlite_page(repo, key);
+                }
+                None
+            }
+            ChangesHitTarget::SqliteRow { generation, index } => {
+                let browser = self.current_sqlite_target(generation)?;
+                browser.active = true;
+                browser.select_row(index, 0);
+                None
+            }
+            ChangesHitTarget::SqlitePreviousPage { generation } => {
+                if self.current_sqlite_target(generation).is_some() {
+                    self.page_sqlite(repo, -1);
+                }
+                None
+            }
+            ChangesHitTarget::SqliteNextPage { generation } => {
+                if self.current_sqlite_target(generation).is_some() {
+                    self.page_sqlite(repo, 1);
+                }
+                None
+            }
         }
     }
 
@@ -489,6 +578,190 @@ impl ChangesState {
         }
     }
 
+    pub(crate) fn sqlite_objects_target(&self) -> Option<ChangesHitTarget> {
+        Some(ChangesHitTarget::SqliteObjectsPane {
+            generation: self.sqlite_browser.as_ref()?.generation,
+        })
+    }
+
+    pub(crate) fn sqlite_rows_target(&self) -> Option<ChangesHitTarget> {
+        Some(ChangesHitTarget::SqliteRowsPane {
+            generation: self.sqlite_browser.as_ref()?.generation,
+        })
+    }
+
+    pub(crate) fn sqlite_object_target(&self, index: usize) -> Option<ChangesHitTarget> {
+        Some(ChangesHitTarget::SqliteObject {
+            generation: self.sqlite_browser.as_ref()?.generation,
+            index,
+        })
+    }
+
+    pub(crate) fn sqlite_row_target(&self, index: usize) -> Option<ChangesHitTarget> {
+        Some(ChangesHitTarget::SqliteRow {
+            generation: self.sqlite_browser.as_ref()?.generation,
+            index,
+        })
+    }
+
+    pub(crate) fn sqlite_page_target(&self, next: bool) -> Option<ChangesHitTarget> {
+        let generation = self.sqlite_browser.as_ref()?.generation;
+        Some(if next {
+            ChangesHitTarget::SqliteNextPage { generation }
+        } else {
+            ChangesHitTarget::SqlitePreviousPage { generation }
+        })
+    }
+
+    pub(super) fn sqlite_active(&self) -> bool {
+        self.sqlite_browser
+            .as_ref()
+            .is_some_and(|browser| browser.active)
+    }
+
+    pub(super) fn activate_sqlite(&mut self) -> bool {
+        let Some(browser) = &mut self.sqlite_browser else {
+            return false;
+        };
+        browser.active = true;
+        true
+    }
+
+    pub(super) fn deactivate_sqlite(&mut self) {
+        if let Some(browser) = &mut self.sqlite_browser {
+            browser.active = false;
+        }
+    }
+
+    pub(super) fn toggle_sqlite_focus(&mut self) {
+        let Some(browser) = &mut self.sqlite_browser else {
+            return;
+        };
+        browser.focus = match browser.focus {
+            SqliteFocus::Objects => SqliteFocus::Rows,
+            SqliteFocus::Rows => SqliteFocus::Objects,
+        };
+    }
+
+    pub(super) fn focus_sqlite_rows(&mut self) {
+        if let Some(browser) = &mut self.sqlite_browser {
+            browser.focus = SqliteFocus::Rows;
+        }
+    }
+
+    pub(super) fn focus_sqlite_objects(&mut self) {
+        if let Some(browser) = &mut self.sqlite_browser {
+            browser.focus = SqliteFocus::Objects;
+        }
+    }
+
+    pub(super) fn move_sqlite_selection(
+        &mut self,
+        repo: &RepositoryData,
+        delta: isize,
+        object_viewport: usize,
+        row_viewport: usize,
+    ) {
+        let Some(browser) = &mut self.sqlite_browser else {
+            return;
+        };
+        let key = match browser.focus {
+            SqliteFocus::Objects => browser.move_object(delta, object_viewport),
+            SqliteFocus::Rows => {
+                browser.move_row(delta, row_viewport);
+                None
+            }
+        };
+        if let Some(key) = key {
+            self.request_sqlite_page(repo, key);
+        }
+    }
+
+    pub(super) fn select_sqlite_boundary(
+        &mut self,
+        repo: &RepositoryData,
+        last: bool,
+        object_viewport: usize,
+        row_viewport: usize,
+    ) {
+        let Some(browser) = &mut self.sqlite_browser else {
+            return;
+        };
+        let key = match browser.focus {
+            SqliteFocus::Objects => browser.select_object_boundary(last, object_viewport),
+            SqliteFocus::Rows => {
+                let row = if last {
+                    browser
+                        .page
+                        .as_ref()
+                        .and_then(|page| page.rows.len().checked_sub(1))
+                } else {
+                    Some(0)
+                };
+                if let Some(row) = row {
+                    browser.select_row(row, row_viewport);
+                }
+                None
+            }
+        };
+        if let Some(key) = key {
+            self.request_sqlite_page(repo, key);
+        }
+    }
+
+    pub(super) fn page_sqlite(&mut self, repo: &RepositoryData, delta: isize) {
+        let key = self
+            .sqlite_browser
+            .as_mut()
+            .and_then(|browser| browser.page_by(delta));
+        if let Some(key) = key {
+            self.request_sqlite_page(repo, key);
+        }
+    }
+
+    pub(super) fn shift_sqlite_columns(&mut self, delta: isize) {
+        if let Some(browser) = &mut self.sqlite_browser {
+            browser.shift_columns(delta);
+        }
+    }
+
+    pub(super) fn scroll_sqlite_objects(&mut self, viewport: usize, delta: isize) {
+        let Some(browser) = &mut self.sqlite_browser else {
+            return;
+        };
+        scroll_viewport(
+            &mut browser.object_scroll,
+            browser.objects.len(),
+            viewport,
+            delta,
+        );
+    }
+
+    pub(super) fn scroll_sqlite_rows(&mut self, viewport: usize, delta: isize) {
+        let Some(browser) = &mut self.sqlite_browser else {
+            return;
+        };
+        let len = browser.page.as_ref().map_or(0, |page| page.rows.len());
+        scroll_viewport(&mut browser.row_scroll, len, viewport, delta);
+    }
+
+    fn current_sqlite_target(&mut self, generation: u64) -> Option<&mut SqliteBrowser> {
+        let browser = self.sqlite_browser.as_mut()?;
+        (self.pane == LeftPane::Files && browser.generation == generation).then_some(browser)
+    }
+
+    fn request_sqlite_page(&mut self, repo: &RepositoryData, key: SqlitePageKey) {
+        let Some(path) = self
+            .sqlite_browser
+            .as_ref()
+            .map(|browser| browser.path.clone())
+        else {
+            return;
+        };
+        self.preview_loader
+            .request_sqlite_page(&repo.root, path, key);
+    }
+
     fn is_current_worktree_target(&self, generation: u64) -> bool {
         self.pane == LeftPane::Worktree && generation == self.worktree_rows_generation
     }
@@ -497,6 +770,7 @@ impl ChangesState {
         if index >= self.explorer_rows().len() {
             return false;
         }
+        self.pending_explorer_selection = None;
         self.explorer_state.select(Some(index));
         self.refresh_diff(Some(repo));
         true
@@ -511,19 +785,8 @@ impl ChangesState {
         let Some(path) = repo.files.get(file_index) else {
             return false;
         };
-        expand_ancestors(&mut self.expanded_explorer_directories, path);
-        self.rebuild_explorer_rows(Some(repo));
-        let Some(row) = self.row_for_explorer_file(file_index) else {
-            return false;
-        };
-        self.explorer_state.select(Some(row));
-        if viewport == 0 {
-            self.explorer_scroll = row;
-        } else {
-            ensure_selection_visible(&mut self.explorer_scroll, Some(row), viewport);
-        }
-        self.refresh_diff(Some(repo));
-        true
+        let path = path.clone();
+        self.select_explorer_path(repo, &path, viewport)
     }
 
     pub(super) fn select_history_row(
@@ -563,6 +826,7 @@ impl ChangesState {
         };
         let previous = self.preview_selection();
         if self.pane == LeftPane::Files {
+            self.pending_explorer_selection = None;
             move_list(
                 &mut self.explorer_state,
                 self.explorer_rows_cache.len(),
@@ -608,6 +872,7 @@ impl ChangesState {
         };
         let previous = self.preview_selection();
         if self.pane == LeftPane::Files {
+            self.pending_explorer_selection = None;
             self.explorer_state
                 .select((!self.explorer_rows().is_empty()).then_some(0));
             ensure_selection_visible(
@@ -642,6 +907,7 @@ impl ChangesState {
         };
         let previous = self.preview_selection();
         if self.pane == LeftPane::Files {
+            self.pending_explorer_selection = None;
             self.explorer_state
                 .select(self.explorer_rows().len().checked_sub(1));
             ensure_selection_visible(
@@ -810,11 +1076,15 @@ impl ChangesState {
     }
 
     pub(super) fn toggle_selected_explorer_directory(&mut self, repo: Option<&RepositoryData>) {
+        self.pending_explorer_selection = None;
         let Some(path) = self.selected_explorer_directory_path() else {
             return;
         };
         if !self.expanded_explorer_directories.remove(&path) {
             self.expanded_explorer_directories.insert(path.clone());
+            if let Some(repo) = repo {
+                self.request_explorer_directory(repo, path.clone());
+            }
         }
         self.rebuild_explorer_rows(repo);
         self.select_explorer_directory(&path);
@@ -822,6 +1092,7 @@ impl ChangesState {
     }
 
     pub(super) fn expand_or_descend_explorer(&mut self, repo: Option<&RepositoryData>) {
+        self.pending_explorer_selection = None;
         let Some(index) = self.explorer_state.selected() else {
             return;
         };
@@ -835,6 +1106,9 @@ impl ChangesState {
         let depth = row.depth;
         if expanded == Some(false) {
             self.expanded_explorer_directories.insert(path.clone());
+            if let Some(repo) = repo {
+                self.request_explorer_directory(repo, path.clone());
+            }
             self.rebuild_explorer_rows(repo);
             self.select_explorer_directory(&path);
         } else if self
@@ -848,6 +1122,7 @@ impl ChangesState {
     }
 
     pub(super) fn collapse_or_ascend_explorer(&mut self, repo: Option<&RepositoryData>) {
+        self.pending_explorer_selection = None;
         let Some(index) = self.explorer_state.selected() else {
             return;
         };
@@ -985,12 +1260,22 @@ impl ChangesState {
                 self.set_diff("Select a file to preview".to_owned());
                 return;
             };
-            if let Some(index) = row.file_index {
+            let file_path = row.file_path.clone();
+            let directory = row.directory_path.clone();
+            let descendant_count = row.descendant_count;
+            if let Some(path) = file_path {
                 self.set_diff("Loading preview…".to_owned());
-                self.preview_loader
-                    .request_file(&repo.root, repo.files[index].clone());
-            } else if let Some(path) = &row.directory_path {
-                self.set_diff(format!("{} files in {path}/", row.descendant_count));
+                self.preview_loader.request_file(&repo.root, path);
+            } else if let Some(path) = directory {
+                let loaded = self
+                    .file_tree
+                    .as_ref()
+                    .is_some_and(|tree| tree.has_directory(&path));
+                if loaded {
+                    self.set_diff(format!("{descendant_count} items in {path}/"));
+                } else {
+                    self.set_diff(format!("Folder {path}/"));
+                }
             }
             return;
         }
@@ -1029,6 +1314,14 @@ impl ChangesState {
         };
         match content {
             LoadedPreview::Text(content) | LoadedPreview::Error(content) => self.set_diff(content),
+            LoadedPreview::Database { path, database } => self.set_database(path, database),
+            LoadedPreview::DatabasePage { path, key, result } => {
+                if let Some(browser) = &mut self.sqlite_browser
+                    && browser.path == path
+                {
+                    browser.apply_page(&key, result);
+                }
+            }
             LoadedPreview::Image(image) => self.set_image(image),
         }
         if let Some(pending) = self.pending_hunk_selection.take() {
@@ -1039,7 +1332,86 @@ impl ChangesState {
         true
     }
 
+    pub(super) fn poll_directories(&mut self, repo: Option<&RepositoryData>) -> bool {
+        let mut changed = false;
+        let mut directories_changed = false;
+        while let Some(completion) = self.directory_loader.poll() {
+            let Some(repo) = repo else {
+                continue;
+            };
+            if completion.generation != self.directory_generation || completion.root != repo.root {
+                continue;
+            }
+            self.loading_directories.remove(&completion.directory);
+            let entries = match completion.result {
+                Ok(entries) => entries,
+                Err(error) => {
+                    self.failed_directories.insert(completion.directory.clone());
+                    let blocks_pending =
+                        self.pending_explorer_selection
+                            .as_ref()
+                            .is_some_and(|(path, _)| {
+                                completion.directory.is_empty()
+                                    || path.as_path().starts_with(completion.directory.as_path())
+                            });
+                    let selected_directory = self
+                        .selected_explorer_directory_path()
+                        .is_some_and(|path| path == completion.directory);
+                    if blocks_pending {
+                        self.pending_explorer_selection = None;
+                    }
+                    if completion.directory.is_empty() || blocks_pending || selected_directory {
+                        self.preview_loader.invalidate();
+                        self.set_diff(error);
+                        changed = true;
+                    }
+                    continue;
+                }
+            };
+            self.failed_directories.remove(&completion.directory);
+            let selected_index = self.explorer_state.selected();
+            let selected_offset =
+                selected_index.map(|index| index.saturating_sub(self.explorer_scroll));
+            let selected = selected_index.and_then(|index| self.explorer_entry(repo, index));
+            if let Some(tree) = &mut self.file_tree {
+                tree.replace_directory(completion.directory, entries);
+            }
+            self.rebuild_explorer_rows(None);
+            if let Some(selected) = selected {
+                let row = self.explorer_rows().iter().position(|row| {
+                    row.directory_path.as_ref() == Some(&selected.path)
+                        || row.file_path.as_ref() == Some(&selected.path)
+                });
+                let row = row.or_else(|| self.initial_explorer_row());
+                self.explorer_state.select(row);
+                self.explorer_scroll = row
+                    .zip(selected_offset)
+                    .map_or(0, |(row, offset)| row.saturating_sub(offset));
+            } else if selected_index.is_none() {
+                self.explorer_state.select(self.initial_explorer_row());
+                self.explorer_scroll = 0;
+            }
+            changed = true;
+            directories_changed = true;
+        }
+        if directories_changed
+            && let Some((path, viewport)) = self.pending_explorer_selection.clone()
+        {
+            if !self.select_explorer_path(
+                repo.expect("changed completion has repository"),
+                &path,
+                viewport,
+            ) {
+                self.refresh_diff(repo);
+            }
+        } else if directories_changed {
+            self.refresh_diff(repo);
+        }
+        changed
+    }
+
     pub(super) fn shutdown(&mut self) {
+        self.directory_loader.shutdown();
         self.preview_loader.shutdown();
         self.preview_presentation.shutdown();
     }
@@ -1064,16 +1436,51 @@ impl ChangesState {
         self.worktree_rows_generation = self.worktree_rows_generation.wrapping_add(1);
     }
 
-    fn sync_repository_caches(&mut self, repo: Option<&RepositoryData>) {
-        let files_fingerprint = repo.map(|repo| repo.files_fingerprint);
-        if self.file_tree_fingerprint != files_fingerprint {
-            let tree = repo.map(|repo| FileTree::new(&repo.files, &repo.directories));
-            let previous = std::mem::replace(&mut self.file_tree, tree);
-            if let Some(previous) = previous {
-                crate::diagnostics::drop_in_background("file-tree", previous);
-            }
-            self.file_tree_fingerprint = files_fingerprint;
+    fn request_explorer_directory(&mut self, repo: &RepositoryData, directory: RepoPath) {
+        let loaded = self
+            .file_tree
+            .as_ref()
+            .is_some_and(|tree| tree.has_directory(&directory));
+        if (loaded && !self.failed_directories.remove(&directory))
+            || !self.loading_directories.insert(directory.clone())
+        {
+            return;
         }
+        self.directory_loader
+            .request(self.directory_generation, &repo.root, directory);
+    }
+
+    fn request_explorer_ancestors(&mut self, repo: &RepositoryData, path: &RepoPath) {
+        self.request_explorer_directory(repo, RepoPath::default());
+        let mut directories = Vec::new();
+        let mut parent = path.parent();
+        while let Some(path) = parent {
+            directories.push(path.clone());
+            parent = path.parent();
+        }
+        for directory in directories.into_iter().rev() {
+            self.request_explorer_directory(repo, directory);
+        }
+    }
+
+    fn refresh_explorer_directories(&mut self, repo: &RepositoryData) {
+        self.directory_generation = self.directory_generation.wrapping_add(1);
+        self.loading_directories.clear();
+        let mut directories = self
+            .file_tree
+            .as_ref()
+            .map_or_else(Vec::new, FileTree::loaded_directories);
+        if !directories.iter().any(RepoPath::is_empty) {
+            directories.push(RepoPath::default());
+        }
+        for directory in directories {
+            self.loading_directories.insert(directory.clone());
+            self.directory_loader
+                .request(self.directory_generation, &repo.root, directory);
+        }
+    }
+
+    fn sync_repository_caches(&mut self, repo: Option<&RepositoryData>) {
         let changes_fingerprint = repo.map(|repo| repo.changes_fingerprint);
         if self.worktree_tree_fingerprint != changes_fingerprint {
             self.worktree_tree = repo.map(|repo| WorktreeTree::new(&repo.changes));
@@ -1089,13 +1496,29 @@ impl ChangesState {
     pub(crate) fn set_diff(&mut self, content: String) {
         self.diff = content;
         self.preview_image = None;
+        self.sqlite_browser = None;
         self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
         self.preview_presentation.clear();
+    }
+
+    fn set_database(&mut self, path: RepoPath, database: SqliteDatabase) {
+        self.diff.clear();
+        self.preview_image = None;
+        self.diff_scroll = 0;
+        self.markdown_rendered = false;
+        self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
+        self.preview_presentation.clear();
+        self.sqlite_browser = Some(SqliteBrowser::new(
+            path,
+            database,
+            self.preview_content_generation,
+        ));
     }
 
     fn set_image(&mut self, image: Arc<DynamicImage>) {
         self.diff.clear();
         self.preview_image = Some(image);
+        self.sqlite_browser = None;
         self.diff_scroll = 0;
         self.markdown_rendered = false;
         self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
@@ -1117,16 +1540,16 @@ impl ChangesState {
         self.explorer_state.select(row);
     }
 
-    fn row_for_explorer_file(&self, file_index: usize) -> Option<usize> {
+    fn row_for_explorer_file(&self, path: &RepoPath) -> Option<usize> {
         self.explorer_rows()
             .iter()
-            .position(|row| row.file_index == Some(file_index))
+            .position(|row| row.file_path.as_ref() == Some(path))
     }
 
     fn first_explorer_file_row(&self) -> Option<usize> {
         self.explorer_rows()
             .iter()
-            .position(|row| row.file_index.is_some())
+            .position(|row| row.file_path.is_some())
     }
 
     fn initial_explorer_row(&self) -> Option<usize> {
@@ -1289,7 +1712,7 @@ fn ensure_selection_visible(scroll: &mut usize, selected: Option<usize>, viewpor
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf, thread, time::Duration};
 
     use crate::git::{Change, RepositoryKind};
 
@@ -1331,7 +1754,13 @@ mod tests {
 
     #[test]
     fn starts_files_collapsed_but_keeps_worktree_expanded() {
-        let repo = repository_data();
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("src/app")).unwrap();
+        fs::write(directory.path().join("src/app/mod.rs"), "").unwrap();
+        fs::write(directory.path().join("src/main.rs"), "").unwrap();
+        fs::write(directory.path().join("README.md"), "").unwrap();
+        let mut repo = repository_data();
+        repo.root = directory.path().to_owned();
 
         let mut state = ChangesState::new(Some(&repo));
         assert!(state.collapsed_directories.is_empty());
@@ -1348,6 +1777,12 @@ mod tests {
 
         state.explorer_state.select(Some(0));
         state.expand_or_descend_explorer(Some(&repo));
+        for _ in 0..100 {
+            if state.poll_directories(Some(&repo)) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
         assert_eq!(
             state
                 .explorer_rows()
@@ -1357,6 +1792,75 @@ mod tests {
             ["src", "app", "main.rs", "README.md"]
         );
         assert_eq!(state.explorer_rows()[1].directory_expanded, Some(false));
+    }
+
+    #[test]
+    fn explorer_uses_the_filesystem_instead_of_the_capped_inventory() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("jobs/k3-max-sleeve")).unwrap();
+        fs::write(
+            directory.path().join("jobs/k3-max-sleeve/result.db"),
+            "result",
+        )
+        .unwrap();
+        let mut repo = repository_data();
+        repo.root = directory.path().to_owned();
+        repo.files.clear();
+        repo.directories.clear();
+        repo.inventory_truncated = true;
+
+        let mut state = ChangesState::new(Some(&repo));
+        assert!(state.explorer_rows().iter().any(|row| {
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "jobs")
+        }));
+
+        assert!(state.select_explorer_path(&repo, &"jobs/k3-max-sleeve/result.db".into(), 20));
+        for _ in 0..100 {
+            state.poll_directories(Some(&repo));
+            if state
+                .selected_explorer_file_path(&repo)
+                .is_some_and(|path| path == "jobs/k3-max-sleeve/result.db")
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("deep filesystem path did not load");
+    }
+
+    #[test]
+    fn explicit_explorer_selection_cancels_a_pending_deep_reveal() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("src/nested")).unwrap();
+        fs::write(directory.path().join("src/nested/main.rs"), "").unwrap();
+        fs::write(directory.path().join("README.md"), "readme").unwrap();
+        let mut repo = repository_data();
+        repo.root = directory.path().to_owned();
+        repo.files = vec!["README.md".into(), "src/nested/main.rs".into()];
+
+        let mut state = ChangesState::new(Some(&repo));
+        assert!(state.select_explorer_path(&repo, &"src/nested/main.rs".into(), 20));
+        let readme = state
+            .explorer_rows()
+            .iter()
+            .position(|row| {
+                row.file_path
+                    .as_ref()
+                    .is_some_and(|path| path == "README.md")
+            })
+            .unwrap();
+        assert!(state.select_explorer_row(&repo, readme));
+
+        for _ in 0..100 {
+            state.poll_directories(Some(&repo));
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            state.selected_explorer_file_path(&repo),
+            Some(&RepoPath::from("README.md"))
+        );
     }
 
     #[test]

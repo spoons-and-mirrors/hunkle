@@ -11,6 +11,7 @@ pub(super) enum Language {
     JavaScript,
     Python,
     Shell,
+    Sql,
     Data,
     Generic,
 }
@@ -140,6 +141,7 @@ impl Language {
             "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "vue" | "svelte" => Self::JavaScript,
             "py" | "pyi" | "rb" => Self::Python,
             "sh" | "bash" | "zsh" | "fish" => Self::Shell,
+            "sql" | "db" | "sqlite" | "sqlite3" => Self::Sql,
             "json" | "jsonc" | "toml" | "yaml" | "yml" => Self::Data,
             _ => Self::Generic,
         }
@@ -201,6 +203,7 @@ fn identifier_style(
 
 fn is_line_comment(rest: &str, language: Language) -> bool {
     rest.starts_with("//")
+        || (language == Language::Sql && rest.starts_with("--"))
         || (matches!(
             language,
             Language::Python | Language::Shell | Language::Data
@@ -375,6 +378,50 @@ fn is_keyword(token: &str, language: Language) -> bool {
             | "yield"
     );
     common
+        || (language == Language::Sql
+            && matches!(
+                token.to_ascii_lowercase().as_str(),
+                "alter"
+                    | "and"
+                    | "as"
+                    | "by"
+                    | "case"
+                    | "create"
+                    | "default"
+                    | "delete"
+                    | "distinct"
+                    | "drop"
+                    | "else"
+                    | "end"
+                    | "exists"
+                    | "from"
+                    | "group"
+                    | "having"
+                    | "in"
+                    | "index"
+                    | "insert"
+                    | "into"
+                    | "join"
+                    | "limit"
+                    | "not"
+                    | "null"
+                    | "on"
+                    | "or"
+                    | "order"
+                    | "primary"
+                    | "references"
+                    | "select"
+                    | "set"
+                    | "table"
+                    | "then"
+                    | "union"
+                    | "unique"
+                    | "update"
+                    | "values"
+                    | "view"
+                    | "when"
+                    | "where"
+            ))
         || (language == Language::Rust
             && matches!(
                 token,

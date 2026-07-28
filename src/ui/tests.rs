@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{
     App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, GraphHitTarget,
     HitTarget, LeftPane, Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings,
-    SettingsStore, View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget,
+    SettingsStore, SqliteFocus, View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget,
     WorktreeManagerHitTarget, WorktreeManagerRow,
 };
 use crate::repo_path::RepoPath;
@@ -201,17 +201,23 @@ fn renders_every_primary_surface() {
         Some(false)
     );
     click(&mut app, explorer.x + 2, explorer.y + directory_row as u16);
+    wait_for(&mut app, |app| {
+        app.changes.explorer_rows().iter().any(|row| {
+            row.file_path
+                .as_ref()
+                .is_some_and(|path| path.parent().is_some_and(|parent| parent == "fixtures"))
+        })
+    });
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     explorer = app.regions.explorer_list.unwrap();
     let explorer_rows = app.changes.explorer_rows();
-    let repo = app.repository().unwrap();
     let selected_file_row = explorer_rows
         .iter()
-        .position(|row| row.file_index.is_some())
+        .position(|row| row.file_path.is_some())
         .unwrap();
     let selected_file = explorer_rows[selected_file_row]
-        .file_index
-        .and_then(|index| repo.files.get(index))
+        .file_path
+        .as_ref()
         .unwrap()
         .clone();
     click(
@@ -241,7 +247,7 @@ fn renders_every_primary_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let visible_file = app.changes.explorer_rows()[app.changes.explorer_scroll..]
         .iter()
-        .position(|row| row.file_index.is_some())
+        .position(|row| row.file_path.is_some())
         .unwrap();
     click(&mut app, explorer.x + 2, explorer.y + visible_file as u16);
     assert_ne!(
@@ -2010,7 +2016,6 @@ fn renders_colored_file_type_icons_in_the_files_view() {
 
     let list = app.regions.explorer_list.unwrap();
     let rows = app.changes.explorer_rows();
-    let repo = app.repository().unwrap();
     for (path, symbol, color) in [
         ("main.rs", "R", super::palette().orange),
         ("app.ts", "T", super::palette().cyan),
@@ -2024,11 +2029,7 @@ fn renders_colored_file_type_icons_in_the_files_view() {
     ] {
         let row_index = rows
             .iter()
-            .position(|row| {
-                row.file_index
-                    .and_then(|index| repo.files.get(index))
-                    .is_some_and(|file| file == path)
-            })
+            .position(|row| row.file_path.as_ref().is_some_and(|file| file == path))
             .unwrap();
         let row = &rows[row_index];
         let x = list.x + UnicodeWidthStr::width(row.prefix.as_str()) as u16;
@@ -2060,6 +2061,13 @@ fn keeps_file_tree_connectors_faint_and_folder_names_bright() {
         .unwrap();
     app.changes.explorer_state.select(Some(src));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for(&mut app, |app| {
+        app.changes.explorer_rows().iter().any(|row| {
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "src/nested")
+        })
+    });
     let nested = app
         .changes
         .explorer_rows()
@@ -2072,12 +2080,18 @@ fn keeps_file_tree_connectors_faint_and_folder_names_bright() {
         .unwrap();
     app.changes.explorer_state.select(Some(nested));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for(&mut app, |app| {
+        app.changes.explorer_rows().iter().any(|row| {
+            row.file_path
+                .as_ref()
+                .is_some_and(|path| path == "src/nested/main.rs")
+        })
+    });
 
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let list = app.regions.explorer_list.unwrap();
     let rows = app.changes.explorer_rows();
-    let repo = app.repository().unwrap();
 
     let src = rows
         .iter()
@@ -2096,11 +2110,7 @@ fn keeps_file_tree_connectors_faint_and_folder_names_bright() {
     for path in ["root.txt", "src/nested/main.rs"] {
         let row_index = rows
             .iter()
-            .position(|row| {
-                row.file_index
-                    .and_then(|index| repo.files.get(index))
-                    .is_some_and(|file| file == path)
-            })
+            .position(|row| row.file_path.as_ref().is_some_and(|file| file == path))
             .unwrap();
         let row = &rows[row_index];
         let x = list.x + UnicodeWidthStr::width(row.prefix.as_str()) as u16 + 2;
@@ -2154,7 +2164,6 @@ fn colors_changed_files_in_the_files_view() {
 
     let list = app.regions.explorer_list.unwrap();
     let rows = app.changes.explorer_rows();
-    let repo = app.repository().unwrap();
     for (path, expected) in [
         ("added.txt", super::palette().accent),
         ("deleted.txt", super::palette().red),
@@ -2163,11 +2172,7 @@ fn colors_changed_files_in_the_files_view() {
     ] {
         let row_index = rows
             .iter()
-            .position(|row| {
-                row.file_index
-                    .and_then(|index| repo.files.get(index))
-                    .is_some_and(|file| file == path)
-            })
+            .position(|row| row.file_path.as_ref().is_some_and(|file| file == path))
             .unwrap();
         let row = &rows[row_index];
         let x = list.x + row.prefix.chars().count() as u16 + 2;
@@ -2244,7 +2249,7 @@ fn files_click_waits_for_release_without_styling_every_file_as_a_drop_target() {
         .iter()
         .enumerate()
         .find_map(|(index, row)| {
-            (row.file_index.is_some() && Some(index) != selected_before).then_some(index)
+            (row.file_path.is_some() && Some(index) != selected_before).then_some(index)
         })
         .unwrap();
     let y = list.y + target.saturating_sub(app.changes.explorer_scroll) as u16;
@@ -2257,7 +2262,7 @@ fn files_click_waits_for_release_without_styling_every_file_as_a_drop_target() {
     assert_eq!(app.changes.explorer_state.selected(), selected_before);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     for (index, row) in app.changes.explorer_rows().iter().enumerate() {
-        if row.file_index.is_some() && Some(index) != selected_before {
+        if row.file_path.is_some() && Some(index) != selected_before {
             let y = list.y + index.saturating_sub(app.changes.explorer_scroll) as u16;
             assert_ne!(
                 terminal.backend().buffer()[(list.x, y)].bg,
@@ -2463,7 +2468,7 @@ fn left_pane_files_take_over_the_preview_from_graph() {
         .changes
         .explorer_rows()
         .iter()
-        .position(|row| row.file_index.is_some())
+        .position(|row| row.file_path.is_some())
         .unwrap();
     click(&mut app, explorer.x + 3, explorer.y + file_row as u16);
     wait_for_preview(&mut app);
@@ -2948,6 +2953,102 @@ fn corrupt_image_shows_an_error_as_text() {
             .diff
             .starts_with("Could not read image dimensions:")
     );
+}
+
+#[test]
+fn renders_sqlite_databases_from_the_files_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("app.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL); \
+             INSERT INTO people (name) VALUES ('Ada'), ('Grace');",
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut app = App::new(directory.path().to_path_buf());
+    wait_for(&mut app, |app| app.changes.sqlite_browser.is_some());
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(screen.contains("DATABASE  app.sqlite  read-only"));
+    assert!(screen.contains("OBJECTS  1"));
+    assert!(screen.contains("people  TABLE"));
+    assert!(screen.contains("name · TEXT"));
+    assert!(screen.contains("Ada"));
+    assert!(screen.contains("Enter explore"));
+}
+
+#[test]
+fn explores_and_pages_sqlite_databases_with_keys_and_mouse() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("app.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY, label TEXT); \
+             WITH RECURSIVE sequence(value) AS ( \
+                VALUES(1) UNION ALL SELECT value + 1 FROM sequence WHERE value < 105 \
+             ) INSERT INTO events SELECT value, printf('event-%03d', value) FROM sequence; \
+             CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT); \
+             INSERT INTO people VALUES (1, 'Ada');",
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut app = App::new(directory.path().to_path_buf());
+    wait_for(&mut app, |app| app.changes.sqlite_browser.is_some());
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.changes.sqlite_browser.as_ref().unwrap().focus,
+        SqliteFocus::Rows
+    );
+    app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+    wait_for(&mut app, |app| {
+        app.changes
+            .sqlite_browser
+            .as_ref()
+            .and_then(|browser| browser.page.as_ref())
+            .is_some_and(|page| page.key.offset == 100 && page.rows.len() == 5)
+    });
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let objects = app.regions.sqlite_objects.unwrap();
+    click(&mut app, objects.x + 2, objects.y + 1);
+    assert!(app.changes.sqlite_browser.as_ref().unwrap().active);
+    assert_eq!(
+        app.changes
+            .sqlite_browser
+            .as_ref()
+            .unwrap()
+            .selected_object()
+            .unwrap()
+            .name,
+        "people"
+    );
+    wait_for(&mut app, |app| {
+        app.changes
+            .sqlite_browser
+            .as_ref()
+            .and_then(|browser| browser.page.as_ref())
+            .is_some_and(|page| page.key.object == "people" && page.rows[0][1] == "Ada")
+    });
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.changes.sqlite_browser.as_ref().unwrap().active);
 }
 
 fn wait_for_halfblock_render(terminal: &mut Terminal<TestBackend>, app: &mut App) {

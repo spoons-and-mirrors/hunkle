@@ -1102,6 +1102,28 @@ impl App {
             }
             .min(self.regions.commit_scroll_max);
             self.commit_scroll = Some(next);
+        } else if self
+            .regions
+            .sqlite_objects
+            .is_some_and(|rect| rect.contains(point))
+        {
+            let viewport = self
+                .regions
+                .sqlite_objects
+                .map_or(0, |rect| usize::from(rect.height));
+            self.changes
+                .scroll_sqlite_objects(viewport, delta.saturating_mul(3));
+        } else if self
+            .regions
+            .sqlite_rows
+            .is_some_and(|rect| rect.contains(point))
+        {
+            let viewport = self
+                .regions
+                .sqlite_rows
+                .map_or(0, |rect| usize::from(rect.height));
+            self.changes
+                .scroll_sqlite_rows(viewport, delta.saturating_mul(3));
         } else if self.regions.diff.is_some_and(|rect| rect.contains(point)) {
             self.changes
                 .scroll_diff_by(self.regions.diff_scroll_max, delta.saturating_mul(3));

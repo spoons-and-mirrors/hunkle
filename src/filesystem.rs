@@ -8,6 +8,43 @@ use anyhow::{Context, Result, bail};
 
 use crate::repo_path::RepoPath;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceEntry {
+    pub(crate) path: RepoPath,
+    pub(crate) is_directory: bool,
+}
+
+pub(crate) fn read_workspace_directory(
+    root: &Path,
+    relative: &RepoPath,
+) -> Result<Vec<WorkspaceEntry>> {
+    let directory = safe_directory(root, relative)?;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&directory)
+        .with_context(|| format!("could not read directory {}", directory.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("could not read an entry in {}", directory.display()))?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("could not inspect {}", entry.path().display()))?;
+        entries.push(WorkspaceEntry {
+            path: relative.join(&entry.file_name()),
+            is_directory: file_type.is_dir() && !file_type.is_symlink(),
+        });
+    }
+    entries.sort_unstable_by(|left, right| {
+        right
+            .is_directory
+            .cmp(&left.is_directory)
+            .then_with(|| left.path.file_name().cmp(&right.path.file_name()))
+    });
+    Ok(entries)
+}
+
 pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
     file.write_all(content)?;
@@ -193,6 +230,37 @@ fn safe_path(root: &Path, relative: &RepoPath) -> Result<PathBuf> {
     Ok(root.join(path))
 }
 
+fn safe_directory(root: &Path, relative: &RepoPath) -> Result<PathBuf> {
+    let root_metadata = fs::symlink_metadata(root)
+        .with_context(|| format!("could not inspect workspace {}", root.display()))?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        bail!("the workspace root is no longer a safe directory");
+    }
+    if relative.is_empty() {
+        return Ok(root.to_owned());
+    }
+    let path = relative.as_path();
+    if path.is_absolute() {
+        bail!("Invalid workspace path");
+    }
+    let mut directory = root.to_owned();
+    for component in path.components() {
+        let Component::Normal(value) = component else {
+            bail!("Path must stay inside the workspace");
+        };
+        if value == ".git" {
+            bail!("Path must stay inside the workspace");
+        }
+        directory.push(value);
+        let metadata = fs::symlink_metadata(&directory)
+            .with_context(|| format!("could not inspect {}", directory.display()))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            bail!("{} is not a safe workspace directory", directory.display());
+        }
+    }
+    Ok(directory)
+}
+
 fn ensure_parent_directory(path: &Path) -> Result<()> {
     let parent = path.parent().context("path has no parent directory")?;
     let metadata = fs::symlink_metadata(parent)
@@ -227,6 +295,49 @@ mod tests {
         assert!(same_path(&child, &child));
         assert!(same_path(&child, &directory.path().join("./child")));
         assert!(!same_path(&child, &directory.path().join("missing")));
+    }
+
+    #[test]
+    fn reads_only_immediate_workspace_children() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        fs::create_dir(root.join("empty")).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("README.md"), "readme").unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let root_entries = read_workspace_directory(root, &RepoPath::default()).unwrap();
+        assert_eq!(
+            root_entries,
+            vec![
+                WorkspaceEntry {
+                    path: "empty".into(),
+                    is_directory: true,
+                },
+                WorkspaceEntry {
+                    path: "src".into(),
+                    is_directory: true,
+                },
+                WorkspaceEntry {
+                    path: "README.md".into(),
+                    is_directory: false,
+                },
+            ]
+        );
+        assert_eq!(
+            read_workspace_directory(root, &"src".into()).unwrap(),
+            vec![
+                WorkspaceEntry {
+                    path: "src/nested".into(),
+                    is_directory: true,
+                },
+                WorkspaceEntry {
+                    path: "src/main.rs".into(),
+                    is_directory: false,
+                },
+            ]
+        );
     }
 
     #[test]

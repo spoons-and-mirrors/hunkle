@@ -17,7 +17,7 @@ mod worktree_manager;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandRecord, CommandStatus};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
-pub(crate) use changes::ChangesHitTarget;
+pub(crate) use changes::{ChangesHitTarget, SqliteFocus, SqlitePage};
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use commit_message::CommitMessageGenerator;
 pub(crate) use commit_summary::CommitSummaryCache;
@@ -199,6 +199,8 @@ pub struct Regions {
     pub diff_scrollbar: Option<Rect>,
     pub diff_scroll_thumb: Option<Rect>,
     pub diff_scroll_max: usize,
+    pub sqlite_objects: Option<Rect>,
+    pub sqlite_rows: Option<Rect>,
     pub splitter: Option<Rect>,
     pub split_bounds: Option<Rect>,
     pub commit: Option<Rect>,
@@ -1015,6 +1017,7 @@ impl App {
         }
         self.try_start_workspace_restore();
         self.maybe_start_workspace_fetch();
+        changed |= self.changes.poll_directories(self.session.data());
         changed |= self
             .changes
             .poll_preview(self.session.data().map(|repo| repo.root.as_path()));
@@ -1126,6 +1129,13 @@ impl App {
             }
             return;
         }
+        if self.view == View::Changes
+            && self.changes.pane == LeftPane::Files
+            && self.changes.sqlite_active()
+        {
+            self.handle_sqlite_browser_key(key);
+            return;
+        }
         match key.code {
             KeyCode::F(1) => self.open_herdr_prompt(),
             KeyCode::F(3) => self.open_file_search(),
@@ -1226,6 +1236,10 @@ impl App {
                 self.open_selected_graph_commit();
             }
             KeyCode::Enter
+                if self.view == View::Changes
+                    && self.changes.pane == LeftPane::Files
+                    && self.changes.activate_sqlite() => {}
+            KeyCode::Enter
                 if self.view == View::Changes && self.changes.pane == LeftPane::Files =>
             {
                 let repo = self.session.data();
@@ -1292,6 +1306,75 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Home => self.select_first(),
             KeyCode::End | KeyCode::Char('G') => self.select_last(),
+            _ => {}
+        }
+    }
+
+    fn handle_sqlite_browser_key(&mut self, key: KeyEvent) {
+        let object_viewport = self
+            .regions
+            .sqlite_objects
+            .map_or(0, |area| usize::from(area.height));
+        let row_viewport = self
+            .regions
+            .sqlite_rows
+            .map_or(0, |area| usize::from(area.height));
+        let focus = self
+            .changes
+            .sqlite_browser
+            .as_ref()
+            .map(|browser| browser.focus);
+        match key.code {
+            KeyCode::Esc => self.changes.deactivate_sqlite(),
+            KeyCode::Tab | KeyCode::BackTab => self.changes.toggle_sqlite_focus(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(repo) = self.session.data() {
+                    self.changes
+                        .move_sqlite_selection(repo, 1, object_viewport, row_viewport);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(repo) = self.session.data() {
+                    self.changes
+                        .move_sqlite_selection(repo, -1, object_viewport, row_viewport);
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                if focus == Some(SqliteFocus::Objects) {
+                    self.changes.focus_sqlite_rows();
+                } else {
+                    self.changes.shift_sqlite_columns(1);
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if focus == Some(SqliteFocus::Rows) {
+                    self.changes.shift_sqlite_columns(-1);
+                } else {
+                    self.changes.focus_sqlite_objects();
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(repo) = self.session.data() {
+                    self.changes.page_sqlite(repo, 1);
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(repo) = self.session.data() {
+                    self.changes.page_sqlite(repo, -1);
+                }
+            }
+            KeyCode::Home => {
+                if let Some(repo) = self.session.data() {
+                    self.changes
+                        .select_sqlite_boundary(repo, false, object_viewport, row_viewport);
+                }
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                if let Some(repo) = self.session.data() {
+                    self.changes
+                        .select_sqlite_boundary(repo, true, object_viewport, row_viewport);
+                }
+            }
             _ => {}
         }
     }
@@ -2654,6 +2737,7 @@ impl App {
         self.view == View::Changes
             && self.changes.pane == LeftPane::Files
             && self.changes.preview_image.is_none()
+            && self.changes.sqlite_browser.is_none()
             && self
                 .selected_explorer_file_path()
                 .is_some_and(is_markdown_path)
@@ -3056,6 +3140,9 @@ mod tests {
         wait_for_state(&mut app, |app| {
             app.repository()
                 .is_some_and(|repo| repo.files.iter().any(|path| path == renamed))
+                && app
+                    .selected_explorer_file_path()
+                    .is_some_and(|path| path == renamed)
         });
         assert!(root.join(renamed).is_file());
         assert_eq!(
@@ -3071,6 +3158,11 @@ mod tests {
         wait_for_state(&mut app, |app| {
             app.repository()
                 .is_some_and(|repo| repo.directories.iter().any(|path| path == "created"))
+                && app.changes.explorer_rows().iter().any(|row| {
+                    row.directory_path
+                        .as_ref()
+                        .is_some_and(|path| path == "created")
+                })
         });
         assert!(root.join("created").is_dir());
 
@@ -3084,11 +3176,7 @@ mod tests {
             .changes
             .explorer_rows()
             .iter()
-            .position(|row| {
-                row.file_index
-                    .and_then(|index| app.repository().unwrap().files.get(index))
-                    .is_some_and(|path| path == renamed)
-            })
+            .position(|row| row.file_path.as_ref().is_some_and(|path| path == renamed))
             .unwrap();
         let target = app
             .changes
@@ -3106,6 +3194,9 @@ mod tests {
         wait_for_state(&mut app, |app| {
             app.repository()
                 .is_some_and(|repo| repo.files.iter().any(|path| path == "created/ renamed.txt"))
+                && app
+                    .selected_explorer_file_path()
+                    .is_some_and(|path| path == "created/ renamed.txt")
         });
         assert!(root.join("created/ renamed.txt").is_file());
 
