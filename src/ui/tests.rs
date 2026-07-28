@@ -109,6 +109,7 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(footer.contains("f Files"));
+    assert!(footer.contains("e Edit"));
     assert!(footer.contains("b Branches"));
     assert!(footer.contains("Tab Git Graph"));
     assert!(!footer.contains("r Refresh"));
@@ -169,6 +170,7 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(footer.contains("f Changes"));
+    assert!(footer.contains("e Edit"));
     let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
     assert_eq!(app.changes.pane, LeftPane::Worktree);

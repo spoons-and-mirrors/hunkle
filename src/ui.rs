@@ -415,6 +415,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         "Changes"
     };
     let mut labels = vec![("Tab", "Git Graph"), ("f", left_pane_label)];
+    let show_edit = app.can_edit_selected_file();
     if app.workspace_panel_available() {
         labels.push(("w", "Workspaces"));
     }
@@ -436,6 +437,19 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     });
     let mut spans = Vec::new();
     let start_x = area.right().saturating_sub(total_width).max(area.x);
+    if show_edit && start_x > area.x {
+        let mut edit = vec![
+            Span::raw(" "),
+            Span::styled("e", Style::default().fg(palette().orange)),
+        ];
+        if !compact {
+            edit.push(Span::styled(" Edit", Style::default().fg(palette().muted)));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(edit)),
+            Rect::new(area.x, area.y, start_x.saturating_sub(area.x), 1),
+        );
+    }
     let mut x = start_x;
     let mut rects = Vec::new();
     for (index, (key, label)) in labels.iter().enumerate() {
@@ -490,7 +504,6 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.regions.changes = None;
     app.regions.graph = rects.first().copied();
     app.regions.left_pane_toggle = rects.get(1).copied();
-    let offset = usize::from(app.workspace_panel_available());
     if app.workspace_panel_available()
         && let Some(rect) = rects.get(2).copied()
     {
@@ -499,6 +512,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             rect,
         );
     }
+    let offset = usize::from(app.workspace_panel_available());
     app.regions.explorer = rects.get(2 + offset).copied();
     app.regions.worktree_manager = rects.get(3 + offset).copied();
     app.regions.repository_browser = rects.get(4 + offset).copied();

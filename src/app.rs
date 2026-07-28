@@ -1777,6 +1777,13 @@ impl App {
         Some((repo.root.clone(), PathBuf::from(path)))
     }
 
+    pub(crate) fn can_edit_selected_file(&self) -> bool {
+        self.mode == Mode::Normal
+            && self.view == View::Changes
+            && self.changes.hunk_selection.is_none()
+            && self.selected_file_to_edit().is_some()
+    }
+
     fn format_selected_file(&mut self) {
         let Some(repo) = self.repository() else {
             self.notice = Some("Open a workspace first".to_owned());
@@ -3693,6 +3700,28 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Editor);
         assert_eq!(app.editor_input, "code --wait");
+
+        app.mode = Mode::Normal;
+        let repo = app.repository().unwrap().clone();
+        app.changes.set_pane(LeftPane::Files, Some(&repo));
+        assert!(
+            app.changes
+                .select_explorer_path(&repo, &RepoPath::from("tracked.txt"), 20)
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(
+            app.take_editor_request().unwrap().file,
+            fs::canonicalize(root.join("tracked.txt")).unwrap()
+        );
+
+        run_git(root, &["add", "tracked.txt"]);
+        let mut app = App::new(root.to_path_buf());
+        app.settings.editor_command = Some("code --wait".to_owned());
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(
+            app.take_editor_request().unwrap().file,
+            fs::canonicalize(root.join("tracked.txt")).unwrap()
+        );
     }
 
     #[cfg(unix)]
