@@ -67,7 +67,13 @@ pub struct RepositoryData {
     pub graph_truncated: bool,
     pub branches: Vec<Branch>,
     pub github_remote: bool,
-    pub(crate) worktree_signature: Option<u64>,
+    pub(crate) worktree_signature: Option<WorktreeSignature>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorktreeSignature {
+    state: u64,
+    branch: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +100,21 @@ impl RefreshScope {
     }
 }
 
+impl WorktreeSignature {
+    pub(crate) fn refresh_scope_since(self, previous: Self) -> RefreshScope {
+        if self.branch == previous.branch {
+            RefreshScope::WORKTREE_AND_INVENTORY
+        } else {
+            RefreshScope::ALL
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(state: u64, branch: u64) -> Self {
+        Self { state, branch }
+    }
+}
+
 #[derive(Debug)]
 pub struct RepositoryUpdate {
     root: PathBuf,
@@ -109,7 +130,7 @@ struct WorktreeData {
     changes: Vec<Change>,
     fingerprint: u64,
     counts: (usize, usize),
-    signature: u64,
+    signature: WorktreeSignature,
 }
 
 #[derive(Debug)]
@@ -202,7 +223,7 @@ impl RepositoryData {
 }
 
 impl RepositoryUpdate {
-    pub(crate) fn worktree_signature(&self) -> Option<u64> {
+    pub(crate) fn worktree_signature(&self) -> Option<WorktreeSignature> {
         self.worktree.as_ref().map(|worktree| worktree.signature)
     }
 }
@@ -1059,7 +1080,7 @@ pub fn run_command(root: &Path, args: &[String]) -> Result<CommandOutput> {
     Ok(command_output(output))
 }
 
-pub fn worktree_signature(root: &Path) -> Result<u64> {
+pub(crate) fn worktree_signature(root: &Path) -> Result<WorktreeSignature> {
     let output = run(
         root,
         &[
@@ -1078,26 +1099,34 @@ pub fn worktree_signature(root: &Path) -> Result<u64> {
     Ok(status_signature(root, &output.stdout, &changes))
 }
 
-fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> u64 {
-    let mut signature = DefaultHasher::new();
-    output.hash(&mut signature);
+fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> WorktreeSignature {
+    let mut state = DefaultHasher::new();
+    output.hash(&mut state);
     for path in changes
         .iter()
         .flat_map(|change| std::iter::once(&change.path).chain(change.original_path.as_ref()))
     {
-        path.hash(&mut signature);
+        path.hash(&mut state);
         let path = root.join(path);
         if let Ok(metadata) = fs::symlink_metadata(path) {
-            metadata.len().hash(&mut signature);
+            metadata.len().hash(&mut state);
             metadata
                 .modified()
                 .ok()
                 .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
                 .map(|duration| duration.as_nanos())
-                .hash(&mut signature);
+                .hash(&mut state);
         }
     }
-    signature.finish()
+    let mut branch = DefaultHasher::new();
+    output
+        .split(|byte| *byte == 0)
+        .find(|field| field.starts_with(b"## "))
+        .hash(&mut branch);
+    WorktreeSignature {
+        state: state.finish(),
+        branch: branch.finish(),
+    }
 }
 
 pub fn diff(root: &Path, change: &Change) -> Result<String> {
@@ -1277,7 +1306,7 @@ fn branch_name(root: &Path) -> Result<String> {
     }
 }
 
-fn status(root: &Path) -> Result<(Vec<Change>, u64)> {
+fn status(root: &Path) -> Result<(Vec<Change>, WorktreeSignature)> {
     let output = run(
         root,
         &[

@@ -22,6 +22,8 @@ struct SummaryRequest {
 
 const MAX_BATCH_SIZE: usize = 32;
 const MAX_CACHED_SUMMARIES: usize = 512;
+const MAX_QUEUED_SUMMARIES: usize = 256;
+const MAX_TRANSIENT_RETRIES: u8 = 2;
 
 pub(crate) struct CommitSummaryCache {
     root: Option<PathBuf>,
@@ -30,6 +32,7 @@ pub(crate) struct CommitSummaryCache {
     summary_order: VecDeque<String>,
     pending: HashSet<String>,
     failed: HashSet<String>,
+    attempts: HashMap<String, u8>,
     queued: VecDeque<String>,
     running: bool,
     request_sender: Sender<SummaryRequest>,
@@ -67,6 +70,7 @@ impl Default for CommitSummaryCache {
             summary_order: VecDeque::new(),
             pending: HashSet::new(),
             failed: HashSet::new(),
+            attempts: HashMap::new(),
             queued: VecDeque::new(),
             running: false,
             request_sender,
@@ -101,7 +105,15 @@ impl CommitSummaryCache {
             return;
         }
         self.pending.extend(requested.iter().cloned());
-        self.queued.extend(requested);
+        for oid in requested.into_iter().rev() {
+            self.queued.push_front(oid);
+        }
+        while self.queued.len() > MAX_QUEUED_SUMMARIES {
+            if let Some(oid) = self.queued.pop_back() {
+                self.pending.remove(&oid);
+                self.attempts.remove(&oid);
+            }
+        }
         self.start_next_batch();
     }
 
@@ -117,13 +129,16 @@ impl CommitSummaryCache {
             }
             match done.result {
                 Ok(summaries) => {
-                    self.failed.extend(
-                        done.requested
-                            .iter()
-                            .filter(|oid| !summaries.contains_key(*oid))
-                            .cloned(),
-                    );
+                    for oid in done
+                        .requested
+                        .iter()
+                        .filter(|oid| !summaries.contains_key(*oid))
+                    {
+                        self.attempts.remove(oid);
+                        self.failed.insert(oid.clone());
+                    }
                     for (oid, summary) in summaries {
+                        self.attempts.remove(&oid);
                         self.summary_order.push_back(oid.clone());
                         self.summaries.insert(oid, summary);
                     }
@@ -133,7 +148,19 @@ impl CommitSummaryCache {
                         }
                     }
                 }
-                Err(_) => self.failed.extend(done.requested),
+                Err(_) => {
+                    for oid in done.requested.into_iter().rev() {
+                        let attempts = self.attempts.entry(oid.clone()).or_default();
+                        *attempts += 1;
+                        if *attempts <= MAX_TRANSIENT_RETRIES {
+                            self.pending.insert(oid.clone());
+                            self.queued.push_back(oid);
+                        } else {
+                            self.attempts.remove(&oid);
+                            self.failed.insert(oid);
+                        }
+                    }
+                }
             }
             changed = true;
         }
@@ -151,6 +178,7 @@ impl CommitSummaryCache {
         self.summary_order.clear();
         self.pending.clear();
         self.failed.clear();
+        self.attempts.clear();
         self.queued.clear();
     }
 
@@ -170,5 +198,72 @@ impl CommitSummaryCache {
         if self.request_sender.send(request).is_ok() {
             self.running = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache() -> (
+        CommitSummaryCache,
+        Receiver<SummaryRequest>,
+        Sender<SummaryResult>,
+    ) {
+        let (request_sender, request_receiver) = mpsc::channel();
+        let (result_sender, receiver) = mpsc::channel();
+        (
+            CommitSummaryCache {
+                root: None,
+                generation: 0,
+                summaries: HashMap::new(),
+                summary_order: VecDeque::new(),
+                pending: HashSet::new(),
+                failed: HashSet::new(),
+                attempts: HashMap::new(),
+                queued: VecDeque::new(),
+                running: false,
+                request_sender,
+                receiver,
+            },
+            request_receiver,
+            result_sender,
+        )
+    }
+
+    #[test]
+    fn retries_transient_failures_before_caching_a_failure() {
+        let (mut cache, requests, results) = cache();
+        let root = Path::new("/repo");
+        cache.request(root, ["abc"]);
+
+        for attempt in 0..=MAX_TRANSIENT_RETRIES {
+            let request = requests.recv().unwrap();
+            results
+                .send(SummaryResult {
+                    generation: request.generation,
+                    root: request.root,
+                    requested: request.requested,
+                    result: Err("temporary failure".to_owned()),
+                })
+                .unwrap();
+            assert!(cache.poll());
+            assert_eq!(cache.failed("abc"), attempt == MAX_TRANSIENT_RETRIES);
+        }
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn prioritizes_visible_requests_and_bounds_stale_queued_work() {
+        let (mut cache, _requests, _results) = cache();
+        let root = Path::new("/repo");
+        let stale = (0..400).map(|index| format!("stale-{index}"));
+        let stale_refs = stale.collect::<Vec<_>>();
+        cache.request(root, stale_refs.iter().map(String::as_str));
+        cache.request(root, ["visible-a", "visible-b"]);
+
+        assert!(cache.queued.len() <= MAX_QUEUED_SUMMARIES);
+        assert_eq!(cache.queued.front().map(String::as_str), Some("visible-a"));
+        assert_eq!(cache.queued.get(1).map(String::as_str), Some("visible-b"));
     }
 }

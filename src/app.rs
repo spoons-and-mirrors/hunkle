@@ -891,9 +891,9 @@ impl App {
                 }
             }
         }
-        while self.session.next_worktree_change() {
+        while let Some(scope) = self.session.next_worktree_change() {
             changed = true;
-            self.reload(RefreshScope::ALL);
+            self.reload(scope);
             self.notice = None;
         }
         if self.session.open_running() {

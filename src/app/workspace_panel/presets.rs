@@ -420,3 +420,23 @@ impl WorkspaceSnapshot {
         self.groups_captured = true;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_presets_are_reported_and_not_overwritten() {
+        let directory = tempfile::tempdir().unwrap();
+        let groups_path = directory.path().join("groups.json");
+        fs::write(&groups_path, "{ malformed").unwrap();
+        let store = PresetStore::new(Some(groups_path.clone()), None);
+
+        let (groups, snapshots, error) = store.load();
+        assert!(groups.is_empty());
+        assert!(snapshots.is_empty());
+        assert!(error.is_some());
+        assert!(store.save_groups(&[]).is_err());
+        assert_eq!(fs::read_to_string(groups_path).unwrap(), "{ malformed");
+    }
+}

@@ -139,16 +139,23 @@ struct WorkerResult {
 struct StatusResult {
     root: PathBuf,
     repository_generation: u64,
-    baseline: Option<u64>,
+    baseline: Option<git::WorktreeSignature>,
     activity_generation: u64,
-    result: Result<u64, String>,
+    result: Result<git::WorktreeSignature, String>,
 }
 
 struct LoadResult {
     generation: u64,
     kind: LoadKind,
     fetch_interval: Duration,
-    result: Result<(LoadPayload, Option<u64>, Option<PreparedFileTree>), String>,
+    result: Result<
+        (
+            LoadPayload,
+            Option<git::WorktreeSignature>,
+            Option<PreparedFileTree>,
+        ),
+        String,
+    >,
 }
 
 enum LoadPayload {
@@ -305,7 +312,7 @@ pub(crate) struct RepositorySession {
     worker_rx: Receiver<WorkerResult>,
     status_tx: Sender<StatusResult>,
     status_rx: Receiver<StatusResult>,
-    status_signature: Option<u64>,
+    status_signature: Option<git::WorktreeSignature>,
     next_fetch_at: Instant,
     next_status_check: Instant,
     status_interval: Duration,
@@ -826,7 +833,7 @@ impl RepositorySession {
         None
     }
 
-    pub(crate) fn next_worktree_change(&mut self) -> bool {
+    pub(crate) fn next_worktree_change(&mut self) -> Option<RefreshScope> {
         while let Ok(done) = self.status_rx.try_recv() {
             if done.repository_generation != self.repository_generation {
                 continue;
@@ -840,13 +847,10 @@ impl RepositorySession {
                 continue;
             }
             if let Ok(signature) = done.result {
-                let changed = self
-                    .status_signature
-                    .replace(signature)
-                    .is_some_and(|previous| previous != signature);
-                if changed {
+                let previous = self.status_signature.replace(signature);
+                if let Some(previous) = previous.filter(|previous| *previous != signature) {
                     self.reset_status_interval();
-                    return true;
+                    return Some(signature.refresh_scope_since(previous));
                 }
             }
             if done.activity_generation == self.status_activity_generation {
@@ -859,7 +863,7 @@ impl RepositorySession {
             }
             self.next_status_check = Instant::now() + self.status_interval;
         }
-        false
+        None
     }
 
     pub(crate) fn note_activity(&mut self) {
@@ -1067,13 +1071,13 @@ mod tests {
                 generation: 1,
                 kind: LoadKind::Open,
                 fetch_interval: Duration::ZERO,
-                result: Ok((LoadPayload::Open(stale_data), Some(99), None)),
+                result: Ok((LoadPayload::Open(stale_data), Some(signature(99, 1)), None)),
             })
             .unwrap();
 
         assert!(session.next_load_completion().is_none());
         assert_eq!(session.data().unwrap().root, Path::new("/active"));
-        assert_eq!(session.status_signature, Some(7));
+        assert_eq!(session.status_signature, Some(signature(7, 1)));
         assert!(
             session
                 .operations
@@ -1090,14 +1094,14 @@ mod tests {
             .send(StatusResult {
                 root: PathBuf::from("/previous"),
                 repository_generation: 0,
-                baseline: Some(10),
+                baseline: Some(signature(10, 1)),
                 activity_generation: 0,
-                result: Ok(20),
+                result: Ok(signature(20, 1)),
             })
             .unwrap();
 
-        assert!(!session.next_worktree_change());
-        assert_eq!(session.status_signature, Some(10));
+        assert!(session.next_worktree_change().is_none());
+        assert_eq!(session.status_signature, Some(signature(10, 1)));
         assert!(!session.operations.is_running(Operation::StatusCheck));
     }
 
@@ -1110,14 +1114,14 @@ mod tests {
             .send(StatusResult {
                 root: PathBuf::from("/active"),
                 repository_generation: 0,
-                baseline: Some(10),
+                baseline: Some(signature(10, 1)),
                 activity_generation: 0,
-                result: Ok(30),
+                result: Ok(signature(30, 1)),
             })
             .unwrap();
 
-        assert!(!session.next_worktree_change());
-        assert_eq!(session.status_signature, Some(20));
+        assert!(session.next_worktree_change().is_none());
+        assert_eq!(session.status_signature, Some(signature(20, 1)));
         assert!(!session.operations.is_running(Operation::StatusCheck));
     }
 
@@ -1150,15 +1154,15 @@ mod tests {
             .send(StatusResult {
                 root: PathBuf::from("/active"),
                 repository_generation: 1,
-                baseline: Some(10),
+                baseline: Some(signature(10, 1)),
                 activity_generation: 0,
                 result: Err("stale status".to_owned()),
             })
             .unwrap();
 
-        assert!(!session.next_worktree_change());
+        assert!(session.next_worktree_change().is_none());
         assert!(session.operations.is_running(Operation::StatusCheck));
-        assert_eq!(session.status_signature, Some(10));
+        assert_eq!(session.status_signature, Some(signature(10, 1)));
     }
 
     #[test]
@@ -1191,14 +1195,47 @@ mod tests {
             .send(StatusResult {
                 root: PathBuf::from("/active"),
                 repository_generation: 0,
-                baseline: Some(10),
+                baseline: Some(signature(10, 1)),
                 activity_generation: 0,
-                result: Ok(10),
+                result: Ok(signature(10, 1)),
             })
             .unwrap();
-        assert!(!session.next_worktree_change());
+        assert!(session.next_worktree_change().is_none());
         assert_eq!(session.status_interval, MIN_STATUS_INTERVAL);
         assert!(session.next_status_check > Instant::now());
+    }
+
+    #[test]
+    fn scopes_external_refreshes_by_branch_identity() {
+        let mut session = session("/active", Some(10));
+        session.operations.start(Operation::StatusCheck);
+        session
+            .status_tx
+            .send(StatusResult {
+                root: PathBuf::from("/active"),
+                repository_generation: 0,
+                baseline: Some(signature(10, 1)),
+                activity_generation: 0,
+                result: Ok(signature(20, 1)),
+            })
+            .unwrap();
+        assert_eq!(
+            session.next_worktree_change(),
+            Some(RefreshScope::WORKTREE_AND_INVENTORY)
+        );
+
+        session.operations.start(Operation::StatusCheck);
+        session
+            .status_tx
+            .send(StatusResult {
+                root: PathBuf::from("/active"),
+                repository_generation: 0,
+                baseline: Some(signature(20, 1)),
+                activity_generation: 0,
+                result: Ok(signature(30, 2)),
+            })
+            .unwrap();
+        assert_eq!(session.next_worktree_change(), Some(RefreshScope::ALL));
     }
 
     #[test]
@@ -1258,7 +1295,12 @@ mod tests {
         assert!(!checking_status.can_start(Operation::StatusCheck));
     }
 
+    fn signature(state: u64, branch: u64) -> git::WorktreeSignature {
+        git::WorktreeSignature::for_test(state, branch)
+    }
+
     fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
+        let status_signature = status_signature.map(|state| signature(state, 1));
         let (worker_tx, worker_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
         let (load_tx, load_rx) = mpsc::channel();
