@@ -417,14 +417,7 @@ impl ChangesState {
                 self.clear_history_selection();
                 Some(ChangesEffect::ToggleAllStaging)
             }
-            ChangesHitTarget::WorktreeBackground(generation) => {
-                if !self.is_current_worktree_target(generation) {
-                    return None;
-                }
-                self.clear_history_selection();
-                self.refresh_diff(Some(repo));
-                None
-            }
+            ChangesHitTarget::WorktreeBackground(_) => None,
             ChangesHitTarget::WorktreeRow { generation, index } => {
                 if !self.is_current_worktree_target(generation) {
                     return None;

@@ -1859,6 +1859,42 @@ fn toggles_worktree_directories_with_the_mouse() {
 }
 
 #[test]
+fn clicking_empty_worktree_keeps_the_open_history_diff() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "History Diff Test"]);
+    run_git(root, &["config", "user.email", "history-diff@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.changes
+            .worktree_rows(app.repository().unwrap())
+            .is_empty()
+    );
+
+    let history = app.regions.history_list.unwrap();
+    click(&mut app, history.x + 1, history.y);
+    wait_for_preview(&mut app);
+    let history_diff = app.changes.diff.clone();
+    assert!(app.changes.history_focused);
+    assert!(history_diff.contains("diff --git"));
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let worktree = app.regions.worktree_list.unwrap();
+    click(&mut app, worktree.x + 1, worktree.y + 1);
+
+    assert!(app.changes.history_focused);
+    assert_eq!(app.changes.history_state.selected(), Some(0));
+    assert_eq!(app.changes.diff, history_diff);
+}
+
+#[test]
 fn right_clicking_worktree_rows_toggles_staging() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
