@@ -53,6 +53,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `r` | Refresh |
 | `o` | Open Explorer |
 | `W` | Manage linked Git worktrees from known repositories |
+| `N` in Worktrees | Create a linked worktree from the selected checkout |
 | `b` | Browse branches, pull requests, and issues |
 | `Delete` in Branches | Delete a local branch, optionally including its tracked remote branch or forcing deletion of unmerged work; checked-out, default, `main`, `master`, and `dev` branches are protected |
 | `w` | Cycle the Herdr Workspaces and Agents rail through left, right, and off |
@@ -69,7 +70,7 @@ Files uses terminal-safe one-cell glyphs and theme colors to distinguish source,
 
 In Explorer, **Around Here** shows ancestors and neighboring directories while **Contents** shows what is inside the current location; `Tab` switches panes and `~` jumps home. Start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; path matches include a live child preview. The path field supports cursor editing and `Ctrl+Backspace` or `Alt+Backspace` removes the previous path segment. `Tab` accepts the best completion with a trailing `/`, and `Enter` opens a repository or navigates into a directory. Hidden directories are browseable, `.config` participates in background search, and only Git metadata and expensive generated trees are omitted from indexing.
 
-Worktrees lists the linked Git checkouts belonging to repositories hunkle has opened or discovered through the active Herdr session. Press `W`, then type to filter by repository, branch, path, or commit. Press `Enter` or double-click to open a checkout. `Delete` safely removes a selected linked worktree after confirmation; primary, current, locked, missing, and dirty worktrees are protected, and Herdr-owned worktrees are removed through Herdr.
+Worktrees lists the linked Git checkouts belonging to repositories hunkle has opened or discovered through the active Herdr session. Press `W`, then type to filter by repository, branch, path, or commit. Press `N` to create a linked worktree from the selected checkout; enter a new or existing local branch and its destination path, and Hunkle opens the result after Git creates it. Press `Enter` or double-click to open a checkout. `Delete` safely removes a selected linked worktree after confirmation; primary, current, locked, missing, and dirty worktrees are protected, and Herdr-owned worktrees are removed through Herdr.
 
 When hunkle runs inside Herdr, it can show a Workspaces and Agents rail backed by Herdr's session snapshot. Single-click a workspace to open its repository immediately in the current hunkle without switching Herdr workspaces. Press `F2` to rename the selected workspace. Press `Enter` or double-click to switch the active Herdr workspace; after a successful switch, the hidden hunkle restores the repository it showed before the first click. Use `j`/`k` to navigate or `Esc` to return to hunkle. The rail refreshes in the background and hides automatically on narrow terminals or outside Herdr.
 
@@ -127,7 +128,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `app::explorer` | Workspace discovery, navigation, fuzzy search, and semantic interaction targets |
 | `app::repository_browser` | Branch, pull-request, and issue interaction plus cached remote data |
 | `app::settings` | Settings discovery, legacy fallback, validation, and persistence |
-| `app::worktree_manager` | Known-repository inventory and linked-worktree interaction, filtering, opening, and safe removal |
+| `app::worktree_manager` | Known-repository inventory and linked-worktree interaction, creation, filtering, opening, and safe removal |
 | `app::workspace_panel` | Workspace Panel interaction, focus transitions, groups, presets, and background refresh |
 | `app::workspace_panel::herdr` | Typed Herdr environment, command, restore, and session-snapshot adapter |
 | `app::workspace_panel::presets` | Preset and group persistence, migration, matching, and recall planning |

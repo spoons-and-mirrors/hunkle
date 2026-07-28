@@ -84,6 +84,9 @@ pub(crate) fn perform(root: &Path, operation: &FileOperation) -> Result<()> {
             let metadata = fs::symlink_metadata(&path)
                 .with_context(|| format!("could not inspect {}", path.display()))?;
             if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                if contains_git_repository(&path)? {
+                    bail!("deleting a nested Git repository or submodule is not supported");
+                }
                 fs::remove_dir_all(&path)
                     .with_context(|| format!("could not delete directory {}", path.display()))?;
             } else {
@@ -93,6 +96,28 @@ pub(crate) fn perform(root: &Path, operation: &FileOperation) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn contains_git_repository(root: &Path) -> Result<bool> {
+    let mut directories = vec![root.to_owned()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("could not inspect {}", directory.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("could not inspect {}", directory.display()))?;
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("could not inspect {}", entry.path().display()))?;
+            if entry.file_name() == ".git" {
+                return Ok(true);
+            }
+            if file_type.is_dir() && !file_type.is_symlink() {
+                directories.push(entry.path());
+            }
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn validate_name(name: &str) -> Result<()> {
@@ -271,6 +296,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn refuses_to_delete_nested_repositories() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("parent/nested/.git")).unwrap();
+        fs::write(root.join("parent/file"), "content").unwrap();
+
+        let error = perform(
+            root,
+            &FileOperation::Delete {
+                path: "parent".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("nested Git repository"));
+        assert!(root.join("parent/file").is_file());
     }
 
     #[test]

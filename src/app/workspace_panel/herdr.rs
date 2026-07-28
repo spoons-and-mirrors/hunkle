@@ -221,16 +221,26 @@ pub(super) fn parse_snapshot(
         .and_then(Value::as_array)
         .ok_or_else(|| "Herdr snapshot has no workspaces".to_owned())?
         .iter()
-        .filter_map(|workspace| parse_workspace(workspace, snapshot))
-        .collect();
+        .enumerate()
+        .map(|(index, workspace)| {
+            parse_workspace(workspace, snapshot)
+                .ok_or_else(|| format!("Herdr snapshot workspace {index} is malformed"))
+        })
+        .collect::<Result<_, _>>()?;
     assign_worktree_parents(&mut workspaces);
-    let agents = snapshot
-        .get("agents")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_agent)
-        .collect();
+    let agents = match snapshot.get("agents") {
+        None => Vec::new(),
+        Some(agents) => agents
+            .as_array()
+            .ok_or_else(|| "Herdr snapshot agents are malformed".to_owned())?
+            .iter()
+            .enumerate()
+            .map(|(index, agent)| {
+                parse_agent(agent)
+                    .ok_or_else(|| format!("Herdr snapshot agent {index} is malformed"))
+            })
+            .collect::<Result<_, _>>()?,
+    };
     Ok((
         workspaces
             .into_iter()
@@ -686,6 +696,24 @@ mod tests {
         assert_eq!(
             agents[0].session_name.as_deref(),
             Some("Refine workspace timers")
+        );
+    }
+
+    #[test]
+    fn rejects_partial_snapshots_instead_of_dropping_records() {
+        let value = serde_json::json!({
+            "result": {"snapshot": {
+                "workspaces": [
+                    {"workspace_id": "valid", "label": "Valid"},
+                    {"workspace_id": "missing-label"}
+                ],
+                "agents": []
+            }}
+        });
+
+        assert_eq!(
+            parse_snapshot(&value).unwrap_err(),
+            "Herdr snapshot workspace 1 is malformed"
         );
     }
 }

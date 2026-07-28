@@ -212,7 +212,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             {
                 app.regions.register_hit_target(target, rect);
             }
-            if let Some(dialog) = &app.worktree_manager.remove_dialog {
+            if let Some(dialog) = &app.worktree_manager.create_dialog {
+                dim(frame);
+                overlays::draw_worktree_create_dialog(frame, dialog);
+            } else if let Some(dialog) = &app.worktree_manager.remove_dialog {
                 dim(frame);
                 overlays::draw_worktree_remove_dialog(frame, dialog);
             }

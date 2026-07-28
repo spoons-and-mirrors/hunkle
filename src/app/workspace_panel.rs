@@ -425,10 +425,10 @@ impl WorkspacePanel {
     fn new(enabled: bool, groups_path: Option<PathBuf>, snapshots_path: Option<PathBuf>) -> Self {
         let (sender, receiver) = mpsc::channel();
         let preset_store = presets::PresetStore::new(groups_path, snapshots_path);
-        let (mut groups, snapshots) = if enabled {
+        let (mut groups, snapshots, preset_error) = if enabled {
             preset_store.load()
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), None)
         };
         presets::sort_groups(&mut groups);
         Self {
@@ -446,7 +446,7 @@ impl WorkspacePanel {
             workspace_scroll: 0,
             agent_scroll: 0,
             loading: false,
-            error: None,
+            error: preset_error,
             group_input: TextInput::default(),
             group_editing: false,
             group_error: None,

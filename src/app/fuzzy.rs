@@ -10,20 +10,18 @@ pub(super) fn fuzzy_text_score_lower(query: &str, candidate: &str) -> Option<u32
         return Some(10_000);
     }
     if candidate.starts_with(query) {
-        return Some(9_000u32.saturating_sub(candidate.len() as u32));
+        return Some(9_000u32.saturating_sub(candidate.chars().count() as u32));
     }
     if let Some(index) = candidate.find(query) {
-        return Some(8_000u32.saturating_sub(index as u32));
+        return Some(8_000u32.saturating_sub(candidate[..index].chars().count() as u32));
     }
     let mut first = None;
     let mut last = 0;
-    let mut offset = 0;
+    let mut characters = candidate.chars().enumerate();
     for needle in query.chars() {
-        let relative = candidate[offset..].find(needle)?;
-        offset += relative;
-        first.get_or_insert(offset);
-        last = offset;
-        offset += needle.len_utf8();
+        let (index, _) = characters.find(|(_, candidate)| *candidate == needle)?;
+        first.get_or_insert(index);
+        last = index;
     }
     let span = last - first?;
     if span > query_len.saturating_mul(3).max(4) {
@@ -45,5 +43,11 @@ mod tests {
         assert!(exact > prefix);
         assert!(prefix > subsequence);
         assert!(fuzzy_text_score("app", "unrelated").is_none());
+    }
+
+    #[test]
+    fn scores_unicode_by_characters_instead_of_bytes() {
+        assert!(fuzzy_text_score("éx", "é---x").is_some());
+        assert_eq!(fuzzy_text_score("x", "éx"), fuzzy_text_score("x", "ax"));
     }
 }

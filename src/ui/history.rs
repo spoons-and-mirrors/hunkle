@@ -336,13 +336,12 @@ pub(super) fn draw_branch(
         if selected < offset {
             offset = selected;
         }
-        while offset < selected
-            && commits[offset..=selected]
-                .iter()
-                .map(history_item_height)
-                .sum::<usize>()
-                > usize::from(list.height)
-        {
+        let mut rendered_height = commits[offset..=selected]
+            .iter()
+            .map(history_item_height)
+            .sum::<usize>();
+        while offset < selected && rendered_height > usize::from(list.height) {
+            rendered_height = rendered_height.saturating_sub(history_item_height(&commits[offset]));
             offset += 1;
         }
     }

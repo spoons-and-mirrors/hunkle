@@ -88,10 +88,6 @@ impl AuthorFilter {
             .collect()
     }
 
-    pub fn matches(&self, commit: &Commit) -> bool {
-        !self.disabled.contains(&commit.author)
-    }
-
     pub fn ensure_enabled(&mut self, author: &str) {
         if self.disabled.remove(author)
             && let Some(entry) = self.entries.iter_mut().find(|entry| entry.name == author)

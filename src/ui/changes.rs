@@ -1849,12 +1849,12 @@ fn rendered_text_height(lines: &[Line<'_>], width: usize, wrapped: bool) -> usiz
     lines
         .iter()
         .map(|line| {
-            let line_width: usize = line
+            let content = line
                 .spans
                 .iter()
-                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                .sum();
-            line_width.max(1).div_ceil(width)
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            word_wrapped_height(&content, width)
         })
         .sum()
 }

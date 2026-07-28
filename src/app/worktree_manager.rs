@@ -28,9 +28,41 @@ pub(crate) enum WorktreeManagerEffect {
     Close,
     Open(PathBuf),
     Refresh,
-    RemoveNative { common_dir: PathBuf, path: PathBuf },
-    RemoveHerdr { workspace_id: String, path: PathBuf },
+    CreateNative {
+        common_dir: PathBuf,
+        path: PathBuf,
+        branch: String,
+        start_point: String,
+    },
+    RemoveNative {
+        common_dir: PathBuf,
+        path: PathBuf,
+    },
+    RemoveHerdr {
+        workspace_id: String,
+        path: PathBuf,
+    },
     Notice(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorktreeCreateField {
+    Branch,
+    Path,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorktreeCreateDialog {
+    pub(crate) repository_label: String,
+    pub(crate) start_label: String,
+    pub(crate) branch: String,
+    pub(crate) path: String,
+    pub(crate) field: WorktreeCreateField,
+    pub(crate) error: Option<String>,
+    common_dir: PathBuf,
+    start_point: String,
+    base_dir: PathBuf,
+    path_automatic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,8 +99,14 @@ struct RemovalCompletion {
     result: Result<(), String>,
 }
 
+struct CreationCompletion {
+    path: PathBuf,
+    result: Result<(), String>,
+}
+
 enum Completion {
     Inventory(InventoryCompletion),
+    Creation(CreationCompletion),
     Removal(RemovalCompletion),
 }
 
@@ -76,6 +114,7 @@ enum Completion {
 pub(crate) struct WorktreeManagerPoll {
     pub(crate) changed: bool,
     pub(crate) notice: Option<String>,
+    pub(crate) open_path: Option<PathBuf>,
 }
 
 pub(crate) struct WorktreeManager {
@@ -83,6 +122,8 @@ pub(crate) struct WorktreeManager {
     pub(crate) state: ListState,
     pub(crate) repositories: Vec<WorktreeRepository>,
     pub(crate) loading: bool,
+    pub(crate) create_running: bool,
+    pub(crate) create_dialog: Option<WorktreeCreateDialog>,
     pub(crate) remove_running: bool,
     pub(crate) remove_dialog: Option<WorktreeRemoveDialog>,
     current_path: Option<PathBuf>,
@@ -94,6 +135,7 @@ pub(crate) struct WorktreeManager {
     generation: u64,
     content_generation: u64,
     last_click: Option<(PathBuf, Instant)>,
+    pending_create: Option<WorktreeCreateDialog>,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
 }
@@ -106,6 +148,8 @@ impl WorktreeManager {
             state: ListState::default(),
             repositories: Vec::new(),
             loading: false,
+            create_running: false,
+            create_dialog: None,
             remove_running: false,
             remove_dialog: None,
             current_path: None,
@@ -117,6 +161,7 @@ impl WorktreeManager {
             generation: 0,
             content_generation: 0,
             last_click: None,
+            pending_create: None,
             sender,
             receiver,
         }
@@ -135,6 +180,7 @@ impl WorktreeManager {
         herdr_verified: bool,
     ) -> Option<String> {
         self.query.clear();
+        self.create_dialog = None;
         self.remove_dialog = None;
         self.current_path = current_path;
         self.candidate_paths = candidate_paths;
@@ -207,7 +253,7 @@ impl WorktreeManager {
     }
 
     pub(crate) fn start_remove(&mut self, common_dir: PathBuf, path: PathBuf) -> bool {
-        if self.remove_running {
+        if self.operation_running() {
             return false;
         }
         self.remove_running = true;
@@ -216,6 +262,27 @@ impl WorktreeManager {
             let result =
                 git::remove_worktree(&common_dir, &path).map_err(|error| error.to_string());
             let _ = sender.send(Completion::Removal(RemovalCompletion { path, result }));
+        });
+        true
+    }
+
+    pub(crate) fn start_create(
+        &mut self,
+        common_dir: PathBuf,
+        path: PathBuf,
+        branch: String,
+        start_point: String,
+    ) -> bool {
+        if self.operation_running() {
+            return false;
+        }
+        self.create_running = true;
+        self.pending_create = self.create_dialog.take();
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = git::create_worktree(&common_dir, &path, &branch, &start_point)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(Completion::Creation(CreationCompletion { path, result }));
         });
         true
     }
@@ -243,6 +310,25 @@ impl WorktreeManager {
                     }
                     self.restore_selection(selected_path.as_deref());
                 }
+                Completion::Creation(completion) => {
+                    self.create_running = false;
+                    match completion.result {
+                        Ok(()) => {
+                            self.pending_create = None;
+                            result.notice =
+                                Some(format!("Created worktree {}", completion.path.display()));
+                            result.open_path = Some(completion.path);
+                            refresh = true;
+                        }
+                        Err(error) => {
+                            if let Some(mut dialog) = self.pending_create.take() {
+                                dialog.error = Some(error.clone());
+                                self.create_dialog = Some(dialog);
+                            }
+                            result.notice = Some(error);
+                        }
+                    }
+                }
                 Completion::Removal(completion) => {
                     self.remove_running = false;
                     match completion.result {
@@ -263,12 +349,16 @@ impl WorktreeManager {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Option<WorktreeManagerEffect> {
+        if self.create_dialog.is_some() {
+            return self.handle_create_dialog(key);
+        }
         if self.remove_dialog.is_some() {
             return self.handle_remove_dialog(key);
         }
         match key.code {
             KeyCode::Esc => Some(WorktreeManagerEffect::Close),
             KeyCode::Enter => self.activate_selected(),
+            KeyCode::Char('N') => self.begin_create(),
             KeyCode::Delete if key.modifiers.is_empty() => self.begin_remove(),
             KeyCode::Down => {
                 self.move_selection(1);
@@ -317,6 +407,10 @@ impl WorktreeManager {
 
     pub(crate) fn paste(&mut self, text: &str) {
         if self.remove_dialog.is_some() {
+            return;
+        }
+        if self.create_dialog.is_some() {
+            self.paste_create_dialog(text);
             return;
         }
         self.query.extend(
@@ -458,14 +552,18 @@ impl WorktreeManager {
         self.remove_dialog.is_some()
     }
 
-    pub(crate) fn remove_running(&self) -> bool {
-        self.remove_running
+    pub(crate) fn dialog_open(&self) -> bool {
+        self.create_dialog.is_some() || self.remove_dialog_open()
+    }
+
+    pub(crate) fn operation_running(&self) -> bool {
+        self.create_running || self.remove_running
     }
 
     fn activate_selected(&self) -> Option<WorktreeManagerEffect> {
-        if self.remove_running {
+        if self.operation_running() {
             return Some(WorktreeManagerEffect::Notice(
-                "Wait for the worktree removal to finish".to_owned(),
+                "Wait for the worktree operation to finish".to_owned(),
             ));
         }
         let (_, worktree) = self.selected_worktree()?;
@@ -483,9 +581,9 @@ impl WorktreeManager {
     }
 
     fn begin_remove(&mut self) -> Option<WorktreeManagerEffect> {
-        if self.remove_running {
+        if self.operation_running() {
             return Some(WorktreeManagerEffect::Notice(
-                "A worktree removal is already running".to_owned(),
+                "A worktree operation is already running".to_owned(),
             ));
         }
         if self.herdr_enabled && !self.herdr_verified {
@@ -533,6 +631,166 @@ impl WorktreeManager {
             herdr_workspace_id,
         });
         None
+    }
+
+    fn begin_create(&mut self) -> Option<WorktreeManagerEffect> {
+        if self.operation_running() {
+            return Some(WorktreeManagerEffect::Notice(
+                "A worktree operation is already running".to_owned(),
+            ));
+        }
+        let (repository, worktree) = self.selected_worktree()?;
+        if worktree.is_bare || worktree.prunable {
+            return Some(WorktreeManagerEffect::Notice(
+                "Select an available checkout to use as the branch starting point".to_owned(),
+            ));
+        }
+        let base_dir = worktree
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| worktree.path.clone());
+        let repository_label = repository.label.clone();
+        let common_dir = repository.common_dir.clone();
+        let start_label = worktree_label(worktree);
+        let start_point = worktree.head.clone().unwrap_or_default();
+        self.create_dialog = Some(WorktreeCreateDialog {
+            repository_label: repository_label.clone(),
+            start_label,
+            branch: String::new(),
+            path: base_dir
+                .join(format!("{repository_label}-"))
+                .display()
+                .to_string(),
+            field: WorktreeCreateField::Branch,
+            error: None,
+            common_dir,
+            start_point,
+            base_dir,
+            path_automatic: true,
+        });
+        None
+    }
+
+    fn handle_create_dialog(&mut self, key: KeyEvent) -> Option<WorktreeManagerEffect> {
+        match key.code {
+            KeyCode::Esc => {
+                self.create_dialog = None;
+                None
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                let dialog = self.create_dialog.as_mut()?;
+                dialog.field = match dialog.field {
+                    WorktreeCreateField::Branch => WorktreeCreateField::Path,
+                    WorktreeCreateField::Path => WorktreeCreateField::Branch,
+                };
+                dialog.error = None;
+                None
+            }
+            KeyCode::Enter => {
+                if self.create_dialog.as_ref()?.field == WorktreeCreateField::Branch {
+                    self.create_dialog.as_mut()?.field = WorktreeCreateField::Path;
+                    return None;
+                }
+                self.create_effect()
+            }
+            KeyCode::Backspace => {
+                let dialog = self.create_dialog.as_mut()?;
+                match dialog.field {
+                    WorktreeCreateField::Branch => {
+                        dialog.branch.pop();
+                        update_automatic_path(dialog);
+                    }
+                    WorktreeCreateField::Path => {
+                        dialog.path.pop();
+                        dialog.path_automatic = false;
+                    }
+                }
+                dialog.error = None;
+                None
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let dialog = self.create_dialog.as_mut()?;
+                match dialog.field {
+                    WorktreeCreateField::Branch => {
+                        dialog.branch.clear();
+                        update_automatic_path(dialog);
+                    }
+                    WorktreeCreateField::Path => {
+                        dialog.path.clear();
+                        dialog.path_automatic = false;
+                    }
+                }
+                dialog.error = None;
+                None
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                let dialog = self.create_dialog.as_mut()?;
+                match dialog.field {
+                    WorktreeCreateField::Branch => {
+                        dialog.branch.push(character);
+                        update_automatic_path(dialog);
+                    }
+                    WorktreeCreateField::Path => {
+                        dialog.path.push(character);
+                        dialog.path_automatic = false;
+                    }
+                }
+                dialog.error = None;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn paste_create_dialog(&mut self, text: &str) {
+        let Some(dialog) = self.create_dialog.as_mut() else {
+            return;
+        };
+        let text = text
+            .chars()
+            .filter(|character| !matches!(character, '\r' | '\n'))
+            .collect::<String>();
+        match dialog.field {
+            WorktreeCreateField::Branch => {
+                dialog.branch.push_str(&text);
+                update_automatic_path(dialog);
+            }
+            WorktreeCreateField::Path => {
+                dialog.path.push_str(&text);
+                dialog.path_automatic = false;
+            }
+        }
+        dialog.error = None;
+    }
+
+    fn create_effect(&mut self) -> Option<WorktreeManagerEffect> {
+        let dialog = self.create_dialog.as_mut()?;
+        if dialog.branch.is_empty() {
+            dialog.error = Some("Enter a branch name".to_owned());
+            dialog.field = WorktreeCreateField::Branch;
+            return None;
+        }
+        if dialog.path.is_empty() {
+            dialog.error = Some("Enter a destination path".to_owned());
+            return None;
+        }
+        let path = expand_home(&dialog.path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            dialog.base_dir.join(path)
+        };
+        Some(WorktreeManagerEffect::CreateNative {
+            common_dir: dialog.common_dir.clone(),
+            path,
+            branch: dialog.branch.clone(),
+            start_point: dialog.start_point.clone(),
+        })
     }
 
     fn handle_remove_dialog(&mut self, key: KeyEvent) -> Option<WorktreeManagerEffect> {
@@ -665,6 +923,40 @@ fn repository_label(common_dir: &Path, worktrees: &[LinkedWorktree]) -> String {
         .or_else(|| common_dir.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| common_dir.display().to_string())
+}
+
+fn update_automatic_path(dialog: &mut WorktreeCreateDialog) {
+    if !dialog.path_automatic {
+        return;
+    }
+    let suffix = dialog
+        .branch
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    dialog.path = dialog
+        .base_dir
+        .join(format!("{}-{suffix}", dialog.repository_label))
+        .display()
+        .to_string();
+}
+
+fn expand_home(path: &str) -> PathBuf {
+    if path == "~" {
+        return std::env::var_os("HOME").map_or_else(|| PathBuf::from(path), PathBuf::from);
+    }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(path)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -885,6 +1177,31 @@ mod tests {
         assert_eq!(
             manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(WorktreeManagerEffect::Open(PathBuf::from("/repo-feature")))
+        );
+    }
+
+    #[test]
+    fn creates_from_the_selected_checkout_with_an_automatic_path() {
+        let mut manager = manager();
+        manager.move_selection(1);
+
+        assert_eq!(
+            manager.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+            None
+        );
+        manager.paste("feature/new");
+        let dialog = manager.create_dialog.as_ref().unwrap();
+        assert_eq!(dialog.path, "/repo-feature-new");
+
+        manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(WorktreeManagerEffect::CreateNative {
+                common_dir: PathBuf::from("/repo/.git"),
+                path: PathBuf::from("/repo-feature-new"),
+                branch: "feature/new".to_owned(),
+                start_point: "1234567890abcdef".to_owned(),
+            })
         );
     }
 

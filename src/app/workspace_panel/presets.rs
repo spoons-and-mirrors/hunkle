@@ -1,5 +1,7 @@
 use std::{
+    cell::Cell,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -14,6 +16,8 @@ use super::{
 pub(super) struct PresetStore {
     groups_path: Option<PathBuf>,
     snapshots_path: Option<PathBuf>,
+    groups_writable: Cell<bool>,
+    snapshots_writable: Cell<bool>,
 }
 
 impl PresetStore {
@@ -21,24 +25,47 @@ impl PresetStore {
         Self {
             groups_path,
             snapshots_path,
+            groups_writable: Cell::new(true),
+            snapshots_writable: Cell::new(true),
         }
     }
 
-    pub(super) fn load(&self) -> (Vec<WorkspaceGroup>, Vec<WorkspaceSnapshot>) {
+    pub(super) fn load(&self) -> (Vec<WorkspaceGroup>, Vec<WorkspaceSnapshot>, Option<String>) {
         let groups = self
             .groups_path
             .as_deref()
             .map(load_groups)
-            .unwrap_or_default();
+            .unwrap_or_else(|| Ok(Vec::new()));
         let snapshots = self
             .snapshots_path
             .as_deref()
             .map(load_snapshots)
-            .unwrap_or_default();
-        (groups, snapshots)
+            .unwrap_or_else(|| Ok(Vec::new()));
+        let mut errors = Vec::new();
+        let groups = groups.unwrap_or_else(|error| {
+            self.groups_writable.set(false);
+            errors.push(error);
+            Vec::new()
+        });
+        let snapshots = snapshots.unwrap_or_else(|error| {
+            self.snapshots_writable.set(false);
+            errors.push(error);
+            Vec::new()
+        });
+        (
+            groups,
+            snapshots,
+            (!errors.is_empty()).then(|| errors.join("; ")),
+        )
     }
 
     pub(super) fn save_groups(&self, groups: &[WorkspaceGroup]) -> Result<(), String> {
+        if !self.groups_writable.get() {
+            return Err(
+                "Could not save workspace groups: repair or remove the malformed preset file first"
+                    .to_owned(),
+            );
+        }
         let Some(path) = self.groups_path.as_deref() else {
             return Ok(());
         };
@@ -60,6 +87,9 @@ impl PresetStore {
     }
 
     pub(super) fn save_snapshots(&self, snapshots: &[WorkspaceSnapshot]) -> Result<(), String> {
+        if !self.snapshots_writable.get() {
+            return Err("Could not save workspace snapshots: repair or remove the malformed preset file first".to_owned());
+        }
         let Some(path) = self.snapshots_path.as_deref() else {
             return Ok(());
         };
@@ -115,60 +145,96 @@ fn prepare_parent(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn load_groups(path: &Path) -> Vec<WorkspaceGroup> {
-    let Ok(content) = fs::read_to_string(path) else {
-        return Vec::new();
+fn read_preset(path: &Path, label: &str) -> Result<Option<Value>, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not read {label}: {error}")),
     };
-    let Ok(value) = serde_json::from_str::<Value>(&content) else {
-        return Vec::new();
+    serde_json::from_str(&content)
+        .map(Some)
+        .map_err(|error| format!("Could not parse {label}: {error}"))
+}
+
+fn load_groups(path: &Path) -> Result<Vec<WorkspaceGroup>, String> {
+    let Some(value) = read_preset(path, "workspace groups")? else {
+        return Ok(Vec::new());
     };
     value
         .get("groups")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|group| {
-            Some(WorkspaceGroup {
-                name: group.get("name")?.as_str()?.to_owned(),
+        .ok_or_else(|| "Could not parse workspace groups: missing groups array".to_owned())?
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let workspace_ids = match group.get("workspace_ids") {
+                None => Vec::new(),
+                Some(ids) => ids
+                    .as_array()
+                    .ok_or_else(|| format!("Workspace group {index} has malformed workspace IDs"))?
+                    .iter()
+                    .enumerate()
+                    .map(|(workspace_index, id)| {
+                        id.as_str().map(str::to_owned).ok_or_else(|| {
+                            format!("Workspace group {index} ID {workspace_index} is malformed")
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
+            };
+            Ok(WorkspaceGroup {
+                name: group
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("Workspace group {index} has no valid name"))?
+                    .to_owned(),
                 expanded: group
                     .get("expanded")
                     .and_then(Value::as_bool)
                     .unwrap_or(true),
-                workspace_ids: group
-                    .get("workspace_ids")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect(),
+                workspace_ids,
             })
         })
         .collect()
 }
 
-fn load_snapshots(path: &Path) -> Vec<WorkspaceSnapshot> {
-    let Ok(content) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&content) else {
-        return Vec::new();
+fn load_snapshots(path: &Path) -> Result<Vec<WorkspaceSnapshot>, String> {
+    let Some(value) = read_preset(path, "workspace snapshots")? else {
+        return Ok(Vec::new());
     };
     let mut snapshots = value
         .get("snapshots")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|snapshot| {
-            let name = snapshot.get("name")?.as_str()?.to_owned();
+        .ok_or_else(|| "Could not parse workspace snapshots: missing snapshots array".to_owned())?
+        .iter()
+        .enumerate()
+        .map(|(snapshot_index, snapshot)| {
+            let name = snapshot
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("Workspace snapshot {snapshot_index} has no valid name"))?
+                .to_owned();
             let entries = snapshot
-                .get("workspaces")?
-                .as_array()?
+                .get("workspaces")
+                .ok_or_else(|| {
+                    format!("Workspace snapshot {snapshot_index} has no workspaces")
+                })?
+                .as_array()
+                .ok_or_else(|| format!("Workspace snapshot {snapshot_index} has malformed workspaces"))?
                 .iter()
-                .filter_map(|entry| {
-                    Some(WorkspaceSnapshotEntry {
-                        label: entry.get("label")?.as_str()?.to_owned(),
-                        path: PathBuf::from(entry.get("path")?.as_str()?),
+                .enumerate()
+                .map(|(entry_index, entry)| {
+                    Ok(WorkspaceSnapshotEntry {
+                        label: entry
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| format!("Workspace snapshot {snapshot_index} entry {entry_index} has no valid label"))?
+                            .to_owned(),
+                        path: PathBuf::from(
+                            entry
+                                .get("path")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| format!("Workspace snapshot {snapshot_index} entry {entry_index} has no valid path"))?,
+                        ),
                         focused: entry
                             .get("focused")
                             .and_then(Value::as_bool)
@@ -183,32 +249,43 @@ fn load_snapshots(path: &Path) -> Vec<WorkspaceSnapshot> {
                             .map(str::to_owned),
                     })
                 })
-                .collect::<Vec<_>>();
-            let groups = snapshot
-                .get("groups")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|group| {
-                    Some(WorkspaceSnapshotGroup {
-                        name: group.get("name")?.as_str()?.to_owned(),
+                .collect::<Result<Vec<_>, String>>()?;
+            if entries.is_empty() {
+                return Err(format!("Workspace snapshot {snapshot_index} has no workspaces"));
+            }
+            let groups_value = snapshot.get("groups");
+            let groups = match groups_value {
+                None => Vec::new(),
+                Some(groups) => groups
+                    .as_array()
+                    .ok_or_else(|| format!("Workspace snapshot {snapshot_index} has malformed groups"))?
+                    .iter()
+                    .enumerate()
+                    .map(|(group_index, group)| {
+                        Ok(WorkspaceSnapshotGroup {
+                            name: group
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| format!("Workspace snapshot {snapshot_index} group {group_index} has no valid name"))?
+                                .to_owned(),
                         expanded: group
                             .get("expanded")
                             .and_then(Value::as_bool)
                             .unwrap_or(true),
+                        })
                     })
-                })
-                .collect();
-            (!entries.is_empty()).then_some(WorkspaceSnapshot {
+                    .collect::<Result<_, String>>()?,
+            };
+            Ok(WorkspaceSnapshot {
                 name,
                 entries,
                 groups,
-                groups_captured: snapshot.get("groups").is_some(),
+                groups_captured: groups_value.is_some(),
             })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
     snapshots.sort_by_cached_key(|snapshot| snapshot.name.to_lowercase());
-    snapshots
+    Ok(snapshots)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

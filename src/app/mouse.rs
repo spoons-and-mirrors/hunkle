@@ -75,7 +75,7 @@ impl App {
         {
             return;
         }
-        if self.mode == Mode::WorktreeManager && self.worktree_manager.remove_dialog_open() {
+        if self.mode == Mode::WorktreeManager && self.worktree_manager.dialog_open() {
             return;
         }
         if self.mode == Mode::WorkspacePresets {

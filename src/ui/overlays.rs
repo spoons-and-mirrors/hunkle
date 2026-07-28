@@ -15,11 +15,11 @@ use crate::app::{
     HerdrPrompt, HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
-    WorkspaceRenameDialog, WorktreeManager, WorktreeManagerHitTarget, WorktreeManagerRow,
-    WorktreeRemoveDialog, short_head, worktree_label,
+    WorkspaceRenameDialog, WorktreeCreateDialog, WorktreeCreateField, WorktreeManager,
+    WorktreeManagerHitTarget, WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
 };
 
-use super::{fill, palette, truncate_width};
+use super::{fill, palette, text::word_wrapped_height, truncate_width};
 
 pub(super) struct FileSearchRegions {
     pub(super) overlay: Rect,
@@ -517,7 +517,7 @@ pub(super) fn draw_worktree_manager(
 
     frame.render_widget(
         Paragraph::new(
-            "Enter open   Del remove   Ctrl-R refresh   ↑↓ select   type filter   Esc close",
+            "N new   Enter open   Del remove   Ctrl-R refresh   ↑↓ select   type filter   Esc close",
         )
         .alignment(Alignment::Right)
         .style(Style::default().fg(palette().muted)),
@@ -525,6 +525,96 @@ pub(super) fn draw_worktree_manager(
     );
 
     hit_targets
+}
+
+pub(super) fn draw_worktree_create_dialog(frame: &mut Frame<'_>, dialog: &WorktreeCreateDialog) {
+    let area = centered_min(frame.area(), 72, 0, 60, 16);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    frame.render_widget(
+        Paragraph::new("CREATE WORKTREE").style(
+            Style::default()
+                .fg(palette().accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{}  ·  starting from {}",
+            dialog.repository_label, dialog.start_label
+        ))
+        .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1),
+    );
+
+    let branch_selected = dialog.field == WorktreeCreateField::Branch;
+    let path_selected = dialog.field == WorktreeCreateField::Path;
+    let branch_area = Rect::new(inner.x, inner.y.saturating_add(4), inner.width, 2);
+    let path_area = Rect::new(inner.x, inner.y.saturating_add(7), inner.width, 2);
+    fill(
+        frame,
+        branch_area,
+        if branch_selected {
+            palette().selected
+        } else {
+            palette().surface_alt
+        },
+    );
+    fill(
+        frame,
+        path_area,
+        if path_selected {
+            palette().selected
+        } else {
+            palette().surface_alt
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                " BRANCH",
+                Style::default().fg(palette().muted),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    " {}{}",
+                    dialog.branch,
+                    if branch_selected { "▌" } else { "" }
+                ),
+                Style::default().fg(palette().ink),
+            )),
+        ]),
+        branch_area,
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(" PATH", Style::default().fg(palette().muted))),
+            Line::from(Span::styled(
+                format!(" {}{}", dialog.path, if path_selected { "▌" } else { "" }),
+                Style::default().fg(palette().ink),
+            )),
+        ]),
+        path_area,
+    );
+    if let Some(error) = &dialog.error {
+        frame.render_widget(
+            Paragraph::new(error.as_str()).style(Style::default().fg(palette().red)),
+            Rect::new(inner.x, inner.y.saturating_add(10), inner.width, 1),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("Tab field   Enter continue/create   Esc cancel")
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
+    );
 }
 
 pub(super) fn draw_worktree_remove_dialog(frame: &mut Frame<'_>, dialog: &WorktreeRemoveDialog) {
@@ -1816,12 +1906,12 @@ fn rendered_height(lines: &[Line<'_>], width: usize) -> usize {
     lines
         .iter()
         .map(|line| {
-            let line_width: usize = line
+            let content = line
                 .spans
                 .iter()
-                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                .sum();
-            line_width.max(1).div_ceil(width)
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            word_wrapped_height(&content, width)
         })
         .sum()
 }
@@ -2597,12 +2687,22 @@ pub(super) fn draw_settings(
         area.width.saturating_sub(4),
         area.height,
     );
-    let auto_row = Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1);
-    let interval_row = Rect::new(inner.x, area.y.saturating_add(9), inner.width, 1);
-    let workspace_panel_row = Rect::new(inner.x, area.y.saturating_add(14), inner.width, 1);
-    let agent_harness_row = Rect::new(inner.x, area.y.saturating_add(16), inner.width, 1);
-    let media_preview_row = Rect::new(inner.x, area.y.saturating_add(18), inner.width, 1);
-    let editor_row = Rect::new(inner.x, area.y.saturating_add(20), inner.width, 1);
+    let compact = area.height < 22;
+    let automation_header_y = if compact { 3 } else { 4 };
+    let auto_y = if compact { 4 } else { 7 };
+    let interval_y = if compact { 5 } else { 9 };
+    let interface_header_y = if compact { 7 } else { 13 };
+    let workspace_y = if compact { 8 } else { 14 };
+    let agent_y = if compact { 9 } else { 16 };
+    let media_y = if compact { 10 } else { 18 };
+    let editor_y = if compact { 11 } else { 20 };
+    let auto_row = Rect::new(inner.x, area.y.saturating_add(auto_y), inner.width, 1);
+    let interval_row = Rect::new(inner.x, area.y.saturating_add(interval_y), inner.width, 1);
+    let workspace_panel_row =
+        Rect::new(inner.x, area.y.saturating_add(workspace_y), inner.width, 1);
+    let agent_harness_row = Rect::new(inner.x, area.y.saturating_add(agent_y), inner.width, 1);
+    let media_preview_row = Rect::new(inner.x, area.y.saturating_add(media_y), inner.width, 1);
+    let editor_row = Rect::new(inner.x, area.y.saturating_add(editor_y), inner.width, 1);
     let interval_down = Rect::new(
         interval_row.right().saturating_sub(15),
         interval_row.y,
@@ -2638,16 +2738,23 @@ pub(super) fn draw_settings(
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
         )),
-        Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
+        Rect::new(
+            inner.x,
+            area.y.saturating_add(automation_header_y),
+            inner.width,
+            1,
+        ),
     );
-    let description = truncate_width(
-        "Fetch updated remote refs in the background",
-        usize::from(inner.width),
-    );
-    frame.render_widget(
-        Paragraph::new(description).style(Style::default().fg(palette().faint)),
-        Rect::new(inner.x, area.y.saturating_add(5), inner.width, 1),
-    );
+    if !compact {
+        let description = truncate_width(
+            "Fetch updated remote refs in the background",
+            usize::from(inner.width),
+        );
+        frame.render_widget(
+            Paragraph::new(description).style(Style::default().fg(palette().faint)),
+            Rect::new(inner.x, area.y.saturating_add(5), inner.width, 1),
+        );
+    }
 
     let (auto_switch, auto_switch_color) = settings_toggle(settings.auto_fetch);
     let auto_padding =
@@ -2705,14 +2812,16 @@ pub(super) fn draw_settings(
     } else {
         "Disabled".to_owned()
     };
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(if settings.auto_fetch {
-            palette().green
-        } else {
-            palette().faint
-        })),
-        Rect::new(inner.x, area.y.saturating_add(11), inner.width, 1),
-    );
+    if !compact {
+        frame.render_widget(
+            Paragraph::new(status).style(Style::default().fg(if settings.auto_fetch {
+                palette().green
+            } else {
+                palette().faint
+            })),
+            Rect::new(inner.x, area.y.saturating_add(11), inner.width, 1),
+        );
+    }
 
     frame.render_widget(
         Paragraph::new(Line::styled(
@@ -2721,7 +2830,12 @@ pub(super) fn draw_settings(
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
         )),
-        Rect::new(inner.x, area.y.saturating_add(13), inner.width, 1),
+        Rect::new(
+            inner.x,
+            area.y.saturating_add(interface_header_y),
+            inner.width,
+            1,
+        ),
     );
     let (workspace_switch, workspace_switch_color) =
         settings_toggle(settings.workspace_panel_enabled);

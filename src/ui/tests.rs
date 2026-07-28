@@ -2707,6 +2707,20 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
     click(&mut app, row_area.x + 1, row_area.y);
     assert_eq!(app.mode, Mode::WorktreeManager);
 
+    app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+    assert!(app.worktree_manager.create_dialog.is_some());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let create_dialog = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(create_dialog.contains("CREATE WORKTREE"));
+    assert!(create_dialog.contains("feature/modal"));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
     app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
     assert!(app.worktree_manager.remove_dialog_open());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

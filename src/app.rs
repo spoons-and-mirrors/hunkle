@@ -39,8 +39,8 @@ pub(crate) use workspace_panel::{
     WorkspacePanelEffect, WorkspacePanelPlacement, WorkspacePanelRow, WorkspaceRenameDialog,
 };
 pub(crate) use worktree_manager::{
-    WorktreeManager, WorktreeManagerEffect, WorktreeManagerRow, WorktreeRemoveDialog, short_head,
-    worktree_label,
+    WorktreeCreateDialog, WorktreeCreateField, WorktreeManager, WorktreeManagerEffect,
+    WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
 };
 
 use std::{
@@ -474,20 +474,13 @@ impl App {
 
     pub(crate) fn selected_graph_commit(&self) -> Option<&git::Commit> {
         let selected = self.graph_state.selected()?;
-        self.repository()?
-            .commits
-            .iter()
-            .filter(|commit| self.author_filter.matches(commit))
-            .nth(selected)
+        let index = *self.author_filter.visible_indices().get(selected)?;
+        self.repository()?.commits.get(index)
     }
 
     fn visible_graph_len(&self) -> usize {
-        self.repository().map_or(0, |repo| {
-            repo.commits
-                .iter()
-                .filter(|commit| self.author_filter.matches(commit))
-                .count()
-        })
+        self.repository()
+            .map_or(0, |_| self.author_filter.visible_indices().len())
     }
 
     fn reconcile_graph_selection(&mut self) {
@@ -686,6 +679,10 @@ impl App {
         changed |= worktree_poll.changed;
         if let Some(notice) = worktree_poll.notice {
             self.notice = Some(notice);
+        }
+        if let Some(path) = worktree_poll.open_path {
+            self.mode = Mode::Normal;
+            self.queue_workspace_restore(path);
         }
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
@@ -1926,6 +1923,30 @@ impl App {
                 );
                 self.worktree_manager.start_refresh();
             }
+            WorktreeManagerEffect::CreateNative {
+                common_dir,
+                path,
+                branch,
+                start_point,
+            } => {
+                if !self.session.can_start_mutation() || self.worktree_removal_running() {
+                    self.notice = Some(
+                        "Wait for the current workspace operation to finish before creating a worktree"
+                            .to_owned(),
+                    );
+                    return;
+                }
+                if !self.worktree_manager.start_create(
+                    common_dir,
+                    path.clone(),
+                    branch,
+                    start_point,
+                ) {
+                    self.notice = Some("A worktree operation is already running".to_owned());
+                    return;
+                }
+                self.notice = Some(format!("Creating worktree {}...", path.display()));
+            }
             WorktreeManagerEffect::RemoveNative { common_dir, path } => {
                 if self
                     .repository()
@@ -2266,7 +2287,8 @@ impl App {
     }
 
     fn worktree_removal_running(&self) -> bool {
-        self.worktree_manager.remove_running() || self.workspace_panel.destructive_action_running()
+        self.worktree_manager.operation_running()
+            || self.workspace_panel.destructive_action_running()
     }
 
     fn maybe_start_workspace_fetch(&mut self) {

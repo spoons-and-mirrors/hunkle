@@ -271,7 +271,7 @@ impl Explorer {
     }
 
     pub(super) fn confirm_path(&mut self) -> PickerCommand {
-        let exact_input = expand_search_path(self.path_input.trim());
+        let exact_input = self.input_path();
         let path = if self.path_input.ends_with(['/', '\\']) && exact_input.is_dir() {
             exact_input
         } else {
