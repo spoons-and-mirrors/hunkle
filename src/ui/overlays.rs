@@ -15,7 +15,8 @@ use crate::app::{
     HerdrPrompt, HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
-    WorkspaceRenameDialog,
+    WorkspaceRenameDialog, WorktreeManager, WorktreeManagerHitTarget, WorktreeManagerRow,
+    WorktreeRemoveDialog, short_head, worktree_label,
 };
 
 use super::{fill, palette, truncate_width};
@@ -300,6 +301,279 @@ pub(super) fn draw_repository_browser(
     );
 
     hit_targets
+}
+
+pub(super) fn draw_worktree_manager(
+    frame: &mut Frame<'_>,
+    manager: &mut WorktreeManager,
+) -> Vec<(HitTarget, Rect)> {
+    let area = centered_min(frame.area(), 88, 78, 62, 20);
+    let mut hit_targets = vec![(
+        HitTarget::WorktreeManager(WorktreeManagerHitTarget::Overlay),
+        area,
+    )];
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    fill(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        palette().surface_alt,
+    );
+
+    let inner_x = area.x.saturating_add(2);
+    let inner_width = area.width.saturating_sub(4);
+    let summary = format!(
+        "  Linked checkouts  {} repositories · {} worktrees{}",
+        manager.repositories.len(),
+        manager.worktree_count(),
+        if manager.loading {
+            " · refreshing"
+        } else {
+            ""
+        }
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "WORKTREES",
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(summary, Style::default().fg(palette().faint)),
+        ])),
+        Rect::new(inner_x, area.y.saturating_add(1), inner_width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("FILTER  ", Style::default().fg(palette().muted)),
+            Span::styled(manager.query.as_str(), Style::default().fg(palette().ink)),
+            Span::styled("▌", Style::default().fg(palette().accent)),
+        ]))
+        .style(Style::default().bg(palette().selected)),
+        Rect::new(inner_x, area.y.saturating_add(4), inner_width, 1),
+    );
+
+    let list = Rect::new(
+        inner_x,
+        area.y.saturating_add(6),
+        inner_width,
+        area.bottom()
+            .saturating_sub(1)
+            .saturating_sub(area.y.saturating_add(6)),
+    );
+    let rows = manager.rows();
+    let items =
+        if rows.is_empty() {
+            vec![status_row(
+                if manager.loading {
+                    "Loading known repositories…"
+                } else if manager.query.is_empty() {
+                    "No linked Git worktrees found"
+                } else {
+                    "No worktrees match this filter"
+                },
+                palette().muted,
+            )]
+        } else {
+            rows.iter()
+                .map(|row| match *row {
+                    WorktreeManagerRow::Repository(repository_index) => {
+                        let repository = &manager.repositories[repository_index];
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                repository.label.to_uppercase(),
+                                Style::default()
+                                    .fg(palette().muted)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {} checkouts", repository.worktrees.len()),
+                                Style::default().fg(palette().faint),
+                            ),
+                        ]))
+                    }
+                    WorktreeManagerRow::Status(repository_index) => {
+                        let repository = &manager.repositories[repository_index];
+                        ListItem::new(vec![
+                            Line::from(Span::styled(
+                                "  Repository unavailable",
+                                Style::default().fg(palette().red),
+                            )),
+                            Line::from(Span::styled(
+                                truncate_width(
+                                    repository.error.as_deref().unwrap_or_default(),
+                                    usize::from(list.width.saturating_sub(4)),
+                                ),
+                                Style::default().fg(palette().faint),
+                            )),
+                        ])
+                    }
+                    WorktreeManagerRow::Worktree {
+                        repository,
+                        worktree,
+                    } => {
+                        let worktree = &manager.repositories[repository].worktrees[worktree];
+                        let selected = manager
+                            .state
+                            .selected()
+                            .is_some_and(|selected| rows.get(selected) == Some(row));
+                        let mut badges = Vec::new();
+                        if manager.is_current(&worktree.path) {
+                            badges.push("CURRENT");
+                        }
+                        if worktree.is_main {
+                            badges.push("PRIMARY");
+                        }
+                        if manager.is_herdr(&worktree.path) {
+                            badges.push("HERDR");
+                        }
+                        if worktree.locked {
+                            badges.push("LOCKED");
+                        }
+                        if worktree.prunable {
+                            badges.push("MISSING");
+                        }
+                        let badge = if badges.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  {}", badges.join(" · "))
+                        };
+                        let marker = if manager.is_current(&worktree.path) {
+                            "●"
+                        } else {
+                            " "
+                        };
+                        ListItem::new(vec![
+                            Line::from(vec![
+                                Span::styled(
+                                    format!("{marker} {}", worktree_label(worktree)),
+                                    Style::default()
+                                        .fg(if selected {
+                                            palette().ink
+                                        } else {
+                                            palette().green
+                                        })
+                                        .add_modifier(if selected {
+                                            Modifier::BOLD
+                                        } else {
+                                            Modifier::empty()
+                                        }),
+                                ),
+                                Span::styled(badge, Style::default().fg(palette().purple)),
+                            ]),
+                            Line::from(Span::styled(
+                                format!(
+                                    "  {}{}",
+                                    worktree.path.display(),
+                                    worktree.head.as_deref().map_or_else(
+                                        String::new,
+                                        |head| format!("  {}", short_head(head))
+                                    )
+                                ),
+                                Style::default().fg(palette().faint),
+                            )),
+                        ])
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::default().bg(palette().selected)),
+        list,
+        &mut manager.state,
+    );
+    hit_targets.push((
+        HitTarget::WorktreeManager(WorktreeManagerHitTarget::List),
+        list,
+    ));
+    let mut row_y = list.y;
+    for (index, row) in rows.iter().enumerate().skip(manager.state.offset()) {
+        let row_height = if matches!(row, WorktreeManagerRow::Repository(_)) {
+            1
+        } else {
+            2
+        };
+        let remaining = list.bottom().saturating_sub(row_y);
+        if remaining < row_height {
+            break;
+        }
+        if matches!(row, WorktreeManagerRow::Worktree { .. }) {
+            hit_targets.push((
+                HitTarget::WorktreeManager(WorktreeManagerHitTarget::Item {
+                    generation: manager.content_generation(),
+                    row: index,
+                }),
+                Rect::new(list.x, row_y, list.width, row_height),
+            ));
+        }
+        row_y = row_y.saturating_add(row_height);
+    }
+
+    frame.render_widget(
+        Paragraph::new(
+            "Enter open   Del remove   Ctrl-R refresh   ↑↓ select   type filter   Esc close",
+        )
+        .alignment(Alignment::Right)
+        .style(Style::default().fg(palette().muted)),
+        Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1),
+    );
+
+    hit_targets
+}
+
+pub(super) fn draw_worktree_remove_dialog(frame: &mut Frame<'_>, dialog: &WorktreeRemoveDialog) {
+    let area = centered_min(frame.area(), 68, 0, 56, 13);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    frame.render_widget(
+        Paragraph::new("REMOVE WORKTREE").style(
+            Style::default()
+                .fg(palette().red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from("Remove this linked checkout?"),
+            Line::from(""),
+            Line::from(Span::styled(
+                dialog.label.as_str(),
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                dialog.path.display().to_string(),
+                Style::default().fg(palette().faint),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Dirty or modified worktrees will not be removed.",
+                Style::default().fg(palette().muted),
+            )),
+        ])
+        .wrap(Wrap { trim: false }),
+        Rect::new(inner.x, inner.y.saturating_add(3), inner.width, 7),
+    );
+    frame.render_widget(
+        Paragraph::new("Enter / y remove   n / Esc cancel")
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
+    );
 }
 
 pub(super) fn draw_branch_delete_dialog(frame: &mut Frame<'_>, dialog: &BranchDeleteDialog) {
@@ -2642,7 +2916,7 @@ pub(super) fn draw_editor(
 }
 
 pub(super) fn draw_help(frame: &mut Frame<'_>) {
-    let area = centered_min(frame.area(), 72, 0, 58, 23);
+    let area = centered_min(frame.area(), 72, 0, 58, 24);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -2696,6 +2970,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("Home / G", "First / last"),
         help_line("r", "Refresh"),
         help_line("o", "Explorer"),
+        help_line("W", "Linked worktrees"),
         help_line("b", "Branches / PRs / issues"),
         help_line("w", "Cycle Herdr rail left/right/off"),
         help_line("p", "Workspace presets"),

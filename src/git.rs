@@ -34,9 +34,24 @@ pub enum RepositoryKind {
     Local,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LinkedWorktree {
+    pub(crate) path: PathBuf,
+    pub(crate) head: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) is_main: bool,
+    pub(crate) is_detached: bool,
+    pub(crate) is_bare: bool,
+    pub(crate) locked: bool,
+    pub(crate) locked_reason: Option<String>,
+    pub(crate) prunable: bool,
+    pub(crate) prunable_reason: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RepositoryData {
     pub root: PathBuf,
+    pub(crate) common_dir: Option<PathBuf>,
     pub kind: RepositoryKind,
     pub branch: String,
     pub changes: Vec<Change>,
@@ -304,6 +319,170 @@ pub fn discover(path: &Path) -> Result<PathBuf> {
     Ok(root)
 }
 
+pub(crate) fn common_git_dir(root: &Path) -> Result<PathBuf> {
+    let output = run(root, &["rev-parse", "--git-common-dir"])?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+
+    let path = path_from_git_bytes(trim_line_ending(&output.stdout));
+    if path.as_os_str().is_empty() {
+        bail!("Git returned an empty common repository directory");
+    }
+    let path = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    fs::canonicalize(&path).with_context(|| {
+        format!(
+            "could not resolve common repository directory {}",
+            path.display()
+        )
+    })
+}
+
+pub(crate) fn list_worktrees(repository: &Path) -> Result<Vec<LinkedWorktree>> {
+    let output = run(repository, &["worktree", "list", "--porcelain", "-z"])?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    parse_worktrees(&output.stdout)
+}
+
+pub(crate) fn remove_worktree(repository: &Path, worktree: &Path) -> Result<()> {
+    let output = process::run(
+        base_command(repository)
+            .args(["worktree", "remove", "--"])
+            .arg(worktree),
+        git_limits(),
+    )
+    .context("could not run git worktree remove")?;
+    ensure_complete(&output, "git worktree remove")?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    Ok(())
+}
+
+fn parse_worktrees(bytes: &[u8]) -> Result<Vec<LinkedWorktree>> {
+    let mut worktrees = Vec::new();
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        let end = remaining
+            .windows(2)
+            .position(|bytes| bytes == b"\0\0")
+            .context("malformed worktree list: record is not terminated")?;
+        let record = &remaining[..end];
+        remaining = &remaining[end + 2..];
+        if record.is_empty() {
+            bail!("malformed worktree list: empty record");
+        }
+        worktrees.push(parse_worktree_record(record, worktrees.is_empty())?);
+    }
+    Ok(worktrees)
+}
+
+fn parse_worktree_record(record: &[u8], is_main: bool) -> Result<LinkedWorktree> {
+    let mut fields = record.split(|byte| *byte == 0);
+    let path = fields
+        .next()
+        .and_then(|field| field.strip_prefix(b"worktree "))
+        .filter(|path| !path.is_empty())
+        .context("malformed worktree record: missing worktree path")?;
+    let mut worktree = LinkedWorktree {
+        path: path_from_git_bytes(path),
+        head: None,
+        branch: None,
+        is_main,
+        is_detached: false,
+        is_bare: false,
+        locked: false,
+        locked_reason: None,
+        prunable: false,
+        prunable_reason: None,
+    };
+
+    for field in fields {
+        if let Some(head) = field.strip_prefix(b"HEAD ") {
+            if head.is_empty() || worktree.head.replace(text(head)).is_some() {
+                bail!("malformed worktree record: invalid HEAD field");
+            }
+        } else if let Some(branch) = field.strip_prefix(b"branch ") {
+            if branch.is_empty() || worktree.branch.replace(text(branch)).is_some() {
+                bail!("malformed worktree record: invalid branch field");
+            }
+        } else if field == b"detached" {
+            if worktree.is_detached {
+                bail!("malformed worktree record: duplicate detached field");
+            }
+            worktree.is_detached = true;
+        } else if field == b"bare" {
+            if worktree.is_bare {
+                bail!("malformed worktree record: duplicate bare field");
+            }
+            worktree.is_bare = true;
+        } else if field == b"locked" {
+            if worktree.locked {
+                bail!("malformed worktree record: duplicate locked field");
+            }
+            worktree.locked = true;
+        } else if let Some(reason) = field.strip_prefix(b"locked ") {
+            if worktree.locked {
+                bail!("malformed worktree record: duplicate locked field");
+            }
+            worktree.locked = true;
+            worktree.locked_reason = Some(text(reason));
+        } else if field == b"prunable" {
+            if worktree.prunable {
+                bail!("malformed worktree record: duplicate prunable field");
+            }
+            worktree.prunable = true;
+        } else if let Some(reason) = field.strip_prefix(b"prunable ") {
+            if worktree.prunable {
+                bail!("malformed worktree record: duplicate prunable field");
+            }
+            worktree.prunable = true;
+            worktree.prunable_reason = Some(text(reason));
+        }
+    }
+
+    if worktree.is_bare {
+        if worktree.head.is_some() || worktree.branch.is_some() || worktree.is_detached {
+            bail!("malformed worktree record: bare worktree has checkout state");
+        }
+    } else if worktree.head.is_none() || worktree.branch.is_some() == worktree.is_detached {
+        bail!("malformed worktree record: incomplete checkout state");
+    }
+    Ok(worktree)
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(bytes: &[u8]) -> PathBuf {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    PathBuf::from(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn trim_line_ending(mut bytes: &[u8]) -> &[u8] {
+    if bytes.ends_with(b"\n") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    if bytes.ends_with(b"\r") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
 pub(crate) fn delete_branch(
     root: &Path,
     branch: &str,
@@ -360,7 +539,8 @@ pub fn load_or_local(path: &Path) -> Result<RepositoryData> {
 }
 
 fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
-    let (worktree, inventory, history, graph, refs) = thread::scope(|scope| {
+    let (common_dir, worktree, inventory, history, graph, refs) = thread::scope(|scope| {
+        let common_dir = scope.spawn(|| common_git_dir(&root));
         let worktree = scope.spawn(|| load_worktree(&root));
         let inventory = scope.spawn(|| load_git_inventory(&root));
         let history = scope.spawn(|| load_history(&root));
@@ -368,6 +548,9 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         let refs = scope.spawn(|| load_refs(&root));
 
         Ok::<_, anyhow::Error>((
+            common_dir
+                .join()
+                .map_err(|_| anyhow!("repository identity worker panicked"))??,
             worktree
                 .join()
                 .map_err(|_| anyhow!("status worker panicked"))??,
@@ -386,6 +569,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
 
     Ok(RepositoryData {
         root,
+        common_dir: Some(common_dir),
         kind: RepositoryKind::Git,
         branch: history.branch,
         changes: worktree.changes,
@@ -556,6 +740,7 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
     let inventory = load_local_inventory(&root)?;
     Ok(RepositoryData {
         root,
+        common_dir: None,
         kind: RepositoryKind::Local,
         branch: "local".to_owned(),
         changes: Vec::new(),
@@ -1445,6 +1630,136 @@ fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_main_worktree_with_spaces() {
+        let parsed = parse_worktrees(
+            b"worktree /repo/main worktree\0HEAD 0123456789abcdef\0branch refs/heads/main\0\0",
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed,
+            [LinkedWorktree {
+                path: PathBuf::from("/repo/main worktree"),
+                head: Some("0123456789abcdef".to_owned()),
+                branch: Some("refs/heads/main".to_owned()),
+                is_main: true,
+                is_detached: false,
+                is_bare: false,
+                locked: false,
+                locked_reason: None,
+                prunable: false,
+                prunable_reason: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_detached_locked_and_prunable_worktrees() {
+        let parsed = parse_worktrees(
+            b"worktree /repo\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/main\0\0worktree /repo/detached\0HEAD bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\0detached\0locked reason with spaces\0prunable gitdir file points to non-existent location\0\0",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[0].is_main);
+        assert!(!parsed[1].is_main);
+        assert!(parsed[1].is_detached);
+        assert_eq!(parsed[1].branch, None);
+        assert!(parsed[1].locked);
+        assert_eq!(
+            parsed[1].locked_reason.as_deref(),
+            Some("reason with spaces")
+        );
+        assert!(parsed[1].prunable);
+        assert_eq!(
+            parsed[1].prunable_reason.as_deref(),
+            Some("gitdir file points to non-existent location")
+        );
+    }
+
+    #[test]
+    fn parses_bare_and_reasonless_locked_worktrees() {
+        let parsed = parse_worktrees(
+            b"worktree /srv/repository.git\0bare\0locked\0prunable metadata missing\0\0",
+        )
+        .unwrap();
+
+        assert!(parsed[0].is_main);
+        assert!(parsed[0].is_bare);
+        assert_eq!(parsed[0].head, None);
+        assert_eq!(parsed[0].branch, None);
+        assert!(parsed[0].locked);
+        assert_eq!(parsed[0].locked_reason, None);
+        assert_eq!(
+            parsed[0].prunable_reason.as_deref(),
+            Some("metadata missing")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_worktree_records() {
+        for malformed in [
+            b"HEAD abc\0branch refs/heads/main\0\0".as_slice(),
+            b"worktree /repo\0HEAD abc\0branch refs/heads/main\0".as_slice(),
+            b"worktree /repo\0HEAD abc\0\0".as_slice(),
+            b"worktree /repo\0HEAD abc\0branch refs/heads/main\0detached\0\0".as_slice(),
+            b"worktree /repo.git\0bare\0HEAD abc\0detached\0\0".as_slice(),
+        ] {
+            assert!(parse_worktrees(malformed).is_err(), "{malformed:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_non_utf8_worktree_paths() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let parsed =
+            parse_worktrees(b"worktree /repo/linked-\xff\0HEAD 0123456789abcdef\0detached\0\0")
+                .unwrap();
+
+        assert_eq!(parsed[0].path.as_os_str().as_bytes(), b"/repo/linked-\xff");
+    }
+
+    #[test]
+    fn lists_and_safely_removes_a_real_linked_worktree() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("main repository");
+        let linked = directory.path().join("linked worktree");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "user.name", "Test Author"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-m", "base"]);
+        git(
+            &root,
+            &["worktree", "add", "-b", "topic", linked.to_str().unwrap()],
+        );
+
+        let common = common_git_dir(&root).unwrap();
+        assert_eq!(common_git_dir(&linked).unwrap(), common);
+        let listed = list_worktrees(&common).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].path, fs::canonicalize(&root).unwrap());
+        assert!(listed[0].is_main);
+        assert_eq!(listed[0].branch.as_deref(), Some("refs/heads/main"));
+        assert_eq!(listed[1].path, fs::canonicalize(&linked).unwrap());
+        assert!(!listed[1].is_main);
+        assert_eq!(listed[1].branch.as_deref(), Some("refs/heads/topic"));
+
+        fs::write(linked.join("tracked.txt"), "dirty\n").unwrap();
+        assert!(remove_worktree(&common, &linked).is_err());
+        assert!(linked.exists());
+        git(&linked, &["restore", "tracked.txt"]);
+
+        remove_worktree(&common, &linked).unwrap();
+        assert!(!linked.exists());
+        assert_eq!(list_worktrees(&common).unwrap().len(), 1);
+    }
 
     #[test]
     fn parses_staged_and_unstaged_status_entries() {

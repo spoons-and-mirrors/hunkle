@@ -206,6 +206,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 overlays::draw_branch_delete_dialog(frame, dialog);
             }
         }
+        Mode::WorktreeManager => {
+            dim(frame);
+            for (target, rect) in overlays::draw_worktree_manager(frame, &mut app.worktree_manager)
+            {
+                app.regions.register_hit_target(target, rect);
+            }
+            if let Some(dialog) = &app.worktree_manager.remove_dialog {
+                dim(frame);
+                overlays::draw_worktree_remove_dialog(frame, dialog);
+            }
+        }
         Mode::AuthorFilter => {
             let anchor = app
                 .regions
@@ -393,7 +404,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         area,
     );
 
-    let compact = area.width < 88;
+    let compact = area.width < 100;
     let left_pane_label = if app.view == View::Graph || app.changes.pane == LeftPane::Worktree {
         "Files"
     } else {
@@ -405,6 +416,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     labels.extend([
         ("o", "Explorer"),
+        ("W", "Worktrees"),
         ("b", "Branches"),
         ("s", "Settings"),
         ("?", "Help"),
@@ -484,9 +496,10 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
     }
     app.regions.explorer = rects.get(2 + offset).copied();
-    app.regions.repository_browser = rects.get(3 + offset).copied();
-    app.regions.settings = rects.get(4 + offset).copied();
-    app.regions.help = rects.get(5 + offset).copied();
+    app.regions.worktree_manager = rects.get(3 + offset).copied();
+    app.regions.repository_browser = rects.get(4 + offset).copied();
+    app.regions.settings = rects.get(5 + offset).copied();
+    app.regions.help = rects.get(6 + offset).copied();
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)),

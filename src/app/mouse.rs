@@ -7,8 +7,8 @@ use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 use super::{
     ACTION_ITEMS, App, ExplorerHitTarget, GraphHitTarget, HitTarget, LeftPane,
     MINIMUM_WORKSPACE_PANEL_WIDTH, Mode, RepositoryBrowserEffect, RepositoryBrowserHitTarget, View,
-    WorkspaceDropTarget, WorkspacePanelHitTarget, WorkspacePanelPlacement, changes::ChangesEffect,
-    scroll_table,
+    WorkspaceDropTarget, WorkspacePanelHitTarget, WorkspacePanelPlacement, WorktreeManagerEffect,
+    WorktreeManagerHitTarget, changes::ChangesEffect, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -73,6 +73,9 @@ impl App {
             || self.workspace_panel.delete_dialog.is_some()
             || self.workspace_panel.snapshot_load_dialog.is_some()
         {
+            return;
+        }
+        if self.mode == Mode::WorktreeManager && self.worktree_manager.remove_dialog_open() {
             return;
         }
         if self.mode == Mode::WorkspacePresets {
@@ -171,6 +174,10 @@ impl App {
         }
         if self.mode == Mode::RepositoryBrowser {
             self.handle_repository_browser_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::WorktreeManager {
+            self.handle_worktree_manager_mouse(mouse);
             return;
         }
         if self.mode == Mode::Command {
@@ -332,6 +339,9 @@ impl App {
             self.regions.hit_target_rect(HitTarget::RepositoryBrowser(
                 RepositoryBrowserHitTarget::Overlay,
             )),
+            self.regions.hit_target_rect(HitTarget::WorktreeManager(
+                WorktreeManagerHitTarget::Overlay,
+            )),
             self.regions.diff,
             self.regions.workspace_panel,
             self.regions.worktree,
@@ -360,6 +370,7 @@ impl App {
             Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::RepositoryBrowser => self.handle_repository_browser_mouse(mouse),
+            Mode::WorktreeManager => self.handle_worktree_manager_mouse(mouse),
             Mode::AuthorFilter => self.handle_author_filter_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
@@ -456,6 +467,12 @@ impl App {
             .is_some_and(|rect| rect.contains(point))
         {
             self.open_explorer();
+        } else if self
+            .regions
+            .worktree_manager
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_worktree_manager();
         } else if self
             .regions
             .repository_browser
@@ -799,6 +816,56 @@ impl App {
                 Some(HitTarget::RepositoryBrowser(
                     RepositoryBrowserHitTarget::Overlay | RepositoryBrowserHitTarget::List,
                 )) => {}
+                Some(HitTarget::WorktreeManager(_)) => {}
+                Some(HitTarget::Graph(_)) => {}
+                Some(HitTarget::Explorer(_)) => {}
+                Some(HitTarget::WorkspacePanel(_)) => {}
+                Some(HitTarget::Changes(_)) => {}
+                Some(HitTarget::CommitMessageGenerate) => {}
+                Some(HitTarget::MarkdownPreviewToggle) => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn handle_worktree_manager_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && !self
+                .regions
+                .hit_target_rect(HitTarget::WorktreeManager(
+                    WorktreeManagerHitTarget::Overlay,
+                ))
+                .is_some_and(|area| area.contains(point))
+        {
+            self.apply_worktree_manager_effect(WorktreeManagerEffect::Close);
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.worktree_manager.move_selection(1),
+            MouseEventKind::ScrollUp => self.worktree_manager.move_selection(-1),
+            MouseEventKind::Moved => {
+                if let Some(HitTarget::WorktreeManager(WorktreeManagerHitTarget::Item {
+                    generation,
+                    row,
+                })) = self.regions.hit_target_at(point)
+                {
+                    self.worktree_manager.select_row(generation, row);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+                Some(HitTarget::WorktreeManager(WorktreeManagerHitTarget::Item {
+                    generation,
+                    row,
+                })) => {
+                    let effect = self.worktree_manager.click_row(generation, row);
+                    self.apply_worktree_manager_effect_option(effect);
+                }
+                None => {}
+                Some(HitTarget::WorktreeManager(
+                    WorktreeManagerHitTarget::Overlay | WorktreeManagerHitTarget::List,
+                )) => {}
+                Some(HitTarget::RepositoryBrowser(_)) => {}
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::Explorer(_)) => {}
                 Some(HitTarget::WorkspacePanel(_)) => {}

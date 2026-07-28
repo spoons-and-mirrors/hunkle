@@ -1300,6 +1300,7 @@ mod tests {
     fn repository_data() -> RepositoryData {
         RepositoryData {
             root: PathBuf::new(),
+            common_dir: None,
             kind: RepositoryKind::Git,
             branch: "main".to_owned(),
             branches: Vec::new(),

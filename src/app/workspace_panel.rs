@@ -255,6 +255,7 @@ enum Completion {
         result: Result<(), String>,
         reopen_path: Option<PathBuf>,
         warning: Option<String>,
+        destructive: bool,
     },
     SnapshotRecall {
         name: String,
@@ -373,6 +374,7 @@ pub(crate) struct WorkspacePanel {
     workspace_drag: Option<WorkspaceDrag>,
     last_click: Option<(SelectionKey, Instant)>,
     focus: WorkspaceFocusState,
+    destructive_actions_running: usize,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
     next_refresh: Instant,
@@ -445,6 +447,7 @@ impl WorkspacePanel {
             workspace_drag: None,
             last_click: None,
             focus: WorkspaceFocusState::default(),
+            destructive_actions_running: 0,
             sender,
             receiver,
             next_refresh: Instant::now(),
@@ -460,6 +463,36 @@ impl WorkspacePanel {
 
     pub(crate) fn is_available(&self) -> bool {
         self.enabled && self.layout_available
+    }
+
+    pub(crate) fn known_workspace_paths(&self) -> Vec<PathBuf> {
+        self.workspaces
+            .iter()
+            .filter_map(|workspace| workspace.path.clone())
+            .collect()
+    }
+
+    pub(crate) fn linked_herdr_worktrees(&self) -> Vec<(PathBuf, String)> {
+        self.workspaces
+            .iter()
+            .filter(|workspace| workspace.linked_worktree)
+            .filter_map(|workspace| {
+                workspace
+                    .path
+                    .clone()
+                    .map(|path| (path, workspace.id.clone()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn refresh_worktree_inventory(&mut self) {
+        if self.enabled && !self.loading {
+            self.start_snapshot();
+        }
+    }
+
+    pub(crate) fn worktree_inventory_verified(&self) -> bool {
+        !self.enabled || (!self.loading && self.error.is_none())
     }
 
     pub(crate) fn set_layout_available(&mut self, available: bool) {
@@ -632,14 +665,23 @@ impl WorkspacePanel {
                     result,
                     reopen_path: action_reopen_path,
                     warning,
-                } => match result {
-                    Ok(()) => {
-                        self.next_refresh = Instant::now();
-                        reopen_path = action_reopen_path;
-                        action_error = warning;
+                    destructive,
+                } => {
+                    if destructive {
+                        self.destructive_actions_running =
+                            self.destructive_actions_running.saturating_sub(1);
                     }
-                    Err(error) => action_error = Some(error),
-                },
+                    match result {
+                        Ok(()) => {
+                            self.next_refresh = Instant::now();
+                            if action_reopen_path.is_some() {
+                                reopen_path = action_reopen_path;
+                            }
+                            action_error = warning;
+                        }
+                        Err(error) => action_error = Some(error),
+                    }
+                }
                 Completion::SnapshotRecall { name, result } => match result {
                     Ok(result) => {
                         self.snapshot_loading = false;
@@ -1037,7 +1079,7 @@ impl WorkspacePanel {
         });
     }
 
-    pub(crate) fn close_workspace(&self, workspace_id: &str) {
+    pub(crate) fn close_workspace(&mut self, workspace_id: &str) {
         self.start_destructive_action(
             herdr::Action::CloseWorkspace {
                 workspace_id: workspace_id.to_owned(),
@@ -1054,7 +1096,7 @@ impl WorkspacePanel {
         });
     }
 
-    pub(crate) fn delete_worktree(&self, workspace_id: &str, reopen_path: Option<PathBuf>) {
+    pub(crate) fn delete_worktree(&mut self, workspace_id: &str, reopen_path: Option<PathBuf>) {
         self.start_destructive_action(
             herdr::Action::RemoveWorktree {
                 workspace_id: workspace_id.to_owned(),
@@ -1759,16 +1801,18 @@ impl WorkspacePanel {
                 result,
                 reopen_path: None,
                 warning: None,
+                destructive: false,
             });
         });
     }
 
     fn start_destructive_action(
-        &self,
+        &mut self,
         action: herdr::Action,
         removed_workspace_id: &str,
         reopen_path: Option<PathBuf>,
     ) {
+        self.destructive_actions_running = self.destructive_actions_running.saturating_add(1);
         let restore_focus = self.focus_to_restore_after_removing(removed_workspace_id);
         let sender = self.sender.clone();
         thread::spawn(move || {
@@ -1790,8 +1834,13 @@ impl WorkspacePanel {
                 result,
                 reopen_path,
                 warning,
+                destructive: true,
             });
         });
+    }
+
+    pub(crate) fn destructive_action_running(&self) -> bool {
+        self.destructive_actions_running > 0
     }
 
     fn focus_to_restore_after_removing(&self, removed_workspace_id: &str) -> Option<String> {
@@ -2653,6 +2702,7 @@ mod tests {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.next_refresh = Instant::now() + Duration::from_secs(60);
         panel.loading = true;
+        panel.destructive_actions_running = 1;
         let parent = PathBuf::from("/home/spoon/code/gitui");
 
         panel
@@ -2661,26 +2711,64 @@ mod tests {
                 result: Ok(()),
                 reopen_path: Some(parent.clone()),
                 warning: None,
+                destructive: true,
             })
             .unwrap();
         let (changed, error, reopen_path, _) = panel.poll();
         assert!(changed);
         assert_eq!(error, None);
         assert_eq!(reopen_path, Some(parent.clone()));
+        assert!(!panel.destructive_action_running());
 
         panel.next_refresh = Instant::now() + Duration::from_secs(60);
+        panel.destructive_actions_running = 1;
         panel
             .sender
             .send(Completion::Action {
                 result: Err("worktree has uncommitted changes".to_owned()),
                 reopen_path: Some(parent),
                 warning: None,
+                destructive: true,
             })
             .unwrap();
         let (changed, error, reopen_path, _) = panel.poll();
         assert!(changed);
         assert_eq!(error.as_deref(), Some("worktree has uncommitted changes"));
         assert_eq!(reopen_path, None);
+        assert!(!panel.destructive_action_running());
+    }
+
+    #[test]
+    fn preserves_parent_reopen_across_multiple_destructive_completions() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.next_refresh = Instant::now() + Duration::from_secs(60);
+        panel.loading = true;
+        panel.destructive_actions_running = 2;
+        let parent = PathBuf::from("/home/spoon/code/gitui");
+
+        panel
+            .sender
+            .send(Completion::Action {
+                result: Ok(()),
+                reopen_path: Some(parent.clone()),
+                warning: None,
+                destructive: true,
+            })
+            .unwrap();
+        panel
+            .sender
+            .send(Completion::Action {
+                result: Ok(()),
+                reopen_path: None,
+                warning: None,
+                destructive: true,
+            })
+            .unwrap();
+
+        let (_, error, reopen_path, _) = panel.poll();
+        assert_eq!(error, None);
+        assert_eq!(reopen_path, Some(parent));
+        assert!(!panel.destructive_action_running());
     }
 
     #[test]

@@ -389,6 +389,10 @@ impl RepositorySession {
         self.operations.can_start(Operation::Load(LoadKind::Open))
     }
 
+    pub(crate) fn can_start_mutation(&self) -> bool {
+        self.operations.can_start(Operation::Mutation)
+    }
+
     pub(crate) fn can_restart(&self) -> bool {
         self.operations.foreground.is_none()
             && !self.operations.fetching
@@ -1261,6 +1265,7 @@ mod tests {
         RepositorySession {
             data: Some(RepositoryData {
                 root: PathBuf::from(root),
+                common_dir: None,
                 kind: git::RepositoryKind::Git,
                 branch: "main".to_owned(),
                 branches: Vec::new(),

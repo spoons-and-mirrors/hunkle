@@ -18,6 +18,10 @@ A directory opened without Git behavior. It supports file browsing, search, prev
 
 The tracked and untracked changes shown in the left CHANGES pane. Staging actions operate on this view even while Graph is visible.
 
+## Linked worktree
+
+A Git checkout registered through `git worktree`. The Worktrees interaction lists linked worktrees from repositories Hunkle knows about and can open or safely remove them. This is distinct from the CHANGES-pane Worktree.
+
 ## Files
 
 The complete filesystem tree inside the workspace, including Git-ignored content but excluding Git's own metadata directory.
