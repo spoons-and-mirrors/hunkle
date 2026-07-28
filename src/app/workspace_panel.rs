@@ -374,6 +374,7 @@ pub(crate) struct WorkspacePanel {
     pub(crate) agent_scroll: usize,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
+    inventory_verified: bool,
     pub(crate) group_input: TextInput,
     pub(crate) group_editing: bool,
     pub(crate) group_error: Option<String>,
@@ -447,6 +448,7 @@ impl WorkspacePanel {
             agent_scroll: 0,
             loading: false,
             error: preset_error,
+            inventory_verified: !enabled,
             group_input: TextInput::default(),
             group_editing: false,
             group_error: None,
@@ -511,7 +513,7 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn worktree_inventory_verified(&self) -> bool {
-        !self.enabled || (!self.loading && self.error.is_none())
+        self.inventory_verified
     }
 
     pub(crate) fn set_layout_available(&mut self, available: bool) {
@@ -660,6 +662,7 @@ impl WorkspacePanel {
                             self.workspaces = workspaces;
                             self.apply_agent_snapshot_at(agents, observed_at);
                             self.error = None;
+                            self.inventory_verified = true;
                             if self.reconcile_group_workspace_ids()
                                 && let Err(error) = self.preset_store.save_groups(&self.groups)
                             {
@@ -667,7 +670,10 @@ impl WorkspacePanel {
                             }
                             self.restore_selection(previous);
                         }
-                        Err(error) => self.error = Some(error),
+                        Err(error) => {
+                            self.error = Some(error);
+                            self.inventory_verified = false;
+                        }
                     }
                 }
                 Completion::WorkspaceFocus { request_id, result } => {
@@ -695,6 +701,7 @@ impl WorkspacePanel {
                     }
                     match result {
                         Ok(()) => {
+                            self.inventory_verified = false;
                             self.next_refresh = Instant::now();
                             if action_reopen_path.is_some() {
                                 reopen_path = action_reopen_path;
@@ -2063,6 +2070,7 @@ impl WorkspacePanel {
         let (workspaces, agents) = herdr::parse_snapshot(value).unwrap();
         panel.focus.apply_snapshot(&workspaces);
         panel.workspaces = workspaces;
+        panel.inventory_verified = true;
         panel.apply_agent_snapshot(agents);
         panel.restore_selection(None);
         panel
@@ -2273,6 +2281,16 @@ mod tests {
 
         panel.loading = true;
         assert!(!panel.should_start_snapshot(Instant::now()));
+    }
+
+    #[test]
+    fn keeps_worktree_inventory_verified_during_routine_refresh() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        assert!(panel.worktree_inventory_verified());
+
+        panel.loading = true;
+
+        assert!(panel.worktree_inventory_verified());
     }
 
     fn agent(name: &str, status: AgentStatus) -> HerdrAgent {
