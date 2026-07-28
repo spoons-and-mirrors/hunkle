@@ -29,10 +29,12 @@ impl WorkspaceFocusState {
     }
 
     pub(super) fn apply_snapshot(&mut self, workspaces: &[HerdrWorkspace]) {
-        self.observed_workspace_id = workspaces
-            .iter()
-            .find(|workspace| workspace.focused)
-            .map(|workspace| workspace.id.clone());
+        self.observe(
+            workspaces
+                .iter()
+                .find(|workspace| workspace.focused)
+                .map(|workspace| workspace.id.clone()),
+        );
         if self.pending.as_ref().is_some_and(|pending| {
             !workspaces
                 .iter()
@@ -40,6 +42,10 @@ impl WorkspaceFocusState {
         }) {
             self.pending = None;
         }
+    }
+
+    pub(super) fn observe(&mut self, workspace_id: Option<String>) {
+        self.observed_workspace_id = workspace_id;
     }
 
     pub(super) fn begin(&mut self, workspace_id: String) -> u64 {

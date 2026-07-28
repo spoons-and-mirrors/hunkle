@@ -296,6 +296,7 @@ enum Completion {
         result: Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String>,
         observed_at_ms: u64,
     },
+    FocusEvent(herdr::FocusEvent),
     WorkspaceFocus {
         request_id: u64,
         result: Result<(), String>,
@@ -378,6 +379,7 @@ impl WorkspacePanel {
         let mut panel = Self::new(enabled, groups_path, snapshots_path);
         if let Some(environment) = environment {
             panel.focus.set_host(environment.workspace_id);
+            panel.start_focus_listener();
         }
         panel
     }
@@ -619,6 +621,10 @@ impl WorkspacePanel {
                             self.inventory_verified = false;
                         }
                     }
+                }
+                Completion::FocusEvent(event) => {
+                    self.apply_focus_event(event);
+                    self.next_refresh = Instant::now();
                 }
                 Completion::WorkspaceFocus { request_id, result } => {
                     match self.focus.complete(request_id, result) {
@@ -1758,6 +1764,36 @@ impl WorkspacePanel {
         });
     }
 
+    fn start_focus_listener(&self) {
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            loop {
+                if herdr::watch_focus_events(|event| {
+                    sender.send(Completion::FocusEvent(event)).is_ok()
+                })
+                .is_ok()
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        });
+    }
+
+    fn apply_focus_event(&mut self, event: herdr::FocusEvent) {
+        let herdr::FocusEvent {
+            workspace_id,
+            pane_id,
+        } = event;
+        self.focus.observe(Some(workspace_id.clone()));
+        for workspace in &mut self.workspaces {
+            workspace.focused = workspace.id == workspace_id;
+        }
+        for agent in &mut self.agents {
+            agent.focused = agent.pane_id == pane_id;
+        }
+    }
+
     pub(crate) fn focus_agent(&self, pane_id: String) {
         self.start_action(herdr::Action::FocusAgent { pane_id });
     }
@@ -2472,6 +2508,27 @@ mod tests {
         panel.agents[1].focused = false;
         assert!(panel.agent_entry_state(0, true).selected);
         assert_eq!(panel.highlighted_agent_index(true), Some(0));
+    }
+
+    #[test]
+    fn focus_events_update_workspace_and_agent_highlights_immediately() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.agents = vec![
+            HerdrAgent {
+                focused: true,
+                ..agent("alpha", AgentStatus::Idle)
+            },
+            agent("beta", AgentStatus::Idle),
+        ];
+        let workspace_id = panel.workspaces[1].id.clone();
+
+        let pane_id = panel.agents[1].pane_id.clone();
+        panel.apply_focus_event(herdr::FocusEvent {
+            workspace_id,
+            pane_id,
+        });
+        assert!(!panel.agents[0].focused);
+        assert!(panel.agents[1].focused);
     }
 
     #[test]
