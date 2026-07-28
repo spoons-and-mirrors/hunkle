@@ -595,6 +595,9 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
+        if self.mode == Mode::Normal && self.paste_clipboard_files(text) {
+            return;
+        }
         match self.mode {
             Mode::Commit => {
                 self.commit_input.insert(text);
@@ -2205,11 +2208,9 @@ impl App {
                 self.workspace_panel
                     .delete_worktree(&workspace_id, reopen_path);
             }
-            WorkspacePanelEffect::FocusWorkspace(workspace_id) => {
-                diagnostics::event(format!(
-                    "Herdr workspace focus requested workspace={workspace_id}"
-                ));
-                self.workspace_panel.start_workspace_focus(workspace_id);
+            WorkspacePanelEffect::FocusAgent(pane_id) => {
+                diagnostics::event(format!("Herdr agent focus requested pane={pane_id}"));
+                self.workspace_panel.focus_agent(pane_id);
             }
             WorkspacePanelEffect::OpenWorkspace(path) => {
                 if self.workspace_focus_restore_path.is_none() {

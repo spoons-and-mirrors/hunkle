@@ -169,6 +169,7 @@ pub(super) fn draw(
                         marker_active: state.loaded,
                         label_active: state.active,
                         selected: state.selected || ungrouped_drop,
+                        selected_background: palette().selected,
                         active_marker: "• ",
                         active_marker_color: palette().yellow,
                         active_label_color: palette().yellow,
@@ -217,15 +218,16 @@ pub(super) fn draw(
         agent_section.height.saturating_sub(1),
     );
     let agent_rows = panel.agent_rows();
-    let selected_agent_row = panel.selected.and_then(|selected| {
-        agent_rows.iter().position(|row| {
-            matches!(row, WorkspacePanelRow::AgentSession(index)
-                if panel.workspaces.len().saturating_add(*index) == selected)
+    let highlighted_agent_row = panel
+        .highlighted_agent_index(focused)
+        .and_then(|highlighted| {
+            agent_rows.iter().position(|row| {
+            matches!(row, WorkspacePanelRow::AgentSession(index) if *index == highlighted)
         })
-    });
+        });
     keep_section_visible(
         &mut panel.agent_scroll,
-        selected_agent_row,
+        highlighted_agent_row,
         agent_rows.len(),
         usize::from(agent_list.height),
     );
@@ -280,6 +282,7 @@ pub(super) fn draw(
                         marker_active: state.active,
                         label_active: state.active,
                         selected: state.selected,
+                        selected_background: palette().inactive_selected,
                         active_marker: "› ",
                         active_marker_color: palette().accent,
                         active_label_color: palette().ink,
@@ -296,7 +299,7 @@ pub(super) fn draw(
                 let state = panel.agent_entry_state(index, focused);
                 let base = state
                     .selected
-                    .then_some(palette().selected)
+                    .then_some(palette().inactive_selected)
                     .map_or_else(Style::default, |color| Style::default().bg(color));
                 frame.render_widget(Block::default().style(base), row_area);
                 if let Some(session_name) = panel.agents[index].session_name.as_deref() {
@@ -311,7 +314,11 @@ pub(super) fn draw(
                             session_name,
                             usize::from(session_area.width),
                         ))
-                        .style(base.fg(palette().faint)),
+                        .style(base.fg(if state.selected {
+                            palette().yellow
+                        } else {
+                            palette().faint
+                        })),
                         session_area,
                     );
                 }
@@ -655,6 +662,7 @@ struct EntryPresentation {
     marker_active: bool,
     label_active: bool,
     selected: bool,
+    selected_background: Color,
     active_marker: &'static str,
     active_marker_color: Color,
     active_label_color: Color,
@@ -673,6 +681,7 @@ fn draw_entry(
         marker_active,
         label_active,
         selected,
+        selected_background,
         active_marker,
         active_marker_color,
         active_label_color,
@@ -694,7 +703,7 @@ fn draw_entry(
     );
     let label_width = UnicodeWidthStr::width(label.as_str());
     let padding = available.saturating_sub(label_width + detail_width);
-    let background = selected.then_some(palette().selected);
+    let background = selected.then_some(selected_background);
     let base = background.map_or_else(Style::default, |color| Style::default().bg(color));
     frame.render_widget(Block::default().style(base), area);
     frame.render_widget(

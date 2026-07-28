@@ -1439,12 +1439,14 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     );
     let agent_timer = &terminal.backend().buffer()[(agent_row.x + 2, agent_row.y)];
     assert_eq!(agent_timer.symbol(), "0");
+    assert_eq!(agent_timer.bg, super::palette().inactive_selected);
     let agent_status = &terminal.backend().buffer()[(agent_row.right() - 1, agent_row.y)];
     assert_eq!(agent_status.symbol(), "⠋");
     assert_eq!(agent_status.fg, super::palette().yellow);
     let agent_session = &terminal.backend().buffer()[(agent_row.x + 2, agent_row.y + 1)];
     assert_eq!(agent_session.symbol(), "R");
-    assert_eq!(agent_session.fg, super::palette().faint);
+    assert_eq!(agent_session.fg, super::palette().yellow);
+    assert_eq!(agent_session.bg, super::palette().inactive_selected);
     let second_agent_row = app
         .regions
         .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(1)))

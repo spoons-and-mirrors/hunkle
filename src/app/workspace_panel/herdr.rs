@@ -16,7 +16,7 @@ pub(super) enum Action {
     CloseWorkspace { workspace_id: String },
     RemoveWorktree { workspace_id: String },
     FocusWorkspace { workspace_id: String },
-    FocusTab { tab_id: String },
+    FocusAgent { pane_id: String },
     RenameWorkspace { workspace_id: String, label: String },
 }
 
@@ -151,7 +151,9 @@ fn action_args(action: Action) -> Vec<String> {
         Action::FocusWorkspace { workspace_id } => {
             vec!["workspace".to_owned(), "focus".to_owned(), workspace_id]
         }
-        Action::FocusTab { tab_id } => vec!["tab".to_owned(), "focus".to_owned(), tab_id],
+        Action::FocusAgent { pane_id } => {
+            vec!["agent".to_owned(), "focus".to_owned(), pane_id]
+        }
         Action::RenameWorkspace {
             workspace_id,
             label,
@@ -228,7 +230,7 @@ pub(super) fn parse_snapshot(
         })
         .collect::<Result<_, _>>()?;
     assign_worktree_parents(&mut workspaces);
-    let agents = match snapshot.get("agents") {
+    let mut agents = match snapshot.get("agents") {
         None => Vec::new(),
         Some(agents) => agents
             .as_array()
@@ -241,6 +243,11 @@ pub(super) fn parse_snapshot(
             })
             .collect::<Result<_, _>>()?,
     };
+    if let Some(focused_pane_id) = snapshot.get("focused_pane_id").and_then(Value::as_str) {
+        for agent in &mut agents {
+            agent.focused = agent.pane_id == focused_pane_id;
+        }
+    }
     Ok((
         workspaces
             .into_iter()
@@ -479,10 +486,10 @@ mod tests {
             ["workspace", "focus", "w1"].map(str::to_owned)
         );
         assert_eq!(
-            action_args(Action::FocusTab {
-                tab_id: "w1:t2".to_owned(),
+            action_args(Action::FocusAgent {
+                pane_id: "w1:p2".to_owned(),
             }),
-            ["tab", "focus", "w1:t2"].map(str::to_owned)
+            ["agent", "focus", "w1:p2"].map(str::to_owned)
         );
         assert_eq!(
             action_args(Action::RenameWorkspace {
@@ -618,6 +625,7 @@ mod tests {
     fn parses_paths_statuses_and_repo_key_parent_fallback() {
         let value = serde_json::json!({
             "result": { "snapshot": {
+                "focused_pane_id": "pane-3",
                 "workspaces": [
                     {
                         "workspace_id": "parent",
@@ -663,7 +671,7 @@ mod tests {
                     "state_change_seq": 17,
                     "terminal_title_stripped": "OC | Refine workspace timers",
                     "terminal_id": "term-3",
-                    "focused": true,
+                    "focused": false,
                     "pane_id": "pane-3",
                     "tab_id": "tab-3",
                     "workspace_id": "pane-path"
@@ -688,6 +696,7 @@ mod tests {
         );
         assert_eq!(workspaces[2].status, AgentStatus::Done);
         assert_eq!(agents[0].status, AgentStatus::Blocked);
+        assert!(agents[0].focused);
         assert_eq!(agents[0].state_change_seq, 17);
         assert!(matches!(
             &agents[0].timing_key,

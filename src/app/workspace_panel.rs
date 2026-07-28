@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
@@ -681,19 +682,13 @@ impl WorkspacePanel {
         ranked.sort_by_key(|(incoming_index, agent)| {
             let previous_index = previous
                 .iter()
-                .position(|existing| existing.pane_id == agent.pane_id);
-            let became_working = agent.status == AgentStatus::Working
-                && previous_index
-                    .is_none_or(|index| previous[index].status != AgentStatus::Working);
-            if became_working {
-                (0, *incoming_index)
-            } else if agent.status == AgentStatus::Working {
-                (1, previous_index.unwrap_or(usize::MAX))
-            } else if let Some(previous_index) = previous_index {
-                (2, previous_index)
-            } else {
-                (3, *incoming_index)
-            }
+                .position(|existing| existing.pane_id == agent.pane_id)
+                .unwrap_or(usize::MAX);
+            (
+                Reverse(agent.state_change_seq),
+                previous_index,
+                *incoming_index,
+            )
         });
         self.agents = ranked.into_iter().map(|(_, agent)| agent).collect();
     }
@@ -1506,7 +1501,7 @@ impl WorkspacePanel {
             return WorkspacePanelEffect::None;
         }
         self.last_click = None;
-        WorkspacePanelEffect::FocusWorkspace(self.agents[index].workspace_id.clone())
+        WorkspacePanelEffect::FocusAgent(self.agents[index].pane_id.clone())
     }
 
     fn is_double_click(&self, key: &SelectionKey) -> bool {
@@ -1582,12 +1577,26 @@ impl WorkspacePanel {
         index: usize,
         panel_focused: bool,
     ) -> WorkspacePanelEntryState {
+        let active = self.agents.get(index).is_some_and(|agent| agent.focused);
         WorkspacePanelEntryState {
-            active: self.agents.get(index).is_some_and(|agent| agent.focused),
+            active,
             loaded: false,
-            selected: panel_focused
-                && self.selected == Some(self.workspaces.len().saturating_add(index)),
+            selected: self.highlighted_agent_index(panel_focused) == Some(index),
         }
+    }
+
+    pub(crate) fn highlighted_agent_index(&self, panel_focused: bool) -> Option<usize> {
+        self.agents
+            .iter()
+            .position(|agent| agent.focused)
+            .or_else(|| {
+                if !panel_focused {
+                    return None;
+                }
+                self.selected?
+                    .checked_sub(self.workspaces.len())
+                    .filter(|index| *index < self.agents.len())
+            })
     }
 
     #[cfg(test)]
@@ -1713,8 +1722,8 @@ impl WorkspacePanel {
         let Some(agent) = self.agents.get(agent_index) else {
             return;
         };
-        self.start_action(herdr::Action::FocusTab {
-            tab_id: agent.tab_id.clone(),
+        self.start_action(herdr::Action::FocusAgent {
+            pane_id: agent.pane_id.clone(),
         });
     }
 
@@ -1725,6 +1734,10 @@ impl WorkspacePanel {
             let result = herdr::perform(herdr::Action::FocusWorkspace { workspace_id });
             let _ = sender.send(Completion::WorkspaceFocus { request_id, result });
         });
+    }
+
+    pub(crate) fn focus_agent(&self, pane_id: String) {
+        self.start_action(herdr::Action::FocusAgent { pane_id });
     }
 
     fn start_action(&self, action: herdr::Action) {
@@ -1998,7 +2011,7 @@ pub(crate) enum WorkspacePanelEffect {
         path: Option<PathBuf>,
         parent_path: Option<PathBuf>,
     },
-    FocusWorkspace(String),
+    FocusAgent(String),
     OpenWorkspace(PathBuf),
     Notice(String),
 }
@@ -2336,69 +2349,69 @@ mod tests {
     }
 
     #[test]
-    fn promotes_newly_working_agents_without_resorting_the_rest() {
+    fn orders_agents_by_latest_state_change() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.agents = vec![
+            agent_at_sequence("alpha", AgentStatus::Idle, 10),
+            agent_at_sequence("beta", AgentStatus::Idle, 30),
+            agent_at_sequence("gamma", AgentStatus::Working, 20),
+        ];
+        assert!(panel.select_agent(0));
+
+        let selected = panel.selection_key();
+        panel.apply_agent_snapshot(vec![
+            agent_at_sequence("alpha", AgentStatus::Idle, 10),
+            agent_at_sequence("beta", AgentStatus::Idle, 30),
+            agent_at_sequence("gamma", AgentStatus::Working, 20),
+        ]);
+        panel.restore_selection(selected);
+        assert_eq!(
+            panel
+                .agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "gamma", "alpha"]
+        );
+        assert_eq!(panel.selected, Some(panel.workspaces.len() + 2));
+
+        let selected = panel.selection_key();
+        panel.apply_agent_snapshot(vec![
+            agent_at_sequence("gamma", AgentStatus::Idle, 20),
+            agent_at_sequence("beta", AgentStatus::Idle, 30),
+            agent_at_sequence("alpha", AgentStatus::Working, 40),
+        ]);
+        panel.restore_selection(selected);
+        assert_eq!(
+            panel
+                .agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta", "gamma"]
+        );
+        assert_eq!(panel.selected, Some(panel.workspaces.len()));
+    }
+
+    #[test]
+    fn agent_highlight_follows_herdr_focus_over_panel_selection() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.agents = vec![
             agent("alpha", AgentStatus::Idle),
-            agent("beta", AgentStatus::Idle),
-            agent("gamma", AgentStatus::Idle),
+            HerdrAgent {
+                focused: true,
+                ..agent("beta", AgentStatus::Idle)
+            },
         ];
+        assert!(panel.select_agent(0));
 
-        panel.apply_agent_snapshot(vec![
-            agent("alpha", AgentStatus::Idle),
-            agent("beta", AgentStatus::Working),
-            agent("gamma", AgentStatus::Idle),
-        ]);
-        assert_eq!(
-            panel
-                .agents
-                .iter()
-                .map(|agent| agent.name.as_str())
-                .collect::<Vec<_>>(),
-            ["beta", "alpha", "gamma"]
-        );
+        assert!(!panel.agent_entry_state(0, true).selected);
+        assert!(panel.agent_entry_state(1, true).selected);
+        assert_eq!(panel.highlighted_agent_index(true), Some(1));
 
-        panel.apply_agent_snapshot(vec![
-            agent("alpha", AgentStatus::Idle),
-            agent("beta", AgentStatus::Working),
-            agent("gamma", AgentStatus::Working),
-        ]);
-        assert_eq!(
-            panel
-                .agents
-                .iter()
-                .map(|agent| agent.name.as_str())
-                .collect::<Vec<_>>(),
-            ["gamma", "beta", "alpha"]
-        );
-
-        panel.apply_agent_snapshot(vec![
-            agent("alpha", AgentStatus::Idle),
-            agent("gamma", AgentStatus::Idle),
-            agent("beta", AgentStatus::Working),
-        ]);
-        assert_eq!(
-            panel
-                .agents
-                .iter()
-                .map(|agent| agent.name.as_str())
-                .collect::<Vec<_>>(),
-            ["beta", "gamma", "alpha"]
-        );
-
-        panel.apply_agent_snapshot(vec![
-            agent("alpha", AgentStatus::Idle),
-            agent("beta", AgentStatus::Idle),
-            agent("gamma", AgentStatus::Idle),
-        ]);
-        assert_eq!(
-            panel
-                .agents
-                .iter()
-                .map(|agent| agent.name.as_str())
-                .collect::<Vec<_>>(),
-            ["beta", "gamma", "alpha"]
-        );
+        panel.agents[1].focused = false;
+        assert!(panel.agent_entry_state(0, true).selected);
+        assert_eq!(panel.highlighted_agent_index(true), Some(0));
     }
 
     #[test]
@@ -2446,13 +2459,13 @@ mod tests {
     }
 
     #[test]
-    fn every_agent_click_requests_its_workspace() {
+    fn every_agent_click_requests_its_pane() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
 
         for _ in 0..2 {
             assert_eq!(
                 panel.click_agent(0),
-                WorkspacePanelEffect::FocusWorkspace("w1".to_owned())
+                WorkspacePanelEffect::FocusAgent("w1:p1".to_owned())
             );
             assert_eq!(panel.selected, Some(panel.workspaces.len()));
         }
