@@ -125,6 +125,18 @@ fn renders_every_primary_surface() {
     let graph_toggle = app.regions.graph.unwrap();
     click(&mut app, graph_toggle.x, graph_toggle.y);
     assert_eq!(app.view, View::Graph);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let commit = app.regions.commit.unwrap();
+    let commit_text: String = (commit.y..commit.bottom())
+        .flat_map(|y| (commit.x..commit.right()).map(move |x| (x, y)))
+        .map(|position| terminal.backend().buffer()[position].symbol())
+        .collect();
+    assert!(commit_text.contains("Write a commit message"));
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::CommitMessageGenerate)
+            .is_some()
+    );
     click(&mut app, graph_toggle.x, graph_toggle.y);
     assert_eq!(app.view, View::Changes);
 

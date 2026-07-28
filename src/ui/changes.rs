@@ -318,6 +318,14 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         &mut app.changes.history_state,
     );
     if !draw_details {
+        draw_commit_editor(
+            frame,
+            app,
+            commit_area,
+            actions_row,
+            local_workspace,
+            has_changes,
+        );
         return;
     }
 
@@ -558,10 +566,27 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         );
     }
     draw_hunk_actions(frame, app, diff_body, visible_hunks);
+    draw_commit_editor(
+        frame,
+        app,
+        commit_area,
+        actions_row,
+        local_workspace,
+        has_changes,
+    );
+}
+
+fn draw_commit_editor(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    commit_area: Rect,
+    actions_row: Rect,
+    local_workspace: bool,
+    has_changes: bool,
+) {
     if !local_workspace {
         draw_commit_message_action(frame, actions_row, app, has_changes);
     }
-
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
     let commit_content = commit_area.inner(Margin::new(1, 0));
