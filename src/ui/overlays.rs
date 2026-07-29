@@ -493,6 +493,11 @@ pub(super) fn draw_worktree_manager(
         .map(|worktree| UnicodeWidthStr::width(worktree_label(worktree).as_str()))
         .max()
         .unwrap_or(0);
+    let branch_budget = branch_column.min(
+        usize::from(list.width.saturating_sub(3))
+            .saturating_sub(repository_column)
+            / 2,
+    );
     let items = if rows.is_empty() {
         vec![status_row(
             if manager.loading {
@@ -510,12 +515,17 @@ pub(super) fn draw_worktree_manager(
             .map(|(row_index, row)| match *row {
                 WorktreeManagerRow::Group(repository_index) => {
                     let group = manager.repositories[repository_index].group.as_deref();
-                    ListItem::new(Line::from(Span::styled(
+                    let label = Line::from(Span::styled(
                         group.unwrap_or("Ungrouped").to_uppercase(),
                         Style::default()
                             .fg(palette().ink)
                             .add_modifier(Modifier::BOLD),
-                    )))
+                    ));
+                    if row_index == 0 {
+                        ListItem::new(label)
+                    } else {
+                        ListItem::new(vec![Line::raw(""), label])
+                    }
                 }
                 WorktreeManagerRow::Status(repository_index) => {
                     let repository = &manager.repositories[repository_index];
@@ -586,16 +596,10 @@ pub(super) fn draw_worktree_manager(
                         .saturating_sub(repository_column)
                         .saturating_sub(UnicodeWidthStr::width(badge.as_str()));
                     let branch_label = worktree_label(worktree);
-                    let path = worktree.path.display().to_string();
-                    let path_width = UnicodeWidthStr::width(path.as_str());
-                    let branch_budget = if branch_column + path_width + 2 <= identity_width {
-                        branch_column
-                    } else {
-                        branch_column.min(identity_width / 2)
-                    };
                     let branch_label = truncate_width(&branch_label, branch_budget);
                     let branch_padding = branch_budget
                         .saturating_sub(UnicodeWidthStr::width(branch_label.as_str()));
+                    let path = worktree.path.display().to_string();
                     let path_budget = identity_width.saturating_sub(branch_budget + 2);
                     let path = truncate_start_width(&path, path_budget);
                     let mut line = vec![
@@ -672,7 +676,11 @@ pub(super) fn draw_worktree_manager(
     ));
     let mut row_y = list.y;
     for (index, row) in rows.iter().enumerate().skip(manager.state.offset()) {
-        let row_height = 1;
+        let row_height = if matches!(row, WorktreeManagerRow::Group(_)) && index != 0 {
+            2
+        } else {
+            1
+        };
         let remaining = list.bottom().saturating_sub(row_y);
         if remaining < row_height {
             break;

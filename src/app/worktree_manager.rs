@@ -96,6 +96,7 @@ struct InventoryCompletion {
     generation: u64,
     repositories: Vec<WorktreeRepository>,
     discovered: Vec<PathBuf>,
+    pruned: Vec<PathBuf>,
 }
 
 struct RemovalCompletion {
@@ -243,34 +244,45 @@ impl WorktreeManager {
                     path.to_string_lossy().to_lowercase(),
                 )
             });
-            let repositories = common_dirs
-                .into_iter()
-                .map(|common_dir| match git::list_worktrees(&common_dir) {
-                    Ok(worktrees) => WorktreeRepository {
+        let mut pruned = Vec::new();
+        let repositories = common_dirs
+            .into_iter()
+            .filter_map(|common_dir| {
+                let group = candidate_ranks
+                    .get(&common_dir)
+                    .and_then(|(_, group)| group.clone());
+                let is_candidate = candidate_ranks.contains_key(&common_dir);
+                match git::list_worktrees(&common_dir) {
+                    Ok(worktrees) => Some(WorktreeRepository {
                         label: repository_label(&common_dir, &worktrees),
-                        group: candidate_ranks
-                            .get(&common_dir)
-                            .and_then(|(_, group)| group.clone()),
+                        group,
                         common_dir,
                         worktrees,
                         error: None,
-                    },
-                    Err(error) => WorktreeRepository {
-                        label: repository_label(&common_dir, &[]),
-                        group: candidate_ranks
-                            .get(&common_dir)
-                            .and_then(|(_, group)| group.clone()),
-                        common_dir,
-                        worktrees: Vec::new(),
-                        error: Some(error.to_string()),
-                    },
-                })
-                .collect();
-            let _ = sender.send(Completion::Inventory(InventoryCompletion {
-                generation,
-                repositories,
-                discovered,
-            }));
+                    }),
+                    Err(error) => {
+                        if is_candidate {
+                            Some(WorktreeRepository {
+                                label: repository_label(&common_dir, &[]),
+                                group,
+                                common_dir,
+                                worktrees: Vec::new(),
+                                error: Some(error.to_string()),
+                            })
+                        } else {
+                            pruned.push(common_dir);
+                            None
+                        }
+                    }
+                }
+            })
+            .collect();
+        let _ = sender.send(Completion::Inventory(InventoryCompletion {
+            generation,
+            repositories,
+            discovered,
+            pruned,
+        }));
         });
     }
 
@@ -331,6 +343,11 @@ impl WorktreeManager {
                     self.bump_content_generation();
                     if !completion.discovered.is_empty()
                         && let Err(error) = self.store.extend_and_save(completion.discovered)
+                    {
+                        result.notice = Some(error);
+                    }
+                    if !completion.pruned.is_empty()
+                        && let Err(error) = self.store.prune_and_save(&completion.pruned)
                     {
                         result.notice = Some(error);
                     }
@@ -1260,6 +1277,58 @@ mod tests {
         );
         assert_eq!(manager.repositories[0].group.as_deref(), Some("First"));
         assert_eq!(manager.repositories[1].group.as_deref(), Some("Second"));
+    }
+
+    #[test]
+    fn prunes_stale_known_repositories_that_no_longer_resolve() {
+        let directory = tempfile::tempdir().unwrap();
+        let live = directory.path().join("live");
+        fs::create_dir(&live).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&live)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let live_common = live.join(".git");
+        let stale_common = directory.path().join("renamed-away").join(".git");
+
+        let store_path = directory.path().join("known-repositories.json");
+        fs::write(
+            &store_path,
+            format!(
+                "{{\"version\":1,\"repositories\":[{{\"common_dir\":\"{}\"}},{{\"common_dir\":\"{}\"}}]}}",
+                stale_common.display(),
+                live_common.display()
+            ),
+        )
+        .unwrap();
+
+        let mut manager = WorktreeManager::new(Some(store_path.clone()));
+        manager.candidates = vec![WorktreeCandidate {
+            path: live,
+            group: None,
+        }];
+        manager.start_refresh();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while manager.loading && Instant::now() < deadline {
+            manager.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(!manager.loading);
+        assert_eq!(manager.repositories.len(), 1);
+        assert_eq!(manager.repositories[0].common_dir, live_common);
+        assert!(
+            !manager
+                .repositories
+                .iter()
+                .any(|repository| repository.common_dir == stale_common)
+        );
+        let restored = WorktreeManager::new(Some(store_path));
+        assert_eq!(restored.store.repositories, [live_common]);
     }
 
     #[test]

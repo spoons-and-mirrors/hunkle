@@ -62,6 +62,20 @@ impl KnownRepositoryStore {
         Ok(())
     }
 
+    pub(super) fn prune_and_save(&mut self, repositories: &[PathBuf]) -> Result<(), String> {
+        let previous = self.repositories.clone();
+        self.repositories
+            .retain(|path| !repositories.iter().any(|pruned| pruned == path));
+        if self.repositories == previous {
+            return Ok(());
+        }
+        if let Err(error) = self.save() {
+            self.repositories = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn save(&self) -> Result<(), String> {
         if let Some(error) = self.load_error.as_deref() {
             return Err(format!(

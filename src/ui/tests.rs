@@ -2865,6 +2865,117 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
 }
 
 #[test]
+fn worktree_manager_separates_groups_with_a_top_margin() {
+    let directory = tempfile::tempdir().unwrap();
+    let alpha = directory.path().join("alpha");
+    let zulu = directory.path().join("zulu");
+    for repository in [&alpha, &zulu] {
+        fs::create_dir(repository).unwrap();
+        run_git(repository, &["init", "-b", "main"]);
+        run_git(repository, &["config", "user.name", "Render Test"]);
+        run_git(repository, &["config", "user.email", "render@example.com"]);
+        fs::write(repository.join("tracked.txt"), "first\n").unwrap();
+        run_git(repository, &["add", "."]);
+        run_git(repository, &["commit", "-m", "initial commit"]);
+    }
+
+    let mut app = App::new(alpha.clone());
+    app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
+        "result": {
+            "snapshot": {
+                "workspaces": [
+                    { "workspace_id": "w1", "label": "alpha", "number": 1 },
+                    { "workspace_id": "w2", "label": "zulu", "number": 2 }
+                ],
+                "agents": []
+            }
+        }
+    }));
+    app.workspace_panel.workspaces[0].path = Some(alpha.clone());
+    app.workspace_panel.workspaces[1].path = Some(zulu.clone());
+    app.workspace_panel.begin_group();
+    app.workspace_panel.paste("First");
+    app.workspace_panel
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.workspace_panel.begin_workspace_drag(0));
+    app.workspace_panel
+        .update_workspace_drag(Some(WorkspaceDropTarget::Group(0)));
+    let _ = app.workspace_panel.finish_workspace_drag();
+    app.workspace_panel.begin_group();
+    app.workspace_panel.paste("Second");
+    app.workspace_panel
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.workspace_panel.begin_workspace_drag(1));
+    app.workspace_panel
+        .update_workspace_drag(Some(WorkspaceDropTarget::Group(1)));
+    let _ = app.workspace_panel.finish_workspace_drag();
+    app.workspace_panel.loading = true;
+
+    let candidates = app.workspace_panel.worktree_candidates();
+    let _ = app.worktree_manager.open(
+        candidates,
+        app.workspace_panel.linked_herdr_worktrees(),
+        Some(alpha.clone()),
+        app.workspace_panel.is_enabled(),
+        app.workspace_panel.worktree_inventory_verified(),
+    );
+    app.mode = Mode::WorktreeManager;
+    wait_for(&mut app, |app| !app.worktree_manager.loading);
+    let rows = app.worktree_manager.rows();
+    assert_eq!(
+        rows,
+        [
+            WorktreeManagerRow::Group(0),
+            WorktreeManagerRow::Worktree {
+                repository: 0,
+                worktree: 0,
+            },
+            WorktreeManagerRow::Group(1),
+            WorktreeManagerRow::Worktree {
+                repository: 1,
+                worktree: 0,
+            },
+        ]
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app
+        .regions
+        .hit_target_rect(HitTarget::WorktreeManager(WorktreeManagerHitTarget::List))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let width = usize::from(buffer.area.width);
+    let line_at = |y: u16| {
+        (list.x..list.right())
+            .map(|x| buffer.content[usize::from(y) * width + usize::from(x)].symbol())
+            .collect::<String>()
+    };
+    let row_y = |row: usize| {
+        app.regions
+            .hit_target_rect(HitTarget::WorktreeManager(WorktreeManagerHitTarget::Item {
+                generation: app.worktree_manager.content_generation(),
+                row,
+            }))
+            .unwrap()
+            .y
+    };
+    let alpha_y = row_y(1);
+    let zulu_y = row_y(3);
+    assert_eq!(zulu_y - alpha_y, 3);
+    let group_line = line_at(zulu_y - 1);
+    let gap_line = line_at(zulu_y - 2);
+    assert!(group_line.contains("SECOND"));
+    assert!(
+        !gap_line.contains("alpha")
+            && !gap_line.contains("zulu")
+            && !gap_line.contains("FIRST")
+                    && !gap_line.contains("SECOND")
+    );
+    assert!(line_at(alpha_y - 1).contains("FIRST"));
+}
+
+#[test]
 fn worktree_manager_groups_repositories_into_aligned_columns() {
     let directory = tempfile::tempdir().unwrap();
     let alpha = directory.path().join("alpha");
