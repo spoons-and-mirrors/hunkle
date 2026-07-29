@@ -340,6 +340,11 @@ impl App {
             workspace_config_dir.map(|path| path.join("known-repositories.json"));
         #[cfg(test)]
         let known_repositories_path = None;
+        #[cfg(not(test))]
+        let explorer_favorites_path =
+            workspace_config_dir.map(|path| path.join("explorer-favorites.json"));
+        #[cfg(test)]
+        let explorer_favorites_path = None;
         let interval = settings.fetch_interval();
         let session = if open_in_background {
             RepositorySession::opening(path.clone(), interval)
@@ -401,7 +406,7 @@ impl App {
             dragging_history: false,
             dragging_diff_scrollbar: false,
             diff_scroll_drag_offset: 0,
-            workspace_explorer: Explorer::new(start),
+            workspace_explorer: Explorer::with_favorites(start, explorer_favorites_path),
             file_search,
             actions: ActionsState::default(),
             herdr_prompt: HerdrPrompt::default(),

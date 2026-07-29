@@ -2327,6 +2327,73 @@ pub(super) fn draw_explorer(
         Rect::new(inner_x, area.y.saturating_add(1), inner_width, 1),
     );
 
+    let favorites_row = Rect::new(inner_x, area.y.saturating_add(2), inner_width, 1);
+    let mut favorite_targets = Vec::new();
+    if explorer.naming_favorite {
+        fill(frame, favorites_row, palette().selected);
+        let name_width = usize::from(favorites_row.width).saturating_sub(17);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "FAVORITE NAME  ",
+                    Style::default()
+                        .fg(palette().orange)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    truncate_width(&explorer.favorite_name, name_width),
+                    Style::default().fg(palette().ink),
+                ),
+                Span::styled("▌", Style::default().fg(palette().accent)),
+            ])),
+            favorites_row,
+        );
+    } else if explorer.favorites.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Ctrl+F  favorite this directory")
+                .style(Style::default().fg(palette().faint)),
+            favorites_row,
+        );
+    } else {
+        let mut x = favorites_row.x;
+        for (index, favorite) in explorer.favorites.iter().enumerate() {
+            let remaining = favorites_row.right().saturating_sub(x);
+            if remaining < 5 {
+                break;
+            }
+            let name = truncate_width(
+                &favorite.name,
+                usize::from(remaining.saturating_sub(4)).min(18),
+            );
+            let label = format!(" ★ {name} ");
+            let width = u16::try_from(UnicodeWidthStr::width(label.as_str()))
+                .unwrap_or(u16::MAX)
+                .min(remaining);
+            let card = Rect::new(x, favorites_row.y, width, 1);
+            fill(
+                frame,
+                card,
+                if explorer.favorite_is_current(index) {
+                    palette().selected
+                } else {
+                    palette().raised
+                },
+            );
+            frame.render_widget(
+                Paragraph::new(label).style(Style::default().fg(
+                    if explorer.favorite_is_current(index) {
+                        palette().orange
+                    } else {
+                        palette().ink
+                    },
+                )),
+                card,
+            );
+            favorite_targets.push((HitTarget::Explorer(explorer.favorite_target(index)), card));
+            x = card.right().saturating_add(1);
+        }
+    }
+
     let path_area = Rect::new(inner_x, area.y.saturating_add(4), inner_width, 3);
     fill(
         frame,
@@ -2597,7 +2664,12 @@ pub(super) fn draw_explorer(
             footer,
         );
     } else {
-        let hint = if explorer.editing_path {
+        let hint = if explorer.naming_favorite {
+            key_hint_line(
+                &[("Enter", "save"), ("Ctrl+U", "clear"), ("Esc", "cancel")],
+                usize::from(inner_width),
+            )
+        } else if explorer.editing_path {
             key_hint_line(
                 &[
                     ("Tab", "complete"),
@@ -2614,6 +2686,7 @@ pub(super) fn draw_explorer(
                     ("Tab", "pane"),
                     ("↑↓", "select"),
                     ("Enter", "open"),
+                    ("Ctrl+F", "favorite"),
                     ("type", "path"),
                     ("Esc", ""),
                 ],
@@ -2628,6 +2701,7 @@ pub(super) fn draw_explorer(
         (HitTarget::Explorer(ExplorerHitTarget::Path), path_area),
         (HitTarget::Explorer(ExplorerHitTarget::Splitter), divider),
     ];
+    targets.extend(favorite_targets);
     if explorer.editing_path {
         targets.push((
             HitTarget::Explorer(ExplorerHitTarget::MatchesPane),

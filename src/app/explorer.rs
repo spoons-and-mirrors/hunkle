@@ -12,7 +12,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::filesystem::same_path;
+
 use super::fuzzy::{fuzzy_text_score, fuzzy_text_score_lower};
+
+mod favorites;
+pub(crate) use favorites::ExplorerFavorite;
+use favorites::FavoriteStore;
 
 const MAX_PREVIEW_ENTRIES: usize = 200;
 const MAX_SURROUNDING_CHILDREN: usize = 200;
@@ -47,6 +53,7 @@ pub(crate) enum ExplorerHitTarget {
     Match { generation: u64, index: usize },
     PreviewPane,
     Preview { generation: u64, index: usize },
+    Favorite { generation: u64, index: usize },
 }
 
 #[derive(Debug)]
@@ -79,6 +86,11 @@ pub struct Explorer {
     last_row_click: Option<(PathBuf, Instant)>,
     pub(crate) left_pane_width: Option<u16>,
     pub(crate) dragging_splitter: bool,
+    pub(crate) favorites: Vec<ExplorerFavorite>,
+    pub(crate) favorite_name: String,
+    pub(crate) naming_favorite: bool,
+    favorite_store: FavoriteStore,
+    favorite_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +139,14 @@ pub(super) enum PickerCommand {
 }
 
 impl Explorer {
+    #[cfg(test)]
     pub(super) fn new(directory: PathBuf) -> Self {
+        Self::with_favorites(directory, None)
+    }
+
+    pub(super) fn with_favorites(directory: PathBuf, favorites_path: Option<PathBuf>) -> Self {
+        let (favorite_store, favorites) = FavoriteStore::new(favorites_path);
+        let favorite_load_error = favorite_store.load_error().map(str::to_owned);
         let index_roots = search_roots(&directory);
         let match_pending = Arc::new(Mutex::new(None::<MatchRequest>));
         let worker_pending = Arc::clone(&match_pending);
@@ -181,12 +200,45 @@ impl Explorer {
             last_row_click: None,
             left_pane_width: None,
             dragging_splitter: false,
+            favorites,
+            favorite_name: String::new(),
+            naming_favorite: false,
+            favorite_store,
+            favorite_generation: 0,
         };
         picker.reload();
+        picker.error = favorite_load_error;
         picker
     }
 
     pub(super) fn handle_key(&mut self, key: KeyEvent, can_close: bool) -> PickerCommand {
+        if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.toggle_current_favorite();
+            return PickerCommand::None;
+        }
+        if self.naming_favorite {
+            match key.code {
+                KeyCode::Esc => self.cancel_favorite_name(),
+                KeyCode::Enter => self.save_favorite_name(),
+                KeyCode::Backspace => {
+                    let mut cursor = self.favorite_name.len();
+                    delete_previous_character(&mut self.favorite_name, &mut cursor);
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.favorite_name.clear();
+                }
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.favorite_name.push(character);
+                    self.error = None;
+                }
+                _ => {}
+            }
+            return PickerCommand::None;
+        }
         if self.editing_path {
             match key.code {
                 KeyCode::Esc => {
@@ -285,6 +337,12 @@ impl Explorer {
     }
 
     pub(super) fn paste(&mut self, text: &str) {
+        if self.naming_favorite {
+            self.favorite_name
+                .extend(text.chars().filter(|character| !character.is_control()));
+            self.error = None;
+            return;
+        }
         if !self.editing_path {
             self.begin_search(Some(""));
         }
@@ -489,6 +547,19 @@ impl Explorer {
         }
     }
 
+    pub(crate) fn favorite_target(&self, index: usize) -> ExplorerHitTarget {
+        ExplorerHitTarget::Favorite {
+            generation: self.favorite_generation,
+            index,
+        }
+    }
+
+    pub(crate) fn favorite_is_current(&self, index: usize) -> bool {
+        self.favorites
+            .get(index)
+            .is_some_and(|favorite| favorite.path == self.favorite_directory())
+    }
+
     pub(super) fn activate_target(&mut self, target: ExplorerHitTarget) -> PickerCommand {
         match target {
             ExplorerHitTarget::Path => {
@@ -534,6 +605,21 @@ impl Explorer {
                 self.accept_preview(index);
                 PickerCommand::None
             }
+            ExplorerHitTarget::Favorite { generation, index }
+                if generation == self.favorite_generation && index < self.favorites.len() =>
+            {
+                let path = self.favorites[index].path.clone();
+                if !path.is_dir() {
+                    self.error = Some(format!("Favorite path not found: {}", path.display()));
+                    return PickerCommand::None;
+                }
+                self.editing_path = false;
+                self.naming_favorite = false;
+                self.matches.clear();
+                self.preview_entries.clear();
+                self.navigate(path);
+                PickerCommand::None
+            }
             ExplorerHitTarget::Overlay
             | ExplorerHitTarget::Splitter
             | ExplorerHitTarget::SurroundingsPane
@@ -543,7 +629,8 @@ impl Explorer {
             | ExplorerHitTarget::Surrounding { .. }
             | ExplorerHitTarget::Entry { .. }
             | ExplorerHitTarget::Match { .. }
-            | ExplorerHitTarget::Preview { .. } => PickerCommand::None,
+            | ExplorerHitTarget::Preview { .. }
+            | ExplorerHitTarget::Favorite { .. } => PickerCommand::None,
         }
     }
 
@@ -577,6 +664,76 @@ impl Explorer {
 
     fn invalidate_targets(&mut self) {
         self.content_generation = self.content_generation.wrapping_add(1);
+    }
+
+    fn favorite_directory(&self) -> PathBuf {
+        if self.directory.is_absolute() {
+            self.directory.clone()
+        } else {
+            std::env::current_dir()
+                .map(|current| current.join(&self.directory))
+                .unwrap_or_else(|_| self.directory.clone())
+        }
+    }
+
+    fn toggle_current_favorite(&mut self) {
+        if self.naming_favorite {
+            self.cancel_favorite_name();
+            return;
+        }
+        let path = self.favorite_directory();
+        if let Some(index) = self
+            .favorites
+            .iter()
+            .position(|favorite| same_path(&favorite.path, &path))
+        {
+            let previous = self.favorites.clone();
+            self.favorites.remove(index);
+            if let Err(error) = self.favorite_store.save(&self.favorites) {
+                self.favorites = previous;
+                self.error = Some(error);
+                return;
+            }
+            self.favorite_generation = self.favorite_generation.wrapping_add(1);
+            self.error = None;
+            return;
+        }
+        self.cancel_match_search();
+        self.editing_path = false;
+        self.set_path_input(display_search_path(&self.directory));
+        self.matches.clear();
+        self.preview_entries.clear();
+        self.favorite_name.clear();
+        self.naming_favorite = true;
+        self.error = None;
+    }
+
+    fn cancel_favorite_name(&mut self) {
+        self.naming_favorite = false;
+        self.favorite_name.clear();
+        self.error = None;
+    }
+
+    fn save_favorite_name(&mut self) {
+        let name = self.favorite_name.trim();
+        if name.is_empty() {
+            self.error = Some("Favorite name cannot be empty".to_owned());
+            return;
+        }
+        let previous = self.favorites.clone();
+        self.favorites.push(ExplorerFavorite {
+            name: name.to_owned(),
+            path: self.favorite_directory(),
+        });
+        if let Err(error) = self.favorite_store.save(&self.favorites) {
+            self.favorites = previous;
+            self.error = Some(error);
+            return;
+        }
+        self.favorite_generation = self.favorite_generation.wrapping_add(1);
+        self.favorite_name.clear();
+        self.naming_favorite = false;
+        self.error = None;
     }
 
     fn selected(&self) -> Option<&PickerEntry> {
@@ -1734,6 +1891,53 @@ mod tests {
 
         assert!(picker.editing_path);
         assert_eq!(picker.path_input, "~/shared");
+    }
+
+    #[test]
+    fn favorites_persist_navigate_and_toggle_from_the_active_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let favorites_path = temp.path().join("explorer-favorites.json");
+        let mut picker = Explorer::with_favorites(first.clone(), Some(favorites_path.clone()));
+
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            true,
+        );
+        assert!(picker.naming_favorite);
+        for character in "Projects".chars() {
+            picker.handle_key(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                true,
+            );
+        }
+        picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), true);
+        assert!(!picker.naming_favorite);
+        assert_eq!(picker.favorites.len(), 1);
+        assert_eq!(picker.favorites[0].name, "Projects");
+        drop(picker);
+
+        let mut picker = Explorer::with_favorites(second.clone(), Some(favorites_path.clone()));
+        assert_eq!(picker.favorites.len(), 1);
+        let target = picker.favorite_target(0);
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
+        assert_eq!(picker.directory, first);
+
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            true,
+        );
+        assert!(picker.favorites.is_empty());
+        drop(picker);
+
+        let picker = Explorer::with_favorites(second, Some(favorites_path));
+        assert!(picker.favorites.is_empty());
     }
 
     #[test]

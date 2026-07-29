@@ -1030,6 +1030,11 @@ fn renders_every_primary_surface() {
         app.workspace_explorer.directory,
         fs::canonicalize(root).unwrap()
     );
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    for character in "Project".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_black_underlay(&terminal);
     let explorer_screen: String = terminal
@@ -1043,6 +1048,7 @@ fn renders_every_primary_surface() {
     assert!(explorer_screen.contains("Switch working directory"));
     assert!(explorer_screen.contains("AROUND HERE"));
     assert!(explorer_screen.contains("CONTENTS"));
+    assert!(explorer_screen.contains("★ Project"));
     assert!(!explorer_screen.contains("OPEN REPOSITORY"));
     assert!(!explorer_screen.contains('┌'));
     assert!(
@@ -1053,6 +1059,13 @@ fn renders_every_primary_surface() {
     assert!(
         app.regions
             .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::EntriesPane))
+            .is_some()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Explorer(
+                app.workspace_explorer.favorite_target(0)
+            ))
             .is_some()
     );
     let left_width = app
