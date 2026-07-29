@@ -1058,13 +1058,14 @@ fn path_completion_candidates(input: &str, base: &Path) -> Vec<PickerEntry> {
         parent
     };
     let fragment_lower = fragment.to_lowercase();
+    let browsing = fragment_lower.is_empty();
     let compare = |(left_score, left): &(u32, PickerEntry),
                    (right_score, right): &(u32, PickerEntry)| {
         right_score
             .cmp(left_score)
             .then_with(|| left.path.cmp(&right.path))
     };
-    let mut candidates = Vec::with_capacity(12);
+    let mut candidates = Vec::new();
     let Ok(entries) = fs::read_dir(&parent) else {
         return Vec::new();
     };
@@ -1081,7 +1082,7 @@ fn path_completion_candidates(input: &str, base: &Path) -> Vec<PickerEntry> {
         }
         let path = entry.path();
         let name = entry.file_name();
-        let Some(score) = (if fragment_lower.is_empty() {
+        let Some(score) = (if browsing {
             Some(0)
         } else {
             fuzzy_text_score_lower(&fragment_lower, &name.to_string_lossy().to_lowercase())
@@ -1101,7 +1102,7 @@ fn path_completion_candidates(input: &str, base: &Path) -> Vec<PickerEntry> {
                 },
             },
         );
-        if candidates.len() < 12 {
+        if browsing || candidates.len() < 12 {
             candidates.push(candidate);
         } else if let Some((worst, _)) = candidates
             .iter()
@@ -1112,7 +1113,15 @@ fn path_completion_candidates(input: &str, base: &Path) -> Vec<PickerEntry> {
             candidates[worst] = candidate;
         }
     }
-    candidates.sort_by(compare);
+    if browsing {
+        candidates.sort_by(|(_, left), (_, right)| {
+            (left.action == PickerAction::OpenFile)
+                .cmp(&(right.action == PickerAction::OpenFile))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+    } else {
+        candidates.sort_by(compare);
+    }
     candidates.into_iter().map(|(_, entry)| entry).collect()
 }
 
@@ -1590,6 +1599,61 @@ mod tests {
                 .error
                 .as_deref()
                 .is_some_and(|error| error.starts_with("Path not found: "))
+        );
+    }
+
+    #[test]
+    fn browsing_a_directory_lists_everything_directories_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for index in 0..15 {
+            fs::write(root.join(format!("file-{index:02}.txt")), "x\n").unwrap();
+        }
+        for index in 0..5 {
+            fs::create_dir_all(root.join(format!("dir-{index:02}"))).unwrap();
+        }
+
+        let mut picker = Explorer::new(root.to_path_buf());
+        picker.begin_search(Some(&format!("{}/", root.display())));
+        wait_for_matches(&mut picker);
+
+        assert_eq!(picker.matches.len(), 20);
+        assert!(
+            picker
+                .matches
+                .iter()
+                .take(5)
+                .all(|entry| entry.action == PickerAction::Navigate)
+        );
+        assert!(
+            picker
+                .matches
+                .iter()
+                .skip(5)
+                .all(|entry| entry.action == PickerAction::OpenFile)
+        );
+        assert_eq!(picker.matches[0].path, root.join("dir-00"));
+        assert_eq!(picker.matches[5].path, root.join("file-00.txt"));
+    }
+
+    #[test]
+    fn fuzzy_fragments_keep_only_the_best_twelve_completions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for index in 0..20 {
+            fs::create_dir_all(root.join(format!("needle-{index:02}"))).unwrap();
+        }
+
+        let mut picker = Explorer::new(root.to_path_buf());
+        picker.begin_search(Some(&format!("{}/need", root.display())));
+        wait_for_matches(&mut picker);
+
+        assert_eq!(picker.matches.len(), 12);
+        assert!(
+            picker
+                .matches
+                .iter()
+                .all(|entry| entry.path.starts_with(root))
         );
     }
 
