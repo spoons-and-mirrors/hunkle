@@ -39,8 +39,8 @@ pub(crate) use workspace_panel::{
     WorkspacePanelEffect, WorkspacePanelPlacement, WorkspacePanelRow, WorkspaceRenameDialog,
 };
 pub(crate) use worktree_manager::{
-    WorktreeCreateDialog, WorktreeCreateField, WorktreeManager, WorktreeManagerEffect,
-    WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
+    WorktreeCandidate, WorktreeCreateDialog, WorktreeCreateField, WorktreeManager,
+    WorktreeManagerEffect, WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
 };
 
 use std::{
@@ -669,7 +669,7 @@ impl App {
             }
             if self.mode == Mode::WorktreeManager {
                 let candidates_changed = self.worktree_manager.update_herdr_inventory(
-                    self.workspace_panel.known_workspace_paths(),
+                    self.workspace_panel.worktree_candidates(),
                     self.workspace_panel.linked_herdr_worktrees(),
                     self.workspace_panel.worktree_inventory_verified(),
                 );
@@ -1952,13 +1952,16 @@ impl App {
     fn open_worktree_manager(&mut self) {
         self.workspace_panel.refresh_worktree_inventory();
         let current_path = self.repository().map(|repository| repository.root.clone());
-        let mut candidates = self.workspace_panel.known_workspace_paths();
+        let mut candidates = self.workspace_panel.worktree_candidates();
         if let Some(path) = current_path.as_ref()
             && !candidates
                 .iter()
-                .any(|candidate| same_path(candidate, path))
+                .any(|candidate| same_path(&candidate.path, path))
         {
-            candidates.push(path.clone());
+            candidates.push(WorktreeCandidate {
+                path: path.clone(),
+                group: None,
+            });
         }
         let warning = self.worktree_manager.open(
             candidates,
@@ -2009,7 +2012,7 @@ impl App {
             WorktreeManagerEffect::Refresh => {
                 self.workspace_panel.refresh_worktree_inventory();
                 let _ = self.worktree_manager.update_herdr_inventory(
-                    self.workspace_panel.known_workspace_paths(),
+                    self.workspace_panel.worktree_candidates(),
                     self.workspace_panel.linked_herdr_worktrees(),
                     self.workspace_panel.worktree_inventory_verified(),
                 );

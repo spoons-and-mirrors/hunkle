@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -74,13 +74,20 @@ pub(crate) struct WorktreeRemoveDialog {
 pub(crate) struct WorktreeRepository {
     pub(crate) common_dir: PathBuf,
     pub(crate) label: String,
+    pub(crate) group: Option<String>,
     pub(crate) worktrees: Vec<LinkedWorktree>,
     pub(crate) error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeCandidate {
+    pub(crate) path: PathBuf,
+    pub(crate) group: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorktreeManagerRow {
-    Repository(usize),
+    Group(usize),
     Worktree { repository: usize, worktree: usize },
     Status(usize),
 }
@@ -124,7 +131,7 @@ pub(crate) struct WorktreeManager {
     pub(crate) remove_running: bool,
     pub(crate) remove_dialog: Option<WorktreeRemoveDialog>,
     current_path: Option<PathBuf>,
-    candidate_paths: Vec<PathBuf>,
+    candidates: Vec<WorktreeCandidate>,
     herdr_worktrees: Vec<(PathBuf, String)>,
     herdr_enabled: bool,
     herdr_verified: bool,
@@ -150,7 +157,7 @@ impl WorktreeManager {
             remove_running: false,
             remove_dialog: None,
             current_path: None,
-            candidate_paths: Vec::new(),
+            candidates: Vec::new(),
             herdr_worktrees: Vec::new(),
             herdr_enabled: false,
             herdr_verified: true,
@@ -170,7 +177,7 @@ impl WorktreeManager {
 
     pub(crate) fn open(
         &mut self,
-        candidate_paths: Vec<PathBuf>,
+        candidates: Vec<WorktreeCandidate>,
         herdr_worktrees: Vec<(PathBuf, String)>,
         current_path: Option<PathBuf>,
         herdr_enabled: bool,
@@ -180,7 +187,7 @@ impl WorktreeManager {
         self.create_dialog = None;
         self.remove_dialog = None;
         self.current_path = current_path;
-        self.candidate_paths = candidate_paths;
+        self.candidates = candidates;
         self.herdr_worktrees = herdr_worktrees;
         self.herdr_enabled = herdr_enabled;
         self.herdr_verified = herdr_verified;
@@ -192,12 +199,12 @@ impl WorktreeManager {
 
     pub(crate) fn update_herdr_inventory(
         &mut self,
-        candidate_paths: Vec<PathBuf>,
+        candidates: Vec<WorktreeCandidate>,
         herdr_worktrees: Vec<(PathBuf, String)>,
         verified: bool,
     ) -> bool {
-        let candidates_changed = self.candidate_paths != candidate_paths;
-        self.candidate_paths = candidate_paths;
+        let candidates_changed = self.candidates != candidates;
+        self.candidates = candidates;
         self.herdr_worktrees = herdr_worktrees;
         self.herdr_verified = verified;
         candidates_changed
@@ -207,34 +214,52 @@ impl WorktreeManager {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         let known = self.store.repositories.clone();
-        let candidates = self.candidate_paths.clone();
+        let candidates = self.candidates.clone();
         let sender = self.sender.clone();
         self.loading = true;
         thread::spawn(move || {
             let mut common_dirs = known;
             let mut seen = common_dirs.iter().cloned().collect::<HashSet<_>>();
+            let mut candidate_ranks = HashMap::new();
             let mut discovered = Vec::new();
-            for candidate in candidates {
-                let Ok(common_dir) = git::common_git_dir(&candidate) else {
+            for (rank, candidate) in candidates.into_iter().enumerate() {
+                let Ok(common_dir) = git::common_git_dir(&candidate.path) else {
                     continue;
                 };
+                candidate_ranks
+                    .entry(common_dir.clone())
+                    .or_insert((rank, candidate.group));
                 if seen.insert(common_dir.clone()) {
                     discovered.push(common_dir.clone());
                     common_dirs.push(common_dir);
                 }
             }
-            common_dirs.sort_by_cached_key(|path| path.to_string_lossy().to_lowercase());
+            common_dirs.sort_by_cached_key(|path| {
+                (
+                    !candidate_ranks.contains_key(path),
+                    candidate_ranks
+                        .get(path)
+                        .map_or(usize::MAX, |(rank, _)| *rank),
+                    path.to_string_lossy().to_lowercase(),
+                )
+            });
             let repositories = common_dirs
                 .into_iter()
                 .map(|common_dir| match git::list_worktrees(&common_dir) {
                     Ok(worktrees) => WorktreeRepository {
                         label: repository_label(&common_dir, &worktrees),
+                        group: candidate_ranks
+                            .get(&common_dir)
+                            .and_then(|(_, group)| group.clone()),
                         common_dir,
                         worktrees,
                         error: None,
                     },
                     Err(error) => WorktreeRepository {
                         label: repository_label(&common_dir, &[]),
+                        group: candidate_ranks
+                            .get(&common_dir)
+                            .and_then(|(_, group)| group.clone()),
                         common_dir,
                         worktrees: Vec::new(),
                         error: Some(error.to_string()),
@@ -425,6 +450,11 @@ impl WorktreeManager {
     pub(crate) fn rows(&self) -> Vec<WorktreeManagerRow> {
         let query = self.query.to_lowercase();
         let mut rows = Vec::new();
+        let show_groups = self
+            .repositories
+            .iter()
+            .any(|repository| repository.group.is_some());
+        let mut previous_group = None;
         for (repository_index, repository) in self.repositories.iter().enumerate() {
             let repository_matches = query.is_empty()
                 || repository.label.to_lowercase().contains(&query)
@@ -449,7 +479,10 @@ impl WorktreeManager {
             if matching.is_empty() && (!repository_matches || repository.error.is_none()) {
                 continue;
             }
-            rows.push(WorktreeManagerRow::Repository(repository_index));
+            if show_groups && previous_group.as_ref() != Some(&repository.group) {
+                rows.push(WorktreeManagerRow::Group(repository_index));
+                previous_group = Some(repository.group.clone());
+            }
             if repository.error.is_some() {
                 rows.push(WorktreeManagerRow::Status(repository_index));
             } else {
@@ -957,6 +990,7 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
+    use std::process::Command;
 
     use super::*;
 
@@ -980,6 +1014,7 @@ mod tests {
         manager.repositories = vec![WorktreeRepository {
             common_dir: PathBuf::from("/repo/.git"),
             label: "repo".to_owned(),
+            group: None,
             worktrees: vec![
                 linked("/repo", "main", true),
                 linked("/repo-feature", "feature/modal", false),
@@ -999,11 +1034,58 @@ mod tests {
 
         assert_eq!(
             manager.rows(),
+            [WorktreeManagerRow::Worktree {
+                repository: 0,
+                worktree: 1,
+            }]
+        );
+        assert_eq!(manager.state.selected(), Some(0));
+    }
+
+    #[test]
+    fn inserts_group_headings_only_when_groups_change() {
+        let mut manager = manager();
+        manager.repositories = vec![
+            WorktreeRepository {
+                common_dir: PathBuf::from("/alpha/.git"),
+                label: "alpha".to_owned(),
+                group: Some("Projects".to_owned()),
+                worktrees: vec![linked("/alpha", "main", true)],
+                error: None,
+            },
+            WorktreeRepository {
+                common_dir: PathBuf::from("/zulu/.git"),
+                label: "zulu".to_owned(),
+                group: Some("Projects".to_owned()),
+                worktrees: vec![linked("/zulu", "main", true)],
+                error: None,
+            },
+            WorktreeRepository {
+                common_dir: PathBuf::from("/solo/.git"),
+                label: "solo".to_owned(),
+                group: None,
+                worktrees: vec![linked("/solo", "main", true)],
+                error: None,
+            },
+        ];
+        manager.select_first();
+
+        assert_eq!(
+            manager.rows(),
             [
-                WorktreeManagerRow::Repository(0),
+                WorktreeManagerRow::Group(0),
                 WorktreeManagerRow::Worktree {
                     repository: 0,
-                    worktree: 1,
+                    worktree: 0,
+                },
+                WorktreeManagerRow::Worktree {
+                    repository: 1,
+                    worktree: 0,
+                },
+                WorktreeManagerRow::Group(2),
+                WorktreeManagerRow::Worktree {
+                    repository: 2,
+                    worktree: 0,
                 },
             ]
         );
@@ -1102,7 +1184,7 @@ mod tests {
         manager.paste("feature");
 
         assert!(!manager.select_row(generation, 1));
-        assert_eq!(manager.state.selected(), Some(1));
+        assert_eq!(manager.state.selected(), Some(0));
     }
 
     #[test]
@@ -1123,10 +1205,61 @@ mod tests {
     #[test]
     fn detects_new_candidate_paths_from_a_late_herdr_snapshot() {
         let mut manager = manager();
-        let paths = vec![PathBuf::from("/another-repository")];
+        let paths = vec![WorktreeCandidate {
+            path: PathBuf::from("/another-repository"),
+            group: None,
+        }];
 
         assert!(manager.update_herdr_inventory(paths.clone(), Vec::new(), true));
         assert!(!manager.update_herdr_inventory(paths, Vec::new(), true));
+    }
+
+    #[test]
+    fn orders_repositories_by_workspace_candidate_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let alpha = directory.path().join("alpha");
+        let zulu = directory.path().join("zulu");
+        for repository in [&alpha, &zulu] {
+            fs::create_dir(repository).unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["init", "--quiet"])
+                    .current_dir(repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+
+        let mut manager = WorktreeManager::new(None);
+        manager.candidates = vec![
+            WorktreeCandidate {
+                path: zulu,
+                group: Some("First".to_owned()),
+            },
+            WorktreeCandidate {
+                path: alpha,
+                group: Some("Second".to_owned()),
+            },
+        ];
+        manager.start_refresh();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while manager.loading && Instant::now() < deadline {
+            manager.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(!manager.loading);
+        assert_eq!(
+            manager
+                .repositories
+                .iter()
+                .map(|repository| repository.label.as_str())
+                .collect::<Vec<_>>(),
+            ["zulu", "alpha"]
+        );
+        assert_eq!(manager.repositories[0].group.as_deref(), Some("First"));
+        assert_eq!(manager.repositories[1].group.as_deref(), Some("Second"));
     }
 
     #[test]

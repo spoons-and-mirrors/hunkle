@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
-use super::TextInput;
+use super::{TextInput, worktree_manager::WorktreeCandidate};
 
 mod focus;
 mod herdr;
@@ -466,11 +466,52 @@ impl WorkspacePanel {
         self.enabled && self.layout_available
     }
 
-    pub(crate) fn known_workspace_paths(&self) -> Vec<PathBuf> {
-        self.workspaces
-            .iter()
-            .filter_map(|workspace| workspace.path.clone())
-            .collect()
+    pub(crate) fn worktree_candidates(&self) -> Vec<WorktreeCandidate> {
+        let mut candidates = Vec::new();
+        for group_index in 0..self.groups.len() {
+            let group = self.groups[group_index].name.clone();
+            candidates.extend(
+                self.sorted_group_workspace_indices(group_index)
+                    .into_iter()
+                    .filter_map(|index| {
+                        self.workspaces[index]
+                            .path
+                            .clone()
+                            .map(|path| WorktreeCandidate {
+                                path,
+                                group: Some(group.clone()),
+                            })
+                    }),
+            );
+        }
+        for (index, workspace) in self.workspaces.iter().enumerate().filter(|(_, workspace)| {
+            !workspace.linked_worktree && self.group_for_workspace_id(&workspace.id).is_none()
+        }) {
+            candidates.extend(
+                std::iter::once(index)
+                    .chain(self.child_workspace_indices(&workspace.id))
+                    .filter_map(|index| {
+                        self.workspaces[index]
+                            .path
+                            .clone()
+                            .map(|path| WorktreeCandidate { path, group: None })
+                    }),
+            );
+        }
+        candidates.extend(
+            self.workspaces
+                .iter()
+                .filter(|workspace| {
+                    workspace.linked_worktree && workspace.parent_workspace_id.is_none()
+                })
+                .filter_map(|workspace| {
+                    workspace
+                        .path
+                        .clone()
+                        .map(|path| WorktreeCandidate { path, group: None })
+                }),
+        );
+        candidates
     }
 
     pub(crate) fn linked_herdr_worktrees(&self) -> Vec<(PathBuf, String)> {
@@ -549,18 +590,11 @@ impl WorkspacePanel {
             rows.push(WorkspacePanelRow::Spacer);
             rows.push(WorkspacePanelRow::Group(group_index));
             if group.expanded {
-                for (index, workspace) in
-                    self.workspaces.iter().enumerate().filter(|(_, workspace)| {
-                        !workspace.linked_worktree && group.workspace_ids.contains(&workspace.id)
-                    })
-                {
-                    rows.push(WorkspacePanelRow::Workspace(index));
-                    rows.extend(
-                        self.child_workspace_indices(&workspace.id)
-                            .into_iter()
-                            .map(WorkspacePanelRow::Workspace),
-                    );
-                }
+                rows.extend(
+                    self.sorted_group_workspace_indices(group_index)
+                        .into_iter()
+                        .map(WorkspacePanelRow::Workspace),
+                );
             }
         }
         for (index, workspace) in self.workspaces.iter().enumerate().filter(|(_, workspace)| {
@@ -1724,12 +1758,38 @@ impl WorkspacePanel {
     }
 
     fn child_workspace_indices(&self, parent_id: &str) -> Vec<usize> {
-        self.workspaces
+        let mut indices = self
+            .workspaces
             .iter()
             .enumerate()
             .filter(|(_, workspace)| workspace.parent_workspace_id.as_deref() == Some(parent_id))
             .map(|(index, _)| index)
-            .collect()
+            .collect::<Vec<_>>();
+        indices.sort_by_cached_key(|index| self.workspaces[*index].label.to_lowercase());
+        indices
+    }
+
+    fn sorted_group_workspace_indices(&self, group_index: usize) -> Vec<usize> {
+        let Some(group) = self.groups.get(group_index) else {
+            return Vec::new();
+        };
+        let mut parents = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, workspace)| {
+                !workspace.linked_worktree && group.workspace_ids.contains(&workspace.id)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        parents.sort_by_cached_key(|index| self.workspaces[*index].label.to_lowercase());
+
+        let mut indices = Vec::new();
+        for parent in parents {
+            indices.push(parent);
+            indices.extend(self.child_workspace_indices(&self.workspaces[parent].id));
+        }
+        indices
     }
 
     fn reconcile_group_workspace_ids(&mut self) -> bool {
@@ -3172,6 +3232,54 @@ mod tests {
         assert_eq!(restored.groups[1].name, "Zulu work");
         assert!(!restored.groups[1].expanded);
         assert_eq!(restored.groups[1].workspace_ids, ["w2"]);
+    }
+
+    #[test]
+    fn sorts_grouped_workspaces_by_label_and_reorders_after_rename() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.workspaces[0].label = "Zulu".to_owned();
+        panel.workspaces[0].path = Some(PathBuf::from("/work/zulu"));
+        panel.workspaces[1].label = "alpha".to_owned();
+        panel.workspaces[1].path = Some(PathBuf::from("/work/alpha"));
+        panel.groups = vec![WorkspaceGroup {
+            name: "Projects".to_owned(),
+            expanded: true,
+            workspace_ids: vec!["w1".to_owned(), "w2".to_owned()],
+        }];
+
+        assert_eq!(
+            panel.workspace_rows(),
+            [
+                WorkspacePanelRow::Spacer,
+                WorkspacePanelRow::Group(0),
+                WorkspacePanelRow::Workspace(1),
+                WorkspacePanelRow::Workspace(0),
+            ]
+        );
+        assert_eq!(
+            panel.worktree_candidates(),
+            [
+                WorktreeCandidate {
+                    path: PathBuf::from("/work/alpha"),
+                    group: Some("Projects".to_owned()),
+                },
+                WorktreeCandidate {
+                    path: PathBuf::from("/work/zulu"),
+                    group: Some("Projects".to_owned()),
+                }
+            ]
+        );
+
+        panel.workspaces[0].label = "aardvark".to_owned();
+        assert_eq!(
+            panel.workspace_rows(),
+            [
+                WorkspacePanelRow::Spacer,
+                WorkspacePanelRow::Group(0),
+                WorkspacePanelRow::Workspace(0),
+                WorkspacePanelRow::Workspace(1),
+            ]
+        );
     }
 
     #[test]
