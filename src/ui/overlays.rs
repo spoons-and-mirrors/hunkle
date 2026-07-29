@@ -886,12 +886,14 @@ pub(super) fn draw_worktree_create_dialog(frame: &mut Frame<'_>, dialog: &Worktr
         ]),
         path_area,
     );
-    if let Some(error) = &dialog.error {
-        frame.render_widget(
-            Paragraph::new(error.as_str()).style(Style::default().fg(palette().red)),
-            Rect::new(inner.x, inner.y.saturating_add(12), inner.width, 1),
-        );
-    }
+    let (message, style) = dialog.error.as_ref().map_or(
+        ("Managed by Herdr", Style::default().fg(palette().purple)),
+        |error| (error.as_str(), Style::default().fg(palette().red)),
+    );
+    frame.render_widget(
+        Paragraph::new(message).style(style),
+        Rect::new(inner.x, inner.y.saturating_add(12), inner.width, 1),
+    );
     frame.render_widget(
         Paragraph::new(key_hint_line(
             &[

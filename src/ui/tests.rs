@@ -2846,6 +2846,7 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(create_dialog.contains("CREATE WORKTREE"));
+    assert!(create_dialog.contains("Managed by Herdr"));
     assert!(create_dialog.contains("feature/modal"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 

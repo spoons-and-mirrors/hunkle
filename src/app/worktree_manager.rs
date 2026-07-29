@@ -25,8 +25,8 @@ pub(crate) enum WorktreeManagerEffect {
     Close,
     Open(PathBuf),
     Refresh,
-    CreateNative {
-        common_dir: PathBuf,
+    CreateHerdr {
+        cwd: PathBuf,
         path: PathBuf,
         branch: String,
         start_point: String,
@@ -56,7 +56,7 @@ pub(crate) struct WorktreeCreateDialog {
     pub(crate) path: String,
     pub(crate) field: WorktreeCreateField,
     pub(crate) error: Option<String>,
-    common_dir: PathBuf,
+    cwd: PathBuf,
     start_point: String,
     base_dir: PathBuf,
     path_automatic: bool,
@@ -265,7 +265,7 @@ impl WorktreeManager {
 
     pub(crate) fn start_create(
         &mut self,
-        common_dir: PathBuf,
+        cwd: PathBuf,
         path: PathBuf,
         branch: String,
         start_point: String,
@@ -277,8 +277,12 @@ impl WorktreeManager {
         self.pending_create = self.create_dialog.take();
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = git::create_worktree(&common_dir, &path, &branch, &start_point)
-                .map_err(|error| error.to_string());
+            let result = super::workspace_panel::create_managed_worktree(
+                cwd,
+                path.clone(),
+                branch,
+                start_point,
+            );
             let _ = sender.send(Completion::Creation(CreationCompletion { path, result }));
         });
         true
@@ -640,7 +644,7 @@ impl WorktreeManager {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| worktree.path.clone());
         let repository_label = repository.label.clone();
-        let common_dir = repository.common_dir.clone();
+        let cwd = worktree.path.clone();
         let start_label = worktree_label(worktree);
         let start_point = worktree.head.clone().unwrap_or_default();
         self.create_dialog = Some(WorktreeCreateDialog {
@@ -653,7 +657,7 @@ impl WorktreeManager {
                 .to_string(),
             field: WorktreeCreateField::Branch,
             error: None,
-            common_dir,
+            cwd,
             start_point,
             base_dir,
             path_automatic: true,
@@ -774,8 +778,8 @@ impl WorktreeManager {
         } else {
             dialog.base_dir.join(path)
         };
-        Some(WorktreeManagerEffect::CreateNative {
-            common_dir: dialog.common_dir.clone(),
+        Some(WorktreeManagerEffect::CreateHerdr {
+            cwd: dialog.cwd.clone(),
             path,
             branch: dialog.branch.clone(),
             start_point: dialog.start_point.clone(),
@@ -1033,8 +1037,8 @@ mod tests {
         manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(WorktreeManagerEffect::CreateNative {
-                common_dir: PathBuf::from("/repo/.git"),
+            Some(WorktreeManagerEffect::CreateHerdr {
+                cwd: PathBuf::from("/repo-feature"),
                 path: PathBuf::from("/repo-feature-new"),
                 branch: "feature/new".to_owned(),
                 start_point: "1234567890abcdef".to_owned(),

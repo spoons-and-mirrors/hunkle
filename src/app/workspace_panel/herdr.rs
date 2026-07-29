@@ -51,13 +51,34 @@ impl FocusEventCoalescer {
 }
 
 pub(super) enum Action {
-    CreateWorkspace { path: Option<PathBuf> },
-    CreateWorktree { workspace_id: String },
-    CloseWorkspace { workspace_id: String },
-    RemoveWorktree { workspace_id: String },
-    FocusWorkspace { workspace_id: String },
-    FocusAgent { pane_id: String },
-    RenameWorkspace { workspace_id: String, label: String },
+    CreateWorkspace {
+        path: Option<PathBuf>,
+    },
+    CreateWorktree {
+        workspace_id: String,
+    },
+    CreateWorktreeAt {
+        cwd: PathBuf,
+        path: PathBuf,
+        branch: String,
+        base: String,
+    },
+    CloseWorkspace {
+        workspace_id: String,
+    },
+    RemoveWorktree {
+        workspace_id: String,
+    },
+    FocusWorkspace {
+        workspace_id: String,
+    },
+    FocusAgent {
+        pane_id: String,
+    },
+    RenameWorkspace {
+        workspace_id: String,
+        label: String,
+    },
 }
 
 pub(super) struct RestoreRequest {
@@ -297,6 +318,24 @@ fn action_args(action: Action) -> Vec<String> {
             "create".to_owned(),
             "--workspace".to_owned(),
             workspace_id,
+            "--no-focus".to_owned(),
+        ],
+        Action::CreateWorktreeAt {
+            cwd,
+            path,
+            branch,
+            base,
+        } => vec![
+            "worktree".to_owned(),
+            "create".to_owned(),
+            "--cwd".to_owned(),
+            cwd.to_string_lossy().into_owned(),
+            "--branch".to_owned(),
+            branch,
+            "--base".to_owned(),
+            base,
+            "--path".to_owned(),
+            path.to_string_lossy().into_owned(),
             "--no-focus".to_owned(),
         ],
         Action::CloseWorkspace { workspace_id } => {
@@ -657,6 +696,28 @@ mod tests {
                 workspace_id: "w1".to_owned(),
             }),
             ["worktree", "create", "--workspace", "w1", "--no-focus"].map(str::to_owned)
+        );
+        assert_eq!(
+            action_args(Action::CreateWorktreeAt {
+                cwd: PathBuf::from("/tmp/current checkout"),
+                path: PathBuf::from("/tmp/new checkout"),
+                branch: "feature/modal".to_owned(),
+                base: "abc123".to_owned(),
+            }),
+            [
+                "worktree",
+                "create",
+                "--cwd",
+                "/tmp/current checkout",
+                "--branch",
+                "feature/modal",
+                "--base",
+                "abc123",
+                "--path",
+                "/tmp/new checkout",
+                "--no-focus",
+            ]
+            .map(str::to_owned)
         );
         assert_eq!(
             action_args(Action::CloseWorkspace {

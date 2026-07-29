@@ -404,56 +404,6 @@ pub(crate) fn remove_worktree(repository: &Path, worktree: &Path) -> Result<()> 
     Ok(())
 }
 
-pub(crate) fn create_worktree(
-    repository: &Path,
-    worktree: &Path,
-    branch: &str,
-    start_point: &str,
-) -> Result<()> {
-    if branch.trim() != branch || branch.is_empty() {
-        bail!("Enter a branch name without leading or trailing whitespace");
-    }
-    let check = run(repository, &["check-ref-format", "--branch", branch])?;
-    if !check.status.success() {
-        bail!("Invalid branch name: {branch}");
-    }
-    if fs::symlink_metadata(worktree).is_ok() {
-        bail!("{} already exists", worktree.display());
-    }
-    let parent = worktree
-        .parent()
-        .context("worktree destination has no parent directory")?;
-    if !parent.is_dir() {
-        bail!("Parent directory {} does not exist", parent.display());
-    }
-
-    let reference = format!("refs/heads/{branch}");
-    let branch_check = run(repository, &["show-ref", "--verify", "--quiet", &reference])?;
-    let branch_exists = match branch_check.status.code() {
-        Some(0) => true,
-        Some(1) => false,
-        _ => bail!("{}", clean_stderr(&branch_check)),
-    };
-    if !branch_exists && start_point.is_empty() {
-        bail!("Cannot create a branch from a checkout without a HEAD commit");
-    }
-
-    let mut command = base_command(repository);
-    command.args(["worktree", "add"]);
-    if !branch_exists {
-        command.args(["-b", branch]);
-    }
-    command.arg(worktree);
-    command.arg(if branch_exists { branch } else { start_point });
-    let output =
-        process::run(&mut command, git_limits()).context("could not run git worktree add")?;
-    ensure_complete(&output, "git worktree add")?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    Ok(())
-}
-
 fn parse_worktrees(bytes: &[u8]) -> Result<Vec<LinkedWorktree>> {
     let mut worktrees = Vec::new();
     let mut remaining = bytes;
@@ -1859,37 +1809,6 @@ mod tests {
         remove_worktree(&common, &linked).unwrap();
         assert!(!linked.exists());
         assert_eq!(list_worktrees(&common).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn creates_real_linked_worktrees_for_new_and_existing_branches() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("main");
-        let new_branch_path = directory.path().join("new branch");
-        let existing_branch_path = directory.path().join("existing branch");
-        fs::create_dir(&root).unwrap();
-        git(&root, &["init", "-b", "main"]);
-        git(&root, &["config", "user.name", "Test Author"]);
-        git(&root, &["config", "user.email", "test@example.com"]);
-        fs::write(root.join("tracked.txt"), "base\n").unwrap();
-        git(&root, &["add", "tracked.txt"]);
-        git(&root, &["commit", "-m", "base"]);
-        git(&root, &["branch", "existing"]);
-
-        let common = common_git_dir(&root).unwrap();
-        create_worktree(&common, &new_branch_path, "feature/new", "HEAD").unwrap();
-        create_worktree(&common, &existing_branch_path, "existing", "HEAD").unwrap();
-
-        let listed = list_worktrees(&common).unwrap();
-        assert_eq!(listed.len(), 3);
-        assert!(listed.iter().any(|worktree| {
-            worktree.path == fs::canonicalize(&new_branch_path).unwrap()
-                && worktree.branch.as_deref() == Some("refs/heads/feature/new")
-        }));
-        assert!(listed.iter().any(|worktree| {
-            worktree.path == fs::canonicalize(&existing_branch_path).unwrap()
-                && worktree.branch.as_deref() == Some("refs/heads/existing")
-        }));
     }
 
     #[test]

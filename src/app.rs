@@ -2015,8 +2015,8 @@ impl App {
                 );
                 self.worktree_manager.start_refresh();
             }
-            WorktreeManagerEffect::CreateNative {
-                common_dir,
+            WorktreeManagerEffect::CreateHerdr {
+                cwd,
                 path,
                 branch,
                 start_point,
@@ -2028,12 +2028,10 @@ impl App {
                     );
                     return;
                 }
-                if !self.worktree_manager.start_create(
-                    common_dir,
-                    path.clone(),
-                    branch,
-                    start_point,
-                ) {
+                if !self
+                    .worktree_manager
+                    .start_create(cwd, path.clone(), branch, start_point)
+                {
                     self.notice = Some("A worktree operation is already running".to_owned());
                     return;
                 }

@@ -26,6 +26,20 @@ pub(super) fn send_command_below(command: String) -> Result<String, String> {
     herdr::send_command_below(command)
 }
 
+pub(crate) fn create_managed_worktree(
+    cwd: PathBuf,
+    path: PathBuf,
+    branch: String,
+    base: String,
+) -> Result<(), String> {
+    herdr::perform(herdr::Action::CreateWorktreeAt {
+        cwd,
+        path,
+        branch,
+        base,
+    })
+}
+
 pub(crate) const DEFAULT_WIDTH: u16 = 26;
 pub(crate) const MINIMUM_WIDTH: u16 = 18;
 
