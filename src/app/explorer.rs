@@ -5,6 +5,7 @@ use std::{
     sync::mpsc::{self, Receiver, SyncSender},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -14,7 +15,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::fuzzy::{fuzzy_text_score, fuzzy_text_score_lower};
 
 const MAX_PREVIEW_ENTRIES: usize = 200;
-const MAX_SURROUNDING_SIBLINGS: usize = 200;
+const MAX_SURROUNDING_CHILDREN: usize = 200;
+const DOUBLE_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
 
 #[derive(Debug, Clone)]
 pub struct PickerEntry {
@@ -72,6 +74,7 @@ pub struct Explorer {
     match_worker: Option<JoinHandle<()>>,
     browse_rx: Option<Receiver<Result<BrowseResult, String>>>,
     content_generation: u64,
+    last_row_click: Option<(PathBuf, Instant)>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +175,7 @@ impl Explorer {
             match_worker: Some(match_worker),
             browse_rx: None,
             content_generation: 0,
+            last_row_click: None,
         };
         picker.reload();
         picker
@@ -308,9 +312,6 @@ impl Explorer {
             }
             return PickerCommand::None;
         };
-        if open_repositories && entry.action == PickerAction::Navigate && entry.is_repo {
-            return PickerCommand::Open(entry.path);
-        }
         match entry.action {
             PickerAction::Navigate => {
                 self.navigate(entry.path);
@@ -461,12 +462,6 @@ impl Explorer {
         self.reload_directory();
     }
 
-    pub(super) fn activate_surrounding(&mut self, index: usize) {
-        if let Some(path) = self.surroundings.get(index).map(|entry| entry.path.clone()) {
-            self.navigate(path);
-        }
-    }
-
     pub(super) fn accept_preview(&mut self, index: usize) {
         let Some(entry) = self.preview_entries.get(index).cloned() else {
             return;
@@ -513,22 +508,37 @@ impl Explorer {
                 PickerCommand::None
             }
             ExplorerHitTarget::Surrounding { generation, index }
-                if generation == self.content_generation =>
+                if generation == self.content_generation && index < self.surroundings.len() =>
             {
-                self.activate_surrounding(index);
+                self.surroundings_focused = true;
+                self.surroundings_state.select(Some(index));
+                let path = self.surroundings[index].path.clone();
+                if self.register_row_click(path.clone()) {
+                    self.navigate(path);
+                }
                 PickerCommand::None
             }
             ExplorerHitTarget::Entry { generation, index }
                 if generation == self.content_generation && index < self.entries.len() =>
             {
+                self.surroundings_focused = false;
                 self.state.select(Some(index));
-                self.activate_selected(true)
+                let entry = self.entries[index].clone();
+                if self.register_row_click(entry.path.clone()) {
+                    return self.activate_selected(true);
+                }
+                PickerCommand::None
             }
             ExplorerHitTarget::Match { generation, index }
                 if generation == self.content_generation && index < self.matches.len() =>
             {
                 self.match_state.select(Some(index));
-                self.confirm_path()
+                self.refresh_preview();
+                let path = self.matches[index].path.clone();
+                if self.register_row_click(path) {
+                    return self.confirm_path();
+                }
+                PickerCommand::None
             }
             ExplorerHitTarget::Preview { generation, index }
                 if generation == self.content_generation =>
@@ -546,6 +556,14 @@ impl Explorer {
             | ExplorerHitTarget::Match { .. }
             | ExplorerHitTarget::Preview { .. } => PickerCommand::None,
         }
+    }
+
+    fn register_row_click(&mut self, path: PathBuf) -> bool {
+        let double_click = self.last_row_click.as_ref().is_some_and(|(previous, at)| {
+            *previous == path && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+        });
+        self.last_row_click = (!double_click).then(|| (path, Instant::now()));
+        double_click
     }
 
     fn invalidate_targets(&mut self) {
@@ -914,35 +932,22 @@ fn load_surroundings(directory: &Path) -> (Vec<SurroundingEntry>, Option<usize>)
     let mut surroundings = Vec::new();
     let mut ancestors: Vec<_> = directory.ancestors().map(Path::to_path_buf).collect();
     ancestors.reverse();
-    ancestors.pop();
     for (depth, path) in ancestors.into_iter().enumerate() {
         surroundings.push(SurroundingEntry {
             label: path_label(&path),
+            current: path == directory,
             path,
             depth,
-            current: false,
         });
     }
 
-    let sibling_depth = surroundings.len();
-    let mut siblings = directory
-        .parent()
-        .map(|parent| load_child_directories(parent, MAX_SURROUNDING_SIBLINGS, false))
-        .unwrap_or_default();
-    if !siblings.iter().any(|entry| entry.path == directory) {
-        siblings.push(PickerEntry {
-            label: path_label(directory),
-            path: directory.to_path_buf(),
-            action: PickerAction::Navigate,
-            is_repo: is_repository_directory(directory),
-        });
-    }
-    for sibling in siblings {
+    let child_depth = surroundings.len();
+    for child in load_child_directories(directory, MAX_SURROUNDING_CHILDREN, false) {
         surroundings.push(SurroundingEntry {
-            label: sibling.label,
-            current: sibling.path == directory,
-            path: sibling.path,
-            depth: sibling_depth,
+            label: child.label,
+            current: false,
+            path: child.path,
+            depth: child_depth,
         });
     }
     let selected = surroundings.iter().position(|entry| entry.current);
@@ -1247,6 +1252,17 @@ mod tests {
         panic!("Explorer search did not finish");
     }
 
+    fn wait_for_browse(picker: &mut Explorer) {
+        for _ in 0..100 {
+            picker.poll_index();
+            if !picker.loading {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("Explorer browse did not finish");
+    }
+
     #[test]
     fn fuzzy_repository_paths_resolve_and_complete() {
         let temp = tempfile::tempdir().unwrap();
@@ -1491,6 +1507,13 @@ mod tests {
             picker.activate_target(target),
             PickerCommand::None
         ));
+        assert_eq!(picker.directory, temp.path());
+        assert_eq!(picker.state.selected(), Some(0));
+
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
         assert_eq!(picker.directory, child);
 
         let generation = picker.content_generation;
@@ -1499,6 +1522,155 @@ mod tests {
             PickerCommand::None
         ));
         assert_eq!(picker.content_generation, generation);
+    }
+
+    #[test]
+    fn single_clicks_select_and_double_clicks_traverse_repository_folders() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let child = root.join("child");
+        let grandchild = child.join("grandchild");
+        fs::create_dir_all(&grandchild).unwrap();
+        fs::create_dir(child.join(".git")).unwrap();
+        fs::write(root.join("note.txt"), "x\n").unwrap();
+        let mut picker = Explorer::new(root.to_path_buf());
+        wait_for_browse(&mut picker);
+
+        let child_row = picker
+            .entries
+            .iter()
+            .position(|entry| entry.path == child)
+            .unwrap();
+        let child_target = picker.entry_target(child_row);
+        assert!(matches!(
+            picker.activate_target(child_target),
+            PickerCommand::None
+        ));
+        assert_eq!(picker.directory, root);
+        assert_eq!(picker.state.selected(), Some(child_row));
+
+        picker.activate_target(child_target);
+        assert_eq!(picker.directory, child);
+        wait_for_browse(&mut picker);
+
+        let grandchild_row = picker
+            .entries
+            .iter()
+            .position(|entry| entry.path == grandchild)
+            .unwrap();
+        let parent_row = picker
+            .entries
+            .iter()
+            .position(|entry| entry.label == "..")
+            .unwrap();
+        picker.activate_target(picker.entry_target(grandchild_row));
+        assert_eq!(picker.directory, child);
+        let parent_target = picker.entry_target(parent_row);
+        picker.activate_target(parent_target);
+        assert_eq!(picker.directory, child);
+        picker.activate_target(parent_target);
+        assert_eq!(picker.directory, root);
+        wait_for_browse(&mut picker);
+
+        let file = root.join("note.txt");
+        let file_row = picker
+            .entries
+            .iter()
+            .position(|entry| entry.path == file)
+            .unwrap();
+        let file_target = picker.entry_target(file_row);
+        assert!(matches!(
+            picker.activate_target(file_target),
+            PickerCommand::None
+        ));
+        let PickerCommand::OpenFile(opened) = picker.activate_target(file_target) else {
+            panic!("double-clicking a file entry should open it");
+        };
+        assert_eq!(opened, file);
+    }
+
+    #[test]
+    fn single_click_on_a_match_previews_and_double_click_confirms() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let child = root.join("child");
+        fs::create_dir_all(child.join("inside")).unwrap();
+        let mut picker = Explorer::new(root.to_path_buf());
+        picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]));
+        picker.begin_search(Some("child"));
+        wait_for_matches(&mut picker);
+
+        let target = picker.match_target(0);
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
+        assert_eq!(picker.directory, root);
+        assert_eq!(picker.match_state.selected(), Some(0));
+        assert!(
+            picker
+                .preview_entries
+                .iter()
+                .any(|entry| entry.path == child.join("inside"))
+        );
+
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
+        assert_eq!(picker.directory, child);
+    }
+
+    #[test]
+    fn surrounding_tree_can_navigate_up_and_back_down() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let spoon = home.join("spoon");
+        let code = spoon.join("code");
+        fs::create_dir_all(&code).unwrap();
+        let mut picker = Explorer::new(code.clone());
+        wait_for_browse(&mut picker);
+
+        let home_row = picker
+            .surroundings
+            .iter()
+            .position(|entry| entry.path == home)
+            .unwrap();
+        let target = picker.surrounding_target(home_row);
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
+        assert_eq!(picker.directory, code);
+        assert_eq!(picker.surroundings_state.selected(), Some(home_row));
+        assert!(picker.surroundings_focused);
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
+        assert_eq!(picker.directory, home);
+        wait_for_browse(&mut picker);
+
+        let spoon_row = picker
+            .surroundings
+            .iter()
+            .position(|entry| entry.path == spoon)
+            .expect("the current directory's child should remain in the left tree");
+        let target = picker.surrounding_target(spoon_row);
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
+        assert_eq!(picker.directory, spoon);
+        wait_for_browse(&mut picker);
+        assert!(picker
+            .surroundings
+            .iter()
+            .any(|entry| entry.path == code));
     }
 
     #[test]

@@ -2449,20 +2449,20 @@ pub(super) fn draw_explorer(
 
     let (left_label, left_count, right_label, right_count) = if explorer.editing_path {
         (
-            "PATH MATCHES",
+            "PATH MATCHES".to_owned(),
             if explorer.searching {
                 "indexing…".to_owned()
             } else {
                 format!("{} found", explorer.matches.len())
             },
-            "LIVE PREVIEW",
+            "LIVE PREVIEW".to_owned(),
             format!("{} inside", explorer.preview_entries.len()),
         )
     } else {
         (
-            "AROUND HERE",
+            "AROUND HERE".to_owned(),
             format!("{} places", explorer.surroundings.len()),
-            "CONTENTS",
+            "CONTENTS".to_owned(),
             if explorer.loading {
                 "loading…".to_owned()
             } else {
@@ -2921,7 +2921,7 @@ fn explorer_item(entry: &PickerEntry, width: usize) -> ListItem<'static> {
 }
 
 fn surrounding_item(entry: &SurroundingEntry, width: usize) -> ListItem<'static> {
-    let indent = "  ".repeat(entry.depth.min(4));
+    let indent = " ".repeat(entry.depth.min(4));
     let marker = if entry.current { "● " } else { "├ " };
     let detail = if entry.current { "here" } else { "" };
     let detail_width = UnicodeWidthStr::width(detail);
