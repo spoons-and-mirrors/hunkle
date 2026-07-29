@@ -28,7 +28,7 @@ The complete filesystem tree inside the workspace, including Git-ignored content
 
 ## Explorer
 
-The `o` interaction for finding and opening another workspace. Explorer is not the repository browser.
+The `o` interaction for finding and opening another workspace. Explorer is not the repository browser. Confirming a file path opens the file's parent directory as a workspace and selects the file.
 
 ## Repository browser
 

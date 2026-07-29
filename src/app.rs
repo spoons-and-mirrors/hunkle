@@ -912,7 +912,6 @@ impl App {
                         diagnostics::activity("apply-workspace", self.diagnostic_context());
                     diagnostics::event(format!("workspace opened {}", self.diagnostic_context()));
                     self.pending_reload = None;
-                    self.pending_file_selection = None;
                     self.reload_queued = None;
                     if self.mode != Mode::WorkspacePanel {
                         self.mode = Mode::Normal;
@@ -933,6 +932,17 @@ impl App {
                     }
                     self.changes
                         .reset_repository(self.session.data(), prepared_file_tree);
+                    if let Some(path) = self.pending_file_selection.take()
+                        && let Some(repo) = self.session.data()
+                    {
+                        self.view = View::Changes;
+                        self.changes.set_pane(LeftPane::Files, Some(repo));
+                        let viewport = self
+                            .regions
+                            .explorer_list
+                            .map_or(0, |rect| usize::from(rect.height));
+                        self.changes.select_explorer_path(repo, &path, viewport);
+                    }
                     self.file_search.invalidate();
                     self.graph_state.select(
                         self.session
@@ -955,6 +965,7 @@ impl App {
                 (LoadKind::Open, Err(error)) => {
                     diagnostics::event(format!("workspace open failed error={error}"));
                     self.workspace_fetch_pending = false;
+                    self.pending_file_selection = None;
                     let message = format!("Could not open workspace: {error}");
                     self.notice = Some(message.clone());
                     self.workspace_explorer.error = Some(message);
@@ -2294,6 +2305,20 @@ impl App {
             PickerCommand::Close => self.mode = Mode::Normal,
             PickerCommand::Quit => self.should_quit = true,
             PickerCommand::Open(path) => self.open_repository(path),
+            PickerCommand::OpenFile(path) => self.open_workspace_file(path),
+        }
+    }
+
+    fn open_workspace_file(&mut self, path: PathBuf) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Some(name) = path.file_name() else {
+            return;
+        };
+        self.pending_file_selection = Some(RepoPath::from(PathBuf::from(name)));
+        if !self.start_repository_open(parent.to_path_buf(), false) {
+            self.pending_file_selection = None;
         }
     }
 
@@ -2977,6 +3002,30 @@ mod tests {
         assert_eq!(repo.change_counts, (0, 0));
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.changes.pane, LeftPane::Files);
+    }
+
+    #[test]
+    fn opening_a_file_from_the_explorer_selects_it_in_the_new_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("auth.json"), "{}\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+
+        app.apply_explorer_command(PickerCommand::OpenFile(nested.join("auth.json")));
+        wait_for_state(&mut app, |app| !app.session.open_running());
+
+        let repo = app.repository().unwrap().clone();
+        assert_eq!(repo.root, fs::canonicalize(&nested).unwrap());
+        assert!(repo.is_local());
+        assert_eq!(app.view, View::Changes);
+        assert_eq!(app.changes.pane, LeftPane::Files);
+        assert_eq!(
+            app.changes.selected_explorer_file_path(&repo),
+            Some(&RepoPath::from("auth.json"))
+        );
+        assert!(app.pending_file_selection.is_none());
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub struct PickerEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerAction {
     Open,
+    OpenFile,
     Navigate,
 }
 
@@ -116,6 +117,7 @@ pub(super) enum PickerCommand {
     Close,
     Quit,
     Open(PathBuf),
+    OpenFile(PathBuf),
 }
 
 impl Explorer {
@@ -271,9 +273,7 @@ impl Explorer {
                 PickerCommand::None
             }
             KeyCode::Char('~') => {
-                if let Some(home) = home_directory() {
-                    self.navigate(home);
-                }
+                self.begin_search(Some("~/"));
                 PickerCommand::None
             }
             KeyCode::Char('r') => {
@@ -317,18 +317,25 @@ impl Explorer {
                 PickerCommand::None
             }
             PickerAction::Open => PickerCommand::Open(entry.path),
+            PickerAction::OpenFile => PickerCommand::OpenFile(entry.path),
         }
     }
 
     pub(super) fn confirm_path(&mut self) -> PickerCommand {
         let exact_input = self.input_path();
+        if exact_input.is_file() {
+            return PickerCommand::OpenFile(exact_input);
+        }
         let path = if self.path_input.ends_with(['/', '\\']) && exact_input.is_dir() {
             exact_input
         } else {
             self.selected_match_path()
         };
+        if path.is_file() {
+            return PickerCommand::OpenFile(path);
+        }
         if !path.is_dir() {
-            self.error = Some(format!("Directory not found: {}", path.display()));
+            self.error = Some(format!("Path not found: {}", path.display()));
             return PickerCommand::None;
         }
         if is_repository_directory(&path) {
@@ -461,14 +468,13 @@ impl Explorer {
     }
 
     pub(super) fn accept_preview(&mut self, index: usize) {
-        let Some(path) = self
-            .preview_entries
-            .get(index)
-            .map(|entry| entry.path.clone())
-        else {
+        let Some(entry) = self.preview_entries.get(index).cloned() else {
             return;
         };
-        self.set_path_input(completion_path(&path));
+        self.set_path_input(completion_path(
+            &entry.path,
+            entry.action != PickerAction::OpenFile,
+        ));
         self.refresh_matches();
     }
 
@@ -642,15 +648,18 @@ impl Explorer {
     }
 
     fn accept_completion(&mut self) {
-        let Some(path) = self
+        let Some(entry) = self
             .match_state
             .selected()
             .and_then(|index| self.matches.get(index))
-            .map(|entry| entry.path.clone())
+            .cloned()
         else {
             return;
         };
-        self.set_path_input(completion_path(&path));
+        self.set_path_input(completion_path(
+            &entry.path,
+            entry.action != PickerAction::OpenFile,
+        ));
         self.refresh_matches();
     }
 
@@ -666,7 +675,7 @@ impl Explorer {
             .match_state
             .selected()
             .and_then(|index| self.matches.get(index))
-            .map(|entry| load_child_directories(&entry.path, MAX_PREVIEW_ENTRIES))
+            .map(|entry| load_child_directories(&entry.path, MAX_PREVIEW_ENTRIES, true))
             .unwrap_or_default();
     }
 
@@ -810,7 +819,7 @@ fn load_directory_entries(directory: &Path) -> Result<BrowseResult, String> {
         });
     }
     fs::read_dir(directory).map_err(|error| error.to_string())?;
-    entries.extend(load_child_directories(directory, usize::MAX));
+    entries.extend(load_child_directories(directory, usize::MAX, true));
     let (surroundings, selected_surrounding) = load_surroundings(directory);
     Ok(BrowseResult {
         entries,
@@ -819,29 +828,41 @@ fn load_directory_entries(directory: &Path) -> Result<BrowseResult, String> {
     })
 }
 
-fn load_child_directories(directory: &Path, limit: usize) -> Vec<PickerEntry> {
+fn load_child_directories(directory: &Path, limit: usize, include_files: bool) -> Vec<PickerEntry> {
     let Ok(read_dir) = fs::read_dir(directory) else {
         return Vec::new();
     };
-    let mut directories: Vec<_> = read_dir
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let file_type = entry.file_type().ok()?;
-            (file_type.is_dir() || file_type.is_symlink()).then_some(entry)
-        })
-        .filter(|entry| entry.file_name() != ".git")
-        .map(|entry| {
-            let path = entry.path();
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+    for entry in read_dir.filter_map(Result::ok) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let is_directory = file_type.is_dir() || file_type.is_symlink();
+        let path = entry.path();
+        if is_directory {
             let is_repo = path.join(".git").exists();
-            PickerEntry {
+            directories.push(PickerEntry {
                 label: format!("{}/", entry.file_name().to_string_lossy()),
                 path,
                 action: PickerAction::Navigate,
                 is_repo,
-            }
-        })
-        .collect();
+            });
+        } else if include_files && file_type.is_file() {
+            files.push(PickerEntry {
+                label: entry.file_name().to_string_lossy().into_owned(),
+                path,
+                action: PickerAction::OpenFile,
+                is_repo: false,
+            });
+        }
+    }
     directories.sort_by_cached_key(|entry| entry.label.to_lowercase());
+    files.sort_by_cached_key(|entry| entry.label.to_lowercase());
+    directories.extend(files);
     directories.truncate(limit);
     directories
 }
@@ -906,7 +927,7 @@ fn load_surroundings(directory: &Path) -> (Vec<SurroundingEntry>, Option<usize>)
     let sibling_depth = surroundings.len();
     let mut siblings = directory
         .parent()
-        .map(|parent| load_child_directories(parent, MAX_SURROUNDING_SIBLINGS))
+        .map(|parent| load_child_directories(parent, MAX_SURROUNDING_SIBLINGS, false))
         .unwrap_or_default();
     if !siblings.iter().any(|entry| entry.path == directory) {
         siblings.push(PickerEntry {
@@ -1047,12 +1068,17 @@ fn path_completion_candidates(input: &str, base: &Path) -> Vec<PickerEntry> {
     let Ok(entries) = fs::read_dir(&parent) else {
         return Vec::new();
     };
-    for entry in entries.filter_map(Result::ok).filter(|entry| {
-        entry.file_name() != ".git"
-            && entry
-                .file_type()
-                .is_ok_and(|kind| kind.is_dir() || kind.is_symlink())
-    }) {
+    for entry in entries.filter_map(Result::ok) {
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let is_directory = kind.is_dir() || kind.is_symlink();
+        if !is_directory && !kind.is_file() {
+            continue;
+        }
         let path = entry.path();
         let name = entry.file_name();
         let Some(score) = (if fragment_lower.is_empty() {
@@ -1066,9 +1092,13 @@ fn path_completion_candidates(input: &str, base: &Path) -> Vec<PickerEntry> {
             score,
             PickerEntry {
                 label: display_search_path(&path),
-                is_repo: path.join(".git").exists(),
+                is_repo: is_directory && path.join(".git").exists(),
                 path,
-                action: PickerAction::Navigate,
+                action: if is_directory {
+                    PickerAction::Navigate
+                } else {
+                    PickerAction::OpenFile
+                },
             },
         );
         if candidates.len() < 12 {
@@ -1086,9 +1116,9 @@ fn path_completion_candidates(input: &str, base: &Path) -> Vec<PickerEntry> {
     candidates.into_iter().map(|(_, entry)| entry).collect()
 }
 
-fn completion_path(path: &Path) -> String {
+fn completion_path(path: &Path, is_directory: bool) -> String {
     let mut path = display_search_path(path);
-    if !path.ends_with(std::path::MAIN_SEPARATOR) {
+    if is_directory && !path.ends_with(std::path::MAIN_SEPARATOR) {
         path.push(std::path::MAIN_SEPARATOR);
     }
     path
@@ -1488,5 +1518,109 @@ mod tests {
 
         assert_eq!(picker.matches.len(), 12);
         assert_eq!(picker.matches[0].path, Path::new("/needle"));
+    }
+
+    #[test]
+    fn tilde_starts_a_home_path_search() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut picker = Explorer::new(temp.path().to_path_buf());
+
+        picker.handle_key(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::NONE), true);
+
+        assert!(picker.editing_path);
+        assert_eq!(picker.path_input, "~/");
+        assert_eq!(picker.directory, temp.path());
+    }
+
+    #[test]
+    fn path_completion_finds_files_and_enter_opens_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let file = root.join("auth.json");
+        fs::write(&file, "{}\n").unwrap();
+        fs::create_dir_all(root.join("themes")).unwrap();
+
+        let mut picker = Explorer::new(root.to_path_buf());
+        picker.begin_search(Some(&format!("{}/au", root.display())));
+        wait_for_matches(&mut picker);
+
+        assert_eq!(picker.matches[0].path, file);
+        assert_eq!(picker.matches[0].action, PickerAction::OpenFile);
+
+        picker.accept_completion();
+        assert!(picker.path_input.ends_with("auth.json"));
+        assert!(!picker.path_input.ends_with(std::path::MAIN_SEPARATOR));
+
+        let PickerCommand::OpenFile(opened) = picker.confirm_path() else {
+            panic!("Enter should open the completed file");
+        };
+        assert_eq!(opened, root.join("auth.json"));
+    }
+
+    #[test]
+    fn enter_opens_an_exact_file_in_the_current_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("auth.json"), "{}\n").unwrap();
+
+        let mut picker = Explorer::new(root.to_path_buf());
+        picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]));
+        picker.begin_search(Some("auth.json"));
+        wait_for_matches(&mut picker);
+
+        let PickerCommand::OpenFile(opened) = picker.confirm_path() else {
+            panic!("Enter should open the exact file path");
+        };
+        assert_eq!(opened, root.join("auth.json"));
+    }
+
+    #[test]
+    fn enter_reports_paths_that_do_not_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        let mut picker = Explorer::new(root.to_path_buf());
+        picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]));
+        picker.begin_search(Some("missing.json"));
+        wait_for_matches(&mut picker);
+
+        assert!(matches!(picker.confirm_path(), PickerCommand::None));
+        assert!(
+            picker
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("Path not found: "))
+        );
+    }
+
+    #[test]
+    fn browsing_lists_directories_before_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("zeta")).unwrap();
+        fs::write(root.join("auth.json"), "{}\n").unwrap();
+
+        let browse = load_directory_entries(root).unwrap();
+        let directory = browse
+            .entries
+            .iter()
+            .position(|entry| entry.path == root.join("zeta"))
+            .unwrap();
+        let file = browse
+            .entries
+            .iter()
+            .position(|entry| entry.path == root.join("auth.json"))
+            .unwrap();
+        assert!(directory < file);
+        assert_eq!(browse.entries[file].action, PickerAction::OpenFile);
+        assert_eq!(browse.entries[file].label, "auth.json");
+
+        let mut picker = Explorer::new(root.to_path_buf());
+        picker.entries = browse.entries;
+        picker.state.select(Some(file));
+        let PickerCommand::OpenFile(opened) = picker.activate_selected(true) else {
+            panic!("activating a file entry should open it");
+        };
+        assert_eq!(opened, root.join("auth.json"));
     }
 }

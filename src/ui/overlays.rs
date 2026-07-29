@@ -2509,7 +2509,7 @@ pub(super) fn draw_explorer(
             } else if explorer.path_input.trim().is_empty() {
                 "Type a folder or path"
             } else {
-                "No matching directories"
+                "No matching entries"
             };
             frame.render_widget(explorer_empty_list(message), left_list);
         } else {
@@ -2527,7 +2527,7 @@ pub(super) fn draw_explorer(
             let message = if explorer.matches.is_empty() {
                 "Select a match to inspect it"
             } else {
-                "No child directories"
+                "No child entries"
             };
             frame.render_widget(explorer_empty_list(message), right_list);
         } else {
@@ -2892,6 +2892,7 @@ fn explorer_item(entry: &PickerEntry, width: usize) -> ListItem<'static> {
     let (marker, label, detail, color) = match entry.action {
         PickerAction::Open if entry.is_repo => ("● ", entry.label.clone(), "open", palette().green),
         PickerAction::Open => ("○ ", entry.label.clone(), "check", palette().muted),
+        PickerAction::OpenFile => ("· ", entry.label.clone(), "file", palette().muted),
         PickerAction::Navigate if entry.label == ".." => {
             ("↑ ", "Parent directory".to_owned(), "", palette().muted)
         }
