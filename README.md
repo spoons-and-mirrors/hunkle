@@ -22,14 +22,6 @@ cargo run -p hunkle -- /path/to/repository
 
 hunkle opens exactly the current or requested directory. When that directory is a Git repository root, Git status and history are available. Any other directory opens as a local file workspace with recursive file browsing, fuzzy search, and previews; it never climbs into an enclosing repository.
 
-## Install
-
-Install or replace `hunkle` from the current checkout:
-
-```sh
-cargo install --path . --force --locked
-```
-
 ## Keys
 
 | Key | Action |
