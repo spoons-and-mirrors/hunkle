@@ -95,7 +95,6 @@ pub enum Mode {
     Settings,
     Help,
     RepositoryBrowser,
-    WorktreeManager,
     AuthorFilter,
     ActionMenu,
     Command,
@@ -104,6 +103,16 @@ pub enum Mode {
     Files,
     WorkspacePanel,
     WorkspacePresets,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExplorerTab {
+    Explorer,
+    Worktrees,
+}
+
+impl ExplorerTab {
+    pub(crate) const ALL: [Self; 2] = [Self::Explorer, Self::Worktrees];
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +131,7 @@ pub(crate) enum HitTarget {
     CommitMessageGenerate,
     MarkdownPreviewToggle,
     Graph(GraphHitTarget),
+    ExplorerTab(ExplorerTab),
     Explorer(ExplorerHitTarget),
     RepositoryBrowser(RepositoryBrowserHitTarget),
     WorktreeManager(WorktreeManagerHitTarget),
@@ -284,6 +294,7 @@ pub struct App {
     pub dragging_diff_scrollbar: bool,
     diff_scroll_drag_offset: u16,
     pub workspace_explorer: Explorer,
+    pub(crate) explorer_tab: ExplorerTab,
     pub(crate) file_search: FileSearch,
     pub(crate) actions: ActionsState,
     pub(crate) herdr_prompt: HerdrPrompt,
@@ -332,7 +343,13 @@ impl App {
     }
 
     fn build(path: PathBuf, open_in_background: bool) -> Self {
+        #[cfg(not(test))]
         let (settings_store, settings) = SettingsStore::discover();
+        #[cfg(test)]
+        let (settings_store, settings) = {
+            let (_, settings) = SettingsStore::discover();
+            (SettingsStore::memory(), settings)
+        };
         let workspace_config_dir = settings_store.config_dir();
         let workspace_groups_path =
             workspace_config_dir.map(|path| path.join("workspace-groups.json"));
@@ -412,6 +429,7 @@ impl App {
             dragging_diff_scrollbar: false,
             diff_scroll_drag_offset: 0,
             workspace_explorer,
+            explorer_tab: ExplorerTab::Explorer,
             file_search,
             actions: ActionsState::default(),
             herdr_prompt: HerdrPrompt::default(),
@@ -584,14 +602,27 @@ impl App {
             self.open_file_search();
             return;
         }
+        if self.mode == Mode::Explorer && !self.worktree_manager.dialog_open() {
+            let tab = match key.code {
+                KeyCode::F(1) => Some(ExplorerTab::Explorer),
+                KeyCode::F(2) => Some(ExplorerTab::Worktrees),
+                _ => None,
+            };
+            if let Some(tab) = tab {
+                self.select_explorer_tab(tab);
+                return;
+            }
+        }
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Commit => self.handle_commit_input(key),
             Mode::FileSearch => self.handle_file_search(key),
-            Mode::Explorer => self.handle_explorer(key),
+            Mode::Explorer => match self.explorer_tab {
+                ExplorerTab::Explorer => self.handle_explorer(key),
+                ExplorerTab::Worktrees => self.handle_worktree_manager(key),
+            },
             Mode::Settings => self.handle_settings(key),
             Mode::RepositoryBrowser => self.handle_repository_browser(key),
-            Mode::WorktreeManager => self.handle_worktree_manager(key),
             Mode::AuthorFilter => self.handle_author_filter(key),
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
@@ -622,7 +653,10 @@ impl App {
                     self.file_search.paste(text, &repo.files);
                 }
             }
-            Mode::Explorer => self.workspace_explorer.paste(text),
+            Mode::Explorer => match self.explorer_tab {
+                ExplorerTab::Explorer => self.workspace_explorer.paste(text),
+                ExplorerTab::Worktrees => self.worktree_manager.paste(text),
+            },
             Mode::Command if self.actions.status != CommandStatus::Running => {
                 self.actions.input.push_str(text);
                 if self.actions.status == CommandStatus::Input {
@@ -646,7 +680,6 @@ impl App {
                 }
             }
             Mode::RepositoryBrowser => self.repository_browser.paste(text),
-            Mode::WorktreeManager => self.worktree_manager.paste(text),
             Mode::WorkspacePanel => self.workspace_panel.paste(text),
             Mode::WorkspacePresets => self.workspace_panel.paste(text),
             _ => {}
@@ -658,9 +691,13 @@ impl App {
     }
 
     pub fn poll_worker(&mut self) -> bool {
-        let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
+        let mut changed = self.mode == Mode::Explorer
+            && self.explorer_tab == ExplorerTab::Explorer
+            && self.workspace_explorer.poll_index();
         if self.workspace_panel_enabled()
-            || (self.mode == Mode::WorktreeManager && self.workspace_panel.is_enabled())
+            || (self.mode == Mode::Explorer
+                && self.explorer_tab == ExplorerTab::Worktrees
+                && self.workspace_panel.is_enabled())
             || self.workspace_panel.destructive_action_running()
         {
             let panel_poll = self.workspace_panel.poll();
@@ -681,7 +718,7 @@ impl App {
                 self.queue_workspace_restore(path);
                 changed = true;
             }
-            if self.mode == Mode::WorktreeManager {
+            if self.mode == Mode::Explorer && self.explorer_tab == ExplorerTab::Worktrees {
                 let candidates_changed = self.worktree_manager.update_herdr_inventory(
                     self.workspace_panel.worktree_candidates(),
                     self.workspace_panel.linked_herdr_worktrees(),
@@ -2027,6 +2064,9 @@ impl App {
     }
 
     fn open_worktree_manager(&mut self) {
+        if self.mode == Mode::Explorer && self.explorer_tab == ExplorerTab::Worktrees {
+            return;
+        }
         self.workspace_panel.refresh_worktree_inventory();
         let current_path = self.repository().map(|repository| repository.root.clone());
         let mut candidates = self.workspace_panel.worktree_candidates();
@@ -2047,7 +2087,8 @@ impl App {
             self.workspace_panel.is_enabled(),
             self.workspace_panel.worktree_inventory_verified(),
         );
-        self.mode = Mode::WorktreeManager;
+        self.explorer_tab = ExplorerTab::Worktrees;
+        self.mode = Mode::Explorer;
         if let Some(warning) = warning {
             self.notice = Some(warning);
         }
@@ -2058,6 +2099,19 @@ impl App {
         self.apply_worktree_manager_effect_option(effect);
     }
 
+    pub(crate) fn select_explorer_tab(&mut self, tab: ExplorerTab) {
+        if self.mode == Mode::Explorer && self.explorer_tab == tab {
+            return;
+        }
+        match tab {
+            ExplorerTab::Explorer => {
+                self.explorer_tab = tab;
+                self.mode = Mode::Explorer;
+            }
+            ExplorerTab::Worktrees => self.open_worktree_manager(),
+        }
+    }
+
     fn apply_worktree_manager_effect_option(&mut self, effect: Option<WorktreeManagerEffect>) {
         if let Some(effect) = effect {
             self.apply_worktree_manager_effect(effect);
@@ -2066,7 +2120,13 @@ impl App {
 
     fn apply_worktree_manager_effect(&mut self, effect: WorktreeManagerEffect) {
         match effect {
-            WorktreeManagerEffect::Close => self.mode = Mode::Normal,
+            WorktreeManagerEffect::Close => {
+                if self.repository().is_some() {
+                    self.mode = Mode::Normal;
+                } else {
+                    self.explorer_tab = ExplorerTab::Explorer;
+                }
+            }
             WorktreeManagerEffect::Open(path) => {
                 if self
                     .repository()
@@ -2513,6 +2573,7 @@ impl App {
             self.workspace_explorer.navigate(start);
         }
         self.workspace_explorer.editing_path = false;
+        self.explorer_tab = ExplorerTab::Explorer;
         self.mode = Mode::Explorer;
     }
 

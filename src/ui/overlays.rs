@@ -12,9 +12,9 @@ use crate::repo_path::RepoPath;
 
 use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandRecord, CommandStatus,
-    Explorer, ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch,
-    HerdrPrompt, HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems, RepositoryBrowser,
-    RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
+    Explorer, ExplorerHitTarget, ExplorerTab, FileDialog, FileDialogKind, FileNameAction,
+    FileSearch, HerdrPrompt, HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems,
+    RepositoryBrowser, RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
     WorkspaceRenameDialog, WorktreeCreateDialog, WorktreeCreateField, WorktreeManager,
     WorktreeManagerHitTarget, WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
@@ -311,10 +311,6 @@ pub(super) fn draw_worktree_manager(
     manager: &mut WorktreeManager,
 ) -> Vec<(HitTarget, Rect)> {
     let area = centered_min(frame.area(), 88, 78, 68, 20);
-    let mut hit_targets = vec![(
-        HitTarget::WorktreeManager(WorktreeManagerHitTarget::Overlay),
-        area,
-    )];
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -327,6 +323,11 @@ pub(super) fn draw_worktree_manager(
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         palette().surface_alt,
     );
+    let mut hit_targets = vec![(
+        HitTarget::WorktreeManager(WorktreeManagerHitTarget::Overlay),
+        area,
+    )];
+    hit_targets.extend(draw_explorer_tabs(frame, area, ExplorerTab::Worktrees));
 
     let inner_x = area.x.saturating_add(2);
     let inner_width = area.width.saturating_sub(4);
@@ -2285,6 +2286,7 @@ pub(super) fn draw_explorer(
         Rect::new(area.x, area.y, area.width, 3),
         palette().surface_alt,
     );
+    let tab_targets = draw_explorer_tabs(frame, area, ExplorerTab::Explorer);
     fill(
         frame,
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -2703,6 +2705,7 @@ pub(super) fn draw_explorer(
         (HitTarget::Explorer(ExplorerHitTarget::Path), path_area),
         (HitTarget::Explorer(ExplorerHitTarget::Splitter), divider),
     ];
+    targets.extend(tab_targets);
     targets.extend(favorite_targets);
     if explorer.editing_path {
         targets.push((
@@ -2773,6 +2776,50 @@ pub(super) fn draw_explorer(
         }
     }
     targets
+}
+
+fn draw_explorer_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    active: ExplorerTab,
+) -> Vec<(HitTarget, Rect)> {
+    let mut x = area.x.saturating_add(2);
+    ExplorerTab::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let label = match tab {
+                ExplorerTab::Explorer => "F1  EXPLORER",
+                ExplorerTab::Worktrees => "F2  WORKTREES",
+            };
+            let width = u16::try_from(UnicodeWidthStr::width(label) + 2).unwrap_or(u16::MAX);
+            let rect = Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1);
+            let selected = tab == active;
+            frame.render_widget(
+                Paragraph::new(format!(" {label} ")).style(
+                    Style::default()
+                        .fg(if selected {
+                            palette().accent
+                        } else {
+                            palette().muted
+                        })
+                        .bg(if selected {
+                            palette().raised
+                        } else {
+                            palette().surface_alt
+                        })
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                rect,
+            );
+            x = rect.right().saturating_add(u16::from(index == 0));
+            (HitTarget::ExplorerTab(tab), rect)
+        })
+        .collect()
 }
 
 pub(super) fn draw_file_search(

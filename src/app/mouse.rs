@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, ExplorerHitTarget, GraphHitTarget, HitTarget, LeftPane,
+    ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphHitTarget, HitTarget, LeftPane,
     MINIMUM_WORKSPACE_PANEL_WIDTH, Mode, RepositoryBrowserEffect, RepositoryBrowserHitTarget, View,
     WorkspaceDropTarget, WorkspacePanelHitTarget, WorkspacePanelPlacement, WorktreeManagerEffect,
     WorktreeManagerHitTarget, changes::ChangesEffect, scroll_table,
@@ -89,7 +89,10 @@ impl App {
         {
             return;
         }
-        if self.mode == Mode::WorktreeManager && self.worktree_manager.dialog_open() {
+        if self.mode == Mode::Explorer
+            && self.explorer_tab == ExplorerTab::Worktrees
+            && self.worktree_manager.dialog_open()
+        {
             return;
         }
         if self.mode == Mode::WorkspacePresets {
@@ -190,8 +193,11 @@ impl App {
             self.handle_repository_browser_mouse(mouse);
             return;
         }
-        if self.mode == Mode::WorktreeManager {
-            self.handle_worktree_manager_mouse(mouse);
+        if self.mode == Mode::Explorer {
+            match self.explorer_tab {
+                ExplorerTab::Explorer => self.handle_explorer_mouse(mouse),
+                ExplorerTab::Worktrees => self.handle_worktree_manager_mouse(mouse),
+            }
             return;
         }
         if self.mode == Mode::Command {
@@ -205,10 +211,6 @@ impl App {
             return;
         }
         if self.mode == Mode::Files {
-            return;
-        }
-        if self.mode == Mode::Explorer {
-            self.handle_explorer_mouse(mouse);
             return;
         }
         if self.mode == Mode::FileSearch {
@@ -276,6 +278,7 @@ impl App {
 
     fn begin_mouse_control(&mut self, point: Position) -> bool {
         if self.mode == Mode::Explorer
+            && self.explorer_tab == ExplorerTab::Explorer
             && matches!(
                 self.regions.hit_target_at(point),
                 Some(HitTarget::Explorer(ExplorerHitTarget::Splitter))
@@ -390,11 +393,13 @@ impl App {
             Mode::ActionMenu => self.handle_action_mouse(mouse),
             Mode::Command => self.handle_command_mouse(mouse),
             Mode::HerdrPrompt => {}
-            Mode::Explorer => self.handle_explorer_mouse(mouse),
+            Mode::Explorer => match self.explorer_tab {
+                ExplorerTab::Explorer => self.handle_explorer_mouse(mouse),
+                ExplorerTab::Worktrees => self.handle_worktree_manager_mouse(mouse),
+            },
             Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::RepositoryBrowser => self.handle_repository_browser_mouse(mouse),
-            Mode::WorktreeManager => self.handle_worktree_manager_mouse(mouse),
             Mode::AuthorFilter => self.handle_author_filter_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
@@ -840,6 +845,7 @@ impl App {
                 Some(HitTarget::RepositoryBrowser(
                     RepositoryBrowserHitTarget::Overlay | RepositoryBrowserHitTarget::List,
                 )) => {}
+                Some(HitTarget::ExplorerTab(_)) => {}
                 Some(HitTarget::WorktreeManager(_)) => {}
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::Explorer(_)) => {}
@@ -878,6 +884,7 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+                Some(HitTarget::ExplorerTab(tab)) => self.select_explorer_tab(tab),
                 Some(HitTarget::WorktreeManager(WorktreeManagerHitTarget::Item {
                     generation,
                     row,
@@ -924,6 +931,7 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+                Some(HitTarget::ExplorerTab(tab)) => self.select_explorer_tab(tab),
                 Some(HitTarget::Explorer(target)) => {
                     let command = self.workspace_explorer.activate_target(target);
                     self.apply_explorer_command(command);

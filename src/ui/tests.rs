@@ -10,10 +10,10 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, GraphHitTarget,
-    HitTarget, LeftPane, Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings,
-    SettingsStore, SqliteFocus, View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget,
-    WorktreeManagerHitTarget, WorktreeManagerRow,
+    App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, ExplorerTab,
+    GraphHitTarget, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
+    RepositoryBrowserHitTarget, Settings, SettingsStore, SqliteFocus, View, WorkspaceDropTarget,
+    WorkspacePanel, WorkspacePanelHitTarget, WorktreeManagerHitTarget, WorktreeManagerRow,
 };
 use crate::repo_path::RepoPath;
 
@@ -1045,12 +1045,23 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(explorer_screen.contains("EXPLORER"));
+    assert!(explorer_screen.contains("F1  EXPLORER"));
+    assert!(explorer_screen.contains("F2  WORKTREES"));
     assert!(explorer_screen.contains("Switch working directory"));
     assert!(explorer_screen.contains("AROUND HERE"));
     assert!(explorer_screen.contains("CONTENTS"));
     assert!(explorer_screen.contains("★ Project"));
     assert!(!explorer_screen.contains("OPEN REPOSITORY"));
     assert!(!explorer_screen.contains('┌'));
+    let worktrees_tab = app
+        .regions
+        .hit_target_rect(HitTarget::ExplorerTab(ExplorerTab::Worktrees))
+        .unwrap();
+    click(&mut app, worktrees_tab.x + 1, worktrees_tab.y);
+    assert_eq!(app.mode, Mode::Explorer);
+    assert_eq!(app.explorer_tab, ExplorerTab::Worktrees);
+    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert_eq!(app.explorer_tab, ExplorerTab::Explorer);
     assert!(
         app.regions
             .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane))
@@ -2823,7 +2834,8 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
 
     let mut app = App::new(root.clone());
     app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
-    assert_eq!(app.mode, Mode::WorktreeManager);
+    assert_eq!(app.mode, Mode::Explorer);
+    assert_eq!(app.explorer_tab, ExplorerTab::Worktrees);
     wait_for(&mut app, |app| !app.worktree_manager.loading);
 
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
@@ -2926,7 +2938,8 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
     assert_eq!(current_cell.bg, super::palette().add_bg);
     assert!(repository_cell.modifier.contains(Modifier::BOLD));
     click(&mut app, row_area.x + 1, row_area.y);
-    assert_eq!(app.mode, Mode::WorktreeManager);
+    assert_eq!(app.mode, Mode::Explorer);
+    assert_eq!(app.explorer_tab, ExplorerTab::Worktrees);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
     assert!(app.worktree_manager.create_dialog.is_some());
@@ -3015,7 +3028,8 @@ fn worktree_manager_separates_groups_with_a_top_margin() {
         app.workspace_panel.is_enabled(),
         app.workspace_panel.worktree_inventory_verified(),
     );
-    app.mode = Mode::WorktreeManager;
+    app.mode = Mode::Explorer;
+    app.explorer_tab = ExplorerTab::Worktrees;
     wait_for(&mut app, |app| !app.worktree_manager.loading);
     let rows = app.worktree_manager.rows();
     assert_eq!(
@@ -3126,7 +3140,8 @@ fn worktree_manager_groups_repositories_into_aligned_columns() {
         app.workspace_panel.is_enabled(),
         app.workspace_panel.worktree_inventory_verified(),
     );
-    app.mode = Mode::WorktreeManager;
+    app.mode = Mode::Explorer;
+    app.explorer_tab = ExplorerTab::Worktrees;
     wait_for(&mut app, |app| !app.worktree_manager.loading);
     let rows = app.worktree_manager.rows();
     assert_eq!(

@@ -21,8 +21,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        App, FileDialogKind, GraphHitTarget, HitTarget, LeftPane, MINIMUM_WORKSPACE_PANEL_WIDTH,
-        Mode, Regions, View, WorkspacePanelHitTarget, WorkspacePanelPlacement,
+        App, ExplorerTab, FileDialogKind, GraphHitTarget, HitTarget, LeftPane,
+        MINIMUM_WORKSPACE_PANEL_WIDTH, Mode, Regions, View, WorkspacePanelHitTarget,
+        WorkspacePanelPlacement,
     },
     theme::{Palette, load_theme},
 };
@@ -173,8 +174,25 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Explorer => {
             dim(frame);
-            for (target, rect) in overlays::draw_explorer(frame, &mut app.workspace_explorer) {
+            let targets = match app.explorer_tab {
+                ExplorerTab::Explorer => {
+                    overlays::draw_explorer(frame, &mut app.workspace_explorer)
+                }
+                ExplorerTab::Worktrees => {
+                    overlays::draw_worktree_manager(frame, &mut app.worktree_manager)
+                }
+            };
+            for (target, rect) in targets {
                 app.regions.register_hit_target(target, rect);
+            }
+            if app.explorer_tab == ExplorerTab::Worktrees {
+                if let Some(dialog) = &app.worktree_manager.create_dialog {
+                    dim(frame);
+                    overlays::draw_worktree_create_dialog(frame, dialog);
+                } else if let Some(dialog) = &app.worktree_manager.remove_dialog {
+                    dim(frame);
+                    overlays::draw_worktree_remove_dialog(frame, dialog);
+                }
             }
         }
         Mode::Settings => {
@@ -207,20 +225,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             if let Some(dialog) = &app.repository_browser.branch_delete {
                 dim(frame);
                 overlays::draw_branch_delete_dialog(frame, dialog);
-            }
-        }
-        Mode::WorktreeManager => {
-            dim(frame);
-            for (target, rect) in overlays::draw_worktree_manager(frame, &mut app.worktree_manager)
-            {
-                app.regions.register_hit_target(target, rect);
-            }
-            if let Some(dialog) = &app.worktree_manager.create_dialog {
-                dim(frame);
-                overlays::draw_worktree_create_dialog(frame, dialog);
-            } else if let Some(dialog) = &app.worktree_manager.remove_dialog {
-                dim(frame);
-                overlays::draw_worktree_remove_dialog(frame, dialog);
             }
         }
         Mode::AuthorFilter => {

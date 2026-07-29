@@ -103,6 +103,11 @@ impl SettingsStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn memory() -> Self {
+        Self { path: None }
+    }
+
+    #[cfg(test)]
     pub(crate) fn at(path: PathBuf) -> Self {
         Self { path: Some(path) }
     }
