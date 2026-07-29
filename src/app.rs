@@ -2303,7 +2303,6 @@ impl App {
         match command {
             PickerCommand::None => {}
             PickerCommand::Close => self.mode = Mode::Normal,
-            PickerCommand::Quit => self.should_quit = true,
             PickerCommand::Open(path) => self.open_repository(path),
             PickerCommand::OpenFile(path) => self.open_workspace_file(path),
         }
@@ -3456,6 +3455,22 @@ mod tests {
                 .is_some_and(|repo| repo.changes.iter().all(|change| change.staged))
         });
         assert_eq!(app.view, View::Graph);
+    }
+
+    #[test]
+    fn explorer_captures_typing_instead_of_normal_shortcuts() {
+        let directory = tempfile::tempdir().unwrap();
+        initialize_repository(directory.path());
+        let mut app = App::new(directory.path().to_path_buf());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+
+        assert_eq!(app.mode, Mode::Explorer);
+        assert!(app.workspace_explorer.editing_path);
+        assert_eq!(app.workspace_explorer.path_input, "sh");
+        assert_eq!(app.workspace_explorer.directory, directory.path());
     }
 
     #[test]

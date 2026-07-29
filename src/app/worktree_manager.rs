@@ -244,45 +244,45 @@ impl WorktreeManager {
                     path.to_string_lossy().to_lowercase(),
                 )
             });
-        let mut pruned = Vec::new();
-        let repositories = common_dirs
-            .into_iter()
-            .filter_map(|common_dir| {
-                let group = candidate_ranks
-                    .get(&common_dir)
-                    .and_then(|(_, group)| group.clone());
-                let is_candidate = candidate_ranks.contains_key(&common_dir);
-                match git::list_worktrees(&common_dir) {
-                    Ok(worktrees) => Some(WorktreeRepository {
-                        label: repository_label(&common_dir, &worktrees),
-                        group,
-                        common_dir,
-                        worktrees,
-                        error: None,
-                    }),
-                    Err(error) => {
-                        if is_candidate {
-                            Some(WorktreeRepository {
-                                label: repository_label(&common_dir, &[]),
-                                group,
-                                common_dir,
-                                worktrees: Vec::new(),
-                                error: Some(error.to_string()),
-                            })
-                        } else {
-                            pruned.push(common_dir);
-                            None
+            let mut pruned = Vec::new();
+            let repositories = common_dirs
+                .into_iter()
+                .filter_map(|common_dir| {
+                    let group = candidate_ranks
+                        .get(&common_dir)
+                        .and_then(|(_, group)| group.clone());
+                    let is_candidate = candidate_ranks.contains_key(&common_dir);
+                    match git::list_worktrees(&common_dir) {
+                        Ok(worktrees) => Some(WorktreeRepository {
+                            label: repository_label(&common_dir, &worktrees),
+                            group,
+                            common_dir,
+                            worktrees,
+                            error: None,
+                        }),
+                        Err(error) => {
+                            if is_candidate {
+                                Some(WorktreeRepository {
+                                    label: repository_label(&common_dir, &[]),
+                                    group,
+                                    common_dir,
+                                    worktrees: Vec::new(),
+                                    error: Some(error.to_string()),
+                                })
+                            } else {
+                                pruned.push(common_dir);
+                                None
+                            }
                         }
                     }
-                }
-            })
-            .collect();
-        let _ = sender.send(Completion::Inventory(InventoryCompletion {
-            generation,
-            repositories,
-            discovered,
-            pruned,
-        }));
+                })
+                .collect();
+            let _ = sender.send(Completion::Inventory(InventoryCompletion {
+                generation,
+                repositories,
+                discovered,
+                pruned,
+            }));
         });
     }
 

@@ -493,11 +493,8 @@ pub(super) fn draw_worktree_manager(
         .map(|worktree| UnicodeWidthStr::width(worktree_label(worktree).as_str()))
         .max()
         .unwrap_or(0);
-    let branch_budget = branch_column.min(
-        usize::from(list.width.saturating_sub(3))
-            .saturating_sub(repository_column)
-            / 2,
-    );
+    let branch_budget = branch_column
+        .min(usize::from(list.width.saturating_sub(3)).saturating_sub(repository_column) / 2);
     let items = if rows.is_empty() {
         vec![status_row(
             if manager.loading {
@@ -548,8 +545,7 @@ pub(super) fn draw_worktree_manager(
                         Span::styled(
                             truncate_width(
                                 repository.error.as_deref().unwrap_or_default(),
-                                usize::from(list.width)
-                                    .saturating_sub(repository_column + 15),
+                                usize::from(list.width).saturating_sub(repository_column + 15),
                             ),
                             Style::default().fg(palette().faint),
                         ),
@@ -590,15 +586,14 @@ pub(super) fn draw_worktree_manager(
                             } if previous == repository_index
                         );
                     let repository_label = truncate_width(&repository.label, repository_column);
-                    let repository_label_width =
-                        UnicodeWidthStr::width(repository_label.as_str());
+                    let repository_label_width = UnicodeWidthStr::width(repository_label.as_str());
                     let identity_width = usize::from(list.width.saturating_sub(3))
                         .saturating_sub(repository_column)
                         .saturating_sub(UnicodeWidthStr::width(badge.as_str()));
                     let branch_label = worktree_label(worktree);
                     let branch_label = truncate_width(&branch_label, branch_budget);
-                    let branch_padding = branch_budget
-                        .saturating_sub(UnicodeWidthStr::width(branch_label.as_str()));
+                    let branch_padding =
+                        branch_budget.saturating_sub(UnicodeWidthStr::width(branch_label.as_str()));
                     let path = worktree.path.display().to_string();
                     let path_budget = identity_width.saturating_sub(branch_budget + 2);
                     let path = truncate_start_width(&path, path_budget);
@@ -616,8 +611,7 @@ pub(super) fn draw_worktree_manager(
                                 format!(
                                     "{repository_label}{}",
                                     " ".repeat(
-                                        repository_column
-                                            .saturating_sub(repository_label_width),
+                                        repository_column.saturating_sub(repository_label_width),
                                     )
                                 )
                             } else {
@@ -2410,40 +2404,47 @@ pub(super) fn draw_explorer(
     }
 
     let list_y = area.y.saturating_add(10);
-    let panes = Layout::horizontal([
-        Constraint::Percentage(38),
-        Constraint::Length(2),
-        Constraint::Min(1),
-    ])
-    .split(Rect::new(
+    let panes_area = Rect::new(
         inner_x,
         area.y.saturating_add(8),
         inner_width,
         area.bottom().saturating_sub(1).saturating_sub(area.y + 8),
-    ));
-    let left_title = Rect::new(panes[0].x, panes[0].y, panes[0].width, 1);
-    let right_title = Rect::new(panes[2].x, panes[2].y, panes[2].width, 1);
+    );
+    let left_width = explorer.pane_width(inner_width);
+    let left_pane = Rect::new(panes_area.x, panes_area.y, left_width, panes_area.height);
+    let gutter = Rect::new(left_pane.right(), panes_area.y, 2, panes_area.height);
+    let right_pane = Rect::new(
+        gutter.right(),
+        panes_area.y,
+        panes_area
+            .width
+            .saturating_sub(left_width)
+            .saturating_sub(2),
+        panes_area.height,
+    );
+    let left_title = Rect::new(left_pane.x, left_pane.y, left_pane.width, 1);
+    let right_title = Rect::new(right_pane.x, right_pane.y, right_pane.width, 1);
     let left_list = Rect::new(
-        panes[0].x,
+        left_pane.x,
         list_y,
-        panes[0].width,
+        left_pane.width,
         area.bottom().saturating_sub(1).saturating_sub(list_y),
     );
     let right_list = Rect::new(
-        panes[2].x,
+        right_pane.x,
         list_y,
-        panes[2].width,
+        right_pane.width,
         area.bottom().saturating_sub(1).saturating_sub(list_y),
     );
-    let divider = Rect::new(
-        panes[1].x.saturating_add(panes[1].width / 2),
-        panes[1].y,
-        1,
-        panes[1].height,
-    );
+    let divider = Rect::new(gutter.x.saturating_add(1), gutter.y, 1, gutter.height);
     frame.render_widget(
-        Paragraph::new("│\n".repeat(usize::from(divider.height)))
-            .style(Style::default().fg(palette().surface_alt)),
+        Paragraph::new("│\n".repeat(usize::from(divider.height))).style(Style::default().fg(
+            if explorer.dragging_splitter {
+                palette().accent
+            } else {
+                palette().surface_alt
+            },
+        )),
         divider,
     );
 
@@ -2613,9 +2614,7 @@ pub(super) fn draw_explorer(
                     ("Tab", "pane"),
                     ("↑↓", "select"),
                     ("Enter", "open"),
-                    ("h", "up"),
-                    ("~", "home"),
-                    ("/", "path"),
+                    ("type", "path"),
                     ("Esc", ""),
                 ],
                 usize::from(inner_width),
@@ -2627,6 +2626,7 @@ pub(super) fn draw_explorer(
     let mut targets = vec![
         (HitTarget::Explorer(ExplorerHitTarget::Overlay), area),
         (HitTarget::Explorer(ExplorerHitTarget::Path), path_area),
+        (HitTarget::Explorer(ExplorerHitTarget::Splitter), divider),
     ];
     if explorer.editing_path {
         targets.push((
@@ -2923,20 +2923,10 @@ fn explorer_item(entry: &PickerEntry, width: usize) -> ListItem<'static> {
 fn surrounding_item(entry: &SurroundingEntry, width: usize) -> ListItem<'static> {
     let indent = " ".repeat(entry.depth.min(4));
     let marker = if entry.current { "● " } else { "├ " };
-    let detail = if entry.current { "here" } else { "" };
-    let detail_width = UnicodeWidthStr::width(detail);
-    let label_width = width.saturating_sub(
-        UnicodeWidthStr::width(indent.as_str())
-            + 2
-            + detail_width
-            + usize::from(!detail.is_empty()),
-    );
+    let label_width = width.saturating_sub(UnicodeWidthStr::width(indent.as_str()) + 2);
     let label = truncate_width(&entry.label, label_width);
     let padding = width.saturating_sub(
-        UnicodeWidthStr::width(indent.as_str())
-            + 2
-            + UnicodeWidthStr::width(label.as_str())
-            + detail_width,
+        UnicodeWidthStr::width(indent.as_str()) + 2 + UnicodeWidthStr::width(label.as_str()),
     );
     ListItem::new(Line::from(vec![
         Span::raw(indent),
@@ -2950,7 +2940,6 @@ fn surrounding_item(entry: &SurroundingEntry, width: usize) -> ListItem<'static>
         ),
         Span::styled(label, Style::default().fg(palette().ink)),
         Span::raw(" ".repeat(padding)),
-        Span::styled(detail, Style::default().fg(palette().orange)),
     ]))
 }
 

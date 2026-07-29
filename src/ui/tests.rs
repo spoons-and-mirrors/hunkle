@@ -1055,6 +1055,39 @@ fn renders_every_primary_surface() {
             .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::EntriesPane))
             .is_some()
     );
+    let left_width = app
+        .regions
+        .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane))
+        .unwrap()
+        .width;
+    let splitter = app
+        .regions
+        .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Splitter))
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        splitter.x,
+        splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        splitter.x + 8,
+        splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        splitter.x + 8,
+        splitter.y,
+    ));
+    assert!(!app.workspace_explorer.dragging_splitter);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane))
+            .unwrap()
+            .width
+            > left_width
+    );
     let path = app
         .regions
         .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Path))
@@ -2970,7 +3003,7 @@ fn worktree_manager_separates_groups_with_a_top_margin() {
         !gap_line.contains("alpha")
             && !gap_line.contains("zulu")
             && !gap_line.contains("FIRST")
-                    && !gap_line.contains("SECOND")
+            && !gap_line.contains("SECOND")
     );
     assert!(line_at(alpha_y - 1).contains("FIRST"));
 }
@@ -3075,10 +3108,8 @@ fn worktree_manager_groups_repositories_into_aligned_columns() {
     assert!(group_line.contains("PROJECTS"));
     assert!(alpha_line.contains("alpha"));
     assert!(zulu_line.contains("zulu"));
-    let column_of = |line: &str, needle: &str| {
-        line.find(needle)
-            .map(|byte| line[..byte].chars().count())
-    };
+    let column_of =
+        |line: &str, needle: &str| line.find(needle).map(|byte| line[..byte].chars().count());
     let branch_column = column_of(&alpha_line, "main").unwrap();
     assert_eq!(column_of(&zulu_line, "main"), Some(branch_column));
     let path_column = column_of(&alpha_line, "/tmp").unwrap();

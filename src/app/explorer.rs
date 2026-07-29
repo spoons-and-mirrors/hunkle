@@ -17,6 +17,7 @@ use super::fuzzy::{fuzzy_text_score, fuzzy_text_score_lower};
 const MAX_PREVIEW_ENTRIES: usize = 200;
 const MAX_SURROUNDING_CHILDREN: usize = 200;
 const DOUBLE_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+const MINIMUM_PANE_WIDTH: u16 = 16;
 
 #[derive(Debug, Clone)]
 pub struct PickerEntry {
@@ -37,6 +38,7 @@ pub enum PickerAction {
 pub(crate) enum ExplorerHitTarget {
     Overlay,
     Path,
+    Splitter,
     SurroundingsPane,
     Surrounding { generation: u64, index: usize },
     EntriesPane,
@@ -75,6 +77,8 @@ pub struct Explorer {
     browse_rx: Option<Receiver<Result<BrowseResult, String>>>,
     content_generation: u64,
     last_row_click: Option<(PathBuf, Instant)>,
+    pub(crate) left_pane_width: Option<u16>,
+    pub(crate) dragging_splitter: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +122,6 @@ struct MatchResult {
 pub(super) enum PickerCommand {
     None,
     Close,
-    Quit,
     Open(PathBuf),
     OpenFile(PathBuf),
 }
@@ -176,6 +179,8 @@ impl Explorer {
             browse_rx: None,
             content_generation: 0,
             last_row_click: None,
+            left_pane_width: None,
+            dragging_splitter: false,
         };
         picker.reload();
         picker
@@ -247,20 +252,20 @@ impl Explorer {
                 self.surroundings_focused = !self.surroundings_focused;
                 PickerCommand::None
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.move_active_selection(1);
                 PickerCommand::None
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.move_active_selection(-1);
                 PickerCommand::None
             }
-            KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Backspace | KeyCode::Left => {
                 self.go_parent();
                 PickerCommand::None
             }
             KeyCode::Enter => self.activate_active(true),
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Right => {
                 if self.surroundings_focused {
                     self.surroundings_focused = false;
                     PickerCommand::None
@@ -268,23 +273,6 @@ impl Explorer {
                     self.activate_selected(false)
                 }
             }
-            KeyCode::Char('p') => {
-                self.begin_search(Some(""));
-                PickerCommand::None
-            }
-            KeyCode::Char('/') => {
-                self.begin_search(Some(std::path::MAIN_SEPARATOR_STR));
-                PickerCommand::None
-            }
-            KeyCode::Char('~') => {
-                self.begin_search(Some("~/"));
-                PickerCommand::None
-            }
-            KeyCode::Char('r') => {
-                self.reload();
-                PickerCommand::None
-            }
-            KeyCode::Char('q') if !can_close => PickerCommand::Quit,
             KeyCode::Char(character)
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT) =>
@@ -297,12 +285,12 @@ impl Explorer {
     }
 
     pub(super) fn paste(&mut self, text: &str) {
-        if self.editing_path {
-            self.path_input.insert_str(self.path_cursor, text);
-            self.path_cursor =
-                boundary_at_or_after(&self.path_input, self.path_cursor + text.len());
-            self.refresh_matches();
+        if !self.editing_path {
+            self.begin_search(Some(""));
         }
+        self.path_input.insert_str(self.path_cursor, text);
+        self.path_cursor = boundary_at_or_after(&self.path_input, self.path_cursor + text.len());
+        self.refresh_matches();
     }
 
     pub(super) fn activate_selected(&mut self, open_repositories: bool) -> PickerCommand {
@@ -547,6 +535,7 @@ impl Explorer {
                 PickerCommand::None
             }
             ExplorerHitTarget::Overlay
+            | ExplorerHitTarget::Splitter
             | ExplorerHitTarget::SurroundingsPane
             | ExplorerHitTarget::EntriesPane
             | ExplorerHitTarget::MatchesPane
@@ -556,6 +545,26 @@ impl Explorer {
             | ExplorerHitTarget::Match { .. }
             | ExplorerHitTarget::Preview { .. } => PickerCommand::None,
         }
+    }
+
+    pub(crate) fn pane_width(&self, total_width: u16) -> u16 {
+        let available = total_width.saturating_sub(2);
+        let minimum = MINIMUM_PANE_WIDTH.min(available / 2);
+        let maximum = available.saturating_sub(minimum);
+        self.left_pane_width
+            .unwrap_or_else(|| total_width.saturating_mul(38) / 100)
+            .clamp(minimum, maximum)
+    }
+
+    pub(crate) fn resize_panes(&mut self, column: u16, start: u16, total_width: u16) {
+        self.left_pane_width = Some(
+            column.saturating_sub(start).saturating_sub(1).clamp(
+                MINIMUM_PANE_WIDTH.min(total_width.saturating_sub(2) / 2),
+                total_width
+                    .saturating_sub(2)
+                    .saturating_sub(MINIMUM_PANE_WIDTH.min(total_width.saturating_sub(2) / 2)),
+            ),
+        );
     }
 
     fn register_row_click(&mut self, path: PathBuf) -> bool {
@@ -1667,10 +1676,7 @@ mod tests {
         ));
         assert_eq!(picker.directory, spoon);
         wait_for_browse(&mut picker);
-        assert!(picker
-            .surroundings
-            .iter()
-            .any(|entry| entry.path == code));
+        assert!(picker.surroundings.iter().any(|entry| entry.path == code));
     }
 
     #[test]
@@ -1702,15 +1708,32 @@ mod tests {
     }
 
     #[test]
-    fn tilde_starts_a_home_path_search() {
+    fn every_unmodified_character_starts_path_input_instead_of_a_browse_command() {
+        let temp = tempfile::tempdir().unwrap();
+        for character in ['h', 'j', 'k', 'l', 'p', 'q', 'r', '/', '~'] {
+            let mut picker = Explorer::new(temp.path().to_path_buf());
+            assert!(matches!(
+                picker.handle_key(
+                    KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                    false,
+                ),
+                PickerCommand::None
+            ));
+            assert!(picker.editing_path);
+            assert_eq!(picker.path_input, character.to_string());
+            assert_eq!(picker.directory, temp.path());
+        }
+    }
+
+    #[test]
+    fn paste_starts_path_input_from_browse_mode() {
         let temp = tempfile::tempdir().unwrap();
         let mut picker = Explorer::new(temp.path().to_path_buf());
 
-        picker.handle_key(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::NONE), true);
+        picker.paste("~/shared");
 
         assert!(picker.editing_path);
-        assert_eq!(picker.path_input, "~/");
-        assert_eq!(picker.directory, temp.path());
+        assert_eq!(picker.path_input, "~/shared");
     }
 
     #[test]

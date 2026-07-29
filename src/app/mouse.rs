@@ -68,6 +68,19 @@ impl App {
             }
             return;
         }
+        if self.workspace_explorer.dragging_splitter {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.resize_explorer_panes(mouse.column);
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.resize_explorer_panes(mouse.column);
+                    self.workspace_explorer.dragging_splitter = false;
+                }
+                _ => {}
+            }
+            return;
+        }
 
         if self.workspace_panel.rename_dialog.is_some()
             || self.workspace_panel.delete_dialog.is_some()
@@ -261,6 +274,16 @@ impl App {
     }
 
     fn begin_mouse_control(&mut self, point: Position) -> bool {
+        if self.mode == Mode::Explorer
+            && matches!(
+                self.regions.hit_target_at(point),
+                Some(HitTarget::Explorer(ExplorerHitTarget::Splitter))
+            )
+        {
+            self.workspace_explorer.dragging_splitter = true;
+            self.resize_explorer_panes(point.x);
+            return true;
+        }
         if matches!(
             self.mode,
             Mode::Normal | Mode::Commit | Mode::WorkspacePanel
@@ -1213,6 +1236,20 @@ impl App {
         let maximum = bounds.right().saturating_sub(25).max(minimum);
         let position = column.clamp(minimum, maximum);
         self.settings.worktree_width = position.saturating_sub(bounds.x);
+    }
+
+    fn resize_explorer_panes(&mut self, column: u16) {
+        let Some(bounds) = self
+            .regions
+            .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Overlay))
+        else {
+            return;
+        };
+        self.workspace_explorer.resize_panes(
+            column,
+            bounds.x.saturating_add(2),
+            bounds.width.saturating_sub(4),
+        );
     }
 
     fn resize_workspace_panel(&mut self, column: u16) {
