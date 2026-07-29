@@ -377,11 +377,15 @@ fn styled_diff_line(
         );
     }
 
-    let (marker, payload, background, new_number) = if let Some(payload) = line.strip_prefix('+') {
+    let (marker, payload, background, new_number) = if new_line.is_some()
+        && let Some(payload) = line.strip_prefix('+')
+    {
         let number = *new_line;
         *new_line = new_line.map(|value| value + 1);
         ("+", payload, palette().add_bg, number)
-    } else if let Some(payload) = line.strip_prefix('-') {
+    } else if old_line.is_some()
+        && let Some(payload) = line.strip_prefix('-')
+    {
         *old_line = old_line.map(|value| value + 1);
         ("-", payload, palette().remove_bg, None)
     } else if let Some(payload) = line.strip_prefix(' ')
@@ -524,6 +528,22 @@ mod tests {
             wrapped_preview_line_starts(diff, true, 100, true).len(),
             lines.len() + 1
         );
+    }
+
+    #[test]
+    fn does_not_style_untracked_source_markers_as_diff_lines() {
+        let lines = styled_diff(
+            "Untracked file: SESSION.md\n\n- first item\n+ literal plus",
+            "SESSION.md",
+            100,
+            false,
+        );
+
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[2].style.bg, Some(palette().panel));
+        assert_eq!(lines[3].style.bg, Some(palette().panel));
+        assert_eq!(lines[2].spans[0].content, "-");
+        assert_eq!(lines[3].spans[0].content, "+");
     }
 
     #[test]

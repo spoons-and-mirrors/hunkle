@@ -2245,6 +2245,45 @@ fn colors_changed_files_in_the_files_view() {
 }
 
 #[test]
+fn shows_worktree_file_status_letters() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Render Test"]);
+    run_git(root, &["config", "user.email", "render@example.com"]);
+    fs::write(root.join("modified.txt"), "original\n").unwrap();
+    fs::write(root.join("deleted.txt"), "deleted\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+
+    fs::write(root.join("modified.txt"), "changed\n").unwrap();
+    fs::remove_file(root.join("deleted.txt")).unwrap();
+    fs::write(root.join("new.txt"), "new\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let list = app.regions.worktree_list.unwrap();
+    let rows = app.changes.worktree_rows(app.repository().unwrap());
+    for (path, status, color) in [
+        ("deleted.txt", 'D', super::palette().red),
+        ("modified.txt", 'M', super::palette().yellow),
+        ("new.txt", 'U', super::palette().green),
+    ] {
+        let row_index = rows.iter().position(|row| row.label == path).unwrap();
+        let row = &rows[row_index];
+        let y = list.y + row_index.saturating_sub(app.changes.worktree_scroll) as u16;
+        let status_x = list.x + UnicodeWidthStr::width(row.prefix.as_str()) as u16;
+        assert_eq!(
+            terminal.backend().buffer()[(status_x, y)].symbol(),
+            status.to_string()
+        );
+        assert_eq!(terminal.backend().buffer()[(status_x, y)].fg, color);
+    }
+}
+
+#[test]
 fn colors_collapsed_folders_for_the_changes_they_contain() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

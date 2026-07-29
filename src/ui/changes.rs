@@ -1704,6 +1704,7 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
         return ListItem::new(Line::from(Span::styled(directory, folder_style())));
     };
     let change = &changes[change_index];
+    let status = if change.code == '?' { 'U' } else { change.code };
     let (checkbox, color) = if change.staged {
         ("◉", palette().green)
     } else {
@@ -1725,10 +1726,23 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
     let show_stats = width >= stats_width + 10;
     let controls_width = 2 + usize::from(show_stats) * (stats_width + 1);
     let available_label = width.saturating_sub(controls_width);
-    let path = truncate_width(&format!("{}{}", row.prefix, label), available_label);
-    let padding = available_label.saturating_sub(UnicodeWidthStr::width(path.as_str()));
+    let prefix = truncate_width(&row.prefix, available_label.saturating_sub(2));
+    let label_width = available_label
+        .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+        .saturating_sub(2);
+    let label = truncate_width(&label, label_width);
+    let path_width =
+        UnicodeWidthStr::width(prefix.as_str()) + 2 + UnicodeWidthStr::width(label.as_str());
+    let padding = available_label.saturating_sub(path_width);
     let mut spans = vec![
-        Span::styled(path, Style::default().fg(palette().ink)),
+        Span::styled(prefix, Style::default().fg(palette().ink)),
+        Span::styled(
+            format!("{status} "),
+            Style::default()
+                .fg(explorer_file_color(change.code))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(label, Style::default().fg(palette().ink)),
         Span::raw(" ".repeat(padding)),
     ];
     if show_stats {
