@@ -584,8 +584,10 @@ fn workspace_path(workspace: &Value, snapshot: &Value) -> Option<PathBuf> {
 
 fn parse_agent(value: &Value) -> Option<HerdrAgent> {
     let pane_id = value.get("pane_id")?.as_str()?.to_owned();
+    let name = value.get("agent")?.as_str()?.to_owned();
+    let session_timing_key = parse_agent_session_identity(value).map(AgentTimingKey::Session);
     Some(HerdrAgent {
-        name: value.get("agent")?.as_str()?.to_owned(),
+        name: name.clone(),
         session_name: parse_agent_session_name(value),
         workspace_id: value.get("workspace_id")?.as_str()?.to_owned(),
         tab_id: value.get("tab_id")?.as_str()?.to_owned(),
@@ -595,15 +597,12 @@ fn parse_agent(value: &Value) -> Option<HerdrAgent> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         status: parse_agent_status(value.get("agent_status").and_then(Value::as_str)),
-        timing_key: parse_agent_session_identity(value)
-            .map(AgentTimingKey::Session)
-            .or_else(|| {
-                value
-                    .get("terminal_id")
-                    .and_then(Value::as_str)
-                    .map(|id| AgentTimingKey::Terminal(id.to_owned()))
-            })
-            .unwrap_or(AgentTimingKey::Pane(pane_id)),
+        timing_key: value
+            .get("terminal_id")
+            .and_then(Value::as_str)
+            .map(|terminal| AgentTimingKey::Terminal(format!("{name}@{terminal}")))
+            .unwrap_or_else(|| AgentTimingKey::Pane(format!("{name}@{pane_id}"))),
+        session_timing_key,
         state_change_seq: value
             .get("state_change_seq")
             .and_then(Value::as_u64)
@@ -990,7 +989,11 @@ mod tests {
         assert_eq!(agents[0].state_change_seq, 17);
         assert!(matches!(
             &agents[0].timing_key,
-            AgentTimingKey::Session(session) if session.value == "ses_timer"
+            AgentTimingKey::Terminal(identity) if identity == "opencode@term-3"
+        ));
+        assert!(matches!(
+            &agents[0].session_timing_key,
+            Some(AgentTimingKey::Session(session)) if session.value == "ses_timer"
         ));
         assert_eq!(
             agents[0].session_name.as_deref(),

@@ -127,6 +127,7 @@ pub(crate) struct HerdrAgent {
     pub(crate) focused: bool,
     pub(crate) status: AgentStatus,
     timing_key: AgentTimingKey,
+    session_timing_key: Option<AgentTimingKey>,
     state_change_seq: u64,
 }
 
@@ -222,7 +223,7 @@ impl AgentTiming {
         let latest_ms = self.elapsed_ms.saturating_add(running_ms);
         Duration::from_millis(match display {
             AgentTimeDisplay::LatestLoop => latest_ms,
-            AgentTimeDisplay::FullSession => self.session_elapsed_ms.saturating_add(latest_ms),
+            AgentTimeDisplay::AgentTotal => self.session_elapsed_ms.saturating_add(latest_ms),
         })
     }
 }
@@ -2474,12 +2475,8 @@ mod tests {
             pane_id: format!("pane-{name}"),
             focused: false,
             status,
-            timing_key: AgentTimingKey::Session(AgentSessionIdentity {
-                source: "herdr:test".to_owned(),
-                agent: name.to_owned(),
-                kind: "id".to_owned(),
-                value: format!("session-{name}"),
-            }),
+            timing_key: AgentTimingKey::Terminal(format!("{name}@terminal-{name}")),
+            session_timing_key: None,
             state_change_seq: 0,
         }
     }
@@ -2546,7 +2543,7 @@ mod tests {
     }
 
     #[test]
-    fn status_events_accumulate_session_time_without_counting_blocked_time() {
+    fn status_events_accumulate_agent_time_without_counting_blocked_time() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.agents.clear();
         panel.agent_timings.clear();
@@ -2574,7 +2571,7 @@ mod tests {
             Some(Duration::from_secs(8))
         );
         assert_eq!(
-            panel.agent_elapsed_for_at(0, AgentTimeDisplay::FullSession, started + 40_000),
+            panel.agent_elapsed_for_at(0, AgentTimeDisplay::AgentTotal, started + 40_000),
             Some(Duration::from_secs(8))
         );
 
@@ -2585,13 +2582,13 @@ mod tests {
             Some(Duration::from_secs(4))
         );
         assert_eq!(
-            panel.agent_elapsed_for_at(0, AgentTimeDisplay::FullSession, started + 60_000),
+            panel.agent_elapsed_for_at(0, AgentTimeDisplay::AgentTotal, started + 60_000),
             Some(Duration::from_secs(12))
         );
     }
 
     #[test]
-    fn resets_timing_when_a_pane_switches_agent_sessions() {
+    fn keeps_timing_when_an_agent_switches_sessions() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.agents.clear();
         panel.agent_timings.clear();
@@ -2606,29 +2603,32 @@ mod tests {
         );
 
         let mut second = first;
-        second.timing_key = AgentTimingKey::Session(AgentSessionIdentity {
+        second.session_timing_key = Some(AgentTimingKey::Session(AgentSessionIdentity {
             source: "herdr:test".to_owned(),
             agent: "alpha".to_owned(),
             kind: "id".to_owned(),
             value: "session-beta".to_owned(),
-        });
+        }));
         second.session_name = Some("Beta".to_owned());
         second.status = AgentStatus::Idle;
         second.state_change_seq = 2;
         panel.apply_agent_snapshot_at(vec![second.clone()], started + 8_000);
-        assert_eq!(panel.agent_elapsed_at(0, started + 8_000), None);
+        assert_eq!(
+            panel.agent_elapsed_for_at(0, AgentTimeDisplay::AgentTotal, started + 8_000),
+            Some(Duration::from_secs(8))
+        );
 
         second.status = AgentStatus::Working;
         second.state_change_seq = 3;
         panel.apply_agent_snapshot_at(vec![second], started + 10_000);
         assert_eq!(
-            panel.agent_elapsed_at(0, started + 13_000),
-            Some(Duration::from_secs(3))
+            panel.agent_elapsed_for_at(0, AgentTimeDisplay::AgentTotal, started + 13_000),
+            Some(Duration::from_secs(11))
         );
     }
 
     #[test]
-    fn keeps_timing_when_a_session_moves_to_another_pane() {
+    fn keeps_timing_when_an_agent_terminal_moves_to_another_pane() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.agents.clear();
         panel.agent_timings.clear();

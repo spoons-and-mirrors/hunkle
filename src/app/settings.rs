@@ -14,28 +14,28 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTimeDisplay {
     LatestLoop,
-    FullSession,
+    AgentTotal,
 }
 
 impl AgentTimeDisplay {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::LatestLoop => "latest",
-            Self::FullSession => "session",
+            Self::AgentTotal => "all",
         }
     }
 
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::LatestLoop => Self::FullSession,
-            Self::FullSession => Self::LatestLoop,
+            Self::LatestLoop => Self::AgentTotal,
+            Self::AgentTotal => Self::LatestLoop,
         }
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::LatestLoop => "Latest loop",
-            Self::FullSession => "Full session",
+            Self::AgentTotal => "Agent total",
         }
     }
 }
@@ -197,7 +197,7 @@ fn load(path: &Path) -> Settings {
             }
             "agent_time_display" => {
                 settings.agent_time_display = match value.trim() {
-                    "session" => AgentTimeDisplay::FullSession,
+                    "all" | "session" => AgentTimeDisplay::AgentTotal,
                     _ => AgentTimeDisplay::LatestLoop,
                 };
             }
@@ -253,7 +253,7 @@ mod tests {
             worktree_width: 61,
             workspace_panel_enabled: false,
             show_agent_harness: true,
-            agent_time_display: AgentTimeDisplay::FullSession,
+            agent_time_display: AgentTimeDisplay::AgentTotal,
             workspace_panel_width: 33,
             history_height: 9,
             explorer_left_pane_width: Some(47),
@@ -263,6 +263,12 @@ mod tests {
 
         store.save(&settings).unwrap();
         assert_eq!(store.load(), settings);
+
+        fs::write(&path, "agent_time_display=session\n").unwrap();
+        assert_eq!(
+            store.load().agent_time_display,
+            AgentTimeDisplay::AgentTotal
+        );
 
         fs::write(&path, "media_preview_protocol=iterm2\n").unwrap();
         assert_eq!(

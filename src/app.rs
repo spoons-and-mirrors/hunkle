@@ -3756,7 +3756,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             app.settings.agent_time_display,
-            settings::AgentTimeDisplay::FullSession
+            settings::AgentTimeDisplay::AgentTotal
         );
         assert_eq!(app.settings_store.load(), app.settings);
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));

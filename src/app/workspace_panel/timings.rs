@@ -12,7 +12,7 @@ use crate::filesystem::atomic_write;
 use super::{AgentTiming, AgentTimingKey, HerdrAgent};
 
 const INDEX_VERSION: u8 = 2;
-const MAX_SESSION_TIMINGS: usize = 512;
+const MAX_AGENT_TIMINGS: usize = 512;
 
 #[derive(Default, Deserialize, Serialize)]
 struct TimingIndex {
@@ -54,6 +54,7 @@ pub(super) fn sync(
     let mut shared = loaded.timings;
 
     merge_local_timings(&mut shared, local, loaded.cleared_at_ms);
+    migrate_session_timings(&mut shared, agents);
     update(&mut shared, agents, now_ms);
     prune(&mut shared, agents.iter().map(|agent| &agent.timing_key));
 
@@ -62,6 +63,23 @@ pub(super) fn sync(
         *local = shared;
     }
     Ok(())
+}
+
+fn migrate_session_timings(
+    timings: &mut HashMap<AgentTimingKey, AgentTiming>,
+    agents: &[HerdrAgent],
+) {
+    for agent in agents {
+        if timings.contains_key(&agent.timing_key) {
+            continue;
+        }
+        let Some(session_key) = agent.session_timing_key.as_ref() else {
+            continue;
+        };
+        if let Some(timing) = timings.remove(session_key) {
+            timings.insert(agent.timing_key.clone(), timing);
+        }
+    }
 }
 
 pub(super) fn update(
@@ -136,7 +154,7 @@ fn prune<'a>(
     timings: &mut HashMap<AgentTimingKey, AgentTiming>,
     active: impl IntoIterator<Item = &'a AgentTimingKey>,
 ) {
-    if timings.len() <= MAX_SESSION_TIMINGS {
+    if timings.len() <= MAX_AGENT_TIMINGS {
         return;
     }
     let active = active.into_iter().collect::<HashSet<_>>();
@@ -147,12 +165,12 @@ fn prune<'a>(
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
     for (_, _, key) in candidates {
-        if timings.len() <= MAX_SESSION_TIMINGS {
+        if timings.len() <= MAX_AGENT_TIMINGS {
             break;
         }
         timings.remove(&key);
     }
-    if timings.len() > MAX_SESSION_TIMINGS {
+    if timings.len() > MAX_AGENT_TIMINGS {
         let mut candidates = timings
             .iter()
             .map(|(key, timing)| (timing.last_seen_ms, key.stable_id(), key.clone()))
@@ -160,7 +178,7 @@ fn prune<'a>(
         candidates.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
         for (_, _, key) in candidates
             .into_iter()
-            .take(timings.len() - MAX_SESSION_TIMINGS)
+            .take(timings.len() - MAX_AGENT_TIMINGS)
         {
             timings.remove(&key);
         }
@@ -316,9 +334,53 @@ mod tests {
     use crate::app::workspace_panel::AgentStatus;
 
     #[test]
-    fn keeps_only_the_512_most_recent_sessions() {
+    fn migrates_the_active_session_timer_to_the_agent() {
+        let session_key = AgentTimingKey::Session(super::super::AgentSessionIdentity {
+            source: "herdr:opencode".to_owned(),
+            agent: "opencode".to_owned(),
+            kind: "id".to_owned(),
+            value: "ses_old".to_owned(),
+        });
+        let agent_key = AgentTimingKey::Terminal("opencode@term-1".to_owned());
+        let agent = HerdrAgent {
+            name: "opencode".to_owned(),
+            session_name: None,
+            workspace_id: "workspace".to_owned(),
+            tab_id: "tab".to_owned(),
+            pane_id: "pane".to_owned(),
+            focused: false,
+            status: AgentStatus::Idle,
+            timing_key: agent_key.clone(),
+            session_timing_key: Some(session_key.clone()),
+            state_change_seq: 7,
+        };
+        let timing = AgentTiming {
+            elapsed_ms: 3_000,
+            session_elapsed_ms: 12_000,
+            running_since_ms: None,
+            status: AgentStatus::Idle,
+            state_change_seq: 7,
+            last_seen_ms: 1_000,
+            awaiting_sequence: false,
+        };
+        let mut timings = HashMap::from([(session_key.clone(), timing)]);
+
+        migrate_session_timings(&mut timings, &[agent]);
+
+        assert!(!timings.contains_key(&session_key));
+        assert_eq!(
+            timings
+                .get(&agent_key)
+                .unwrap()
+                .elapsed_at(crate::app::settings::AgentTimeDisplay::AgentTotal, 2_000),
+            std::time::Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn keeps_only_the_512_most_recent_agents() {
         let mut timings = HashMap::new();
-        for index in 0..=MAX_SESSION_TIMINGS {
+        for index in 0..=MAX_AGENT_TIMINGS {
             let key = AgentTimingKey::Terminal(format!("session-{index:03}"));
             timings.insert(
                 key,
@@ -328,7 +390,7 @@ mod tests {
 
         prune(&mut timings, std::iter::empty::<&AgentTimingKey>());
 
-        assert_eq!(timings.len(), MAX_SESSION_TIMINGS);
+        assert_eq!(timings.len(), MAX_AGENT_TIMINGS);
         assert!(!timings.contains_key(&AgentTimingKey::Terminal("session-000".to_owned())));
         assert!(timings.contains_key(&AgentTimingKey::Terminal("session-512".to_owned())));
     }
