@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use interprocess::local_socket::Stream;
+use interprocess::local_socket::{Stream, traits::Stream as _};
 use serde_json::Value;
 
 use crate::process::{self, Limits};
@@ -20,6 +20,34 @@ pub(super) struct Environment {
 pub(super) struct FocusEvent {
     pub(super) workspace_id: String,
     pub(super) pane_id: String,
+}
+
+struct FocusEventCoalescer {
+    replaying: bool,
+    latest: Option<FocusEvent>,
+}
+
+impl FocusEventCoalescer {
+    fn new() -> Self {
+        Self {
+            replaying: true,
+            latest: None,
+        }
+    }
+
+    fn observe(&mut self, event: FocusEvent) -> Option<FocusEvent> {
+        if self.replaying {
+            self.latest = Some(event);
+            None
+        } else {
+            Some(event)
+        }
+    }
+
+    fn finish_replay(&mut self) -> Option<FocusEvent> {
+        self.replaying = false;
+        self.latest.take()
+    }
 }
 
 pub(super) enum Action {
@@ -104,11 +132,36 @@ pub(super) fn watch_focus_events(
         return Err("Herdr returned an unexpected focus subscription response".to_owned());
     }
 
+    // Official Herdr releases replay retained events at 100 ms intervals. Collapse that history
+    // at startup, then remove the timeout so future focus changes pass through immediately.
+    reader
+        .get_ref()
+        .set_recv_timeout(Some(Duration::from_millis(200)))
+        .map_err(|error| format!("Could not configure the Herdr focus stream: {error}"))?;
+    let mut events = FocusEventCoalescer::new();
     loop {
         line.clear();
-        let read = reader
-            .read_line(&mut line)
-            .map_err(|error| format!("Herdr focus event stream failed: {error}"))?;
+        let read = match reader.read_line(&mut line) {
+            Ok(read) => read,
+            Err(error)
+                if events.replaying
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+            {
+                reader.get_ref().set_recv_timeout(None).map_err(|error| {
+                    format!("Could not configure the Herdr focus stream: {error}")
+                })?;
+                if let Some(event) = events.finish_replay()
+                    && !on_event(event)
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(error) => return Err(format!("Herdr focus event stream failed: {error}")),
+        };
         if read == 0 {
             return Err("Herdr focus event stream closed".to_owned());
         }
@@ -120,7 +173,9 @@ pub(super) fn watch_focus_events(
         let Some(event) = parse_focus_event(&value) else {
             continue;
         };
-        if !on_event(event) {
+        if let Some(event) = events.observe(event)
+            && !on_event(event)
+        {
             return Ok(());
         }
     }
@@ -562,6 +617,23 @@ mod tests {
                 workspace_id: "w2".to_owned(),
                 pane_id: "w2:p3".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn coalesces_replayed_focus_events_before_forwarding_live_events() {
+        let mut events = FocusEventCoalescer::new();
+        let event = |workspace_id: &str, pane_id: &str| FocusEvent {
+            workspace_id: workspace_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+        };
+
+        assert_eq!(events.observe(event("w1", "w1:p1")), None);
+        assert_eq!(events.observe(event("w2", "w2:p2")), None);
+        assert_eq!(events.finish_replay(), Some(event("w2", "w2:p2")));
+        assert_eq!(
+            events.observe(event("w3", "w3:p3")),
+            Some(event("w3", "w3:p3"))
         );
     }
 
