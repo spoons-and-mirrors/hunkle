@@ -68,6 +68,7 @@ pub struct RepositoryData {
     pub branches: Vec<Branch>,
     pub github_remote: bool,
     pub(crate) worktree_signature: Option<WorktreeSignature>,
+    pub(crate) details_ready: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +119,7 @@ impl WorktreeSignature {
 #[derive(Debug)]
 pub struct RepositoryUpdate {
     root: PathBuf,
+    scope: RefreshScope,
     worktree: Option<WorktreeData>,
     inventory: Option<InventoryData>,
     history: Option<HistoryData>,
@@ -194,6 +196,7 @@ impl RepositoryData {
 
     pub(crate) fn apply(&mut self, update: RepositoryUpdate) {
         debug_assert_eq!(self.root, update.root);
+        self.details_ready |= update.scope == RefreshScope::ALL;
         if let Some(worktree) = update.worktree {
             self.changes = worktree.changes;
             self.changes_fingerprint = worktree.fingerprint;
@@ -580,6 +583,62 @@ pub fn load_or_local(path: &Path) -> Result<RepositoryData> {
     }
 }
 
+pub(crate) fn bootstrap_or_local(path: &Path) -> Result<RepositoryData> {
+    match discover_workspace(path)? {
+        WorkspaceDiscovery::Repository(root) => {
+            let common_dir = common_git_dir(&root)?;
+            Ok(bootstrap_data(
+                root,
+                Some(common_dir),
+                RepositoryKind::Git,
+                String::new(),
+            ))
+        }
+        WorkspaceDiscovery::Local(reason) => {
+            drop(reason);
+            let root = canonical_workspace_root(path)?;
+            Ok(bootstrap_data(
+                root,
+                None,
+                RepositoryKind::Local,
+                "local".to_owned(),
+            ))
+        }
+    }
+}
+
+fn bootstrap_data(
+    root: PathBuf,
+    common_dir: Option<PathBuf>,
+    kind: RepositoryKind,
+    branch: String,
+) -> RepositoryData {
+    let changes = Vec::<Change>::new();
+    let files = Vec::<RepoPath>::new();
+    let directories = Vec::<RepoPath>::new();
+    RepositoryData {
+        root,
+        common_dir,
+        kind,
+        branch,
+        changes_fingerprint: fingerprint(&changes),
+        files_fingerprint: fingerprint(&(&files, &directories)),
+        changes,
+        files,
+        directories,
+        history: Vec::new(),
+        commits: Vec::new(),
+        inventory_truncated: false,
+        change_counts: (0, 0),
+        graph_width: 0,
+        graph_truncated: false,
+        branches: Vec::new(),
+        github_remote: false,
+        worktree_signature: None,
+        details_ready: false,
+    }
+}
+
 fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
     let (common_dir, worktree, inventory, history, graph, refs) = thread::scope(|scope| {
         let common_dir = scope.spawn(|| common_git_dir(&root));
@@ -628,6 +687,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         branches: refs.branches,
         github_remote: refs.github_remote,
         worktree_signature: Some(worktree.signature),
+        details_ready: true,
     })
 }
 
@@ -639,6 +699,7 @@ pub fn refresh_repository(
     if kind == RepositoryKind::Local {
         return Ok(RepositoryUpdate {
             root: root.to_owned(),
+            scope,
             worktree: None,
             inventory: scope
                 .includes(RefreshScope::INVENTORY)
@@ -678,6 +739,7 @@ pub fn refresh_repository(
 
     Ok(RepositoryUpdate {
         root: root.to_owned(),
+        scope,
         worktree,
         inventory,
         history,
@@ -775,10 +837,7 @@ fn load_refs(root: &Path) -> Result<RefsData> {
 }
 
 fn local_workspace(path: &Path) -> Result<RepositoryData> {
-    let root = fs::canonicalize(path).context("could not resolve workspace directory")?;
-    if !root.is_dir() {
-        bail!("{} is not a directory", root.display());
-    }
+    let root = canonical_workspace_root(path)?;
     let inventory = load_local_inventory(&root)?;
     Ok(RepositoryData {
         root,
@@ -799,7 +858,16 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
         branches: Vec::new(),
         github_remote: false,
         worktree_signature: None,
+        details_ready: true,
     })
+}
+
+fn canonical_workspace_root(path: &Path) -> Result<PathBuf> {
+    let root = fs::canonicalize(path).context("could not resolve workspace directory")?;
+    if !root.is_dir() {
+        bail!("{} is not a directory", root.display());
+    }
+    Ok(root)
 }
 
 fn repository_has_github_remote(root: &Path) -> Result<bool> {
@@ -1952,6 +2020,48 @@ mod tests {
         assert!(workspace.changes.is_empty());
         assert!(workspace.history.is_empty());
         assert!(workspace.commits.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_defers_repository_facets_until_full_refresh() {
+        let git_directory = tempfile::tempdir().unwrap();
+        let git_root = git_directory.path();
+        git(git_root, &["init", "-b", "main"]);
+        git(git_root, &["config", "user.name", "Test Author"]);
+        git(git_root, &["config", "user.email", "test@example.com"]);
+        fs::write(git_root.join("tracked.txt"), "tracked\n").unwrap();
+        git(git_root, &["add", "tracked.txt"]);
+        git(git_root, &["commit", "-m", "initial"]);
+
+        let mut repository = bootstrap_or_local(git_root).unwrap();
+        assert_eq!(repository.kind, RepositoryKind::Git);
+        assert!(repository.common_dir.is_some());
+        assert!(!repository.details_ready);
+        assert!(repository.files.is_empty());
+        assert!(repository.history.is_empty());
+        assert!(repository.commits.is_empty());
+
+        let update =
+            refresh_repository(&repository.root, repository.kind, RefreshScope::ALL).unwrap();
+        repository.apply(update);
+        assert!(repository.details_ready);
+        assert_eq!(repository.branch, "main");
+        assert_eq!(repository.files, ["tracked.txt"]);
+        assert_eq!(repository.history.len(), 1);
+        assert_eq!(repository.commits.len(), 1);
+
+        let local_directory = tempfile::tempdir().unwrap();
+        fs::write(local_directory.path().join("local.txt"), "local\n").unwrap();
+        let mut workspace = bootstrap_or_local(local_directory.path()).unwrap();
+        assert_eq!(workspace.kind, RepositoryKind::Local);
+        assert!(!workspace.details_ready);
+        assert!(workspace.files.is_empty());
+
+        let update =
+            refresh_repository(&workspace.root, workspace.kind, RefreshScope::ALL).unwrap();
+        workspace.apply(update);
+        assert!(workspace.details_ready);
+        assert_eq!(workspace.files, ["local.txt"]);
     }
 
     #[test]

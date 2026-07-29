@@ -258,7 +258,7 @@ impl RepositorySession {
     fn git_root(&self) -> Option<PathBuf> {
         self.data
             .as_ref()
-            .filter(|repository| !repository.is_local())
+            .filter(|repository| !repository.is_local() && repository.details_ready)
             .map(|repository| repository.root.clone())
     }
 
@@ -801,7 +801,7 @@ impl RepositorySession {
         thread::spawn(move || {
             let started = Instant::now();
             let result = match repository_kind {
-                None => git::load_or_local(&path).map(LoadPayload::Open),
+                None => git::bootstrap_or_local(&path).map(LoadPayload::Open),
                 Some(repository_kind) => {
                     git::refresh_repository(&path, repository_kind, scope).map(LoadPayload::Refresh)
                 }
@@ -1170,6 +1170,7 @@ mod tests {
         assert!(reloading.start(Operation::Load(LoadKind::Reload)));
         assert!(reloading.can_start(Operation::Commit));
         assert!(reloading.can_start(Operation::Command));
+        assert!(reloading.can_start(Operation::Load(LoadKind::Open)));
 
         let mut checking_status = OperationState::default();
         assert!(checking_status.start(Operation::StatusCheck));
@@ -1210,6 +1211,7 @@ mod tests {
                 graph_width: 0,
                 graph_truncated: false,
                 worktree_signature: status_signature,
+                details_ready: true,
             }),
             operations: OperationState::default(),
             worker_tx,

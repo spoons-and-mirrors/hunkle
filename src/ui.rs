@@ -340,7 +340,14 @@ fn dim(frame: &mut Frame<'_>) {
 fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let (path, branch) = app.repository().map_or_else(
         || ("No repository selected".to_owned(), "offline".to_owned()),
-        |repo| (repo.root.display().to_string(), repo.branch.clone()),
+        |repo| {
+            let branch = if !repo.is_local() && !repo.details_ready {
+                "loading".to_owned()
+            } else {
+                repo.branch.clone()
+            };
+            (repo.root.display().to_string(), branch)
+        },
     );
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().surface_alt)),

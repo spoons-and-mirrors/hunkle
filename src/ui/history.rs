@@ -35,6 +35,13 @@ pub(super) fn draw_graph(
             targets: Vec::new(),
         };
     };
+    if !repo.is_local() && !repo.details_ready {
+        draw_empty(frame, area, "Loading commit graph…");
+        return GraphRegions {
+            table: None,
+            targets: Vec::new(),
+        };
+    }
     if repo.commits.is_empty() {
         draw_empty(frame, area, "This repository has no commits yet");
         return GraphRegions {
@@ -284,6 +291,7 @@ pub(super) fn draw_branch(
     focused: bool,
     mode: Mode,
     state: &mut ListState,
+    ready: bool,
 ) {
     fill(
         frame,
@@ -294,7 +302,9 @@ pub(super) fn draw_branch(
             palette().surface_alt
         },
     );
-    let history_title = if header.width >= 20 {
+    let history_title = if !ready {
+        "HISTORY  loading".to_owned()
+    } else if header.width >= 20 {
         format!("HISTORY  {branch}")
     } else {
         "HISTORY".to_owned()
@@ -321,9 +331,13 @@ pub(super) fn draw_branch(
         ])),
         header,
     );
-    if commits.is_empty() {
+    if !ready || commits.is_empty() {
         let items = vec![ListItem::new(Line::styled(
-            "  No commits on this branch",
+            if ready {
+                "  No commits on this branch"
+            } else {
+                "  Loading branch history…"
+            },
             Style::default().fg(palette().faint),
         ))];
         frame.render_stateful_widget(List::new(items), list, state);

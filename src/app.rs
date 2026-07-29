@@ -508,8 +508,12 @@ impl App {
     }
 
     fn require_git_repository(&mut self) -> bool {
-        if self.git_repository().is_some() {
-            return true;
+        if let Some(repository) = self.git_repository() {
+            if repository.details_ready {
+                return true;
+            }
+            self.notice = Some("Repository details are still loading".to_owned());
+            return false;
         }
         self.notice = Some(
             if self.repository().is_some() {
@@ -924,14 +928,7 @@ impl App {
                         self.mode = Mode::Normal;
                     }
                     self.actions = ActionsState::default();
-                    self.notice = Some(
-                        if self.session.data().is_some_and(RepositoryData::is_local) {
-                            "Workspace opened"
-                        } else {
-                            "Repository opened"
-                        }
-                        .to_owned(),
-                    );
+                    let local = self.session.data().is_some_and(RepositoryData::is_local);
                     self.graph_state = TableState::default();
                     self.graph_scroll_to_selection = true;
                     if let Some(repo) = self.session.data() {
@@ -958,22 +955,35 @@ impl App {
                             .then_some(0),
                     );
                     self.restore_commit_draft();
-                    self.show_graph_if_diff_empty();
-                    self.prefetch_repository_browser();
-                    if let Some(common_dir) = self
+                    let remember_error = self
                         .session
                         .data()
                         .and_then(|repository| repository.common_dir.as_deref())
-                        && let Err(error) = self.worktree_manager.remember(common_dir)
-                    {
-                        self.notice = Some(error);
-                    }
+                        .and_then(|common_dir| self.worktree_manager.remember(common_dir).err());
+                    self.reload(RefreshScope::ALL);
+                    self.notice = remember_error.or_else(|| {
+                        Some(
+                            if local {
+                                "Workspace opened; indexing files…"
+                            } else {
+                                "Repository opened; loading details…"
+                            }
+                            .to_owned(),
+                        )
+                    });
                 }
                 (LoadKind::Open, Err(error)) => {
                     diagnostics::event(format!("workspace open failed error={error}"));
                     self.workspace_fetch_pending = false;
                     self.pending_file_selection = None;
                     let message = format!("Could not open workspace: {error}");
+                    if self
+                        .session
+                        .data()
+                        .is_some_and(|repository| !repository.details_ready)
+                    {
+                        self.reload(RefreshScope::ALL);
+                    }
                     self.notice = Some(message.clone());
                     self.workspace_explorer.error = Some(message);
                 }
@@ -1012,13 +1022,26 @@ impl App {
                     }
                     self.show_graph_if_diff_empty();
                     self.prefetch_repository_browser();
-                    if self.notice.as_deref() == Some("Refreshing…")
-                        || self
-                            .notice
-                            .as_deref()
-                            .is_some_and(|notice| notice.ends_with(" (retrying queued refresh…)"))
-                    {
+                    if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());
+                    } else if self
+                        .session
+                        .data()
+                        .is_some_and(|repository| repository.details_ready)
+                        && (self.notice.as_deref() == Some("Repository opened; loading details…")
+                            || self.notice.as_deref() == Some("Workspace opened; indexing files…")
+                            || self.notice.as_deref().is_some_and(|notice| {
+                                notice.ends_with(" (retrying queued refresh…)")
+                            }))
+                    {
+                        self.notice = Some(
+                            if self.session.data().is_some_and(RepositoryData::is_local) {
+                                "Workspace ready"
+                            } else {
+                                "Repository ready"
+                            }
+                            .to_owned(),
+                        );
                     }
                     if let Some(scope) = self.reload_queued.take() {
                         self.reload(scope);
@@ -1028,10 +1051,32 @@ impl App {
                     self.pending_reload = None;
                     let queued = self.reload_queued.take();
                     if let Some(scope) = queued {
+                        let scope = if self
+                            .session
+                            .data()
+                            .is_some_and(|repository| !repository.details_ready)
+                        {
+                            RefreshScope::ALL
+                        } else {
+                            scope
+                        };
                         self.reload(scope);
                         self.notice = Some(format!("{error} (retrying queued refresh…)"));
                     } else {
-                        self.notice = Some(error);
+                        self.notice = Some(match self.session.data() {
+                            Some(repository) if !repository.details_ready => {
+                                if repository.is_local() {
+                                    format!(
+                                        "Could not index workspace files: {error} (press r to retry)"
+                                    )
+                                } else {
+                                    format!(
+                                        "Could not load repository details: {error} (press r to retry)"
+                                    )
+                                }
+                            }
+                            _ => error,
+                        });
                     }
                 }
             }
@@ -1945,6 +1990,10 @@ impl App {
             self.require_git_repository();
             return;
         };
+        if !repo.details_ready {
+            self.notice = Some("Repository details are still loading".to_owned());
+            return;
+        }
         let root = repo.root.clone();
         let branches = repo.branches.clone();
         let prefetch = repo.github_remote;
@@ -2247,7 +2296,14 @@ impl App {
     }
 
     fn open_author_filter(&mut self) {
-        let Some(repo) = self.session.data().filter(|repo| !repo.is_local()) else {
+        let Some(repo) = self
+            .session
+            .data()
+            .filter(|repo| !repo.is_local() && repo.details_ready)
+        else {
+            if self.git_repository().is_some() {
+                self.notice = Some("Repository details are still loading".to_owned());
+            }
             return;
         };
         self.author_filter.open(&repo.root, &repo.commits);
@@ -2394,6 +2450,8 @@ impl App {
             .session
             .start_open(path, self.settings.fetch_interval())
         {
+            self.pending_reload = None;
+            self.reload_queued = None;
             self.workspace_fetch_pending = fetch_if_stale;
             self.workspace_explorer.error = None;
             self.notice = Some("Opening workspace…".to_owned());
@@ -2452,6 +2510,10 @@ impl App {
         let Some(repository) = self.session.data() else {
             return;
         };
+        if !repository.details_ready {
+            self.notice = Some("Workspace files are still being indexed".to_owned());
+            return;
+        }
         self.file_search
             .reindex(&repository.files, Some(repository.files_fingerprint));
         self.file_search.open();
@@ -2742,6 +2804,8 @@ impl App {
             return;
         };
         let selection = self.changes.capture_selection(repo);
+        let details_ready = repo.details_ready;
+        let local = repo.is_local();
         let selected_oid = self
             .selected_graph_commit()
             .map(|commit| commit.oid.clone());
@@ -2751,7 +2815,16 @@ impl App {
             .start_reload(scope, self.settings.fetch_interval())
         {
             self.pending_reload = Some((selection, selected_oid));
-            self.notice = Some("Refreshing…".to_owned());
+            self.notice = Some(
+                if details_ready {
+                    "Refreshing…"
+                } else if local {
+                    "Indexing workspace files…"
+                } else {
+                    "Loading repository details…"
+                }
+                .to_owned(),
+            );
         } else {
             self.pending_reload = Some((selection, selected_oid));
             self.reload_queued = Some(
@@ -3054,7 +3127,65 @@ mod tests {
             app.repository().unwrap().root,
             fs::canonicalize(root).unwrap()
         );
-        assert_eq!(app.notice.as_deref(), Some("Workspace opened"));
+        wait_for_state(&mut app, |app| {
+            app.repository().is_some_and(|repo| repo.details_ready)
+        });
+        assert_eq!(app.notice.as_deref(), Some("Workspace ready"));
+    }
+
+    #[test]
+    fn failed_open_resumes_interrupted_initial_hydration() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("file.txt"), "content\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+
+        app.open_repository(root.to_path_buf());
+        wait_for_state(&mut app, |app| {
+            !app.session.open_running()
+                && app
+                    .repository()
+                    .is_some_and(|repository| !repository.details_ready)
+        });
+        app.open_repository(root.join("missing"));
+        wait_for_state(&mut app, |app| !app.session.open_running());
+        wait_for_state(&mut app, |app| {
+            app.repository()
+                .is_some_and(|repository| repository.details_ready)
+        });
+
+        assert_eq!(
+            app.repository().unwrap().root,
+            fs::canonicalize(root).unwrap()
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Could not open workspace:"))
+        );
+    }
+
+    #[test]
+    fn initial_hydration_keeps_successful_queued_refreshes_scoped() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("file.txt"), "content\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+
+        app.open_repository(root.to_path_buf());
+        wait_for_state(&mut app, |app| {
+            !app.session.open_running()
+                && app
+                    .repository()
+                    .is_some_and(|repository| !repository.details_ready)
+        });
+        app.editor_finished(Ok(()));
+
+        assert_eq!(app.reload_queued, Some(RefreshScope::WORKTREE));
+        wait_for_state(&mut app, |app| {
+            app.repository()
+                .is_some_and(|repository| repository.details_ready)
+        });
     }
 
     #[test]

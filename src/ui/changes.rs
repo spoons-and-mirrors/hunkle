@@ -64,6 +64,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     let worktree_content = columns[0].inner(Margin::new(1, 0));
     let repo = app.session.data().expect("checked above");
     let local_workspace = repo.is_local();
+    let details_ready = repo.details_ready;
     let has_changes = !repo.changes.is_empty();
     let staged_count = repo.change_counts.0;
     let checkbox = if !repo.changes.is_empty() && staged_count == repo.changes.len() {
@@ -220,12 +221,16 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         }
     }
     let list = List::new(items);
-    let stage_label = if worktree_header.width >= 36 {
-        format!("Stage all  {} files", repo.changes.len())
-    } else {
-        "All".to_owned()
-    };
-    let worktree_title = if worktree_header.width >= 36 {
+    let stage_label = details_ready.then(|| {
+        if worktree_header.width >= 36 {
+            format!("Stage all  {} files", repo.changes.len())
+        } else {
+            "All".to_owned()
+        }
+    });
+    let worktree_title = if !details_ready {
+        "CHANGES  …".to_owned()
+    } else if worktree_header.width >= 36 {
         format!("CHANGES  {}", repo.changes.len())
     } else {
         "CHANGES".to_owned()
@@ -233,30 +238,36 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     let files_title = "FILES";
     let worktree_title_width = UnicodeWidthStr::width(worktree_title.as_str());
     let title_width = worktree_title_width + 2 + files_title.len();
-    let stage_width = UnicodeWidthStr::width(stage_label.as_str()) + 3;
+    let stage_width = stage_label
+        .as_deref()
+        .map_or(0, |label| UnicodeWidthStr::width(label) + 3);
     let stage_target_width = worktree_header.width.min(stage_width as u16);
-    app.regions.register_hit_target(
-        HitTarget::Changes(ChangesHitTarget::StageAll),
-        Rect::new(
-            worktree_header.right().saturating_sub(stage_target_width),
-            worktree_header.y,
-            stage_target_width,
-            1,
-        ),
-    );
+    if details_ready {
+        app.regions.register_hit_target(
+            HitTarget::Changes(ChangesHitTarget::StageAll),
+            Rect::new(
+                worktree_header.right().saturating_sub(stage_target_width),
+                worktree_header.y,
+                stage_target_width,
+                1,
+            ),
+        );
+    }
     let stage_padding =
         usize::from(worktree_header.width).saturating_sub(title_width + stage_width);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                worktree_title,
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(files_title, Style::default().fg(palette().faint)),
-            Span::raw(" ".repeat(stage_padding)),
+    let mut header = vec![
+        Span::styled(
+            worktree_title,
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(files_title, Style::default().fg(palette().faint)),
+        Span::raw(" ".repeat(stage_padding)),
+    ];
+    if let Some(stage_label) = stage_label {
+        header.extend([
             Span::styled(
                 format!("{stage_label} "),
                 Style::default().fg(palette().muted),
@@ -267,9 +278,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
                     .fg(checkbox_color)
                     .add_modifier(Modifier::BOLD),
             ),
-        ])),
-        worktree_header,
-    );
+        ]);
+    }
+    frame.render_widget(Paragraph::new(Line::from(header)), worktree_header);
     app.regions.register_hit_target(
         HitTarget::Changes(ChangesHitTarget::WorktreeTab),
         Rect::new(
@@ -316,6 +327,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         app.changes.history_focused,
         app.mode,
         &mut app.changes.history_state,
+        local_workspace || details_ready,
     );
     if !draw_details {
         draw_commit_editor(
@@ -325,6 +337,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
             actions_row,
             local_workspace,
             has_changes,
+            details_ready,
         );
         return;
     }
@@ -573,6 +586,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         actions_row,
         local_workspace,
         has_changes,
+        details_ready,
     );
 }
 
@@ -583,8 +597,9 @@ fn draw_commit_editor(
     actions_row: Rect,
     local_workspace: bool,
     has_changes: bool,
+    details_ready: bool,
 ) {
-    if !local_workspace {
+    if !local_workspace && details_ready {
         draw_commit_message_action(frame, actions_row, app, has_changes);
     }
     let commit_active = app.mode == Mode::Commit;
@@ -605,6 +620,14 @@ fn draw_commit_editor(
                 ),
             ]),
             2,
+        )
+    } else if !details_ready {
+        (
+            Text::from(Line::styled(
+                "Loading Git status…",
+                Style::default().fg(palette().faint),
+            )),
+            1,
         )
     } else if app.commit_running() {
         (

@@ -117,7 +117,7 @@ impl ChangesState {
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
         let file_tree = repo.map(|repo| FileTree::from_root(&repo.root));
         let mut state = Self {
-            pane: if repo.is_some_and(RepositoryData::is_local) {
+            pane: if repo.is_some_and(|repo| repo.is_local() || !repo.details_ready) {
                 LeftPane::Files
             } else {
                 LeftPane::Worktree
@@ -177,7 +177,7 @@ impl ChangesState {
         repo: Option<&RepositoryData>,
         prepared_file_tree: Option<PreparedFileTree>,
     ) {
-        self.pane = if repo.is_some_and(RepositoryData::is_local) {
+        self.pane = if repo.is_some_and(|repo| repo.is_local() || !repo.details_ready) {
             LeftPane::Files
         } else {
             LeftPane::Worktree
@@ -1279,6 +1279,17 @@ impl ChangesState {
             }
             return;
         }
+        if !repo.details_ready {
+            self.set_diff(
+                if repo.is_local() {
+                    "Indexing workspace files…"
+                } else {
+                    "Loading repository details…"
+                }
+                .to_owned(),
+            );
+            return;
+        }
         if self.history_focused
             && let Some(commit) = self
                 .history_state
@@ -1749,6 +1760,7 @@ mod tests {
             change_counts: (0, 1),
             graph_width: 0,
             graph_truncated: false,
+            details_ready: true,
         }
     }
 

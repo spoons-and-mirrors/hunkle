@@ -62,7 +62,9 @@ impl OperationState {
                     && !self.checking_status
                     && self.loading.is_none()
             }
-            Operation::Load(LoadKind::Open) => self.foreground.is_none() && self.loading.is_none(),
+            Operation::Load(LoadKind::Open) => {
+                self.foreground.is_none() && self.loading != Some(LoadKind::Open)
+            }
             Operation::Load(LoadKind::Reload) => self.loading.is_none(),
         }
     }
