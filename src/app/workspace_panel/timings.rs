@@ -11,12 +11,22 @@ use crate::filesystem::atomic_write;
 
 use super::{AgentTiming, AgentTimingKey, HerdrAgent};
 
-const INDEX_VERSION: u8 = 1;
+const INDEX_VERSION: u8 = 2;
+const MAX_SESSION_TIMINGS: usize = 512;
 
 #[derive(Default, Deserialize, Serialize)]
 struct TimingIndex {
     version: u8,
+    #[serde(default)]
+    cleared_at_ms: u64,
     timings: Vec<TimingRecord>,
+}
+
+#[derive(Default)]
+struct LoadedTimings {
+    timings: HashMap<AgentTimingKey, AgentTiming>,
+    cleared_at_ms: u64,
+    migrated: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -36,18 +46,19 @@ pub(super) fn sync(
     }
     let _lock = IndexLock::acquire(path)?;
     let loaded = load(path);
-    let needs_rewrite = loaded.is_err() || !path.exists();
-    let mut shared = loaded.unwrap_or_default();
+    let needs_rewrite = match loaded.as_ref() {
+        Ok(loaded) => loaded.migrated,
+        Err(_) => true,
+    } || !path.exists();
+    let loaded = loaded.unwrap_or_default();
+    let mut shared = loaded.timings;
 
-    // A local record can be newer when an earlier write failed. Sequence ordering
-    // prevents a stale Hunkle process from replacing a newer shared transition.
-    for (key, timing) in local.iter() {
-        merge_timing(&mut shared, key.clone(), timing.clone());
-    }
+    merge_local_timings(&mut shared, local, loaded.cleared_at_ms);
     update(&mut shared, agents, now_ms);
+    prune(&mut shared, agents.iter().map(|agent| &agent.timing_key));
 
     if needs_rewrite || &shared != local {
-        save(path, &shared)?;
+        save(path, &shared, loaded.cleared_at_ms)?;
         *local = shared;
     }
     Ok(())
@@ -58,12 +69,6 @@ pub(super) fn update(
     agents: &[HerdrAgent],
     now_ms: u64,
 ) {
-    let active_keys = agents
-        .iter()
-        .map(|agent| agent.timing_key.clone())
-        .collect::<HashSet<_>>();
-    timings.retain(|key, _| active_keys.contains(key));
-
     for agent in agents {
         let key = agent.timing_key.clone();
         if let Some(timing) = timings.get_mut(&key) {
@@ -82,6 +87,86 @@ pub(super) fn update(
     }
 }
 
+pub(super) fn observe_status(
+    path: &Path,
+    local: &mut HashMap<AgentTimingKey, AgentTiming>,
+    key: &AgentTimingKey,
+    status: super::AgentStatus,
+    state_change_seq: u64,
+    now_ms: u64,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let _lock = IndexLock::acquire(path)?;
+    let loaded = load(path).unwrap_or_default();
+    let mut shared = loaded.timings;
+    merge_local_timings(&mut shared, local, loaded.cleared_at_ms);
+    if let Some(timing) = shared.get_mut(key) {
+        timing.observe_event(status, now_ms);
+    } else if status.should_track_timing() {
+        let mut timing = AgentTiming::new(status, state_change_seq, now_ms);
+        timing.awaiting_sequence = true;
+        shared.insert(key.clone(), timing);
+    }
+    prune(&mut shared, std::iter::once(key));
+    save(path, &shared, loaded.cleared_at_ms)?;
+    *local = shared;
+    Ok(())
+}
+
+pub(super) fn reset(
+    path: &Path,
+    local: &mut HashMap<AgentTimingKey, AgentTiming>,
+    agents: &[HerdrAgent],
+    now_ms: u64,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let _lock = IndexLock::acquire(path)?;
+    let mut reset = HashMap::new();
+    update(&mut reset, agents, now_ms);
+    save(path, &reset, now_ms)?;
+    *local = reset;
+    Ok(())
+}
+
+fn prune<'a>(
+    timings: &mut HashMap<AgentTimingKey, AgentTiming>,
+    active: impl IntoIterator<Item = &'a AgentTimingKey>,
+) {
+    if timings.len() <= MAX_SESSION_TIMINGS {
+        return;
+    }
+    let active = active.into_iter().collect::<HashSet<_>>();
+    let mut candidates = timings
+        .iter()
+        .filter(|(key, _)| !active.contains(key))
+        .map(|(key, timing)| (timing.last_seen_ms, key.stable_id(), key.clone()))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    for (_, _, key) in candidates {
+        if timings.len() <= MAX_SESSION_TIMINGS {
+            break;
+        }
+        timings.remove(&key);
+    }
+    if timings.len() > MAX_SESSION_TIMINGS {
+        let mut candidates = timings
+            .iter()
+            .map(|(key, timing)| (timing.last_seen_ms, key.stable_id(), key.clone()))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+        for (_, _, key) in candidates
+            .into_iter()
+            .take(timings.len() - MAX_SESSION_TIMINGS)
+        {
+            timings.remove(&key);
+        }
+    }
+}
+
 fn merge_timing(
     timings: &mut HashMap<AgentTimingKey, AgentTiming>,
     key: AgentTimingKey,
@@ -91,29 +176,64 @@ fn merge_timing(
         timings.insert(key, incoming);
         return;
     };
-    if incoming.state_change_seq > existing.state_change_seq {
+    if incoming.state_change_seq > existing.state_change_seq
+        || (incoming.state_change_seq == existing.state_change_seq
+            && incoming.last_seen_ms > existing.last_seen_ms)
+    {
         *existing = incoming;
     }
 }
 
-fn load(path: &Path) -> io::Result<HashMap<AgentTimingKey, AgentTiming>> {
+fn merge_local_timings(
+    shared: &mut HashMap<AgentTimingKey, AgentTiming>,
+    local: &HashMap<AgentTimingKey, AgentTiming>,
+    cleared_at_ms: u64,
+) {
+    // A clear watermark prevents another Hunkle process from restoring deleted history.
+    for (key, timing) in local {
+        if timing.last_seen_ms > cleared_at_ms {
+            merge_timing(shared, key.clone(), timing.clone());
+        }
+    }
+}
+
+fn load(path: &Path) -> io::Result<LoadedTimings> {
     let content = match fs::read(path) {
         Ok(content) => content,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(LoadedTimings {
+                timings: HashMap::new(),
+                cleared_at_ms: 0,
+                migrated: false,
+            });
+        }
         Err(error) => return Err(error),
     };
     let index: TimingIndex = serde_json::from_slice(&content).map_err(io::Error::other)?;
-    if index.version != INDEX_VERSION {
-        return Ok(HashMap::new());
+    if !matches!(index.version, 1 | INDEX_VERSION) {
+        return Ok(LoadedTimings {
+            timings: HashMap::new(),
+            cleared_at_ms: 0,
+            migrated: true,
+        });
     }
-    Ok(index
-        .timings
-        .into_iter()
-        .map(|record| (record.key, record.timing))
-        .collect())
+    let migrated = index.version != INDEX_VERSION;
+    Ok(LoadedTimings {
+        timings: index
+            .timings
+            .into_iter()
+            .map(|record| (record.key, record.timing))
+            .collect(),
+        cleared_at_ms: index.cleared_at_ms,
+        migrated,
+    })
 }
 
-fn save(path: &Path, timings: &HashMap<AgentTimingKey, AgentTiming>) -> io::Result<()> {
+fn save(
+    path: &Path,
+    timings: &HashMap<AgentTimingKey, AgentTiming>,
+    cleared_at_ms: u64,
+) -> io::Result<()> {
     let mut records = timings
         .iter()
         .map(|(key, timing)| TimingRecord {
@@ -124,6 +244,7 @@ fn save(path: &Path, timings: &HashMap<AgentTimingKey, AgentTiming>) -> io::Resu
     records.sort_by_key(|record| record.key.stable_id());
     let mut content = serde_json::to_vec_pretty(&TimingIndex {
         version: INDEX_VERSION,
+        cleared_at_ms,
         timings: records,
     })
     .map_err(io::Error::other)?;
@@ -188,3 +309,86 @@ fn unlock(file: &File) {
 
 #[cfg(not(unix))]
 fn unlock(_file: &File) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::workspace_panel::AgentStatus;
+
+    #[test]
+    fn keeps_only_the_512_most_recent_sessions() {
+        let mut timings = HashMap::new();
+        for index in 0..=MAX_SESSION_TIMINGS {
+            let key = AgentTimingKey::Terminal(format!("session-{index:03}"));
+            timings.insert(
+                key,
+                AgentTiming::new(AgentStatus::Working, index as u64, index as u64),
+            );
+        }
+
+        prune(&mut timings, std::iter::empty::<&AgentTimingKey>());
+
+        assert_eq!(timings.len(), MAX_SESSION_TIMINGS);
+        assert!(!timings.contains_key(&AgentTimingKey::Terminal("session-000".to_owned())));
+        assert!(timings.contains_key(&AgentTimingKey::Terminal("session-512".to_owned())));
+    }
+
+    #[test]
+    fn migrates_version_one_timings_without_losing_the_latest_loop() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-timings.json");
+        fs::write(
+            &path,
+            r#"{"version":1,"timings":[{"key":{"scope":"terminal","identity":"session-a"},"timing":{"elapsed_ms":3000,"running_since_ms":null,"status":"idle","state_change_seq":7}}]}"#,
+        )
+        .unwrap();
+
+        let loaded = load(&path).unwrap();
+        let timing = loaded
+            .timings
+            .get(&AgentTimingKey::Terminal("session-a".to_owned()))
+            .unwrap();
+        assert!(loaded.migrated);
+        assert_eq!(timing.elapsed_ms, 3_000);
+        assert_eq!(timing.session_elapsed_ms, 0);
+
+        let mut local = HashMap::new();
+        sync(&path, &mut local, &[], 10_000).unwrap();
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], INDEX_VERSION);
+    }
+
+    #[test]
+    fn reset_removes_persisted_session_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-timings.json");
+        let key = AgentTimingKey::Terminal("old-session".to_owned());
+        let mut timings = HashMap::from([(key, AgentTiming::new(AgentStatus::Idle, 3, 1_000))]);
+        save(&path, &timings, 0).unwrap();
+
+        reset(&path, &mut timings, &[], 2_000).unwrap();
+
+        assert!(timings.is_empty());
+        let loaded = load(&path).unwrap();
+        assert!(loaded.timings.is_empty());
+        assert_eq!(loaded.cleared_at_ms, 2_000);
+    }
+
+    #[test]
+    fn stale_process_cannot_restore_cleared_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-timings.json");
+        let key = AgentTimingKey::Terminal("old-session".to_owned());
+        let old_timing = AgentTiming::new(AgentStatus::Idle, 3, 1_000);
+        let mut clearing_process = HashMap::from([(key.clone(), old_timing.clone())]);
+        let mut stale_process = HashMap::from([(key, old_timing)]);
+        save(&path, &clearing_process, 0).unwrap();
+
+        reset(&path, &mut clearing_process, &[], 2_000).unwrap();
+        sync(&path, &mut stale_process, &[], 3_000).unwrap();
+
+        assert!(stale_process.is_empty());
+        assert!(load(&path).unwrap().timings.is_empty());
+    }
+}

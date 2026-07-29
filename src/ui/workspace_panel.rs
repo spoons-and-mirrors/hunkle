@@ -9,7 +9,7 @@ use std::{path::Path, time::Duration};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AgentStatus, HitTarget, SPINNER_FRAMES, WorkspaceDropTarget, WorkspacePanel,
+    AgentStatus, HitTarget, SPINNER_FRAMES, Settings, WorkspaceDropTarget, WorkspacePanel,
     WorkspacePanelHitTarget, WorkspacePanelPlacement, WorkspacePanelRow,
 };
 
@@ -21,7 +21,7 @@ pub(super) fn draw(
     area: Rect,
     focused: bool,
     hovered: Option<WorkspacePanelHitTarget>,
-    show_agent_harness: bool,
+    settings: &Settings,
     loaded_workspace_path: Option<&Path>,
 ) -> Vec<(HitTarget, Rect)> {
     fill(frame, area, palette().surface_alt);
@@ -257,7 +257,9 @@ pub(super) fn draw(
             }
             WorkspacePanelRow::Agent(index) => {
                 let state = panel.agent_entry_state(index, focused);
-                let elapsed = panel.agent_elapsed(index).map(format_duration);
+                let elapsed = panel
+                    .agent_elapsed(index, settings.agent_time_display)
+                    .map(format_duration);
                 let agent = &panel.agents[index];
                 let workspace = panel
                     .workspaces
@@ -266,7 +268,7 @@ pub(super) fn draw(
                     .map_or("", |workspace| workspace.label.as_str());
                 let label = if workspace.is_empty() {
                     agent.name.clone()
-                } else if show_agent_harness {
+                } else if settings.show_agent_harness {
                     format!("{} / {workspace}", agent.name)
                 } else {
                     workspace.to_owned()

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
-use super::{TextInput, worktree_manager::WorktreeCandidate};
+use super::{TextInput, settings::AgentTimeDisplay, worktree_manager::WorktreeCandidate};
 
 mod focus;
 mod herdr;
@@ -44,6 +44,7 @@ pub(crate) const DEFAULT_WIDTH: u16 = 26;
 pub(crate) const MINIMUM_WIDTH: u16 = 18;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
 pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -132,31 +133,45 @@ pub(crate) struct HerdrAgent {
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 struct AgentTiming {
     elapsed_ms: u64,
+    #[serde(default)]
+    session_elapsed_ms: u64,
     running_since_ms: Option<u64>,
     status: AgentStatus,
     state_change_seq: u64,
+    #[serde(default)]
+    last_seen_ms: u64,
+    #[serde(default)]
+    awaiting_sequence: bool,
 }
 
 impl AgentTiming {
     fn new(status: AgentStatus, state_change_seq: u64, now_ms: u64) -> Self {
         Self {
             elapsed_ms: 0,
+            session_elapsed_ms: 0,
             running_since_ms: (status == AgentStatus::Working).then_some(now_ms),
             status,
             state_change_seq,
+            last_seen_ms: now_ms,
+            awaiting_sequence: false,
         }
     }
 
     fn observe(&mut self, status: AgentStatus, state_change_seq: u64, now_ms: u64) {
         let sequence_changed = self.state_change_seq != 0
             && state_change_seq != 0
+            && self.state_change_seq != state_change_seq
+            && !self.awaiting_sequence;
+        let reconciles_event = self.awaiting_sequence
+            && state_change_seq != 0
             && self.state_change_seq != state_change_seq;
+        let transition = self.status != status || sequence_changed;
         match status {
             AgentStatus::Working => match self.status {
-                AgentStatus::Working if sequence_changed => self.restart(now_ms),
+                AgentStatus::Working if sequence_changed => self.start_loop(now_ms),
                 AgentStatus::Working => {}
                 AgentStatus::Blocked | AgentStatus::Unknown => self.running_since_ms = Some(now_ms),
-                AgentStatus::Idle | AgentStatus::Done => self.restart(now_ms),
+                AgentStatus::Idle | AgentStatus::Done => self.start_loop(now_ms),
             },
             AgentStatus::Blocked | AgentStatus::Unknown => {
                 if !matches!(
@@ -171,9 +186,22 @@ impl AgentTiming {
         }
         self.status = status;
         self.state_change_seq = state_change_seq;
+        if reconciles_event {
+            self.awaiting_sequence = false;
+        }
+        if transition || now_ms.saturating_sub(self.last_seen_ms) >= TIMING_LAST_SEEN_INTERVAL_MS {
+            self.last_seen_ms = now_ms;
+        }
     }
 
-    fn restart(&mut self, now_ms: u64) {
+    fn observe_event(&mut self, status: AgentStatus, now_ms: u64) {
+        self.observe(status, self.state_change_seq, now_ms);
+        self.awaiting_sequence = true;
+    }
+
+    fn start_loop(&mut self, now_ms: u64) {
+        self.pause(now_ms);
+        self.session_elapsed_ms = self.session_elapsed_ms.saturating_add(self.elapsed_ms);
         self.elapsed_ms = 0;
         self.running_since_ms = Some(now_ms);
     }
@@ -186,12 +214,16 @@ impl AgentTiming {
         }
     }
 
-    fn elapsed_at(&self, now_ms: u64) -> Duration {
+    fn elapsed_at(&self, display: AgentTimeDisplay, now_ms: u64) -> Duration {
         let running_ms = self
             .running_since_ms
             .map(|started_ms| now_ms.saturating_sub(started_ms))
             .unwrap_or_default();
-        Duration::from_millis(self.elapsed_ms.saturating_add(running_ms))
+        let latest_ms = self.elapsed_ms.saturating_add(running_ms);
+        Duration::from_millis(match display {
+            AgentTimeDisplay::LatestLoop => latest_ms,
+            AgentTimeDisplay::FullSession => self.session_elapsed_ms.saturating_add(latest_ms),
+        })
     }
 }
 
@@ -310,7 +342,10 @@ enum Completion {
         result: Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String>,
         observed_at_ms: u64,
     },
-    FocusEvent(herdr::FocusEvent),
+    HerdrEvent {
+        event: herdr::Event,
+        observed_at_ms: u64,
+    },
     WorkspaceFocus {
         request_id: u64,
         result: Result<(), String>,
@@ -393,7 +428,7 @@ impl WorkspacePanel {
         let mut panel = Self::new(enabled, groups_path, snapshots_path);
         if let Some(environment) = environment {
             panel.focus.set_host(environment.workspace_id);
-            panel.start_focus_listener();
+            panel.start_event_listener();
         }
         panel
     }
@@ -670,8 +705,16 @@ impl WorkspacePanel {
                         }
                     }
                 }
-                Completion::FocusEvent(event) => {
-                    self.apply_focus_event(event);
+                Completion::HerdrEvent {
+                    event,
+                    observed_at_ms,
+                } => {
+                    match event {
+                        herdr::Event::Focus(event) => self.apply_focus_event(event),
+                        herdr::Event::AgentStatus(event) => {
+                            self.apply_agent_status_event_at(event, observed_at_ms);
+                        }
+                    }
                     self.next_refresh = Instant::now();
                 }
                 Completion::WorkspaceFocus { request_id, result } => {
@@ -769,15 +812,41 @@ impl WorkspacePanel {
         self.agents = ranked.into_iter().map(|(_, agent)| agent).collect();
     }
 
-    pub(crate) fn agent_elapsed(&self, index: usize) -> Option<Duration> {
-        self.agent_elapsed_at(index, unix_time_ms())
+    pub(crate) fn agent_elapsed(
+        &self,
+        index: usize,
+        display: AgentTimeDisplay,
+    ) -> Option<Duration> {
+        self.agent_elapsed_for_at(index, display, unix_time_ms())
     }
 
+    #[cfg(test)]
     fn agent_elapsed_at(&self, index: usize, now_ms: u64) -> Option<Duration> {
+        self.agent_elapsed_for_at(index, AgentTimeDisplay::LatestLoop, now_ms)
+    }
+
+    fn agent_elapsed_for_at(
+        &self,
+        index: usize,
+        display: AgentTimeDisplay,
+        now_ms: u64,
+    ) -> Option<Duration> {
         let agent = self.agents.get(index)?;
         self.agent_timings
             .get(&agent.timing_key)
-            .map(|timing| timing.elapsed_at(now_ms))
+            .map(|timing| timing.elapsed_at(display, now_ms))
+    }
+
+    pub(crate) fn clear_agent_timing_history(&mut self) -> Result<(), String> {
+        let now_ms = unix_time_ms();
+        if let Some(path) = self.agent_timings_path.as_deref() {
+            timings::reset(path, &mut self.agent_timings, &self.agents, now_ms)
+                .map_err(|error| format!("Could not clear agent timing history: {error}"))
+        } else {
+            self.agent_timings.clear();
+            timings::update(&mut self.agent_timings, &self.agents, now_ms);
+            Ok(())
+        }
     }
 
     pub(crate) fn spinner_frame(&self) -> usize {
@@ -1842,12 +1911,17 @@ impl WorkspacePanel {
         });
     }
 
-    fn start_focus_listener(&self) {
+    fn start_event_listener(&self) {
         let sender = self.sender.clone();
         thread::spawn(move || {
             loop {
-                if herdr::watch_focus_events(|event| {
-                    sender.send(Completion::FocusEvent(event)).is_ok()
+                if herdr::watch_events(|event| {
+                    sender
+                        .send(Completion::HerdrEvent {
+                            event,
+                            observed_at_ms: unix_time_ms(),
+                        })
+                        .is_ok()
                 })
                 .is_ok()
                 {
@@ -1869,6 +1943,37 @@ impl WorkspacePanel {
         }
         for agent in &mut self.agents {
             agent.focused = agent.pane_id == pane_id;
+        }
+    }
+
+    fn apply_agent_status_event_at(&mut self, event: herdr::AgentStatusEvent, now_ms: u64) {
+        let Some(agent) = self.agents.iter_mut().find(|agent| {
+            agent.workspace_id == event.workspace_id && agent.pane_id == event.pane_id
+        }) else {
+            return;
+        };
+        agent.status = event.status;
+        let key = agent.timing_key.clone();
+        let state_change_seq = agent.state_change_seq;
+        let synced = self.agent_timings_path.as_deref().is_some_and(|path| {
+            timings::observe_status(
+                path,
+                &mut self.agent_timings,
+                &key,
+                event.status,
+                state_change_seq,
+                now_ms,
+            )
+            .is_ok()
+        });
+        if !synced {
+            if let Some(timing) = self.agent_timings.get_mut(&key) {
+                timing.observe_event(event.status, now_ms);
+            } else if event.status.should_track_timing() {
+                let mut timing = AgentTiming::new(event.status, state_change_seq, now_ms);
+                timing.awaiting_sequence = true;
+                self.agent_timings.insert(key, timing);
+            }
         }
     }
 
@@ -2437,6 +2542,51 @@ mod tests {
         assert_eq!(
             panel.agent_elapsed_at(0, started + 42_000),
             Some(Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn status_events_accumulate_session_time_without_counting_blocked_time() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.agents.clear();
+        panel.agent_timings.clear();
+        let started = 1_000_000;
+        panel.apply_agent_snapshot_at(
+            vec![agent_at_sequence("alpha", AgentStatus::Idle, 1)],
+            started,
+        );
+        let event = |status| herdr::AgentStatusEvent {
+            workspace_id: "workspace".to_owned(),
+            pane_id: "pane-alpha".to_owned(),
+            status,
+        };
+
+        panel.apply_agent_status_event_at(event(AgentStatus::Working), started + 2_000);
+        panel.apply_agent_snapshot_at(
+            vec![agent_at_sequence("alpha", AgentStatus::Working, 2)],
+            started + 3_000,
+        );
+        panel.apply_agent_status_event_at(event(AgentStatus::Blocked), started + 7_000);
+        panel.apply_agent_status_event_at(event(AgentStatus::Working), started + 17_000);
+        panel.apply_agent_status_event_at(event(AgentStatus::Done), started + 20_000);
+        assert_eq!(
+            panel.agent_elapsed_for_at(0, AgentTimeDisplay::LatestLoop, started + 40_000),
+            Some(Duration::from_secs(8))
+        );
+        assert_eq!(
+            panel.agent_elapsed_for_at(0, AgentTimeDisplay::FullSession, started + 40_000),
+            Some(Duration::from_secs(8))
+        );
+
+        panel.apply_agent_status_event_at(event(AgentStatus::Working), started + 40_000);
+        panel.apply_agent_status_event_at(event(AgentStatus::Idle), started + 44_000);
+        assert_eq!(
+            panel.agent_elapsed_for_at(0, AgentTimeDisplay::LatestLoop, started + 60_000),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(
+            panel.agent_elapsed_for_at(0, AgentTimeDisplay::FullSession, started + 60_000),
+            Some(Duration::from_secs(12))
         );
     }
 

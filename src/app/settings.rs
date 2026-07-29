@@ -11,6 +11,35 @@ use super::{
     explorer::MINIMUM_EXPLORER_PANE_WIDTH,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTimeDisplay {
+    LatestLoop,
+    FullSession,
+}
+
+impl AgentTimeDisplay {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::LatestLoop => "latest",
+            Self::FullSession => "session",
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::LatestLoop => Self::FullSession,
+            Self::FullSession => Self::LatestLoop,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::LatestLoop => "Latest loop",
+            Self::FullSession => "Full session",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub auto_fetch: bool,
@@ -18,6 +47,7 @@ pub struct Settings {
     pub worktree_width: u16,
     pub workspace_panel_enabled: bool,
     pub show_agent_harness: bool,
+    pub agent_time_display: AgentTimeDisplay,
     pub workspace_panel_width: u16,
     pub history_height: u16,
     pub explorer_left_pane_width: Option<u16>,
@@ -39,6 +69,7 @@ impl Default for Settings {
             worktree_width: 38,
             workspace_panel_enabled: true,
             show_agent_harness: false,
+            agent_time_display: AgentTimeDisplay::LatestLoop,
             workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
             history_height: 7,
             explorer_left_pane_width: None,
@@ -95,12 +126,13 @@ impl SettingsStore {
         atomic_write(
             path,
             format!(
-                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nworkspace_panel_width={}\nhistory_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
+                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nworkspace_panel_width={}\nhistory_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
                 settings.auto_fetch,
                 settings.fetch_interval_minutes,
                 settings.worktree_width,
                 settings.workspace_panel_enabled,
                 settings.show_agent_harness,
+                settings.agent_time_display.as_str(),
                 settings.workspace_panel_width,
                 settings.history_height,
                 settings
@@ -158,6 +190,12 @@ fn load(path: &Path) -> Settings {
             "show_agent_harness" => {
                 settings.show_agent_harness = value.trim() == "true";
             }
+            "agent_time_display" => {
+                settings.agent_time_display = match value.trim() {
+                    "session" => AgentTimeDisplay::FullSession,
+                    _ => AgentTimeDisplay::LatestLoop,
+                };
+            }
             "workspace_panel_width" => {
                 if let Ok(width) = value.trim().parse::<u16>() {
                     settings.workspace_panel_width =
@@ -210,6 +248,7 @@ mod tests {
             worktree_width: 61,
             workspace_panel_enabled: false,
             show_agent_harness: true,
+            agent_time_display: AgentTimeDisplay::FullSession,
             workspace_panel_width: 33,
             history_height: 9,
             explorer_left_pane_width: Some(47),

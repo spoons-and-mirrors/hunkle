@@ -53,6 +53,7 @@ use std::{
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
+const SETTINGS_ROW_COUNT: usize = 8;
 
 struct CommitDraftResult {
     root: PathBuf,
@@ -226,6 +227,8 @@ pub struct Regions {
     pub auto_fetch: Option<Rect>,
     pub workspace_panel_setting: Option<Rect>,
     pub agent_harness_setting: Option<Rect>,
+    pub agent_time_setting: Option<Rect>,
+    pub clear_agent_timings_setting: Option<Rect>,
     pub fetch_interval: Option<Rect>,
     pub fetch_interval_down: Option<Rect>,
     pub fetch_interval_up: Option<Rect>,
@@ -1574,10 +1577,11 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('s') => self.mode = Mode::Normal,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                self.settings_selection = (self.settings_selection + 1) % 6;
+                self.settings_selection = (self.settings_selection + 1) % SETTINGS_ROW_COUNT;
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                self.settings_selection = (self.settings_selection + 5) % 6;
+                self.settings_selection =
+                    (self.settings_selection + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 0 => {
                 self.toggle_auto_fetch();
@@ -1597,9 +1601,15 @@ impl App {
                 self.toggle_agent_harness();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 4 => {
-                self.toggle_media_preview_protocol();
+                self.toggle_agent_time_display();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 5 => {
+                self.clear_agent_timing_history();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 6 => {
+                self.toggle_media_preview_protocol();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 7 => {
                 self.open_editor_setting();
             }
             _ => {}
@@ -2556,6 +2566,18 @@ impl App {
     fn toggle_agent_harness(&mut self) {
         self.settings.show_agent_harness = !self.settings.show_agent_harness;
         self.settings_changed();
+    }
+
+    fn toggle_agent_time_display(&mut self) {
+        self.settings.agent_time_display = self.settings.agent_time_display.next();
+        self.settings_changed();
+    }
+
+    fn clear_agent_timing_history(&mut self) {
+        self.notice = Some(match self.workspace_panel.clear_agent_timing_history() {
+            Ok(()) => "Agent timing history cleared".to_owned(),
+            Err(error) => error,
+        });
     }
 
     fn toggle_media_preview_protocol(&mut self) {
@@ -3652,6 +3674,7 @@ mod tests {
                 worktree_width: 38,
                 workspace_panel_enabled: true,
                 show_agent_harness: false,
+                agent_time_display: settings::AgentTimeDisplay::LatestLoop,
                 workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
                 history_height: 7,
                 explorer_left_pane_width: None,
@@ -3668,6 +3691,16 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.settings.show_agent_harness);
         assert_eq!(app.settings_store.load(), app.settings);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.settings.agent_time_display,
+            settings::AgentTimeDisplay::FullSession
+        );
+        assert_eq!(app.settings_store.load(), app.settings);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.notice.as_deref(), Some("Agent timing history cleared"));
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(

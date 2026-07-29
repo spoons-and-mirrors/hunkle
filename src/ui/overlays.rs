@@ -35,6 +35,8 @@ pub(super) struct SettingsRegions {
     pub(super) fetch_interval_up: Rect,
     pub(super) workspace_panel: Rect,
     pub(super) agent_harness: Rect,
+    pub(super) agent_time: Rect,
+    pub(super) clear_agent_timings: Rect,
     pub(super) media_preview: Rect,
     pub(super) editor: Rect,
 }
@@ -3061,7 +3063,7 @@ pub(super) fn draw_settings(
     selection: usize,
     fetch_running: bool,
 ) -> SettingsRegions {
-    let area = centered_min(frame.area(), 58, 0, 48, 24);
+    let area = centered_min(frame.area(), 58, 0, 48, 28);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -3112,20 +3114,29 @@ pub(super) fn draw_settings(
         area.width.saturating_sub(4),
         area.height,
     );
-    let compact = area.height < 22;
+    let compact = area.height < 26;
     let automation_header_y = if compact { 3 } else { 4 };
     let auto_y = if compact { 4 } else { 7 };
     let interval_y = if compact { 5 } else { 9 };
     let interface_header_y = if compact { 7 } else { 13 };
     let workspace_y = if compact { 8 } else { 14 };
     let agent_y = if compact { 9 } else { 16 };
-    let media_y = if compact { 10 } else { 18 };
-    let editor_y = if compact { 11 } else { 20 };
+    let agent_time_y = if compact { 10 } else { 18 };
+    let clear_timings_y = if compact { 11 } else { 20 };
+    let media_y = if compact { 12 } else { 22 };
+    let editor_y = if compact { 13 } else { 24 };
     let auto_row = Rect::new(inner.x, area.y.saturating_add(auto_y), inner.width, 1);
     let interval_row = Rect::new(inner.x, area.y.saturating_add(interval_y), inner.width, 1);
     let workspace_panel_row =
         Rect::new(inner.x, area.y.saturating_add(workspace_y), inner.width, 1);
     let agent_harness_row = Rect::new(inner.x, area.y.saturating_add(agent_y), inner.width, 1);
+    let agent_time_row = Rect::new(inner.x, area.y.saturating_add(agent_time_y), inner.width, 1);
+    let clear_agent_timings_row = Rect::new(
+        inner.x,
+        area.y.saturating_add(clear_timings_y),
+        inner.width,
+        1,
+    );
     let media_preview_row = Rect::new(inner.x, area.y.saturating_add(media_y), inner.width, 1);
     let editor_row = Rect::new(inner.x, area.y.saturating_add(editor_y), inner.width, 1);
     let interval_down = Rect::new(
@@ -3148,7 +3159,7 @@ pub(super) fn draw_settings(
             ),
             Span::styled(media_protocol_label, Style::default().fg(palette().accent)),
         ]))
-        .style(Style::default().bg(if selection == 4 {
+        .style(Style::default().bg(if selection == 6 {
             palette().selected
         } else {
             palette().surface_alt
@@ -3312,6 +3323,40 @@ pub(super) fn draw_settings(
         agent_harness_row,
     );
 
+    let agent_time_label = settings.agent_time_display.label();
+    let agent_time_padding = usize::from(agent_time_row.width)
+        .saturating_sub("Agent time".len() + agent_time_label.len());
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Agent time", Style::default().fg(palette().ink)),
+            Span::raw(" ".repeat(agent_time_padding)),
+            Span::styled(agent_time_label, Style::default().fg(palette().accent)),
+        ]))
+        .style(Style::default().bg(if selection == 4 {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        agent_time_row,
+    );
+
+    let clear_label = "Clear";
+    let clear_padding = usize::from(clear_agent_timings_row.width)
+        .saturating_sub("Agent timing history".len() + clear_label.len());
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Agent timing history", Style::default().fg(palette().ink)),
+            Span::raw(" ".repeat(clear_padding)),
+            Span::styled(clear_label, Style::default().fg(palette().orange)),
+        ]))
+        .style(Style::default().bg(if selection == 5 {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        clear_agent_timings_row,
+    );
+
     let editor = settings
         .editor_command
         .as_deref()
@@ -3332,7 +3377,7 @@ pub(super) fn draw_settings(
                 }),
             ),
         ]))
-        .style(Style::default().bg(if selection == 5 {
+        .style(Style::default().bg(if selection == 7 {
             palette().selected
         } else {
             palette().surface_alt
@@ -3348,6 +3393,8 @@ pub(super) fn draw_settings(
         fetch_interval_up: interval_up,
         workspace_panel: workspace_panel_row,
         agent_harness: agent_harness_row,
+        agent_time: agent_time_row,
+        clear_agent_timings: clear_agent_timings_row,
         media_preview: media_preview_row,
         editor: editor_row,
     }

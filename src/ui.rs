@@ -105,7 +105,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             Some(HitTarget::WorkspacePanel(target)) => Some(target),
             _ => None,
         };
-        let show_agent_harness = app.settings.show_agent_harness;
         let loaded_workspace_path = app.repository().map(|repository| repository.root.clone());
         for (target, rect) in workspace_panel::draw(
             frame,
@@ -113,7 +112,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             panel_area,
             app.mode == Mode::WorkspacePanel,
             workspace_panel_hover,
-            show_agent_harness,
+            &app.settings,
             loaded_workspace_path.as_deref(),
         ) {
             app.regions.register_hit_target(target, rect);
@@ -193,6 +192,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.fetch_interval_up = Some(regions.fetch_interval_up);
             app.regions.workspace_panel_setting = Some(regions.workspace_panel);
             app.regions.agent_harness_setting = Some(regions.agent_harness);
+            app.regions.agent_time_setting = Some(regions.agent_time);
+            app.regions.clear_agent_timings_setting = Some(regions.clear_agent_timings);
             app.regions.media_preview_setting = Some(regions.media_preview);
             app.regions.editor_setting = Some(regions.editor);
         }

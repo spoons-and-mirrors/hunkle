@@ -22,12 +22,25 @@ pub(super) struct FocusEvent {
     pub(super) pane_id: String,
 }
 
-struct FocusEventCoalescer {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AgentStatusEvent {
+    pub(super) workspace_id: String,
+    pub(super) pane_id: String,
+    pub(super) status: AgentStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Event {
+    Focus(FocusEvent),
+    AgentStatus(AgentStatusEvent),
+}
+
+struct EventCoalescer {
     replaying: bool,
     latest: Option<FocusEvent>,
 }
 
-impl FocusEventCoalescer {
+impl EventCoalescer {
     fn new() -> Self {
         Self {
             replaying: true,
@@ -35,18 +48,20 @@ impl FocusEventCoalescer {
         }
     }
 
-    fn observe(&mut self, event: FocusEvent) -> Option<FocusEvent> {
+    fn observe(&mut self, event: Event) -> Option<Event> {
         if self.replaying {
-            self.latest = Some(event);
+            if let Event::Focus(event) = event {
+                self.latest = Some(event);
+            }
             None
         } else {
             Some(event)
         }
     }
 
-    fn finish_replay(&mut self) -> Option<FocusEvent> {
+    fn finish_replay(&mut self) -> Option<Event> {
         self.replaying = false;
-        self.latest.take()
+        self.latest.take().map(Event::Focus)
     }
 }
 
@@ -108,37 +123,35 @@ pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>
     run(&["api".to_owned(), "snapshot".to_owned()]).and_then(|value| parse_snapshot(&value))
 }
 
-pub(super) fn watch_focus_events(
-    mut on_event: impl FnMut(FocusEvent) -> bool,
-) -> Result<(), String> {
+pub(super) fn watch_events(mut on_event: impl FnMut(Event) -> bool) -> Result<(), String> {
     let socket_path = std::env::var_os("HERDR_SOCKET_PATH")
         .map(PathBuf::from)
         .ok_or_else(|| "Herdr did not provide its API socket path".to_owned())?;
     let mut stream = connect(&socket_path)
-        .map_err(|error| format!("Could not subscribe to Herdr focus events: {error}"))?;
+        .map_err(|error| format!("Could not subscribe to Herdr events: {error}"))?;
     stream
         .write_all(
             concat!(
-                r#"{"id":"hunkle:focus","method":"events.subscribe","params":{"subscriptions":["#,
-                r#"{"type":"pane.focused"}]}}"#,
+                r#"{"id":"hunkle:events","method":"events.subscribe","params":{"subscriptions":["#,
+                r#"{"type":"pane.focused"},{"type":"pane.agent_status_changed"}]}}"#,
                 "\n"
             )
             .as_bytes(),
         )
         .and_then(|()| stream.flush())
-        .map_err(|error| format!("Could not subscribe to Herdr focus events: {error}"))?;
+        .map_err(|error| format!("Could not subscribe to Herdr events: {error}"))?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader
         .read_line(&mut line)
-        .map_err(|error| format!("Herdr focus event stream failed: {error}"))?
+        .map_err(|error| format!("Herdr event stream failed: {error}"))?
         == 0
     {
-        return Err("Herdr focus event stream closed".to_owned());
+        return Err("Herdr event stream closed".to_owned());
     }
     let acknowledgement: Value = serde_json::from_str(&line)
-        .map_err(|error| format!("Could not read the Herdr focus subscription: {error}"))?;
+        .map_err(|error| format!("Could not read the Herdr event subscription: {error}"))?;
     if let Some(error) = acknowledgement
         .pointer("/error/message")
         .and_then(Value::as_str)
@@ -150,16 +163,17 @@ pub(super) fn watch_focus_events(
         .and_then(Value::as_str)
         != Some("subscription_started")
     {
-        return Err("Herdr returned an unexpected focus subscription response".to_owned());
+        return Err("Herdr returned an unexpected event subscription response".to_owned());
     }
 
     // Official Herdr releases replay retained events at 100 ms intervals. Collapse that history
-    // at startup, then remove the timeout so future focus changes pass through immediately.
+    // at startup, then remove the timeout so future changes pass through immediately. Historical
+    // status events have no timestamps, so the initial snapshot establishes timing state instead.
     reader
         .get_ref()
         .set_recv_timeout(Some(Duration::from_millis(200)))
-        .map_err(|error| format!("Could not configure the Herdr focus stream: {error}"))?;
-    let mut events = FocusEventCoalescer::new();
+        .map_err(|error| format!("Could not configure the Herdr event stream: {error}"))?;
+    let mut events = EventCoalescer::new();
     loop {
         line.clear();
         let read = match reader.read_line(&mut line) {
@@ -172,7 +186,7 @@ pub(super) fn watch_focus_events(
                     ) =>
             {
                 reader.get_ref().set_recv_timeout(None).map_err(|error| {
-                    format!("Could not configure the Herdr focus stream: {error}")
+                    format!("Could not configure the Herdr event stream: {error}")
                 })?;
                 if let Some(event) = events.finish_replay()
                     && !on_event(event)
@@ -181,17 +195,17 @@ pub(super) fn watch_focus_events(
                 }
                 continue;
             }
-            Err(error) => return Err(format!("Herdr focus event stream failed: {error}")),
+            Err(error) => return Err(format!("Herdr event stream failed: {error}")),
         };
         if read == 0 {
-            return Err("Herdr focus event stream closed".to_owned());
+            return Err("Herdr event stream closed".to_owned());
         }
         let value: Value = serde_json::from_str(&line)
-            .map_err(|error| format!("Could not read a Herdr focus event: {error}"))?;
+            .map_err(|error| format!("Could not read a Herdr event: {error}"))?;
         if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
             return Err(error.to_owned());
         }
-        let Some(event) = parse_focus_event(&value) else {
+        let Some(event) = parse_event(&value) else {
             continue;
         };
         if let Some(event) = events.observe(event)
@@ -218,14 +232,21 @@ fn connect(path: &Path) -> std::io::Result<Stream> {
     }
 }
 
-fn parse_focus_event(value: &Value) -> Option<FocusEvent> {
-    if value.get("event")?.as_str()? != "pane_focused" {
-        return None;
+fn parse_event(value: &Value) -> Option<Event> {
+    let workspace_id = value.pointer("/data/workspace_id")?.as_str()?.to_owned();
+    let pane_id = value.pointer("/data/pane_id")?.as_str()?.to_owned();
+    match value.get("event")?.as_str()? {
+        "pane_focused" => Some(Event::Focus(FocusEvent {
+            workspace_id,
+            pane_id,
+        })),
+        "pane_agent_status_changed" => Some(Event::AgentStatus(AgentStatusEvent {
+            workspace_id,
+            pane_id,
+            status: parse_agent_status(value.pointer("/data/agent_status").and_then(Value::as_str)),
+        })),
+        _ => None,
     }
-    Some(FocusEvent {
-        workspace_id: value.pointer("/data/workspace_id")?.as_str()?.to_owned(),
-        pane_id: value.pointer("/data/pane_id")?.as_str()?.to_owned(),
-    })
 }
 
 pub(super) fn restore(request: RestoreRequest) -> Result<Option<String>, String> {
@@ -648,23 +669,40 @@ mod tests {
     #[test]
     fn parses_focus_events() {
         assert_eq!(
-            parse_focus_event(&serde_json::json!({
+            parse_event(&serde_json::json!({
                 "event": "pane_focused",
                 "data": { "workspace_id": "w2", "pane_id": "w2:p3" }
             })),
-            Some(FocusEvent {
+            Some(Event::Focus(FocusEvent {
                 workspace_id: "w2".to_owned(),
                 pane_id: "w2:p3".to_owned(),
-            })
+            }))
+        );
+        assert_eq!(
+            parse_event(&serde_json::json!({
+                "event": "pane_agent_status_changed",
+                "data": {
+                    "workspace_id": "w2",
+                    "pane_id": "w2:p3",
+                    "agent_status": "blocked"
+                }
+            })),
+            Some(Event::AgentStatus(AgentStatusEvent {
+                workspace_id: "w2".to_owned(),
+                pane_id: "w2:p3".to_owned(),
+                status: AgentStatus::Blocked,
+            }))
         );
     }
 
     #[test]
     fn coalesces_replayed_focus_events_before_forwarding_live_events() {
-        let mut events = FocusEventCoalescer::new();
-        let event = |workspace_id: &str, pane_id: &str| FocusEvent {
-            workspace_id: workspace_id.to_owned(),
-            pane_id: pane_id.to_owned(),
+        let mut events = EventCoalescer::new();
+        let event = |workspace_id: &str, pane_id: &str| {
+            Event::Focus(FocusEvent {
+                workspace_id: workspace_id.to_owned(),
+                pane_id: pane_id.to_owned(),
+            })
         };
 
         assert_eq!(events.observe(event("w1", "w1:p1")), None);

@@ -1021,17 +1021,31 @@ impl App {
             self.toggle_agent_harness();
         } else if self
             .regions
-            .media_preview_setting
+            .agent_time_setting
             .is_some_and(|rect| rect.contains(point))
         {
             self.settings_selection = 4;
+            self.toggle_agent_time_display();
+        } else if self
+            .regions
+            .clear_agent_timings_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 5;
+            self.clear_agent_timing_history();
+        } else if self
+            .regions
+            .media_preview_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 6;
             self.toggle_media_preview_protocol();
         } else if self
             .regions
             .editor_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 5;
+            self.settings_selection = 7;
             self.open_editor_setting();
         }
     }
