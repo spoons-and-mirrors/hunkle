@@ -1093,6 +1093,10 @@ fn renders_every_primary_surface() {
         splitter.y,
     ));
     assert!(!app.workspace_explorer.dragging_splitter);
+    assert_eq!(
+        app.settings_store.load().explorer_left_pane_width,
+        app.workspace_explorer.left_pane_width
+    );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions

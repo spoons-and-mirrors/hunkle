@@ -76,6 +76,7 @@ impl App {
                 MouseEventKind::Up(MouseButton::Left) => {
                     self.resize_explorer_panes(mouse.column);
                     self.workspace_explorer.dragging_splitter = false;
+                    self.persist_settings();
                 }
                 _ => {}
             }
@@ -1250,6 +1251,7 @@ impl App {
             bounds.x.saturating_add(2),
             bounds.width.saturating_sub(4),
         );
+        self.settings.explorer_left_pane_width = self.workspace_explorer.left_pane_width;
     }
 
     fn resize_workspace_panel(&mut self, column: u16) {

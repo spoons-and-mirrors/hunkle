@@ -385,6 +385,8 @@ impl App {
         if let Some(repo) = session.data() {
             author_filter.sync(&repo.root, &repo.commits);
         }
+        let mut workspace_explorer = Explorer::with_favorites(start, explorer_favorites_path);
+        workspace_explorer.left_pane_width = settings.explorer_left_pane_width;
         let mut app = Self {
             session,
             view: View::Changes,
@@ -406,7 +408,7 @@ impl App {
             dragging_history: false,
             dragging_diff_scrollbar: false,
             diff_scroll_drag_offset: 0,
-            workspace_explorer: Explorer::with_favorites(start, explorer_favorites_path),
+            workspace_explorer,
             file_search,
             actions: ActionsState::default(),
             herdr_prompt: HerdrPrompt::default(),
@@ -3521,6 +3523,7 @@ mod tests {
                 show_agent_harness: false,
                 workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
                 history_height: 7,
+                explorer_left_pane_width: None,
                 editor_command: None,
                 media_preview_protocol: MediaPreviewProtocol::Auto,
             }

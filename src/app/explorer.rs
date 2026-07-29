@@ -23,7 +23,7 @@ use favorites::FavoriteStore;
 const MAX_PREVIEW_ENTRIES: usize = 200;
 const MAX_SURROUNDING_CHILDREN: usize = 200;
 const DOUBLE_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
-const MINIMUM_PANE_WIDTH: u16 = 16;
+pub(super) const MINIMUM_EXPLORER_PANE_WIDTH: u16 = 16;
 
 #[derive(Debug, Clone)]
 pub struct PickerEntry {
@@ -636,7 +636,7 @@ impl Explorer {
 
     pub(crate) fn pane_width(&self, total_width: u16) -> u16 {
         let available = total_width.saturating_sub(2);
-        let minimum = MINIMUM_PANE_WIDTH.min(available / 2);
+        let minimum = MINIMUM_EXPLORER_PANE_WIDTH.min(available / 2);
         let maximum = available.saturating_sub(minimum);
         self.left_pane_width
             .unwrap_or_else(|| total_width.saturating_mul(38) / 100)
@@ -644,14 +644,13 @@ impl Explorer {
     }
 
     pub(crate) fn resize_panes(&mut self, column: u16, start: u16, total_width: u16) {
-        self.left_pane_width = Some(
-            column.saturating_sub(start).saturating_sub(1).clamp(
-                MINIMUM_PANE_WIDTH.min(total_width.saturating_sub(2) / 2),
-                total_width
-                    .saturating_sub(2)
-                    .saturating_sub(MINIMUM_PANE_WIDTH.min(total_width.saturating_sub(2) / 2)),
-            ),
-        );
+        self.left_pane_width =
+            Some(column.saturating_sub(start).saturating_sub(1).clamp(
+                MINIMUM_EXPLORER_PANE_WIDTH.min(total_width.saturating_sub(2) / 2),
+                total_width.saturating_sub(2).saturating_sub(
+                    MINIMUM_EXPLORER_PANE_WIDTH.min(total_width.saturating_sub(2) / 2),
+                ),
+            ));
     }
 
     fn register_row_click(&mut self, path: PathBuf) -> bool {
