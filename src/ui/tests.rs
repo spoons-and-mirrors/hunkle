@@ -2743,7 +2743,7 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
     assert!(screen.contains("WORKTREES"));
     assert!(screen.contains("feature/modal"));
     assert!(!screen.contains("ACTIVE REPOSITORY"));
-    assert_eq!(screen.matches("MAIN ·").count(), 1);
+    assert!(!screen.contains("MAIN ·"));
     assert!(!screen.contains("PRIMARY"));
     assert!(!screen.contains("2 CHECKOUTS"));
     assert!(screen.contains("WORKTREE DETAILS"));
@@ -2779,7 +2779,7 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
         row: linked_row,
     });
     let row_area = app.regions.hit_target_rect(target).unwrap();
-    assert_eq!(row_area.height, 2);
+    assert_eq!(row_area.height, 1);
 
     app.handle_mouse(mouse(MouseEventKind::Moved, row_area.x + 1, row_area.y));
     assert_eq!(app.worktree_manager.state.selected(), Some(linked_row));
@@ -2793,8 +2793,8 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
         [usize::from(row_area.y) * width + usize::from(row_area.x.saturating_add(1))];
     let selected_branch_cell = &buffer.content
         [usize::from(row_area.y) * width + usize::from(row_area.x.saturating_add(4))];
-    let selected_path_cell = &buffer.content[usize::from(row_area.y.saturating_add(1)) * width
-        + usize::from(row_area.x.saturating_add(4))];
+    let selected_path_cell = &buffer.content
+        [usize::from(row_area.y) * width + usize::from(row_area.x.saturating_add(19))];
     assert_eq!(selected_cell.bg, super::palette().raised);
     assert_eq!(selected_branch_cell.fg, super::palette().accent);
     assert_eq!(selected_path_cell.fg, super::palette().soft);
@@ -2824,10 +2824,14 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
         .unwrap();
     let current_cell = &buffer.content
         [usize::from(current_area.y) * width + usize::from(current_area.x.saturating_add(1))];
-    let current_repository_cell = &buffer.content
-        [usize::from(current_area.y) * width + usize::from(current_area.x.saturating_add(2))];
+    let list_area = app
+        .regions
+        .hit_target_rect(HitTarget::WorktreeManager(WorktreeManagerHitTarget::List))
+        .unwrap();
+    let repository_cell =
+        &buffer.content[usize::from(list_area.y) * width + usize::from(list_area.x)];
     assert_eq!(current_cell.bg, super::palette().add_bg);
-    assert!(current_repository_cell.modifier.contains(Modifier::BOLD));
+    assert!(repository_cell.modifier.contains(Modifier::BOLD));
     click(&mut app, row_area.x + 1, row_area.y);
     assert_eq!(app.mode, Mode::WorktreeManager);
 

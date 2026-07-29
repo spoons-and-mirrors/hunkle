@@ -492,36 +492,34 @@ pub(super) fn draw_worktree_manager(
         )]
     } else {
         rows.iter()
-            .enumerate()
-            .map(|(row_index, row)| match *row {
+            .map(|row| match *row {
+                WorktreeManagerRow::Repository(repository_index) => {
+                    let repository = &manager.repositories[repository_index];
+                    ListItem::new(Line::from(Span::styled(
+                        repository.label.to_uppercase(),
+                        Style::default()
+                            .fg(palette().ink)
+                            .add_modifier(Modifier::BOLD),
+                    )))
+                }
                 WorktreeManagerRow::Status(repository_index) => {
                     let repository = &manager.repositories[repository_index];
-                    ListItem::new(vec![
-                        Line::from(Span::styled(
-                            format!("  {}  UNAVAILABLE", repository.label.to_uppercase()),
-                            Style::default().fg(palette().red),
-                        )),
-                        Line::from(Span::styled(
+                    ListItem::new(Line::from(vec![
+                        Span::styled("    UNAVAILABLE  ", Style::default().fg(palette().red)),
+                        Span::styled(
                             truncate_width(
                                 repository.error.as_deref().unwrap_or_default(),
-                                usize::from(list.width.saturating_sub(4)),
+                                usize::from(list.width.saturating_sub(17)),
                             ),
                             Style::default().fg(palette().faint),
-                        )),
-                    ])
+                        ),
+                    ]))
                     .style(Style::default().bg(palette().surface_alt))
                 }
                 WorktreeManagerRow::Worktree {
                     repository,
                     worktree,
                 } => {
-                    let first_in_repository = !matches!(
-                        row_index.checked_sub(1).and_then(|index| rows.get(index)),
-                        Some(WorktreeManagerRow::Worktree {
-                            repository: previous,
-                            ..
-                        }) if *previous == repository
-                    );
                     let repository = &manager.repositories[repository];
                     let worktree = &repository.worktrees[worktree];
                     let current = manager.is_current(&worktree.path);
@@ -545,52 +543,44 @@ pub(super) fn draw_worktree_manager(
                         format!("  {}", badges.join(" · "))
                     };
                     let marker = if current || selected { "▌ " } else { "  " };
-                    let badge = truncate_width(&badge, usize::from(list.width / 2));
-                    let label_width = usize::from(list.width.saturating_sub(2))
+                    let badge = truncate_width(&badge, usize::from(list.width / 3));
+                    let identity_width = usize::from(list.width.saturating_sub(4))
                         .saturating_sub(UnicodeWidthStr::width(badge.as_str()));
                     let branch_label = worktree_label(worktree);
-                    let (repository_label, branch_label) = if first_in_repository {
-                        let repository_label = repository.label.to_uppercase();
-                        let identity_width = label_width.saturating_sub(3);
-                        let repository_width = UnicodeWidthStr::width(repository_label.as_str());
-                        let branch_width = UnicodeWidthStr::width(branch_label.as_str());
-                        let repository_budget = if repository_width + branch_width <= identity_width
-                        {
-                            repository_width
-                        } else {
-                            let branch_reserve = branch_width.min(identity_width / 2);
-                            repository_width.min(identity_width.saturating_sub(branch_reserve))
-                        };
-                        let repository_label = truncate_width(&repository_label, repository_budget);
-                        let branch_budget = identity_width
-                            .saturating_sub(UnicodeWidthStr::width(repository_label.as_str()));
-                        (
-                            Some(repository_label),
-                            truncate_width(&branch_label, branch_budget),
-                        )
+                    let path = worktree.path.display().to_string();
+                    let branch_width = UnicodeWidthStr::width(branch_label.as_str());
+                    let path_width = UnicodeWidthStr::width(path.as_str());
+                    let branch_budget = if branch_width + path_width + 2 <= identity_width {
+                        branch_width
                     } else {
-                        (
-                            None,
-                            truncate_width(&branch_label, label_width.saturating_sub(2)),
-                        )
+                        branch_width.min(identity_width / 2)
                     };
-                    let mut identity = Vec::new();
-                    if let Some(repository_label) = repository_label {
-                        identity.push(Span::styled(
-                            repository_label,
-                            Style::default()
-                                .fg(palette().ink)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                        identity.push(Span::styled(" · ", Style::default().fg(palette().faint)));
-                    } else {
-                        identity.push(Span::raw("  "));
-                    }
-                    identity.push(Span::styled(
-                        branch_label,
-                        Style::default().fg(palette().accent),
-                    ));
-                    identity.push(Span::styled(
+                    let branch_label = truncate_width(&branch_label, branch_budget);
+                    let path_budget = identity_width
+                        .saturating_sub(UnicodeWidthStr::width(branch_label.as_str()) + 2);
+                    let path = truncate_start_width(&path, path_budget);
+                    let mut line = vec![
+                        Span::styled(
+                            marker,
+                            Style::default().fg(if current {
+                                palette().green
+                            } else {
+                                palette().accent
+                            }),
+                        ),
+                        Span::raw("  "),
+                        Span::styled(branch_label, Style::default().fg(palette().accent)),
+                        Span::raw("  "),
+                        Span::styled(
+                            path,
+                            Style::default().fg(if selected || current {
+                                palette().soft
+                            } else {
+                                palette().muted
+                            }),
+                        ),
+                    ];
+                    line.push(Span::styled(
                         badge,
                         Style::default()
                             .fg(if current {
@@ -604,41 +594,7 @@ pub(super) fn draw_worktree_manager(
                                 Modifier::empty()
                             }),
                     ));
-                    let mut heading = vec![Span::styled(
-                        marker,
-                        Style::default().fg(if current {
-                            palette().green
-                        } else {
-                            palette().accent
-                        }),
-                    )];
-                    heading.extend(identity);
-                    ListItem::new(vec![
-                        Line::from(heading),
-                        Line::from(vec![
-                            Span::styled(
-                                marker,
-                                Style::default().fg(if current {
-                                    palette().green
-                                } else {
-                                    palette().accent
-                                }),
-                            ),
-                            Span::raw("  "),
-                            Span::styled(
-                                truncate_start_width(
-                                    &worktree.path.display().to_string(),
-                                    usize::from(list.width.saturating_sub(4)),
-                                ),
-                                Style::default().fg(if selected || current {
-                                    palette().soft
-                                } else {
-                                    palette().muted
-                                }),
-                            ),
-                        ]),
-                    ])
-                    .style(Style::default().bg(if selected {
+                    ListItem::new(Line::from(line)).style(Style::default().bg(if selected {
                         palette().raised
                     } else if current {
                         palette().add_bg
@@ -657,7 +613,7 @@ pub(super) fn draw_worktree_manager(
     ));
     let mut row_y = list.y;
     for (index, row) in rows.iter().enumerate().skip(manager.state.offset()) {
-        let row_height = 2;
+        let row_height = 1;
         let remaining = list.bottom().saturating_sub(row_y);
         if remaining < row_height {
             break;

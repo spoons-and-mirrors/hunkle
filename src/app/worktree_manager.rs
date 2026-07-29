@@ -80,6 +80,7 @@ pub(crate) struct WorktreeRepository {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorktreeManagerRow {
+    Repository(usize),
     Worktree { repository: usize, worktree: usize },
     Status(usize),
 }
@@ -444,6 +445,7 @@ impl WorktreeManager {
             if matching.is_empty() && (!repository_matches || repository.error.is_none()) {
                 continue;
             }
+            rows.push(WorktreeManagerRow::Repository(repository_index));
             if repository.error.is_some() {
                 rows.push(WorktreeManagerRow::Status(repository_index));
             } else {
@@ -993,12 +995,15 @@ mod tests {
 
         assert_eq!(
             manager.rows(),
-            [WorktreeManagerRow::Worktree {
-                repository: 0,
-                worktree: 1,
-            }]
+            [
+                WorktreeManagerRow::Repository(0),
+                WorktreeManagerRow::Worktree {
+                    repository: 0,
+                    worktree: 1,
+                },
+            ]
         );
-        assert_eq!(manager.state.selected(), Some(0));
+        assert_eq!(manager.state.selected(), Some(1));
     }
 
     #[test]
@@ -1093,7 +1098,7 @@ mod tests {
         manager.paste("feature");
 
         assert!(!manager.select_row(generation, 1));
-        assert_eq!(manager.state.selected(), Some(0));
+        assert_eq!(manager.state.selected(), Some(1));
     }
 
     #[test]
