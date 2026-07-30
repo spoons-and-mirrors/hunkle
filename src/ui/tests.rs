@@ -86,7 +86,6 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.help.unwrap().y, 35);
     assert!(app.regions.graph.unwrap().x > 0);
     assert_eq!(app.regions.help.unwrap().right(), 120);
-    assert!(app.regions.repository_browser.is_some());
     let buffer = terminal.backend().buffer();
     let history = app.regions.history_splitter.unwrap();
     let history_offset = usize::from(history.y) * 120 + usize::from(history.x);
@@ -110,8 +109,9 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(footer.contains("f Files"));
     assert!(footer.contains("e Edit"));
-    assert!(footer.contains("b Branches"));
     assert!(footer.contains("Tab Git Graph"));
+    assert!(!footer.contains("W Worktrees"));
+    assert!(!footer.contains("b Branches"));
     assert!(!footer.contains("r Refresh"));
     assert!(!footer.contains("1 Changes"));
     assert!(!footer.contains("2 Graph"));
@@ -1047,6 +1047,7 @@ fn renders_every_primary_surface() {
     assert!(explorer_screen.contains("EXPLORER"));
     assert!(explorer_screen.contains("F1  EXPLORER"));
     assert!(explorer_screen.contains("F2  WORKTREES"));
+    assert!(explorer_screen.contains("F3  BRANCHES"));
     assert!(explorer_screen.contains("Switch working directory"));
     assert!(explorer_screen.contains("AROUND HERE"));
     assert!(explorer_screen.contains("CONTENTS"));
@@ -1060,6 +1061,15 @@ fn renders_every_primary_surface() {
     click(&mut app, worktrees_tab.x + 1, worktrees_tab.y);
     assert_eq!(app.mode, Mode::Explorer);
     assert_eq!(app.explorer_tab, ExplorerTab::Worktrees);
+    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert_eq!(app.explorer_tab, ExplorerTab::Explorer);
+    let branches_tab = app
+        .regions
+        .hit_target_rect(HitTarget::ExplorerTab(ExplorerTab::Branches))
+        .unwrap();
+    click(&mut app, branches_tab.x + 1, branches_tab.y);
+    assert_eq!(app.mode, Mode::Explorer);
+    assert_eq!(app.explorer_tab, ExplorerTab::Branches);
     app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
     assert_eq!(app.explorer_tab, ExplorerTab::Explorer);
     assert!(
@@ -1142,7 +1152,8 @@ fn renders_every_primary_surface() {
 
     app.mode = Mode::Normal;
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::RepositoryBrowser);
+    assert_eq!(app.mode, Mode::Explorer);
+    assert_eq!(app.explorer_tab, ExplorerTab::Branches);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let browser_screen: String = terminal
         .backend()
@@ -1153,6 +1164,7 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(browser_screen.contains("PULL REQUESTS"));
     assert!(browser_screen.contains("LOCAL & REMOTE"));
+    assert!(browser_screen.contains("F3  BRANCHES"));
     assert!(browser_screen.contains("main"));
     assert!(
         app.regions
@@ -1201,6 +1213,9 @@ fn renders_every_primary_surface() {
         super::palette().selected
     );
     app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    assert!(app.repository_browser.branch_delete_open());
+    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert_eq!(app.explorer_tab, ExplorerTab::Branches);
     assert!(app.repository_browser.branch_delete_open());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let delete_screen: String = terminal

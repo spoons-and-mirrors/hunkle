@@ -61,7 +61,7 @@ pub(super) fn draw_repository_browser(
     frame: &mut Frame<'_>,
     browser: &mut RepositoryBrowser,
 ) -> Vec<(HitTarget, Rect)> {
-    let area = centered_min(frame.area(), 84, 72, 60, 18);
+    let area = centered_min(frame.area(), 88, 78, 68, 20);
     let mut hit_targets = vec![(
         HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Overlay),
         area,
@@ -73,6 +73,7 @@ pub(super) fn draw_repository_browser(
         Rect::new(area.x, area.y, area.width, 3),
         palette().surface_alt,
     );
+    hit_targets.extend(draw_explorer_tabs(frame, area, ExplorerTab::Branches));
     fill(
         frame,
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -84,7 +85,7 @@ pub(super) fn draw_repository_browser(
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "REPOSITORY",
+                "BRANCHES",
                 Style::default()
                     .fg(palette().ink)
                     .add_modifier(Modifier::BOLD),
@@ -2791,6 +2792,7 @@ fn draw_explorer_tabs(
             let label = match tab {
                 ExplorerTab::Explorer => "F1  EXPLORER",
                 ExplorerTab::Worktrees => "F2  WORKTREES",
+                ExplorerTab::Branches => "F3  BRANCHES",
             };
             let width = u16::try_from(UnicodeWidthStr::width(label) + 2).unwrap_or(u16::MAX);
             let rect = Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1);

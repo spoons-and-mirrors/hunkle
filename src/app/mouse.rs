@@ -95,6 +95,12 @@ impl App {
         {
             return;
         }
+        if self.mode == Mode::Explorer
+            && self.explorer_tab == ExplorerTab::Branches
+            && self.repository_browser.branch_delete_open()
+        {
+            return;
+        }
         if self.mode == Mode::WorkspacePresets {
             self.handle_workspace_presets_mouse(mouse);
             return;
@@ -189,14 +195,11 @@ impl App {
             self.handle_author_filter_mouse(mouse);
             return;
         }
-        if self.mode == Mode::RepositoryBrowser {
-            self.handle_repository_browser_mouse(mouse);
-            return;
-        }
         if self.mode == Mode::Explorer {
             match self.explorer_tab {
                 ExplorerTab::Explorer => self.handle_explorer_mouse(mouse),
                 ExplorerTab::Worktrees => self.handle_worktree_manager_mouse(mouse),
+                ExplorerTab::Branches => self.handle_repository_browser_mouse(mouse),
             }
             return;
         }
@@ -396,10 +399,10 @@ impl App {
             Mode::Explorer => match self.explorer_tab {
                 ExplorerTab::Explorer => self.handle_explorer_mouse(mouse),
                 ExplorerTab::Worktrees => self.handle_worktree_manager_mouse(mouse),
+                ExplorerTab::Branches => self.handle_repository_browser_mouse(mouse),
             },
             Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
-            Mode::RepositoryBrowser => self.handle_repository_browser_mouse(mouse),
             Mode::AuthorFilter => self.handle_author_filter_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
@@ -496,18 +499,6 @@ impl App {
             .is_some_and(|rect| rect.contains(point))
         {
             self.open_explorer();
-        } else if self
-            .regions
-            .worktree_manager
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.open_worktree_manager();
-        } else if self
-            .regions
-            .repository_browser
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.open_repository_browser();
         } else if self
             .regions
             .settings
@@ -823,6 +814,17 @@ impl App {
             return;
         }
         let point = Position::new(mouse.column, mouse.row);
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && !self
+                .regions
+                .hit_target_rect(HitTarget::RepositoryBrowser(
+                    RepositoryBrowserHitTarget::Overlay,
+                ))
+                .is_some_and(|area| area.contains(point))
+        {
+            self.apply_repository_browser_effect(RepositoryBrowserEffect::Close);
+            return;
+        }
         match mouse.kind {
             MouseEventKind::ScrollDown => self.repository_browser.move_selection(1),
             MouseEventKind::ScrollUp => self.repository_browser.move_selection(-1),
@@ -834,7 +836,7 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
-                None => self.apply_repository_browser_effect(RepositoryBrowserEffect::Close),
+                Some(HitTarget::ExplorerTab(tab)) => self.select_explorer_tab(tab),
                 Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Tab(tab))) => {
                     self.repository_browser.set_tab(tab);
                 }
@@ -845,7 +847,7 @@ impl App {
                 Some(HitTarget::RepositoryBrowser(
                     RepositoryBrowserHitTarget::Overlay | RepositoryBrowserHitTarget::List,
                 )) => {}
-                Some(HitTarget::ExplorerTab(_)) => {}
+                None => {}
                 Some(HitTarget::WorktreeManager(_)) => {}
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::Explorer(_)) => {}

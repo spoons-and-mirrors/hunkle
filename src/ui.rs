@@ -181,6 +181,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 ExplorerTab::Worktrees => {
                     overlays::draw_worktree_manager(frame, &mut app.worktree_manager)
                 }
+                ExplorerTab::Branches => {
+                    overlays::draw_repository_browser(frame, &mut app.repository_browser)
+                }
             };
             for (target, rect) in targets {
                 app.regions.register_hit_target(target, rect);
@@ -193,6 +196,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     dim(frame);
                     overlays::draw_worktree_remove_dialog(frame, dialog);
                 }
+            } else if app.explorer_tab == ExplorerTab::Branches
+                && let Some(dialog) = &app.repository_browser.branch_delete
+            {
+                dim(frame);
+                overlays::draw_branch_delete_dialog(frame, dialog);
             }
         }
         Mode::Settings => {
@@ -214,18 +222,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.clear_agent_timings_setting = Some(regions.clear_agent_timings);
             app.regions.media_preview_setting = Some(regions.media_preview);
             app.regions.editor_setting = Some(regions.editor);
-        }
-        Mode::RepositoryBrowser => {
-            dim(frame);
-            for (target, rect) in
-                overlays::draw_repository_browser(frame, &mut app.repository_browser)
-            {
-                app.regions.register_hit_target(target, rect);
-            }
-            if let Some(dialog) = &app.repository_browser.branch_delete {
-                dim(frame);
-                overlays::draw_branch_delete_dialog(frame, dialog);
-            }
         }
         Mode::AuthorFilter => {
             let anchor = app
@@ -432,13 +428,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if app.workspace_panel_available() {
         labels.push(("w", "Workspaces"));
     }
-    labels.extend([
-        ("o", "Explorer"),
-        ("W", "Worktrees"),
-        ("b", "Branches"),
-        ("s", "Settings"),
-        ("?", "Help"),
-    ]);
+    labels.extend([("o", "Explorer"), ("s", "Settings"), ("?", "Help")]);
 
     let total_width = labels.iter().fold(0_u16, |width, (key, label)| {
         let label_width = if compact {
@@ -527,10 +517,8 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     let offset = usize::from(app.workspace_panel_available());
     app.regions.explorer = rects.get(2 + offset).copied();
-    app.regions.worktree_manager = rects.get(3 + offset).copied();
-    app.regions.repository_browser = rects.get(4 + offset).copied();
-    app.regions.settings = rects.get(5 + offset).copied();
-    app.regions.help = rects.get(6 + offset).copied();
+    app.regions.settings = rects.get(3 + offset).copied();
+    app.regions.help = rects.get(4 + offset).copied();
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)),

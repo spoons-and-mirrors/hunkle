@@ -94,7 +94,6 @@ pub enum Mode {
     Explorer,
     Settings,
     Help,
-    RepositoryBrowser,
     AuthorFilter,
     ActionMenu,
     Command,
@@ -109,10 +108,11 @@ pub enum Mode {
 pub(crate) enum ExplorerTab {
     Explorer,
     Worktrees,
+    Branches,
 }
 
 impl ExplorerTab {
-    pub(crate) const ALL: [Self; 2] = [Self::Explorer, Self::Worktrees];
+    pub(crate) const ALL: [Self; 3] = [Self::Explorer, Self::Worktrees, Self::Branches];
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -189,8 +189,6 @@ pub struct Regions {
     pub graph: Option<Rect>,
     pub left_pane_toggle: Option<Rect>,
     pub explorer: Option<Rect>,
-    pub repository_browser: Option<Rect>,
-    pub worktree_manager: Option<Rect>,
     pub settings: Option<Rect>,
     pub help: Option<Rect>,
     pub workspace_panel: Option<Rect>,
@@ -602,10 +600,16 @@ impl App {
             self.open_file_search();
             return;
         }
-        if self.mode == Mode::Explorer && !self.worktree_manager.dialog_open() {
+        let explorer_dialog_open = match self.explorer_tab {
+            ExplorerTab::Worktrees => self.worktree_manager.dialog_open(),
+            ExplorerTab::Branches => self.repository_browser.branch_delete_open(),
+            ExplorerTab::Explorer => false,
+        };
+        if self.mode == Mode::Explorer && !explorer_dialog_open {
             let tab = match key.code {
                 KeyCode::F(1) => Some(ExplorerTab::Explorer),
                 KeyCode::F(2) => Some(ExplorerTab::Worktrees),
+                KeyCode::F(3) => Some(ExplorerTab::Branches),
                 _ => None,
             };
             if let Some(tab) = tab {
@@ -620,9 +624,9 @@ impl App {
             Mode::Explorer => match self.explorer_tab {
                 ExplorerTab::Explorer => self.handle_explorer(key),
                 ExplorerTab::Worktrees => self.handle_worktree_manager(key),
+                ExplorerTab::Branches => self.handle_repository_browser(key),
             },
             Mode::Settings => self.handle_settings(key),
-            Mode::RepositoryBrowser => self.handle_repository_browser(key),
             Mode::AuthorFilter => self.handle_author_filter(key),
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
@@ -656,6 +660,7 @@ impl App {
             Mode::Explorer => match self.explorer_tab {
                 ExplorerTab::Explorer => self.workspace_explorer.paste(text),
                 ExplorerTab::Worktrees => self.worktree_manager.paste(text),
+                ExplorerTab::Branches => self.repository_browser.paste(text),
             },
             Mode::Command if self.actions.status != CommandStatus::Running => {
                 self.actions.input.push_str(text);
@@ -679,7 +684,6 @@ impl App {
                     dialog.error = None;
                 }
             }
-            Mode::RepositoryBrowser => self.repository_browser.paste(text),
             Mode::WorkspacePanel => self.workspace_panel.paste(text),
             Mode::WorkspacePresets => self.workspace_panel.paste(text),
             _ => {}
@@ -1056,7 +1060,8 @@ impl App {
                         } else {
                             self.file_search.invalidate();
                         }
-                        if self.mode == Mode::RepositoryBrowser {
+                        if self.mode == Mode::Explorer && self.explorer_tab == ExplorerTab::Branches
+                        {
                             self.repository_browser.sync_branches(&repo.branches);
                         }
                     }
@@ -2033,6 +2038,9 @@ impl App {
     }
 
     fn open_repository_browser(&mut self) {
+        if self.mode == Mode::Explorer && self.explorer_tab == ExplorerTab::Branches {
+            return;
+        }
         let Some(repo) = self.git_repository() else {
             self.require_git_repository();
             return;
@@ -2045,7 +2053,8 @@ impl App {
         let branches = repo.branches.clone();
         let prefetch = repo.github_remote;
         self.repository_browser.open(&root, &branches, prefetch);
-        self.mode = Mode::RepositoryBrowser;
+        self.explorer_tab = ExplorerTab::Branches;
+        self.mode = Mode::Explorer;
     }
 
     fn prefetch_repository_browser(&mut self) {
@@ -2109,6 +2118,7 @@ impl App {
                 self.mode = Mode::Explorer;
             }
             ExplorerTab::Worktrees => self.open_worktree_manager(),
+            ExplorerTab::Branches => self.open_repository_browser(),
         }
     }
 
