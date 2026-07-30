@@ -27,7 +27,7 @@ pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use herdr_prompt::HerdrPrompt;
 pub(crate) use repository_browser::{
-    BranchDeleteDialog, BrowserTab, PullRequest, RemoteItems, RepositoryBrowser,
+    BranchDeleteDialog, BrowserTab, Issue, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserEffect,
 };
 pub use settings::Settings;

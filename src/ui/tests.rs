@@ -1165,6 +1165,11 @@ fn renders_every_primary_surface() {
     assert!(browser_screen.contains("PULL REQUESTS"));
     assert!(browser_screen.contains("LOCAL & REMOTE"));
     assert!(browser_screen.contains("F3  BRANCHES"));
+    assert!(browser_screen.contains("Navigate repository work"));
+    assert!(browser_screen.contains("FILTER  TYPE TO SEARCH"));
+    assert!(browser_screen.contains("BRANCH DETAILS"));
+    assert!(browser_screen.contains("LATEST COMMIT"));
+    assert!(browser_screen.contains("CURRENT"));
     assert!(browser_screen.contains("main"));
     assert!(
         app.regions
@@ -1282,6 +1287,16 @@ fn renders_every_primary_surface() {
     ]);
     app.repository_browser.set_tab(BrowserTab::PullRequests);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let pull_request_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(pull_request_screen.contains("PULL REQUEST  selected"));
+    assert!(pull_request_screen.contains("HEAD BRANCH"));
+    assert!(pull_request_screen.contains("feature/browser"));
     let list = app
         .regions
         .hit_target_rect(HitTarget::RepositoryBrowser(

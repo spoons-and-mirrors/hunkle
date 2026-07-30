@@ -8,12 +8,12 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::repo_path::RepoPath;
+use crate::{git::Branch, repo_path::RepoPath};
 
 use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandRecord, CommandStatus,
     Explorer, ExplorerHitTarget, ExplorerTab, FileDialog, FileDialogKind, FileNameAction,
-    FileSearch, HerdrPrompt, HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems,
+    FileSearch, HerdrPrompt, HitTarget, Issue, PickerAction, PickerEntry, PullRequest, RemoteItems,
     RepositoryBrowser, RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
     WorkspaceRenameDialog, WorktreeCreateDialog, WorktreeCreateField, WorktreeManager,
@@ -82,6 +82,10 @@ pub(super) fn draw_repository_browser(
 
     let inner_x = area.x.saturating_add(2);
     let inner_width = area.width.saturating_sub(4);
+    let repository_summary = format!("{} REFS", browser.branches.len());
+    let title_width = "BRANCHES  Navigate repository work".len();
+    let title_padding = usize::from(inner_width)
+        .saturating_sub(title_width + UnicodeWidthStr::width(repository_summary.as_str()));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -91,65 +95,182 @@ pub(super) fn draw_repository_browser(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Branches and GitHub work",
+                "  Navigate repository work",
                 Style::default().fg(palette().faint),
+            ),
+            Span::raw(" ".repeat(title_padding)),
+            Span::styled(
+                repository_summary,
+                Style::default()
+                    .fg(palette().green)
+                    .add_modifier(Modifier::BOLD),
             ),
         ])),
         Rect::new(inner_x, area.y.saturating_add(1), inner_width, 1),
     );
 
-    let tab_area = Rect::new(inner_x, area.y.saturating_add(4), inner_width, 1);
-    let tab_layout = Layout::horizontal([
-        Constraint::Percentage(34),
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
-    ])
-    .split(tab_area);
-    let tabs = [tab_layout[0], tab_layout[1], tab_layout[2]];
-    let tab_labels = [
-        format!("BRANCHES {}", browser.branches.len()),
-        remote_tab_label("PULL REQUESTS", &browser.pull_requests),
-        remote_tab_label("ISSUES", &browser.issues),
+    let cards_width = inner_width.saturating_sub(2);
+    let first_width = cards_width / 3;
+    let second_width = cards_width / 3;
+    let tabs = [
+        Rect::new(inner_x, area.y.saturating_add(3), first_width, 3),
+        Rect::new(
+            inner_x.saturating_add(first_width).saturating_add(1),
+            area.y.saturating_add(3),
+            second_width,
+            3,
+        ),
+        Rect::new(
+            inner_x
+                .saturating_add(first_width)
+                .saturating_add(second_width)
+                .saturating_add(2),
+            area.y.saturating_add(3),
+            cards_width
+                .saturating_sub(first_width)
+                .saturating_sub(second_width),
+            3,
+        ),
     ];
     for (index, rect) in tabs.iter().copied().enumerate() {
+        let tab = BrowserTab::ALL[index];
         hit_targets.push((
-            HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Tab(BrowserTab::ALL[index])),
+            HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Tab(tab)),
             rect,
         ));
-        let active = BrowserTab::ALL[index] == browser.tab;
+        let active = tab == browser.tab;
+        fill(
+            frame,
+            rect,
+            if active {
+                palette().raised
+            } else {
+                palette().surface_alt
+            },
+        );
+        if active {
+            fill(
+                frame,
+                Rect::new(rect.x, rect.y, 1, rect.height),
+                palette().accent,
+            );
+        }
+        let (label, status, status_color) = match tab {
+            BrowserTab::Branches => (
+                "BRANCHES",
+                format!("{} local and remote", browser.branches.len()),
+                palette().green,
+            ),
+            BrowserTab::PullRequests => {
+                let (status, color) = remote_card_status(&browser.pull_requests);
+                ("PULL REQUESTS", status, color)
+            }
+            BrowserTab::Issues => {
+                let (status, color) = remote_card_status(&browser.issues);
+                ("ISSUES", status, color)
+            }
+        };
         frame.render_widget(
-            Paragraph::new(tab_labels[index].as_str())
-                .alignment(Alignment::Center)
-                .style(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    label,
                     Style::default()
                         .fg(if active {
-                            palette().accent
+                            palette().ink
                         } else {
                             palette().muted
                         })
-                        .bg(if active {
-                            palette().raised
-                        } else {
-                            palette().panel
-                        })
-                        .add_modifier(if active {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
+                        .add_modifier(Modifier::BOLD),
                 ),
-            rect,
+                Span::styled(
+                    if active { "  ACTIVE" } else { "" },
+                    Style::default()
+                        .fg(palette().orange)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            Rect::new(
+                rect.x.saturating_add(2),
+                rect.y,
+                rect.width.saturating_sub(3),
+                1,
+            ),
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_width(
+                &status,
+                usize::from(rect.width.saturating_sub(3)),
+            ))
+            .style(Style::default().fg(status_color)),
+            Rect::new(
+                rect.x.saturating_add(2),
+                rect.y.saturating_add(1),
+                rect.width.saturating_sub(3),
+                1,
+            ),
         );
     }
 
+    let filter_area = Rect::new(inner_x, area.y.saturating_add(7), inner_width, 3);
+    fill(frame, filter_area, palette().raised);
+    fill(
+        frame,
+        Rect::new(filter_area.x, filter_area.y, 1, filter_area.height),
+        palette().accent,
+    );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("FILTER  ", Style::default().fg(palette().muted)),
-            Span::styled(browser.query.as_str(), Style::default().fg(palette().ink)),
+            Span::styled(
+                "FILTER",
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if browser.query.is_empty() {
+                    "  TYPE TO SEARCH"
+                } else {
+                    "  FILTERING"
+                },
+                Style::default()
+                    .fg(palette().orange)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        Rect::new(
+            filter_area.x.saturating_add(2),
+            filter_area.y,
+            filter_area.width.saturating_sub(4),
+            1,
+        ),
+    );
+    let filter_placeholder = match browser.tab {
+        BrowserTab::Branches => "branch, upstream, commit or subject",
+        BrowserTab::PullRequests => "title, branch, author or number",
+        BrowserTab::Issues => "title, label, author or number",
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                if browser.query.is_empty() {
+                    filter_placeholder
+                } else {
+                    browser.query.as_str()
+                },
+                Style::default().fg(if browser.query.is_empty() {
+                    palette().faint
+                } else {
+                    palette().ink
+                }),
+            ),
             Span::styled("▌", Style::default().fg(palette().accent)),
-        ]))
-        .style(Style::default().bg(palette().selected)),
-        Rect::new(inner_x, area.y.saturating_add(6), inner_width, 1),
+        ])),
+        Rect::new(
+            filter_area.x.saturating_add(2),
+            filter_area.y.saturating_add(1),
+            filter_area.width.saturating_sub(4),
+            1,
+        ),
     );
 
     let result_indices = browser.result_indices();
@@ -164,12 +285,48 @@ pub(super) fn draw_repository_browser(
         BrowserTab::PullRequests => remote_result_summary(&browser.pull_requests, result_count),
         BrowserTab::Issues => remote_result_summary(&browser.issues, result_count),
     };
+    let panes = Layout::horizontal([
+        Constraint::Percentage(58),
+        Constraint::Length(2),
+        Constraint::Min(24),
+    ])
+    .split(Rect::new(
+        inner_x,
+        area.y.saturating_add(11),
+        inner_width,
+        area.bottom().saturating_sub(1).saturating_sub(area.y + 11),
+    ));
+    let list_title = Rect::new(panes[0].x, panes[0].y, panes[0].width, 1);
+    let details_title = Rect::new(panes[2].x, panes[2].y, panes[2].width, 1);
+    let list = Rect::new(
+        panes[0].x,
+        panes[0].y.saturating_add(2),
+        panes[0].width,
+        panes[0].height.saturating_sub(2),
+    );
+    let details = Rect::new(
+        panes[2].x,
+        panes[2].y.saturating_add(2),
+        panes[2].width,
+        panes[2].height.saturating_sub(2),
+    );
+    let divider = Rect::new(
+        panes[1].x.saturating_add(panes[1].width / 2),
+        panes[1].y,
+        1,
+        panes[1].height,
+    );
+    frame.render_widget(
+        Paragraph::new("│\n".repeat(usize::from(divider.height)))
+            .style(Style::default().fg(palette().surface_alt)),
+        divider,
+    );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 section_label,
                 Style::default()
-                    .fg(palette().muted)
+                    .fg(palette().orange)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -177,55 +334,73 @@ pub(super) fn draw_repository_browser(
                 Style::default().fg(result_color),
             ),
         ])),
-        Rect::new(inner_x, area.y.saturating_add(8), inner_width, 1),
+        list_title,
     );
-
-    let list = Rect::new(
-        inner_x,
-        area.y.saturating_add(9),
-        inner_width,
-        area.bottom()
-            .saturating_sub(1)
-            .saturating_sub(area.y.saturating_add(9)),
+    let details_label = match browser.tab {
+        BrowserTab::Branches => "BRANCH DETAILS",
+        BrowserTab::PullRequests => "PULL REQUEST",
+        BrowserTab::Issues => "ISSUE DETAILS",
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                details_label,
+                Style::default()
+                    .fg(if browser.state.selected().is_some() {
+                        palette().orange
+                    } else {
+                        palette().muted
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  selected", Style::default().fg(palette().faint)),
+        ])),
+        details_title,
     );
     let selected = browser.state.selected();
     let items: Vec<ListItem<'_>> = match browser.tab {
-        BrowserTab::Branches => result_indices
-            .into_iter()
-            .filter_map(|index| browser.branches.get(index))
-            .enumerate()
-            .map(|(row, branch)| {
-                let marker = if branch.current { "●" } else { " " };
-                let kind = if branch.remote { "remote" } else { "local" };
-                let detail = if branch.upstream.is_empty() {
-                    format!("{} · {}", branch.oid, branch.date)
-                } else {
-                    format!("{} → {} · {}", branch.oid, branch.upstream, branch.date)
-                };
-                browser_row(
-                    format!("{marker} {}", branch.name),
-                    format!("{kind} · {detail} · {}", branch.subject),
-                    usize::from(list.width),
-                    branch.current,
-                    selected == Some(row),
-                    if branch.remote {
-                        palette().purple
+        BrowserTab::Branches => {
+            if result_indices.is_empty() {
+                vec![status_row(
+                    if browser.query.is_empty() {
+                        "No branches found"
                     } else {
-                        palette().green
+                        "No branches match this filter"
                     },
-                )
-            })
-            .collect(),
-        BrowserTab::PullRequests => {
-            if let Some(pull_requests) = browser.pull_requests.items() {
+                    palette().muted,
+                )]
+            } else {
                 result_indices
-                    .into_iter()
-                    .filter_map(|index| pull_requests.get(index))
+                    .iter()
+                    .filter_map(|index| browser.branches.get(*index))
                     .enumerate()
-                    .map(|(row, pull_request)| {
-                        pull_request_row(pull_request, selected == Some(row))
+                    .map(|(row, branch)| {
+                        branch_browser_row(branch, usize::from(list.width), selected == Some(row))
                     })
                     .collect()
+            }
+        }
+        BrowserTab::PullRequests => {
+            if let Some(pull_requests) = browser.pull_requests.items() {
+                if result_indices.is_empty() {
+                    vec![status_row(
+                        if browser.query.is_empty() {
+                            "No open pull requests"
+                        } else {
+                            "No pull requests match this filter"
+                        },
+                        palette().muted,
+                    )]
+                } else {
+                    result_indices
+                        .iter()
+                        .filter_map(|index| pull_requests.get(*index))
+                        .enumerate()
+                        .map(|(row, pull_request)| {
+                            pull_request_row(pull_request, selected == Some(row))
+                        })
+                        .collect()
+                }
             } else if browser.pull_requests.is_loading() {
                 vec![status_row("Loading pull requests…", palette().muted)]
             } else if let Some(error) = browser.pull_requests.error() {
@@ -236,26 +411,23 @@ pub(super) fn draw_repository_browser(
         }
         BrowserTab::Issues => {
             if let Some(issues) = browser.issues.items() {
-                result_indices
-                    .into_iter()
-                    .filter_map(|index| issues.get(index))
-                    .enumerate()
-                    .map(|(row, issue)| {
-                        let detail = if issue.labels.is_empty() {
-                            issue.author.clone()
+                if result_indices.is_empty() {
+                    vec![status_row(
+                        if browser.query.is_empty() {
+                            "No open issues"
                         } else {
-                            format!("{} · {}", issue.author, issue.labels)
-                        };
-                        browser_row(
-                            format!("#{}  {}", issue.number, issue.title),
-                            detail,
-                            usize::from(list.width),
-                            false,
-                            selected == Some(row),
-                            palette().purple,
-                        )
-                    })
-                    .collect()
+                            "No issues match this filter"
+                        },
+                        palette().muted,
+                    )]
+                } else {
+                    result_indices
+                        .iter()
+                        .filter_map(|index| issues.get(*index))
+                        .enumerate()
+                        .map(|(row, issue)| issue_row(issue, selected == Some(row)))
+                        .collect()
+                }
             } else if browser.issues.is_loading() {
                 vec![status_row("Loading issues…", palette().muted)]
             } else if let Some(error) = browser.issues.error() {
@@ -270,14 +442,15 @@ pub(super) fn draw_repository_browser(
         list,
         &mut browser.state,
     );
+    let selected_source_index = selected.and_then(|row| result_indices.get(row)).copied();
+    draw_repository_browser_details(frame, browser, selected_source_index, details);
     hit_targets.push((
         HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::List),
         list,
     ));
-    let row_height = if browser.tab == BrowserTab::PullRequests {
-        2
-    } else {
-        1
+    let row_height = match browser.tab {
+        BrowserTab::Branches => 1,
+        BrowserTab::PullRequests | BrowserTab::Issues => 2,
     };
     let mut row_y = list.y;
     for index in browser.state.offset()..result_count {
@@ -293,14 +466,31 @@ pub(super) fn draw_repository_browser(
     }
 
     let footer = if browser.tab == BrowserTab::Branches {
-        "Enter open   Del delete   ←→ / Tab switch   ↑↓ select   type filter   Esc close"
+        key_hint_line(
+            &[
+                ("Enter", "graph"),
+                ("Del", "delete"),
+                ("Tab/←→", "section"),
+                ("↑↓", "select"),
+                ("Ctrl-U", "clear"),
+                ("Esc", ""),
+            ],
+            usize::from(inner_width),
+        )
     } else {
-        "←→ / Tab switch   ↑↓ select   type to filter   Esc close"
+        key_hint_line(
+            &[
+                ("Tab/←→", "section"),
+                ("↑↓", "select"),
+                ("type", "filter"),
+                ("Ctrl-U", "clear"),
+                ("Esc", ""),
+            ],
+            usize::from(inner_width),
+        )
     };
     frame.render_widget(
-        Paragraph::new(footer)
-            .alignment(Alignment::Right)
-            .style(Style::default().fg(palette().muted)),
+        Paragraph::new(footer).alignment(Alignment::Right),
         Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1),
     );
 
@@ -1492,14 +1682,16 @@ pub(super) fn draw_workspace_presets(
     (area, targets)
 }
 
-fn remote_tab_label<T>(label: &str, items: &RemoteItems<T>) -> String {
+fn remote_card_status<T>(items: &RemoteItems<T>) -> (String, Color) {
     match (items.count(), items.is_loading(), items.error()) {
-        (Some(count), true, _) => format!("{label} {count} …"),
-        (Some(count), false, Some(_)) => format!("{label} {count} !"),
-        (Some(count), false, None) => format!("{label} {count}"),
-        (None, true, _) => format!("{label} …"),
-        (None, false, Some(_)) => format!("{label} !"),
-        (None, false, None) => label.to_owned(),
+        (Some(count), true, _) => (format!("{count} open · refreshing"), palette().muted),
+        (Some(count), false, Some(_)) => {
+            (format!("{count} cached · refresh failed"), palette().red)
+        }
+        (Some(count), false, None) => (format!("{count} open"), palette().green),
+        (None, true, _) => ("loading from GitHub".to_owned(), palette().muted),
+        (None, false, Some(_)) => ("GitHub unavailable".to_owned(), palette().red),
+        (None, false, None) => ("not loaded".to_owned(), palette().faint),
     }
 }
 
@@ -1521,30 +1713,32 @@ fn remote_result_summary<T>(items: &RemoteItems<T>, shown: usize) -> (String, Co
     }
 }
 
-fn browser_row(
-    label: String,
-    detail: String,
-    width: usize,
-    current: bool,
-    selected: bool,
-    detail_color: Color,
-) -> ListItem<'static> {
-    let detail = truncate_width(&detail, width / 2);
-    let detail_width = UnicodeWidthStr::width(detail.as_str());
-    let label = truncate_width(&label, width.saturating_sub(detail_width + 2));
-    let padding = width.saturating_sub(UnicodeWidthStr::width(label.as_str()) + detail_width);
+fn branch_browser_row(branch: &Branch, width: usize, selected: bool) -> ListItem<'static> {
+    let (badge, badge_color) = if branch.current {
+        ("CURRENT", palette().green)
+    } else if branch.default {
+        ("DEFAULT", palette().yellow)
+    } else if branch.remote {
+        ("REMOTE", palette().purple)
+    } else {
+        ("LOCAL", palette().green)
+    };
+    let marker = if branch.current { "● " } else { "  " };
+    let label = truncate_width(
+        &branch.name,
+        width.saturating_sub(UnicodeWidthStr::width(marker) + badge.len() + 2),
+    );
+    let padding = width.saturating_sub(
+        UnicodeWidthStr::width(marker) + UnicodeWidthStr::width(label.as_str()) + badge.len(),
+    );
+    let color = |default| if selected { palette().ink } else { default };
     ListItem::new(Line::from(vec![
+        Span::styled(marker, Style::default().fg(color(palette().green))),
         Span::styled(
             label,
             Style::default()
-                .fg(if selected {
-                    palette().ink
-                } else if current {
-                    palette().accent
-                } else {
-                    palette().ink
-                })
-                .add_modifier(if current {
+                .fg(color(palette().ink))
+                .add_modifier(if branch.current {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
@@ -1552,14 +1746,41 @@ fn browser_row(
         ),
         Span::raw(" ".repeat(padding)),
         Span::styled(
-            detail,
-            Style::default().fg(if selected {
-                palette().ink
-            } else {
-                detail_color
-            }),
+            badge,
+            Style::default()
+                .fg(color(badge_color))
+                .add_modifier(Modifier::BOLD),
         ),
     ]))
+    .style(Style::default().bg(if branch.current && !selected {
+        palette().add_bg
+    } else {
+        palette().panel
+    }))
+}
+
+fn issue_row(issue: &Issue, selected: bool) -> ListItem<'static> {
+    let color = |default| if selected { palette().ink } else { default };
+    let metadata = if issue.labels.is_empty() {
+        issue.author.clone()
+    } else {
+        format!("{}  ·  {}", issue.author, issue.labels)
+    };
+    ListItem::new(vec![
+        Line::from(vec![
+            Span::styled(
+                format!("#{:<4}", issue.number),
+                Style::default()
+                    .fg(color(palette().accent))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(issue.title.clone(), Style::default().fg(palette().ink)),
+        ]),
+        Line::from(vec![
+            Span::raw("     "),
+            Span::styled(metadata, Style::default().fg(color(palette().purple))),
+        ]),
+    ])
 }
 
 fn pull_request_row(pull_request: &PullRequest, selected: bool) -> ListItem<'static> {
@@ -1599,6 +1820,187 @@ fn pull_request_row(pull_request: &PullRequest, selected: bool) -> ListItem<'sta
         ]),
         Line::from(metadata),
     ])
+}
+
+fn draw_repository_browser_details(
+    frame: &mut Frame<'_>,
+    browser: &RepositoryBrowser,
+    selected_source_index: Option<usize>,
+    area: Rect,
+) {
+    let lines = match browser.tab {
+        BrowserTab::Branches => {
+            let Some(branch) = selected_source_index.and_then(|index| browser.branches.get(index))
+            else {
+                frame.render_widget(explorer_empty_list("Select a branch to inspect it"), area);
+                return;
+            };
+            let (badge, badge_color) = if branch.current {
+                ("CURRENT", palette().green)
+            } else if branch.default {
+                ("DEFAULT", palette().yellow)
+            } else if branch.remote {
+                ("REMOTE", palette().purple)
+            } else {
+                ("LOCAL", palette().green)
+            };
+            let tracking = if branch.upstream.is_empty() {
+                if branch.remote {
+                    "Remote reference".to_owned()
+                } else {
+                    "No upstream configured".to_owned()
+                }
+            } else {
+                branch.upstream.clone()
+            };
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        branch.name.clone(),
+                        Style::default()
+                            .fg(palette().ink)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {badge}"),
+                        Style::default()
+                            .fg(badge_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                detail_label("LATEST COMMIT"),
+                Line::from(vec![
+                    Span::styled(
+                        short_head(&branch.oid),
+                        Style::default().fg(palette().purple),
+                    ),
+                    Span::styled(
+                        format!("  {}", branch.date),
+                        Style::default().fg(palette().faint),
+                    ),
+                ]),
+                Line::styled(branch.subject.clone(), Style::default().fg(palette().ink)),
+                Line::from(""),
+                detail_label("TRACKING"),
+                Line::styled(tracking, Style::default().fg(palette().cyan)),
+            ];
+            if area.height >= 12 {
+                lines.extend([
+                    Line::from(""),
+                    detail_label("ACTION"),
+                    Line::styled(
+                        if branch.remote {
+                            "Enter opens this commit in the graph"
+                        } else if branch.current {
+                            "Checked out now · deletion protected"
+                        } else {
+                            "Enter opens graph · Del deletes branch"
+                        },
+                        Style::default().fg(palette().muted),
+                    ),
+                ]);
+            }
+            lines
+        }
+        BrowserTab::PullRequests => {
+            let Some(pull_request) =
+                selected_source_index.and_then(|index| browser.pull_requests.items()?.get(index))
+            else {
+                frame.render_widget(
+                    explorer_empty_list("Select a pull request to inspect it"),
+                    area,
+                );
+                return;
+            };
+            vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!("#{}", pull_request.number),
+                        Style::default()
+                            .fg(palette().accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        if pull_request.draft {
+                            "  DRAFT"
+                        } else {
+                            "  OPEN"
+                        },
+                        Style::default()
+                            .fg(if pull_request.draft {
+                                palette().yellow
+                            } else {
+                                palette().green
+                            })
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                detail_label("TITLE"),
+                Line::styled(
+                    pull_request.title.clone(),
+                    Style::default().fg(palette().ink),
+                ),
+                Line::from(""),
+                detail_label("HEAD BRANCH"),
+                Line::styled(
+                    pull_request.branch.clone(),
+                    Style::default().fg(palette().cyan),
+                ),
+                Line::from(""),
+                detail_label("AUTHOR"),
+                Line::styled(
+                    pull_request.author.clone(),
+                    Style::default().fg(palette().purple),
+                ),
+            ]
+        }
+        BrowserTab::Issues => {
+            let Some(issue) =
+                selected_source_index.and_then(|index| browser.issues.items()?.get(index))
+            else {
+                frame.render_widget(explorer_empty_list("Select an issue to inspect it"), area);
+                return;
+            };
+            let labels = if issue.labels.is_empty() {
+                "No labels".to_owned()
+            } else {
+                issue.labels.clone()
+            };
+            vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!("#{}", issue.number),
+                        Style::default()
+                            .fg(palette().accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "  OPEN",
+                        Style::default()
+                            .fg(palette().green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                detail_label("TITLE"),
+                Line::styled(issue.title.clone(), Style::default().fg(palette().ink)),
+                Line::from(""),
+                detail_label("LABELS"),
+                Line::styled(labels, Style::default().fg(palette().purple)),
+                Line::from(""),
+                detail_label("AUTHOR"),
+                Line::styled(issue.author.clone(), Style::default().fg(palette().cyan)),
+            ]
+        }
+    };
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 1),
+        palette().surface_alt,
+    );
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn status_row(message: &str, color: Color) -> ListItem<'_> {
