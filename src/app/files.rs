@@ -227,7 +227,7 @@ impl App {
     }
 
     pub(super) fn open_discard_unstaged_dialog(&mut self) {
-        if self.changes.pane != LeftPane::Worktree || self.changes.history_focused {
+        if self.changes.pane != LeftPane::Worktree {
             return;
         }
         let Some(change) = self

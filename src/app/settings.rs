@@ -45,7 +45,7 @@ pub struct Settings {
     pub workspace_panel_enabled: bool,
     pub show_agent_harness: bool,
     pub agent_time_display: AgentTimeDisplay,
-    pub history_height: u16,
+    pub agents_height: u16,
     pub explorer_left_pane_width: Option<u16>,
     pub editor_command: Option<String>,
     pub media_preview_protocol: MediaPreviewProtocol,
@@ -66,7 +66,7 @@ impl Default for Settings {
             workspace_panel_enabled: true,
             show_agent_harness: false,
             agent_time_display: AgentTimeDisplay::LatestLoop,
-            history_height: 7,
+            agents_height: 7,
             explorer_left_pane_width: None,
             editor_command: None,
             media_preview_protocol: MediaPreviewProtocol::Auto,
@@ -126,14 +126,14 @@ impl SettingsStore {
         atomic_write(
             path,
             format!(
-                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nhistory_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
+                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
                 settings.auto_fetch,
                 settings.fetch_interval_minutes,
                 settings.worktree_width,
                 settings.workspace_panel_enabled,
                 settings.show_agent_harness,
                 settings.agent_time_display.as_str(),
-                settings.history_height,
+                settings.agents_height,
                 settings
                     .explorer_left_pane_width
                     .map(|width| width.to_string())
@@ -195,9 +195,9 @@ fn load(path: &Path) -> Settings {
                     _ => AgentTimeDisplay::LatestLoop,
                 };
             }
-            "history_height" => {
+            "agents_height" | "history_height" => {
                 if let Ok(height) = value.trim().parse::<u16>() {
-                    settings.history_height = height.clamp(3, 256);
+                    settings.agents_height = height.clamp(3, 256);
                 }
             }
             "explorer_left_pane_width" => {
@@ -242,7 +242,7 @@ mod tests {
             workspace_panel_enabled: false,
             show_agent_harness: true,
             agent_time_display: AgentTimeDisplay::AgentTotal,
-            history_height: 9,
+            agents_height: 9,
             explorer_left_pane_width: Some(47),
             editor_command: Some("code --wait".to_owned()),
             media_preview_protocol: MediaPreviewProtocol::Sixel,
@@ -271,7 +271,7 @@ mod tests {
         let loaded = store.load();
         assert_eq!(loaded.fetch_interval_minutes, 1);
         assert_eq!(loaded.worktree_width, 24);
-        assert_eq!(loaded.history_height, 3);
+        assert_eq!(loaded.agents_height, 3);
         assert_eq!(
             loaded.explorer_left_pane_width,
             Some(MINIMUM_EXPLORER_PANE_WIDTH)

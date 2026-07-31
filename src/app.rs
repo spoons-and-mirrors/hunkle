@@ -198,9 +198,9 @@ pub struct Regions {
     pub worktree: Option<Rect>,
     pub worktree_list: Option<Rect>,
     pub explorer_list: Option<Rect>,
-    pub history_list: Option<Rect>,
-    pub history_splitter: Option<Rect>,
-    pub history_bounds: Option<Rect>,
+    pub agents_list: Option<Rect>,
+    pub agents_splitter: Option<Rect>,
+    pub agents_bounds: Option<Rect>,
     pub diff: Option<Rect>,
     pub diff_scrollbar: Option<Rect>,
     pub diff_scroll_thumb: Option<Rect>,
@@ -284,7 +284,7 @@ pub struct App {
     commit_draft_due: Option<Instant>,
     commit_draft_rx: Option<Receiver<CommitDraftResult>>,
     pub dragging_splitter: bool,
-    pub dragging_history: bool,
+    pub dragging_agents: bool,
     pub dragging_diff_scrollbar: bool,
     diff_scroll_drag_offset: u16,
     pub workspace_explorer: Explorer,
@@ -418,7 +418,7 @@ impl App {
             commit_draft_due: None,
             commit_draft_rx: None,
             dragging_splitter: false,
-            dragging_history: false,
+            dragging_agents: false,
             dragging_diff_scrollbar: false,
             diff_scroll_drag_offset: 0,
             workspace_explorer,
@@ -1176,15 +1176,6 @@ impl App {
                     .map(|index| repo.commits[*index].oid.clone()),
             );
         }
-        if self.changes.history_focused
-            && let Some(commit) = self
-                .changes
-                .history_state
-                .selected()
-                .and_then(|index| repo.history.get(index))
-        {
-            oids.push(commit.oid.clone());
-        }
         if oids.is_empty() {
             return;
         }
@@ -1334,7 +1325,7 @@ impl App {
                 self.unstage_all();
             }
             KeyCode::Char(' ')
-                if self.changes.pane == LeftPane::Worktree && !self.changes.history_focused =>
+                if self.changes.pane == LeftPane::Worktree =>
             {
                 self.toggle_stage()
             }
@@ -1353,8 +1344,7 @@ impl App {
             }
             KeyCode::Enter
                 if self.view == View::Changes
-                    && self.changes.pane == LeftPane::Worktree
-                    && !self.changes.history_focused =>
+                    && self.changes.pane == LeftPane::Worktree =>
             {
                 let repo = self.session.data();
                 self.changes.toggle_selected_directory(repo);
@@ -1367,8 +1357,7 @@ impl App {
             }
             KeyCode::Right | KeyCode::Char('l')
                 if self.view == View::Changes
-                    && self.changes.pane == LeftPane::Worktree
-                    && !self.changes.history_focused =>
+                    && self.changes.pane == LeftPane::Worktree =>
             {
                 let invalid_path = self.session.data().and_then(|repo| {
                     let index = self.changes.selected_change_index(repo)?;
@@ -1394,8 +1383,7 @@ impl App {
             }
             KeyCode::Left | KeyCode::Char('h')
                 if self.view == View::Changes
-                    && self.changes.pane == LeftPane::Worktree
-                    && !self.changes.history_focused =>
+                    && self.changes.pane == LeftPane::Worktree =>
             {
                 let repo = self.session.data();
                 self.changes.collapse_or_ascend_worktree(repo);
@@ -1842,7 +1830,6 @@ impl App {
         let Some(repo) = self.session.data() else {
             return;
         };
-        self.changes.clear_history_selection();
         self.changes.preview_commit(repo, &commit);
         self.graph_commit_open = true;
     }
@@ -1959,9 +1946,6 @@ impl App {
     }
 
     fn selected_file_to_edit(&self) -> Option<(PathBuf, PathBuf)> {
-        if self.changes.history_focused {
-            return None;
-        }
         let repo = self.repository()?;
         let path = match self.changes.pane {
             LeftPane::Worktree => {
@@ -3726,7 +3710,7 @@ mod tests {
                 workspace_panel_enabled: true,
                 show_agent_harness: false,
                 agent_time_display: settings::AgentTimeDisplay::LatestLoop,
-                history_height: 7,
+                agents_height: 7,
                 explorer_left_pane_width: None,
                 editor_command: None,
                 media_preview_protocol: MediaPreviewProtocol::Auto,

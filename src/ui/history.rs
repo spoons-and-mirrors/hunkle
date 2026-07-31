@@ -2,13 +2,13 @@ use ratatui::{
     Frame,
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    text::{Line, Span},
+    widgets::{Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{AuthorFilter, CommitSummaryCache, GraphHitTarget, HitTarget, Mode},
+    app::{AuthorFilter, CommitSummaryCache, GraphHitTarget, HitTarget},
     git::{Commit, RepositoryData},
 };
 
@@ -280,116 +280,6 @@ pub(super) fn draw_author_filter(
     targets
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn draw_branch(
-    frame: &mut Frame<'_>,
-    commits: &[Commit],
-    branch: &str,
-    header: Rect,
-    list: Rect,
-    dragging: bool,
-    focused: bool,
-    mode: Mode,
-    state: &mut ListState,
-    ready: bool,
-) {
-    fill(
-        frame,
-        header,
-        if dragging {
-            palette().selected
-        } else {
-            palette().surface_alt
-        },
-    );
-    let history_title = if !ready {
-        "HISTORY  loading".to_owned()
-    } else if header.width >= 20 {
-        format!("HISTORY  {branch}")
-    } else {
-        "HISTORY".to_owned()
-    };
-    let history_meta = format!("↕  {}", commits.len());
-    let history_padding = usize::from(header.width).saturating_sub(
-        UnicodeWidthStr::width(history_title.as_str())
-            + UnicodeWidthStr::width(history_meta.as_str()),
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                truncate_width(
-                    &history_title,
-                    usize::from(header.width)
-                        .saturating_sub(UnicodeWidthStr::width(history_meta.as_str()) + 1),
-                ),
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" ".repeat(history_padding)),
-            Span::styled(history_meta, Style::default().fg(palette().faint)),
-        ])),
-        header,
-    );
-    if !ready || commits.is_empty() {
-        let items = vec![ListItem::new(Line::styled(
-            if ready {
-                "  No commits on this branch"
-            } else {
-                "  Loading branch history…"
-            },
-            Style::default().fg(palette().faint),
-        ))];
-        frame.render_stateful_widget(List::new(items), list, state);
-        return;
-    }
-
-    let selected = state.selected();
-    let mut offset = state.offset().min(commits.len().saturating_sub(1));
-    if let Some(selected) = selected {
-        if selected < offset {
-            offset = selected;
-        }
-        let mut rendered_height = commits[offset..=selected]
-            .iter()
-            .map(history_item_height)
-            .sum::<usize>();
-        while offset < selected && rendered_height > usize::from(list.height) {
-            rendered_height = rendered_height.saturating_sub(history_item_height(&commits[offset]));
-            offset += 1;
-        }
-    }
-    *state.offset_mut() = offset;
-    let mut height = 0usize;
-    let items: Vec<ListItem<'_>> = commits
-        .iter()
-        .skip(offset)
-        .take_while(|commit| {
-            let item_height = history_item_height(commit);
-            let include =
-                height == 0 || height.saturating_add(item_height) <= usize::from(list.height);
-            if include {
-                height = height.saturating_add(item_height);
-            }
-            include
-        })
-        .map(|commit| history_item(commit, usize::from(list.width)))
-        .collect();
-    let history =
-        List::new(items).highlight_style(Style::default().bg(if focused && mode == Mode::Normal {
-            palette().selected
-        } else {
-            palette().inactive_selected
-        }));
-    let mut visible_state = ListState::default();
-    visible_state.select(selected.and_then(|selected| selected.checked_sub(offset)));
-    frame.render_stateful_widget(history, list, &mut visible_state);
-}
-
-fn history_item_height(commit: &Commit) -> usize {
-    1 + usize::from(!commit.refs.is_empty())
-}
-
 fn graph_row(
     commit: &Commit,
     summary: Option<&crate::git::DiffSummary>,
@@ -484,46 +374,6 @@ fn commit_changes(summary: Option<&crate::git::DiffSummary>) -> Cell<'static> {
             Style::default().fg(palette().red),
         ),
     ]))
-}
-
-fn history_item(commit: &Commit, width: usize) -> ListItem<'static> {
-    let short_oid: String = commit.oid.chars().take(7).collect();
-    let subject_width = width.saturating_sub(8);
-    let subject = truncate_width(&commit.subject, subject_width);
-    let subject_padding = width.saturating_sub(
-        UnicodeWidthStr::width(subject.as_str()) + UnicodeWidthStr::width(short_oid.as_str()),
-    );
-    let mut details = Vec::new();
-    let has_head = commit
-        .refs
-        .iter()
-        .any(|reference| reference == "HEAD" || reference.starts_with("HEAD -> "));
-    if has_head {
-        details.push(ref_badge("HEAD", palette().green));
-    }
-    for reference in &commit.refs {
-        if reference == "HEAD" || reference.starts_with("HEAD -> ") {
-            continue;
-        }
-        let (label, color) = if let Some(tag) = reference.strip_prefix("tag: ") {
-            (tag, palette().yellow)
-        } else if reference.contains('/') {
-            (reference.as_str(), palette().purple)
-        } else {
-            (reference.as_str(), palette().accent)
-        };
-        details.push(ref_badge(label, color));
-    }
-
-    let mut lines = vec![Line::from(vec![
-        Span::styled(subject, Style::default().fg(palette().ink)),
-        Span::raw(" ".repeat(subject_padding)),
-        Span::styled(short_oid, Style::default().fg(palette().faint)),
-    ])];
-    if !details.is_empty() {
-        lines.push(Line::from(details));
-    }
-    ListItem::new(Text::from(lines))
 }
 
 fn ref_badge(label: &str, color: Color) -> Span<'static> {

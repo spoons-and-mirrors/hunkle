@@ -31,12 +31,12 @@ impl App {
             }
             return;
         }
-        if self.dragging_history {
+        if self.dragging_agents {
             match mouse.kind {
-                MouseEventKind::Drag(MouseButton::Left) => self.resize_history(mouse.row),
+                MouseEventKind::Drag(MouseButton::Left) => self.resize_agents(mouse.row),
                 MouseEventKind::Up(MouseButton::Left) => {
-                    self.resize_history(mouse.row);
-                    self.dragging_history = false;
+                    self.resize_agents(mouse.row);
+                    self.dragging_agents = false;
                     self.persist_settings();
                 }
                 _ => {}
@@ -292,13 +292,12 @@ impl App {
         }
         if self
             .regions
-            .history_splitter
+            .agents_splitter
             .is_some_and(|rect| rect.contains(point))
         {
             self.mode = Mode::Normal;
-            self.dragging_history = true;
-            self.changes.history_focused = true;
-            self.resize_history(point.y);
+            self.dragging_agents = true;
+            self.resize_agents(point.y);
             return true;
         }
         if self
@@ -489,7 +488,7 @@ impl App {
                 self.view = View::Changes;
                 self.graph_commit_open = false;
             }
-        } else if self.select_history_row(point) {
+        } else if self.select_agents_row(point) {
         } else if self.select_graph_row(point) {
             self.open_selected_graph_commit();
         } else if let Some(commit) = self.regions.commit.filter(|rect| rect.contains(point)) {
@@ -1051,23 +1050,16 @@ impl App {
         self.changes.select_explorer_row(repo, index)
     }
 
-    fn select_history_row(&mut self, point: Position) -> bool {
-        let Some(rect) = self
+    fn select_agents_row(&mut self, point: Position) -> bool {
+        if !self
             .regions
-            .history_list
-            .filter(|rect| rect.contains(point))
-        else {
+            .agents_list
+            .is_some_and(|rect| rect.contains(point))
+        {
             return false;
-        };
-        let Some(repo) = self.session.data() else {
-            return false;
-        };
-        let relative_row = usize::from(point.y - rect.y);
-        let selected = self.changes.select_history_row(repo, relative_row);
-        if selected && self.view == View::Graph {
-            self.graph_commit_open = true;
         }
-        selected
+        self.open_workspace_panel();
+        true
     }
 
     fn select_graph_row(&mut self, point: Position) -> bool {
@@ -1143,12 +1135,10 @@ impl App {
             self.scroll_explorer(delta.saturating_mul(3));
         } else if self
             .regions
-            .history_list
+            .agents_list
             .is_some_and(|rect| rect.contains(point))
         {
-            if let Some(repo) = self.session.data() {
-                self.changes.move_history_selection(repo, delta);
-            }
+            self.workspace_panel.scroll_agents(delta);
         } else if self
             .regions
             .worktree_list
@@ -1238,11 +1228,11 @@ impl App {
         self.settings.explorer_left_pane_width = self.workspace_explorer.left_pane_width;
     }
 
-    fn resize_history(&mut self, row: u16) {
-        let Some(bounds) = self.regions.history_bounds else {
+    fn resize_agents(&mut self, row: u16) {
+        let Some(bounds) = self.regions.agents_bounds else {
             return;
         };
         let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(3));
-        self.settings.history_height = bounds.bottom().saturating_sub(top).max(3);
+        self.settings.agents_height = bounds.bottom().saturating_sub(top).max(3);
     }
 }

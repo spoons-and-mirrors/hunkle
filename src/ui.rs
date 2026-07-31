@@ -222,7 +222,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::WorkspacePanel => {
             dim(frame);
-            let panel_area = workspace_panel::modal_area(frame.area());
+            let panel_area = workspace_panel::drawer_area(frame.area());
             app.regions.workspace_panel = Some(panel_area);
             let (workspace_section, agent_section) = workspace_panel::section_areas(panel_area);
             app.regions.workspace_panel_workspaces = Some(workspace_section);

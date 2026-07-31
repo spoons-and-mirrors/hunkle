@@ -18,41 +18,32 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 
 use super::{fill, palette, truncate_width};
 
-const MODAL_MAX_WIDTH: u16 = 112;
 const HEADER_HEIGHT: u16 = 4;
 const FOOTER_HEIGHT: u16 = 3;
+const DRAWER_MIN_HEIGHT: u16 = 17;
+const DRAWER_MAX_HEIGHT: u16 = 20;
 
 fn chrome_heights(area: Rect) -> (u16, u16) {
-    if area.width < 82 || area.height < 18 {
+    if area.width < 82 || area.height < 20 {
         (2, 2)
     } else {
         (HEADER_HEIGHT, FOOTER_HEIGHT)
     }
 }
 
-pub(super) fn modal_area(screen: Rect) -> Rect {
-    let width = if screen.width >= 84 {
-        screen.width.saturating_mul(88) / 100
+pub(super) fn drawer_area(screen: Rect) -> Rect {
+    let height = if screen.height >= DRAWER_MIN_HEIGHT + 5 {
+        (screen.height / 2).clamp(DRAWER_MIN_HEIGHT, DRAWER_MAX_HEIGHT)
     } else {
-        screen.width.saturating_sub(4)
+        screen.height.saturating_sub(2).max(1)
     }
-    .clamp(1, MODAL_MAX_WIDTH)
-    .min(screen.width);
-    let height = if screen.height >= 18 {
-        screen.height.saturating_mul(90) / 100
-    } else {
-        screen.height.saturating_sub(2)
-    }
-    .max(1)
     .min(screen.height);
     Rect::new(
-        screen
-            .x
-            .saturating_add(screen.width.saturating_sub(width) / 2),
+        screen.x,
         screen
             .y
-            .saturating_add(screen.height.saturating_sub(height) / 2),
-        width,
+            .saturating_add(screen.height.saturating_sub(height)),
+        screen.width,
         height,
     )
 }
@@ -712,6 +703,232 @@ fn draw_footer(frame: &mut Frame<'_>, panel: &WorkspacePanel, area: Rect) {
             })),
             Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1),
         );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_agents_pane(
+    frame: &mut Frame<'_>,
+    panel: &mut WorkspacePanel,
+    settings: &Settings,
+    header: Rect,
+    list: Rect,
+    dragging: bool,
+    enabled: bool,
+    hovered: Option<usize>,
+) -> Vec<(HitTarget, Rect)> {
+    let mut targets = Vec::new();
+    if header.width == 0 || header.height == 0 {
+        return targets;
+    }
+    fill(
+        frame,
+        header,
+        if dragging {
+            palette().selected
+        } else {
+            palette().surface_alt
+        },
+    );
+    let title = format!("AGENTS  {}", panel.agents.len());
+    let hint = if enabled {
+        "click  focus"
+    } else {
+        "w  workspace manager"
+    };
+    let padding = usize::from(header.width)
+        .saturating_sub(UnicodeWidthStr::width(title.as_str()) + UnicodeWidthStr::width(hint) + 1);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                truncate_width(
+                    &title,
+                    usize::from(header.width)
+                        .saturating_sub(UnicodeWidthStr::width(hint) + 1),
+                ),
+                Style::default()
+                    .fg(palette().cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(padding)),
+            Span::styled(hint, Style::default().fg(palette().faint)),
+        ])),
+        header,
+    );
+    if !enabled {
+        if list.height > 0 {
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    "  Workspace manager is disabled in settings",
+                    Style::default().fg(palette().faint),
+                )),
+                list,
+            );
+        }
+        return targets;
+    }
+    if panel.agents.is_empty() {
+        let message = panel.error.as_deref().unwrap_or(if panel.loading {
+            "Loading Herdr agents…"
+        } else {
+            "No agents detected"
+        });
+        if list.height > 0 {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "  {}",
+                    truncate_width(message, usize::from(list.width).saturating_sub(2))
+                ))
+                .style(
+                    Style::default()
+                        .fg(if panel.error.is_some() {
+                            palette().red
+                        } else {
+                            palette().faint
+                        })
+                        .bg(palette().surface_alt),
+                ),
+                list,
+            );
+        }
+        return targets;
+    }
+    let card_height = if list.height >= 2 { 2 } else { 1 };
+    let viewport = usize::from((list.height + 1) / card_height).max(1);
+    let scroll = panel
+        .agent_scroll
+        .min(panel.agents.len().saturating_sub(viewport));
+    for (screen_row, index) in (scroll..panel.agents.len()).enumerate() {
+        if screen_row >= viewport {
+            break;
+        }
+        let offset = u16::try_from(screen_row).unwrap_or(0) * card_height;
+        let row_area = Rect::new(
+            list.x,
+            list.y.saturating_add(offset),
+            list.width,
+            card_height.min(list.height.saturating_sub(offset)),
+        );
+        let agent = &panel.agents[index];
+        let state = panel.agent_entry_state(index, false);
+        let workspace = panel
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == agent.workspace_id)
+            .map_or("unassigned", |workspace| workspace.label.as_str());
+        let session = panel
+            .agent_display_name(index)
+            .unwrap_or("terminal session");
+        let elapsed = panel
+            .agent_elapsed(index, settings.agent_time_display)
+            .map(format_duration);
+        draw_agents_pane_row(
+            frame,
+            row_area,
+            workspace,
+            session,
+            elapsed.as_deref(),
+            agent.status,
+            state,
+            hovered == Some(index),
+        );
+        targets.push((
+            HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index)),
+            row_area,
+        ));
+    }
+    targets
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_agents_pane_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    workspace: &str,
+    session: &str,
+    elapsed: Option<&str>,
+    status: AgentStatus,
+    state: WorkspacePanelEntryState,
+    hovered: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let highlighted = state.selected || hovered;
+    let background = if highlighted {
+        palette().selected
+    } else {
+        palette().surface_alt
+    };
+    fill(frame, area, background);
+    let content = Rect::new(
+        area.x.saturating_add(2),
+        area.y,
+        area.width.saturating_sub(2),
+        area.height,
+    );
+    let status_text = status_label(status);
+    let badge = badge_width(status_text);
+    let badge_area = Rect::new(
+        content.right().saturating_sub(badge),
+        content.y,
+        badge.min(content.width),
+        1,
+    );
+    draw_badge(
+        frame,
+        badge_area,
+        status_text,
+        status_color(status),
+        palette().raised,
+    );
+    let name_area = Rect::new(
+        area.x,
+        content.y,
+        badge_area.x.saturating_sub(area.x.saturating_add(1)),
+        1,
+    );
+    let name_color = if state.active { palette().yellow } else { palette().ink };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("●", Style::default().fg(status_color(status))),
+            Span::raw(" "),
+            Span::styled(
+                truncate_width(workspace, usize::from(name_area.width).saturating_sub(2)),
+                Style::default()
+                    .fg(name_color)
+                    .bg(background)
+                    .add_modifier(if highlighted { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+        ])),
+        name_area,
+    );
+    if area.height > 1 {
+        let time_width = elapsed
+            .map(|time| u16::try_from(UnicodeWidthStr::width(time)).unwrap_or(u16::MAX))
+            .unwrap_or(0)
+            .min(content.width);
+        let session_width = content
+            .width
+            .saturating_sub(time_width.saturating_add(u16::from(time_width > 0)));
+        frame.render_widget(
+            Paragraph::new(truncate_width(session, usize::from(session_width)))
+                .style(Style::default().fg(palette().muted).bg(background)),
+            Rect::new(content.x, content.y.saturating_add(1), session_width, 1),
+        );
+        if let Some(elapsed) = elapsed {
+            frame.render_widget(
+                Paragraph::new(elapsed)
+                    .alignment(ratatui::layout::Alignment::Right)
+                    .style(Style::default().fg(palette().soft).bg(background)),
+                Rect::new(
+                    content.right().saturating_sub(time_width),
+                    content.y.saturating_add(1),
+                    time_width,
+                    1,
+                ),
+            );
+        }
     }
 }
 

@@ -9,17 +9,18 @@ use ratatui_image::{Resize, StatefulImage};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, TextInput, View},
+    app::{App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, TextInput, View, WorkspacePanelHitTarget},
     git::{Change, DiffSummary},
     repo_path::{RepoPath, display_os_str},
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
 
 use super::{
-    fill, history, palette,
+    fill, palette,
     preview::{PreparedPreview, PreviewInput, take_inline_transmission, take_kitty_transmission},
     text::word_wrapped_height,
     truncate_width,
+    workspace_panel,
 };
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
@@ -101,34 +102,34 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         1,
     );
     let worktree_list_y = actions_row.bottom();
-    let maximum_history = worktree_content
+    let maximum_agents = worktree_content
         .bottom()
         .saturating_sub(worktree_list_y)
         .saturating_sub(2)
         .max(3);
-    let history_height = app
+    let agents_height = app
         .settings
-        .history_height
-        .clamp(3, maximum_history)
+        .agents_height
+        .clamp(3, maximum_agents)
         .min(worktree_content.bottom().saturating_sub(worktree_list_y));
-    let history_area = Rect::new(
+    let agents_area = Rect::new(
         worktree_content.x,
-        worktree_content.bottom().saturating_sub(history_height),
+        worktree_content.bottom().saturating_sub(agents_height),
         worktree_content.width,
-        history_height,
+        agents_height,
     );
     let worktree_list = Rect::new(
         worktree_header.x,
         worktree_list_y,
         worktree_header.width,
-        history_area.y.saturating_sub(worktree_list_y),
+        agents_area.y.saturating_sub(worktree_list_y),
     );
     app.regions.worktree_list = Some(worktree_list);
     app.regions.register_hit_target(
         HitTarget::Changes(app.changes.worktree_background_target()),
         worktree_list,
     );
-    app.regions.history_bounds = Some(Rect::new(
+    app.regions.agents_bounds = Some(Rect::new(
         worktree_content.x,
         worktree_list_y.saturating_add(2),
         worktree_content.width,
@@ -136,17 +137,17 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
             .bottom()
             .saturating_sub(worktree_list_y.saturating_add(2)),
     ));
-    app.regions.history_splitter = Some(Rect::new(
-        history_area.x,
-        history_area.y,
-        history_area.width,
+    app.regions.agents_splitter = Some(Rect::new(
+        agents_area.x,
+        agents_area.y,
+        agents_area.width,
         1,
     ));
-    app.regions.history_list = Some(Rect::new(
-        history_area.x,
-        history_area.y.saturating_add(1),
-        history_area.width,
-        history_area.height.saturating_sub(1),
+    app.regions.agents_list = Some(Rect::new(
+        agents_area.x,
+        agents_area.y.saturating_add(1),
+        agents_area.width,
+        agents_area.height.saturating_sub(1),
     ));
 
     let worktree_len = app.changes.worktree_rows(repo).len();
@@ -303,8 +304,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     );
     frame.render_widget(list, worktree_list);
 
-    let history_header = app.regions.history_splitter.expect("set above");
-    let history_list = app.regions.history_list.expect("set above");
+    let agents_header = app.regions.agents_splitter.expect("set above");
+    let agents_list = app.regions.agents_list.expect("set above");
     app.regions.actions = if local_workspace {
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -317,18 +318,23 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     } else {
         Some(draw_actions(frame, actions_row, app.mode))
     };
-    history::draw_branch(
+    let hovered_agent = match &app.hovered_hit_target {
+        Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index))) => Some(*index),
+        _ => None,
+    };
+    let agents_ready = app.workspace_panel_enabled();
+    for (target, rect) in workspace_panel::draw_agents_pane(
         frame,
-        &repo.history,
-        &repo.branch,
-        history_header,
-        history_list,
-        app.dragging_history,
-        app.changes.history_focused,
-        app.mode,
-        &mut app.changes.history_state,
-        local_workspace || details_ready,
-    );
+        &mut app.workspace_panel,
+        &app.settings,
+        agents_header,
+        agents_list,
+        app.dragging_agents,
+        agents_ready,
+        hovered_agent,
+    ) {
+        app.regions.register_hit_target(target, rect);
+    }
     if !draw_details {
         draw_commit_editor(
             frame,
@@ -342,18 +348,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         return;
     }
 
-    let selected_history = if app.changes.history_focused {
-        app.changes
-            .history_state
-            .selected()
-            .and_then(|index| repo.history.get(index))
-    } else {
-        None
-    };
     let selected_graph_commit = (app.view == View::Graph && app.graph_commit_open)
         .then(|| app.selected_graph_commit())
         .flatten();
-    let selected_commit = selected_history.or(selected_graph_commit);
+    let selected_commit = selected_graph_commit;
     let selected_change = if selected_commit.is_none() {
         app.changes
             .worktree_state
@@ -811,9 +809,9 @@ fn draw_explorer_changes(
 ) {
     app.regions.worktree_list = None;
     app.regions.commit = None;
-    app.regions.history_list = None;
-    app.regions.history_splitter = None;
-    app.regions.history_bounds = None;
+    app.regions.agents_list = None;
+    app.regions.agents_splitter = None;
+    app.regions.agents_bounds = None;
 
     let content = columns[0].inner(Margin::new(1, 0));
     let header = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);

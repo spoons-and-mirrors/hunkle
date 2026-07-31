@@ -73,7 +73,6 @@ fn renders_every_primary_surface() {
 
     let mut app = App::new(root.to_path_buf());
     app.commit_message_generator = CommitMessageGenerator::ready_for_test();
-    assert_eq!(app.changes.history_state.selected(), None);
     let settings_path = root.join(".git/hunkle-test-config");
     app.settings_store = SettingsStore::at(settings_path.clone());
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
@@ -87,15 +86,15 @@ fn renders_every_primary_surface() {
     assert!(app.regions.graph.unwrap().x > 0);
     assert_eq!(app.regions.help.unwrap().right(), 120);
     let buffer = terminal.backend().buffer();
-    let history = app.regions.history_splitter.unwrap();
-    let history_offset = usize::from(history.y) * 120 + usize::from(history.x);
+    let agents = app.regions.agents_splitter.unwrap();
+    let agents_offset = usize::from(agents.y) * 120 + usize::from(agents.x);
     assert_eq!(buffer.content[0].bg, super::palette().surface_alt);
     assert_eq!(
         buffer.content[36 * 120 - 1].bg,
         super::palette().surface_alt
     );
     assert_eq!(
-        buffer.content[history_offset].bg,
+        buffer.content[agents_offset].bg,
         super::palette().surface_alt
     );
     let header: String = terminal.backend().buffer().content[..120]
@@ -184,7 +183,7 @@ fn renders_every_primary_surface() {
     assert_eq!(app.changes.pane, LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.commit.is_none());
-    assert!(app.regions.history_list.is_none());
+    assert!(app.regions.agents_list.is_none());
     let mut explorer = app.regions.explorer_list.unwrap();
     let directory_row = app
         .changes
@@ -430,46 +429,61 @@ fn renders_every_primary_surface() {
     assert!(!app.dragging_splitter);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let history_splitter = app.regions.history_splitter.unwrap();
+    let agents_splitter = app.regions.agents_splitter.unwrap();
     let commit = app.regions.commit.unwrap();
     let actions = app.regions.actions.unwrap();
     let worktree = app.regions.worktree_list.unwrap();
     assert_eq!(actions.y, commit.bottom());
     assert_eq!(actions.right(), commit.right());
     assert_eq!(actions.bottom(), worktree.y);
-    assert!(commit.bottom() <= history_splitter.y);
-    let history_bounds = app.regions.history_bounds.unwrap();
-    let history_target = history_bounds.bottom().saturating_sub(9);
+    assert!(commit.bottom() <= agents_splitter.y);
+    let agents_bounds = app.regions.agents_bounds.unwrap();
+    let agents_target = agents_bounds.bottom().saturating_sub(9);
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
-        history_splitter.right().saturating_sub(2),
-        history_splitter.y,
+        agents_splitter.right().saturating_sub(2),
+        agents_splitter.y,
     ));
     app.handle_mouse(mouse(
         MouseEventKind::Drag(MouseButton::Left),
-        history_splitter.right().saturating_sub(2),
-        history_target,
+        agents_splitter.right().saturating_sub(2),
+        agents_target,
     ));
     app.handle_mouse(mouse(
         MouseEventKind::Up(MouseButton::Left),
-        history_splitter.right().saturating_sub(2),
-        history_target,
+        agents_splitter.right().saturating_sub(2),
+        agents_target,
     ));
-    assert_eq!(app.settings.history_height, 9);
+    assert_eq!(app.settings.agents_height, 9);
     assert!(
         fs::read_to_string(&settings_path)
             .unwrap()
-            .contains("history_height=9")
+            .contains("agents_height=9")
     );
-    assert!(!app.dragging_history);
+    assert!(!app.dragging_agents);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let history = app.regions.history_list.unwrap();
-    click(&mut app, history.x + 2, history.y + 2);
-    wait_for_preview(&mut app);
-    assert_eq!(app.changes.history_state.selected(), Some(1));
-    assert!(app.changes.history_focused);
-    assert!(app.changes.diff.contains("diff --git"));
+    let agents = app.regions.agents_list.unwrap();
+    app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
+        "result": {
+            "snapshot": {
+                "workspaces": [],
+                "agents": [{
+                    "agent": "opencode",
+                    "agent_status": "idle",
+                    "focused": true,
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "workspace_id": "w1"
+                }]
+            }
+        }
+    }));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    click(&mut app, agents.x + 2, agents.y + 2);
+    assert_eq!(app.mode, Mode::WorkspacePanel);
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
@@ -482,8 +496,6 @@ fn renders_every_primary_surface() {
     let tracked_y = worktree.y + (tracked_row - app.changes.worktree_scroll) as u16;
     click(&mut app, worktree.x + 2, tracked_y);
     wait_for_preview(&mut app);
-    assert_eq!(app.changes.history_state.selected(), None);
-    assert!(!app.changes.history_focused);
     assert!(app.changes.diff.contains("tracked.txt"));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let diff = app.regions.diff.unwrap();
@@ -655,6 +667,21 @@ fn renders_every_primary_surface() {
     );
     app.changes.diff_wrap = true;
     app.changes.diff_scroll = usize::MAX;
+    app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
+        "result": {
+            "snapshot": {
+                "workspaces": [],
+                "agents": [{
+                    "agent": "opencode",
+                    "agent_status": "working",
+                    "focused": true,
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "workspace_id": "w1"
+                }]
+            }
+        }
+    }));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.changes.preview_presentation.is_windowed());
     assert!(app.changes.diff_scroll > usize::from(u16::MAX));
@@ -668,21 +695,15 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(changes_screen.contains("Write a commit message"));
-    assert!(changes_screen.contains("HISTORY"));
+    assert!(changes_screen.contains("AGENTS"));
+    assert!(changes_screen.contains("terminal session"));
+    assert!(changes_screen.contains("unassigned"));
+    assert!(changes_screen.contains("WORKING"));
     assert!(changes_screen.contains("ACTIONS"));
     assert!(app.regions.actions.is_some());
     assert!(app.regions.actions.unwrap().bottom() <= app.regions.worktree_list.unwrap().y);
-    assert!(changes_screen.contains("HEAD"));
-    let history_oid: String = app.repository().unwrap().history[0]
-        .oid
-        .chars()
-        .take(7)
-        .collect();
-    let history_date = app.repository().unwrap().history[0].date.clone();
-    assert!(changes_screen.contains(&history_oid));
-    assert!(!changes_screen.contains(&history_date));
+    assert!(!changes_screen.contains("HEAD"));
     assert!(!changes_screen.contains("Render Test"));
-    assert!(!changes_screen.contains('●'));
     assert!(!changes_screen.contains("[Commit]"));
     assert!(!changes_screen.contains("COMMIT"));
     assert!(!changes_screen.contains('┌'));
@@ -874,7 +895,7 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
     let worktree = app.regions.worktree.unwrap();
-    let mut graph = app.regions.graph_table.unwrap();
+    let graph = app.regions.graph_table.unwrap();
     assert!(graph.x >= worktree.right());
     assert!(app.regions.diff.is_none());
 
@@ -908,19 +929,6 @@ fn renders_every_primary_surface() {
     assert_eq!(app.visible_graph_indices().len(), 2);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
-
-    let branch_history = app.regions.history_list.unwrap();
-    click(&mut app, branch_history.x + 1, branch_history.y);
-    assert_eq!(app.changes.history_state.selected(), Some(0));
-    assert!(app.graph_commit_open);
-    wait_for_preview(&mut app);
-    assert!(!app.changes.diff.is_empty());
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.graph_table.is_none());
-    assert!(app.regions.diff.is_some());
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    graph = app.regions.graph_table.unwrap();
 
     let graph_offset = app.graph_state.offset();
     app.handle_mouse(MouseEvent {
@@ -1416,7 +1424,8 @@ fn renders_every_primary_surface() {
 }
 
 #[test]
-fn renders_the_workspace_manager_as_a_centered_modal() {
+
+fn renders_the_workspace_manager_as_a_bottom_drawer() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
     app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
@@ -1449,13 +1458,15 @@ fn renders_the_workspace_manager_as_a_centered_modal() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    let modal = app.regions.workspace_panel.unwrap();
-    assert_eq!(modal.width, 105);
-    assert_eq!(modal.height, 27);
-    assert_eq!(modal.x, 7);
+    let drawer = app.regions.workspace_panel.unwrap();
+    assert_eq!(drawer.width, 120);
+    assert_eq!(drawer.height, 17);
+    assert_eq!(drawer.x, 0);
+    assert_eq!(drawer.y, 13);
+    assert_eq!(drawer.bottom(), 30);
     assert_eq!(app.regions.worktree.unwrap().x, 0);
-    assert!(app.regions.workspace_panel_workspaces.unwrap().x > modal.x);
-    assert!(app.regions.workspace_panel_agents.unwrap().x > modal.x);
+    assert!(app.regions.workspace_panel_workspaces.unwrap().x > drawer.x);
+    assert!(app.regions.workspace_panel_agents.unwrap().x > drawer.x);
     assert!(
         app.regions.workspace_panel_agents.unwrap().x
             > app.regions.workspace_panel_workspaces.unwrap().right()
@@ -1501,7 +1512,9 @@ fn renders_the_workspace_manager_as_a_centered_modal() {
 
     let mut tall = Terminal::new(TestBackend::new(120, 50)).unwrap();
     tall.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.workspace_panel.unwrap().height, 45);
+    let tall_drawer = app.regions.workspace_panel.unwrap();
+    assert_eq!(tall_drawer.height, 20);
+    assert_eq!(tall_drawer.y, 30);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
@@ -1510,9 +1523,11 @@ fn renders_the_workspace_manager_as_a_centered_modal() {
 
     let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
     narrow.draw(|frame| draw(frame, &mut app)).unwrap();
-    let narrow_modal = app.regions.workspace_panel.unwrap();
-    assert_eq!(narrow_modal.width, 56);
-    assert_eq!(narrow_modal.x, 2);
+    let narrow_drawer = app.regions.workspace_panel.unwrap();
+    assert_eq!(narrow_drawer.width, 60);
+    assert_eq!(narrow_drawer.x, 0);
+    assert_eq!(narrow_drawer.height, 14);
+    assert_eq!(narrow_drawer.bottom(), 16);
     let workspace_section = app.regions.workspace_panel_workspaces.unwrap();
     let agent_section = app.regions.workspace_panel_agents.unwrap();
     assert_eq!(workspace_section.x, agent_section.x);
@@ -1631,39 +1646,75 @@ fn toggles_worktree_directories_with_the_mouse() {
 }
 
 #[test]
-fn clicking_empty_worktree_keeps_the_open_history_diff() {
+fn clicking_the_agents_pane_opens_the_workspace_manager() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
-    run_git(root, &["config", "user.name", "History Diff Test"]);
-    run_git(root, &["config", "user.email", "history-diff@example.com"]);
+    run_git(root, &["config", "user.name", "Agents Pane Test"]);
+    run_git(root, &["config", "user.email", "agents-pane@example.com"]);
     fs::write(root.join("tracked.txt"), "initial\n").unwrap();
     run_git(root, &["add", "."]);
     run_git(root, &["commit", "-m", "initial commit"]);
 
     let mut app = App::new(root.to_path_buf());
+    app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
+        "result": {
+            "snapshot": {
+                "workspaces": [{
+                    "workspace_id": "w1",
+                    "label": "HUNKLE",
+                    "focused": true
+                }],
+                "agents": [{
+                    "agent": "opencode",
+                    "agent_status": "working",
+                    "focused": true,
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "terminal_title_stripped": "OC | Refine workspace timers",
+                    "workspace_id": "w1"
+                }]
+            }
+        }
+    }));
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.mode, Mode::Normal);
+
+    let agents = app.regions.agents_list.unwrap();
+    let agent_row: String = (agents.x..agents.right())
+        .map(|column| terminal.backend().buffer()[(column, agents.y)].symbol())
+        .collect();
+    assert!(agent_row.contains("HUNKLE"), "agent row was: {agent_row:?}");
+    assert!(agent_row.contains("WORKING"));
+    assert_eq!(
+        terminal.backend().buffer()[(agents.x, agents.y)].symbol(),
+        "●",
+        "status dot should be the first character of the row"
+    );
+    let session_row: String = (agents.x..agents.right())
+        .map(|column| terminal.backend().buffer()[(column, agents.y + 1)].symbol())
+        .collect();
     assert!(
-        app.changes
-            .worktree_rows(app.repository().unwrap())
-            .is_empty()
+        session_row.contains("Refine workspace"),
+        "session row was: {session_row:?}"
     );
 
-    let history = app.regions.history_list.unwrap();
-    click(&mut app, history.x + 1, history.y);
-    wait_for_preview(&mut app);
-    let history_diff = app.changes.diff.clone();
-    assert!(app.changes.history_focused);
-    assert!(history_diff.contains("diff --git"));
-
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        agents.x + 2,
+        agents.y,
+    ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let worktree = app.regions.worktree_list.unwrap();
-    click(&mut app, worktree.x + 1, worktree.y + 1);
+    assert_eq!(
+        terminal.backend().buffer()[(agents.x + 2, agents.y)].bg,
+        super::palette().selected
+    );
 
-    assert!(app.changes.history_focused);
-    assert_eq!(app.changes.history_state.selected(), Some(0));
-    assert_eq!(app.changes.diff, history_diff);
+    click(&mut app, agents.x + 2, agents.y);
+    assert_eq!(app.mode, Mode::WorkspacePanel);
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
 }
 
 #[test]
@@ -1964,6 +2015,7 @@ fn shows_worktree_file_status_letters() {
     fs::write(root.join("new.txt"), "new\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
+    app.settings.agents_height = 9;
     let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 

@@ -69,7 +69,6 @@ pub struct ChangesState {
     pub(crate) worktree_scroll: usize,
     pub(crate) worktree_scroll_to_selection: bool,
     pub(crate) explorer_scroll: usize,
-    pub(crate) history_state: ListState,
     pub(crate) diff: String,
     pub(crate) diff_scroll: usize,
     pub(crate) diff_wrap: bool,
@@ -78,7 +77,6 @@ pub struct ChangesState {
     pub(crate) hunk_selection: Option<usize>,
     hunk_pin_pending: bool,
     pending_hunk_selection: Option<PendingHunkSelection>,
-    pub(crate) history_focused: bool,
     pub(crate) collapsed_directories: HashSet<RepoPath>,
     pub(crate) expanded_explorer_directories: HashSet<RepoPath>,
     worktree_rows_cache: Vec<WorktreeRow>,
@@ -110,7 +108,6 @@ pub(super) struct ChangesSelection {
     directory: Option<(RepoPath, WorktreeSection)>,
     explorer_file: Option<RepoPath>,
     explorer_directory: Option<RepoPath>,
-    history_oid: Option<String>,
 }
 
 impl ChangesState {
@@ -127,7 +124,6 @@ impl ChangesState {
             worktree_scroll: 0,
             worktree_scroll_to_selection: true,
             explorer_scroll: 0,
-            history_state: ListState::default(),
             diff: String::new(),
             diff_scroll: 0,
             diff_wrap: false,
@@ -136,7 +132,6 @@ impl ChangesState {
             hunk_selection: None,
             hunk_pin_pending: false,
             pending_hunk_selection: None,
-            history_focused: false,
             collapsed_directories: HashSet::new(),
             expanded_explorer_directories: HashSet::new(),
             worktree_rows_cache: Vec::new(),
@@ -187,13 +182,11 @@ impl ChangesState {
         self.worktree_scroll = 0;
         self.worktree_scroll_to_selection = true;
         self.explorer_scroll = 0;
-        self.history_state = ListState::default();
         self.set_diff(String::new());
         self.diff_scroll = 0;
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
-        self.history_focused = false;
         self.collapsed_directories.clear();
         self.expanded_explorer_directories.clear();
         self.directory_generation = self.directory_generation.wrapping_add(1);
@@ -234,11 +227,6 @@ impl ChangesState {
             }),
             explorer_file: self.selected_explorer_file_path(repo).cloned(),
             explorer_directory: self.selected_explorer_directory_path(),
-            history_oid: self
-                .history_state
-                .selected()
-                .and_then(|index| repo.history.get(index))
-                .map(|commit| commit.oid.clone()),
         }
     }
 
@@ -268,11 +256,6 @@ impl ChangesState {
             .or_else(|| self.first_change_row(repo));
         self.worktree_state.select(change_row);
         self.worktree_scroll_to_selection = true;
-
-        let history_index = selection
-            .history_oid
-            .and_then(|oid| repo.history.iter().position(|commit| commit.oid == oid));
-        self.history_state.select(history_index);
 
         let explorer_row = selection
             .explorer_file
@@ -306,27 +289,18 @@ impl ChangesState {
         self.worktree_rows(repo).get(selected)?.change_index
     }
 
-    pub(super) fn has_preview_target(&self, repo: &RepositoryData) -> bool {
+    pub(super) fn has_preview_target(&self, _repo: &RepositoryData) -> bool {
         match self.pane {
             LeftPane::Files => self
                 .explorer_state
                 .selected()
                 .and_then(|index| self.explorer_rows_cache.get(index))
                 .is_some_and(|row| row.file_path.is_some() || row.directory_path.is_some()),
-            LeftPane::Worktree => {
-                if self.history_focused
-                    && self
-                        .history_state
-                        .selected()
-                        .is_some_and(|index| repo.history.get(index).is_some())
-                {
-                    return true;
-                }
-                self.worktree_state
-                    .selected()
-                    .and_then(|index| self.worktree_rows_cache.get(index))
-                    .is_some_and(|row| row.change_index.is_some() || row.directory_path.is_some())
-            }
+            LeftPane::Worktree => self
+                .worktree_state
+                .selected()
+                .and_then(|index| self.worktree_rows_cache.get(index))
+                .is_some_and(|row| row.change_index.is_some() || row.directory_path.is_some()),
         }
     }
 
@@ -424,7 +398,6 @@ impl ChangesState {
             return false;
         }
         self.pane = pane;
-        self.clear_history_selection();
         if pane == LeftPane::Files && self.explorer_state.selected().is_none() {
             self.explorer_state.select(self.initial_explorer_row());
         }
@@ -441,7 +414,6 @@ impl ChangesState {
             return false;
         }
         self.worktree_state.select(Some(index));
-        self.clear_history_selection();
         self.refresh_diff(Some(repo));
         true
     }
@@ -464,7 +436,6 @@ impl ChangesState {
                 if self.pane != LeftPane::Worktree {
                     return None;
                 }
-                self.clear_history_selection();
                 Some(ChangesEffect::ToggleAllStaging)
             }
             ChangesHitTarget::WorktreeBackground(_) => None,
@@ -473,7 +444,6 @@ impl ChangesState {
                     return None;
                 }
                 if !self.select_worktree_row(repo, index) {
-                    self.clear_history_selection();
                     self.refresh_diff(Some(repo));
                     return None;
                 }
@@ -789,31 +759,6 @@ impl ChangesState {
         self.select_explorer_path(repo, &path, viewport)
     }
 
-    pub(super) fn select_history_row(
-        &mut self,
-        repo: &RepositoryData,
-        relative_row: usize,
-    ) -> bool {
-        let mut rendered_row = 0;
-        let index = (self.history_state.offset()..repo.history.len()).find(|index| {
-            let height = if repo.history[*index].refs.is_empty() {
-                1
-            } else {
-                2
-            };
-            let contains = relative_row < rendered_row + height;
-            rendered_row += height;
-            contains
-        });
-        let Some(index) = index else {
-            return false;
-        };
-        self.history_state.select(Some(index));
-        self.history_focused = true;
-        self.refresh_diff(Some(repo));
-        true
-    }
-
     pub(super) fn move_selection(
         &mut self,
         repo: Option<&RepositoryData>,
@@ -837,8 +782,6 @@ impl ChangesState {
                 self.explorer_state.selected(),
                 explorer_viewport,
             );
-        } else if self.history_focused {
-            move_list(&mut self.history_state, repo.history.len(), delta);
         } else {
             move_worktree_selection(&mut self.worktree_state, &self.worktree_rows_cache, delta);
             ensure_selection_visible(
@@ -847,15 +790,6 @@ impl ChangesState {
                 worktree_viewport,
             );
         }
-        if self.preview_selection() != previous {
-            self.refresh_diff(Some(repo));
-        }
-    }
-
-    pub(super) fn move_history_selection(&mut self, repo: &RepositoryData, delta: isize) {
-        let previous = self.preview_selection();
-        self.history_focused = true;
-        move_list(&mut self.history_state, repo.history.len(), delta);
         if self.preview_selection() != previous {
             self.refresh_diff(Some(repo));
         }
@@ -880,9 +814,6 @@ impl ChangesState {
                 self.explorer_state.selected(),
                 explorer_viewport,
             );
-        } else if self.history_focused {
-            self.history_state
-                .select((!repo.history.is_empty()).then_some(0));
         } else {
             self.worktree_state.select(self.first_change_row(repo));
             ensure_selection_visible(
@@ -915,8 +846,6 @@ impl ChangesState {
                 self.explorer_state.selected(),
                 explorer_viewport,
             );
-        } else if self.history_focused {
-            self.history_state.select(repo.history.len().checked_sub(1));
         } else {
             self.worktree_state.select(self.last_change_row(repo));
             ensure_selection_visible(
@@ -1068,11 +997,6 @@ impl ChangesState {
 
     pub(crate) fn take_hunk_pin_request(&mut self) -> bool {
         std::mem::take(&mut self.hunk_pin_pending)
-    }
-
-    pub(super) fn clear_history_selection(&mut self) {
-        self.history_focused = false;
-        self.history_state.select(None);
     }
 
     pub(super) fn toggle_selected_explorer_directory(&mut self, repo: Option<&RepositoryData>) {
@@ -1288,17 +1212,6 @@ impl ChangesState {
                 }
                 .to_owned(),
             );
-            return;
-        }
-        if self.history_focused
-            && let Some(commit) = self
-                .history_state
-                .selected()
-                .and_then(|index| repo.history.get(index))
-        {
-            self.set_diff("Loading preview…".to_owned());
-            self.preview_loader
-                .request_commit(&repo.root, commit.oid.clone());
             return;
         }
         let rows = self.worktree_rows(repo);
@@ -1539,7 +1452,6 @@ impl ChangesState {
     fn select_initial_rows(&mut self, repo: Option<&RepositoryData>) {
         self.worktree_state
             .select(repo.and_then(|repo| self.first_change_row(repo)));
-        self.history_state.select(None);
         self.explorer_state.select(self.initial_explorer_row());
     }
 
@@ -1602,15 +1514,13 @@ impl ChangesState {
             .rposition(|row| row.change_index.is_some())
     }
 
-    fn preview_selection(&self) -> (LeftPane, bool, Option<usize>) {
+    fn preview_selection(&self) -> (LeftPane, Option<usize>) {
         let selected = if self.pane == LeftPane::Files {
             self.explorer_state.selected()
-        } else if self.history_focused {
-            self.history_state.selected()
         } else {
             self.worktree_state.selected()
         };
-        (self.pane, self.history_focused, selected)
+        (self.pane, selected)
     }
 }
 
