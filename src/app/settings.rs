@@ -47,6 +47,8 @@ pub struct Settings {
     pub show_agent_harness: bool,
     pub agent_time_display: AgentTimeDisplay,
     pub agents_height: u16,
+    pub graph_lane_width: u16,
+    pub graph_description_width: u16,
     pub graph_changes_width: u16,
     pub graph_date_width: u16,
     pub graph_author_width: u16,
@@ -64,6 +66,8 @@ impl Settings {
 
     pub(crate) fn graph_column_width(&self, column: GraphColumn) -> u16 {
         match column {
+            GraphColumn::Graph => self.graph_lane_width,
+            GraphColumn::Description => self.graph_description_width,
             GraphColumn::Changes => self.graph_changes_width,
             GraphColumn::Date => self.graph_date_width,
             GraphColumn::Author => self.graph_author_width,
@@ -72,10 +76,12 @@ impl Settings {
     }
 
     pub(crate) fn set_graph_column_width(&mut self, column: GraphColumn, width: u16) {
-        let width = width.clamp(3, 80);
+        let width = width.clamp(column.minimum_width(), 80);
         match column {
+            GraphColumn::Graph => self.graph_lane_width = width,
+            GraphColumn::Description => self.graph_description_width = width,
             GraphColumn::Changes => self.graph_changes_width = width,
-            GraphColumn::Date => self.graph_date_width = width.max(4),
+            GraphColumn::Date => self.graph_date_width = width,
             GraphColumn::Author => self.graph_author_width = width,
             GraphColumn::Commit => self.graph_commit_width = width,
         }
@@ -93,6 +99,8 @@ impl Default for Settings {
             show_agent_harness: false,
             agent_time_display: AgentTimeDisplay::LatestLoop,
             agents_height: 7,
+            graph_lane_width: 0,
+            graph_description_width: 0,
             graph_changes_width: 11,
             graph_date_width: 11,
             graph_author_width: 16,
@@ -155,7 +163,7 @@ impl SettingsStore {
             fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.format_on_save,
@@ -164,6 +172,8 @@ impl SettingsStore {
             settings.show_agent_harness,
             settings.agent_time_display.as_str(),
             settings.agents_height,
+            settings.graph_lane_width,
+            settings.graph_description_width,
             settings.graph_changes_width,
             settings.graph_date_width,
             settings.graph_author_width,
@@ -247,6 +257,24 @@ fn load(path: &Path) -> Settings {
                     settings.set_graph_column_width(GraphColumn::Changes, width);
                 }
             }
+            "graph_lane_width" => {
+                if let Ok(width) = value.trim().parse::<u16>() {
+                    settings.graph_lane_width = if width == 0 {
+                        0
+                    } else {
+                        width.clamp(GraphColumn::Graph.minimum_width(), 80)
+                    };
+                }
+            }
+            "graph_description_width" => {
+                if let Ok(width) = value.trim().parse::<u16>() {
+                    settings.graph_description_width = if width == 0 {
+                        0
+                    } else {
+                        width.clamp(GraphColumn::Description.minimum_width(), 80)
+                    };
+                }
+            }
             "graph_date_width" => {
                 if let Ok(width) = value.trim().parse::<u16>() {
                     settings.set_graph_column_width(GraphColumn::Date, width);
@@ -307,6 +335,8 @@ mod tests {
             show_agent_harness: true,
             agent_time_display: AgentTimeDisplay::AgentTotal,
             agents_height: 9,
+            graph_lane_width: 12,
+            graph_description_width: 31,
             graph_changes_width: 13,
             graph_date_width: 18,
             graph_author_width: 21,

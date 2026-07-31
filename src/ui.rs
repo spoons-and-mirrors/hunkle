@@ -108,7 +108,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 state: &mut app.graph_state,
                 scroll_to_selection: &mut app.graph_scroll_to_selection,
                 settings: &app.settings,
-                dragging_column: app.dragging_graph_column.map(|drag| drag.column),
+                dragging_column: app.dragging_graph_column.map(|drag| drag.right),
             },
         );
         app.regions.graph_table = graph_regions.table;

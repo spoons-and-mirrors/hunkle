@@ -5,7 +5,7 @@
 - Local workspaces for browsing, searching, and previewing directories that are not Git repositories.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
-- An all-refs commit graph showing branches, remotes, tags, authors, dates, hashes, lazy-loaded line-change totals, and interactive author filtering. Changes, Date, Author, and Commit column widths can be resized by dragging their header handles.
+- An all-refs commit graph showing branches, remotes, tags, authors, dates, hashes, lazy-loaded line-change totals, and interactive author filtering. Drag any vertical header separator to resize the adjacent columns.
 - A filterable repository browser for local and remote branches plus open GitHub pull requests and issues.
 - Source-aware diffs with changed-file and line-count summaries, line numbers, syntax color, and tinted additions, deletions, and hunk headers.
 - Nonblocking worktree refresh when files, the index, branches, or HEAD change outside hunkle.

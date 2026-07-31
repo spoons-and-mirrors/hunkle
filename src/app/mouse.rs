@@ -336,9 +336,11 @@ impl App {
             .copied()
         {
             let drag = GraphColumnDrag {
-                column: column.column,
-                start_x: column.start_x,
-                end_x: column.end_x,
+                left: column.left,
+                right: column.right,
+                origin_x: point.x,
+                left_width: column.left_width,
+                right_width: column.right_width,
             };
             self.dragging_graph_column = Some(drag);
             self.resize_graph_column(drag, point.x);
@@ -1460,11 +1462,14 @@ impl App {
     }
 
     fn resize_graph_column(&mut self, drag: GraphColumnDrag, column: u16) {
-        let width = if drag.column == super::GraphColumn::Commit {
-            drag.end_x.saturating_sub(column)
-        } else {
-            column.saturating_sub(drag.start_x)
-        };
-        self.settings.set_graph_column_width(drag.column, width);
+        let requested = i32::from(column) - i32::from(drag.origin_x);
+        let minimum = i32::from(drag.left.minimum_width()) - i32::from(drag.left_width);
+        let maximum = i32::from(drag.right_width) - i32::from(drag.right.minimum_width());
+        let delta = requested.clamp(minimum, maximum);
+        let left_width = (i32::from(drag.left_width) + delta) as u16;
+        let right_width = (i32::from(drag.right_width) - delta) as u16;
+        self.settings.set_graph_column_width(drag.left, left_width);
+        self.settings
+            .set_graph_column_width(drag.right, right_width);
     }
 }

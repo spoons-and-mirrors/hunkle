@@ -131,6 +131,8 @@ fn renders_every_primary_surface() {
     fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
+    app.settings.graph_lane_width = 0;
+    app.settings.graph_description_width = 0;
     app.settings.graph_changes_width = 11;
     app.settings.graph_date_width = 11;
     app.settings.graph_author_width = 16;
@@ -971,12 +973,28 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("CHANGES"));
     assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
+    assert_eq!(app.regions.graph_columns.len(), 5);
+    assert!(
+        app.regions
+            .graph_columns
+            .iter()
+            .any(|column| column.right == GraphColumn::Description)
+    );
+    assert!(
+        app.regions
+            .graph_columns
+            .iter()
+            .any(|column| column.right == GraphColumn::Changes)
+    );
+    assert!(app.regions.graph_columns.iter().all(|column| {
+        terminal.backend().buffer()[(column.splitter.x, column.splitter.y)].symbol() == "│"
+    }));
 
     let date_column = app
         .regions
         .graph_columns
         .iter()
-        .find(|column| column.column == GraphColumn::Date)
+        .find(|column| column.right == GraphColumn::Date)
         .copied()
         .unwrap();
     app.handle_mouse(mouse(
@@ -984,22 +1002,24 @@ fn renders_every_primary_surface() {
         date_column.splitter.x,
         date_column.splitter.y,
     ));
-    let resized_date_end = date_column.start_x + 12;
+    let resized_date_start = date_column.splitter.x.saturating_sub(1);
     app.handle_mouse(mouse(
         MouseEventKind::Drag(MouseButton::Left),
-        resized_date_end,
+        resized_date_start,
         date_column.splitter.y,
     ));
     app.handle_mouse(mouse(
         MouseEventKind::Up(MouseButton::Left),
-        resized_date_end,
+        resized_date_start,
         date_column.splitter.y,
     ));
-    assert_eq!(app.settings.graph_date_width, 12);
+    let expected_date_width = date_column.right_width + 1;
+    assert_eq!(app.settings.graph_date_width, expected_date_width);
+    assert_eq!(app.settings.graph_changes_width, date_column.left_width - 1);
     assert!(
         fs::read_to_string(&settings_path)
             .unwrap()
-            .contains("graph_date_width=12")
+            .contains(&format!("graph_date_width={expected_date_width}"))
     );
     assert!(app.dragging_graph_column.is_none());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1008,7 +1028,7 @@ fn renders_every_primary_surface() {
         .regions
         .graph_columns
         .iter()
-        .find(|column| column.column == GraphColumn::Commit)
+        .find(|column| column.right == GraphColumn::Commit)
         .copied()
         .unwrap();
     app.handle_mouse(mouse(
@@ -1016,7 +1036,7 @@ fn renders_every_primary_surface() {
         commit_column.splitter.x,
         commit_column.splitter.y,
     ));
-    let wider_commit_start = commit_column.start_x.saturating_sub(3);
+    let wider_commit_start = commit_column.splitter.x.saturating_sub(3);
     app.handle_mouse(mouse(
         MouseEventKind::Drag(MouseButton::Left),
         wider_commit_start,
@@ -1027,11 +1047,16 @@ fn renders_every_primary_surface() {
         wider_commit_start,
         commit_column.splitter.y,
     ));
-    assert_eq!(app.settings.graph_commit_width, 10);
+    let expected_commit_width = commit_column.right_width + 3;
+    assert_eq!(app.settings.graph_commit_width, expected_commit_width);
+    assert_eq!(
+        app.settings.graph_author_width,
+        commit_column.left_width - 3
+    );
     assert!(
         fs::read_to_string(&settings_path)
             .unwrap()
-            .contains("graph_commit_width=10")
+            .contains(&format!("graph_commit_width={expected_commit_width}"))
     );
     assert!(app.dragging_graph_column.is_none());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

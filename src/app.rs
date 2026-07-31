@@ -180,25 +180,42 @@ pub(crate) enum GraphHitTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GraphColumn {
+    Graph,
+    Description,
     Changes,
     Date,
     Author,
     Commit,
 }
 
+impl GraphColumn {
+    pub(crate) fn minimum_width(self) -> u16 {
+        match self {
+            Self::Graph => 2,
+            Self::Description => 1,
+            Self::Changes => 3,
+            Self::Date => 4,
+            Self::Author | Self::Commit => 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GraphColumnRegion {
-    pub column: GraphColumn,
-    pub start_x: u16,
-    pub end_x: u16,
+    pub left: GraphColumn,
+    pub right: GraphColumn,
+    pub left_width: u16,
+    pub right_width: u16,
     pub splitter: Rect,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GraphColumnDrag {
-    pub column: GraphColumn,
-    pub start_x: u16,
-    pub end_x: u16,
+    pub left: GraphColumn,
+    pub right: GraphColumn,
+    pub origin_x: u16,
+    pub left_width: u16,
+    pub right_width: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4188,6 +4205,8 @@ mod tests {
                 show_agent_harness: false,
                 agent_time_display: settings::AgentTimeDisplay::LatestLoop,
                 agents_height: 7,
+                graph_lane_width: 0,
+                graph_description_width: 0,
                 graph_changes_width: 11,
                 graph_date_width: 11,
                 graph_author_width: 16,

@@ -17,8 +17,8 @@ use crate::{
 };
 use serde_json::Value;
 
-const MODEL: &str = "openai/gpt-5.6-sol";
-const VARIANT: &str = "low";
+const MODEL: &str = "opencode/deepseek-v4-flash-free";
+const VARIANT: &str = "max";
 const MAX_MESSAGE_BYTES: usize = 2_000;
 const MAX_DIFF_BYTES: usize = 1024 * 1024;
 const MAX_OPENCODE_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_low_reasoning_opencode_command() {
+    fn builds_deepseek_flash_max_opencode_command() {
         let args = opencode_args(DiffSource::Staged);
         let args = args
             .iter()
@@ -442,9 +442,9 @@ mod tests {
                 "run",
                 "--pure",
                 "--model",
-                "openai/gpt-5.6-sol",
+                "opencode/deepseek-v4-flash-free",
                 "--variant",
-                "low",
+                "max",
                 "--format",
                 "json",
                 "--title",

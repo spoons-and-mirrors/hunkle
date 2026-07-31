@@ -139,7 +139,7 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         "CHANGES".to_owned(),
         "DATE".to_owned(),
         author_label,
-        " COMMIT".to_owned(),
+        "COMMIT".to_owned(),
     ])
     .style(
         Style::default()
@@ -157,41 +157,36 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
     visible_state.select(selected.and_then(|selected| selected.checked_sub(offset)));
     frame.render_stateful_widget(table, table_area, &mut visible_state);
     let column_starts = graph_column_starts(table_area.x, column_widths);
-    let columns = [
-        (GraphColumn::Changes, 2),
-        (GraphColumn::Date, 3),
-        (GraphColumn::Author, 4),
-        (GraphColumn::Commit, 5),
-    ]
-    .into_iter()
-    .map(|(column, index)| {
-        let splitter_x = if column == GraphColumn::Commit {
-            column_starts[index]
-        } else {
-            column_starts[index].saturating_add(column_widths[index])
-        };
-        let splitter = Rect::new(splitter_x, table_area.y, 1, 1);
-        frame.render_widget(
-            Paragraph::new(if column == GraphColumn::Commit {
-                "↔"
-            } else {
-                "│"
-            })
-            .style(Style::default().fg(if dragging_column == Some(column) {
-                palette().accent
-            } else {
-                palette().faint
-            })),
-            splitter,
-        );
-        GraphColumnRegion {
-            column,
-            start_x: column_starts[index],
-            end_x: column_starts[index].saturating_add(column_widths[index]),
-            splitter,
-        }
-    })
-    .collect::<Vec<_>>();
+    let graph_columns = [
+        GraphColumn::Graph,
+        GraphColumn::Description,
+        GraphColumn::Changes,
+        GraphColumn::Date,
+        GraphColumn::Author,
+        GraphColumn::Commit,
+    ];
+    let columns = (1..graph_columns.len())
+        .map(|index| {
+            let left = graph_columns[index - 1];
+            let right = graph_columns[index];
+            let splitter = Rect::new(column_starts[index].saturating_sub(1), table_area.y, 1, 1);
+            frame.render_widget(
+                Paragraph::new("│").style(Style::default().fg(if dragging_column == Some(right) {
+                    palette().accent
+                } else {
+                    palette().faint
+                })),
+                splitter,
+            );
+            GraphColumnRegion {
+                left,
+                right,
+                left_width: column_widths[index - 1],
+                right_width: column_widths[index],
+                splitter,
+            }
+        })
+        .collect::<Vec<_>>();
     if visible.is_empty() {
         frame.render_widget(
             Paragraph::new("No commits match the author filter")
@@ -214,12 +209,18 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
 
 fn graph_column_widths(width: u16, graph_width: usize, settings: &Settings) -> [u16; 6] {
     const COLUMN_SPACING: u16 = 5;
-    const PREFERRED_MINIMUMS: [u16; 6] = [5, 1, 7, 9, 12, 7];
+    const PREFERRED_MINIMUMS: [u16; 6] = [5, 8, 7, 9, 12, 7];
     const ABSOLUTE_MINIMUMS: [u16; 6] = [2, 1, 3, 4, 3, 3];
     let available = width.saturating_sub(COLUMN_SPACING).max(1);
     let mut widths = [
-        graph_width.clamp(8, 40) as u16,
-        1,
+        match settings.graph_column_width(GraphColumn::Graph) {
+            0 => graph_width.clamp(8, 40) as u16,
+            width => width,
+        },
+        match settings.graph_column_width(GraphColumn::Description) {
+            0 => PREFERRED_MINIMUMS[1],
+            width => width,
+        },
         settings
             .graph_column_width(GraphColumn::Changes)
             .clamp(3, 80),
@@ -231,35 +232,26 @@ fn graph_column_widths(width: u16, graph_width: usize, settings: &Settings) -> [
             .graph_column_width(GraphColumn::Commit)
             .clamp(3, 80),
     ];
-    let fixed = widths[0] + widths[2] + widths[3] + widths[4] + widths[5];
-    let fixed_minimum = PREFERRED_MINIMUMS[0]
-        + PREFERRED_MINIMUMS[2]
-        + PREFERRED_MINIMUMS[3]
-        + PREFERRED_MINIMUMS[4]
-        + PREFERRED_MINIMUMS[5];
-    let description_minimum = available
-        .saturating_sub(fixed_minimum)
-        .clamp(PREFERRED_MINIMUMS[1], 8);
-    let mut overflow = fixed
-        .saturating_add(description_minimum)
-        .saturating_sub(available);
-    for index in [4, 2, 5, 0, 3] {
+    let requested = widths.iter().sum::<u16>();
+    if requested < available {
+        widths[1] = widths[1].saturating_add(available - requested);
+        return widths;
+    }
+    let mut overflow = requested.saturating_sub(available);
+    for index in [1, 4, 2, 0, 5, 3] {
         let reduction = widths[index]
             .saturating_sub(PREFERRED_MINIMUMS[index])
             .min(overflow);
         widths[index] = widths[index].saturating_sub(reduction);
         overflow = overflow.saturating_sub(reduction);
     }
-    for index in [4, 2, 5, 0, 3] {
+    for index in [1, 4, 2, 0, 5, 3] {
         let reduction = widths[index]
             .saturating_sub(ABSOLUTE_MINIMUMS[index])
             .min(overflow);
         widths[index] = widths[index].saturating_sub(reduction);
         overflow = overflow.saturating_sub(reduction);
     }
-    widths[1] = available
-        .saturating_sub(widths[0] + widths[2] + widths[3] + widths[4] + widths[5])
-        .max(ABSOLUTE_MINIMUMS[1]);
     widths
 }
 
