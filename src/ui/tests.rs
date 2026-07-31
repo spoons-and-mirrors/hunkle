@@ -69,6 +69,9 @@ fn header_cards_open_pickers_and_checkout_branches() {
     );
     let long_branch = "feature/header-branch-name-is-never-truncated";
     run_git(root, &["branch", "-m", long_branch]);
+    fs::write(root.join("feature.txt"), "feature branch\n").unwrap();
+    run_git(root, &["add", "feature.txt"]);
+    run_git(root, &["commit", "-m", "feature change"]);
 
     let mut app = App::new(root.to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -86,6 +89,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .regions
         .hit_target_rect(HitTarget::HeaderBranch)
         .unwrap();
+    let diff = app.regions.hit_target_rect(HitTarget::HeaderDiff).unwrap();
     assert_eq!(repository.x, 1);
     assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), "▀");
     assert_eq!(
@@ -98,6 +102,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
     );
     assert_eq!(repository.right().saturating_add(1), worktrees.x);
     assert!(worktrees.right() <= branch.x);
+    assert_eq!(branch.right().saturating_add(1), diff.x);
     assert_eq!(
         terminal.backend().buffer()[(repository.x, repository.y)].bg,
         super::palette().yellow
@@ -114,6 +119,10 @@ fn header_cards_open_pickers_and_checkout_branches() {
         terminal.backend().buffer()[(branch.x, branch.y)].bg,
         super::palette().accent
     );
+    assert_eq!(
+        terminal.backend().buffer()[(diff.x, diff.y)].bg,
+        super::palette().purple
+    );
     assert_eq!(worktrees.width, " worktree ".width() as u16);
     let worktree_text = (worktrees.x..worktrees.right())
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())
@@ -123,6 +132,46 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
         .collect::<String>();
     assert_eq!(branch_text, format!(" {long_branch} "));
+
+    click(&mut app, diff.x, diff.y);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::DiffTargets));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let topic_index = app
+        .header_picker
+        .items
+        .iter()
+        .position(
+            |item| matches!(item, HeaderPickerItem::DiffTarget(branch) if branch.name == "topic"),
+        )
+        .unwrap();
+    let topic_target = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(topic_index))
+        .unwrap();
+    click(&mut app, topic_target.x, topic_target.y);
+    wait_for(&mut app, |app| {
+        app.changes
+            .branch_comparison()
+            .is_some_and(|comparison| comparison.target == "topic")
+            && app.changes.diff.contains("feature.txt")
+    });
+    assert_eq!(app.visible_view(), View::Changes);
+    assert_eq!(app.repository().unwrap().branch, long_branch);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("topic...feature/header"));
+    let diff = app.regions.diff.unwrap();
+    let diff_header = (diff.x..diff.right())
+        .map(|x| terminal.backend().buffer()[(x, diff.y + 1)].symbol())
+        .collect::<String>();
+    assert!(!diff_header.contains("topic..."));
 
     click(&mut app, repository.x, repository.y);
     assert_eq!(app.mode, Mode::Normal);
@@ -594,6 +643,24 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(section_screen.contains("All staged changes"));
+    let preview_body = app.regions.preview_body.unwrap();
+    let changed_row = (preview_body.y..preview_body.bottom())
+        .find(|row| {
+            (preview_body.x..preview_body.right())
+                .map(|column| terminal.backend().buffer()[(column, *row)].symbol())
+                .collect::<String>()
+                .contains("changed")
+        })
+        .unwrap();
+    click(&mut app, preview_body.x + 8, changed_row);
+    assert_eq!(app.mode, Mode::FileEdit);
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().path(),
+        &RepoPath::from("tracked.txt")
+    );
+    assert_eq!(app.file_editor.as_ref().unwrap().cursor_position().0, 0);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let stage_all = app
         .regions
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::StageAll))

@@ -619,6 +619,68 @@ pub(super) fn diff_new_line_and_payload_at_display_row(
     None
 }
 
+pub(super) fn diff_file_position_at_display_row(
+    diff: &str,
+    target: usize,
+    show_initial_header: bool,
+) -> Option<(RepoPath, usize, &str)> {
+    if !show_initial_header {
+        return None;
+    }
+    let lines = diff.lines().collect::<Vec<_>>();
+    let has_hunks = lines.iter().any(|line| line.starts_with("@@"));
+    let mut display_index = 0;
+    let mut in_hunk = false;
+    let mut seen_header = false;
+    let mut path = None;
+    let mut old_line = None;
+    let mut new_line = None;
+
+    for (index, line) in lines.iter().copied().enumerate() {
+        let file_header = line.starts_with("diff --git");
+        if file_header {
+            in_hunk = false;
+            old_line = None;
+            new_line = None;
+            path = diff_file_destination(&lines, index).map(|(path, _)| path);
+            if seen_header {
+                if display_index == target {
+                    return None;
+                }
+                display_index += 1;
+            }
+            seen_header = true;
+        }
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header && !file_header {
+            continue;
+        }
+        if hunk_header {
+            if in_hunk {
+                if display_index == target {
+                    return None;
+                }
+                display_index += 1;
+            }
+            in_hunk = true;
+            if let Some((old, new)) = parse_hunk_lines(line) {
+                old_line = Some(old);
+                new_line = Some(new);
+            }
+        }
+        if display_index == target {
+            return if in_hunk && (line.starts_with('+') || line.starts_with(' ')) {
+                Some((path.clone()?, new_line?.max(1) as usize, &line[1..]))
+            } else {
+                None
+            };
+        }
+        advance_diff_line(line, &mut old_line, &mut new_line);
+        display_index += 1;
+    }
+    None
+}
+
 pub(super) fn diff_file_header_at_display_row(
     diff: &str,
     target: usize,
@@ -854,6 +916,15 @@ mod tests {
             Some((RepoPath::from("src/space name.rs"), 42))
         );
         assert_eq!(diff_file_header_at_display_row(diff, 0, false), None);
+        assert_eq!(
+            diff_file_position_at_display_row(diff, 2, true),
+            Some((RepoPath::from("src/first.rs"), 12, "first"))
+        );
+        assert_eq!(
+            diff_file_position_at_display_row(diff, 6, true),
+            Some((RepoPath::from("src/space name.rs"), 42, "second"))
+        );
+        assert_eq!(diff_file_position_at_display_row(diff, 3, true), None);
     }
 
     #[test]

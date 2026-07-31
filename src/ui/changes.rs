@@ -295,11 +295,15 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         .then(|| app.selected_graph_commit())
         .flatten();
     let selected_commit = selected_graph_commit;
-    let selected_section = selected_commit
+    let branch_comparison = selected_commit
         .is_none()
+        .then(|| app.changes.branch_comparison())
+        .flatten()
+        .cloned();
+    let selected_section = (selected_commit.is_none() && branch_comparison.is_none())
         .then(|| app.changes.selected_diff_section())
         .flatten();
-    let selected_change = if selected_commit.is_none() {
+    let selected_change = if selected_commit.is_none() && branch_comparison.is_none() {
         app.changes
             .worktree_state
             .selected()
@@ -309,22 +313,27 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     } else {
         None
     };
-    let selected_label = selected_commit.map_or_else(
+    let selected_label = branch_comparison.as_ref().map_or_else(
         || {
-            selected_change.map_or_else(
+            selected_commit.map_or_else(
                 || {
-                    selected_section.map_or_else(
-                        || "No file selected".to_owned(),
-                        |section| match section {
-                            WorktreeSection::Staged => "All staged changes".to_owned(),
-                            WorktreeSection::Unstaged => "All unstaged changes".to_owned(),
+                    selected_change.map_or_else(
+                        || {
+                            selected_section.map_or_else(
+                                || "No file selected".to_owned(),
+                                |section| match section {
+                                    WorktreeSection::Staged => "All staged changes".to_owned(),
+                                    WorktreeSection::Unstaged => "All unstaged changes".to_owned(),
+                                },
+                            )
                         },
+                        |change| change.path.display(),
                     )
                 },
-                |change| change.path.display(),
+                |commit| commit.oid.chars().take(7).collect(),
             )
         },
-        |commit| commit.oid.chars().take(7).collect(),
+        |_| String::new(),
     );
     let syntax_path = selected_change.map_or_else(String::new, |change| change.path.display());
     let diff_header = Rect::new(
@@ -333,26 +342,31 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         columns[1].width.saturating_sub(2),
         1,
     );
-    let state =
-        selected_commit.map_or_else(
-            || {
-                selected_section.map_or_else(
-                    || {
-                        selected_change.map_or("", |change| {
-                            if change.staged { "staged" } else { "unstaged" }
-                        })
-                    },
-                    |section| match section {
-                        WorktreeSection::Staged => "staged",
-                        WorktreeSection::Unstaged => "unstaged",
-                    },
-                )
-            },
-            |_| "commit",
-        );
+    let state = branch_comparison.as_ref().map_or_else(
+        || {
+            selected_commit.map_or_else(
+                || {
+                    selected_section.map_or_else(
+                        || {
+                            selected_change.map_or("", |change| {
+                                if change.staged { "staged" } else { "unstaged" }
+                            })
+                        },
+                        |section| match section {
+                            WorktreeSection::Staged => "staged",
+                            WorktreeSection::Unstaged => "unstaged",
+                        },
+                    )
+                },
+                |_| "commit",
+            )
+        },
+        |_| "branch",
+    );
     let inspecting_commit = selected_commit.is_some();
-    let show_file_headers = inspecting_commit || selected_section.is_some();
-    let show_summary = show_file_headers || selected_change.is_some();
+    let show_file_headers =
+        inspecting_commit || selected_section.is_some() || branch_comparison.is_some();
+    let show_summary = inspecting_commit || selected_section.is_some() || selected_change.is_some();
     let metadata_width = diff_header.width.saturating_sub(2);
     let message_height = selected_commit.map_or(0, |commit| {
         commit_message_height(
@@ -446,7 +460,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "DIFF  ",
+                if branch_comparison.is_some() {
+                    "DIFF"
+                } else {
+                    "DIFF  "
+                },
                 Style::default()
                     .fg(palette().muted)
                     .add_modifier(Modifier::BOLD),
@@ -462,6 +480,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
                 Style::default().fg(match state {
                     "staged" => palette().green,
                     "commit" => palette().accent,
+                    "branch" => palette().purple,
                     _ => palette().yellow,
                 }),
             ),
@@ -492,9 +511,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     }
     let show_hunk_actions =
         !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
-    let editable_diff = selected_change
-        .filter(|change| !change.staged)
-        .map(|change| (change.path.clone(), change.code == '?'));
+    let editable_diff = selected_change.map(|change| (change.path.clone(), change.code == '?'));
+    let editable_combined_diff = selected_section.is_some() || branch_comparison.is_some();
     let mut preview = prepare_preview_lines(
         app,
         diff_body,
@@ -508,6 +526,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         app.regions.preview_body = Some(diff_body);
         app.regions.preview_path = Some(path);
         app.regions.preview_untracked = untracked;
+        app.regions.preview_generation = app.changes.preview_content_generation;
+        app.regions.preview_scroll = app.changes.diff_scroll;
+    } else if editable_combined_diff {
+        app.regions.preview_body = Some(diff_body);
         app.regions.preview_generation = app.changes.preview_content_generation;
         app.regions.preview_scroll = app.changes.diff_scroll;
     }

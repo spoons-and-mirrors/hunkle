@@ -7,6 +7,7 @@ pub(crate) enum HeaderPickerKind {
     Repositories,
     Worktrees,
     Branches,
+    DiffTargets,
 }
 
 #[derive(Debug, Clone)]
@@ -14,6 +15,7 @@ pub(crate) enum HeaderPickerItem {
     Repository { common_dir: PathBuf, path: PathBuf },
     Worktree(LinkedWorktree),
     Branch(Branch),
+    DiffTarget(Branch),
 }
 
 #[derive(Debug, Default)]
