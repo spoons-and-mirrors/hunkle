@@ -54,7 +54,7 @@ use std::{
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
-const SETTINGS_ROW_COUNT: usize = 8;
+const SETTINGS_ROW_COUNT: usize = 9;
 
 struct CommitDraftResult {
     root: PathBuf,
@@ -233,6 +233,7 @@ pub struct Regions {
     pub file_dialog_secondary: Option<Rect>,
     pub editor_setting: Option<Rect>,
     pub media_preview_setting: Option<Rect>,
+    pub format_on_save_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub workspace_panel_setting: Option<Rect>,
     pub agent_harness_setting: Option<Rect>,
@@ -1521,19 +1522,25 @@ impl App {
         self.file_editor = None;
         self.mode = Mode::Normal;
 
+        if !self.settings.format_on_save {
+            self.reload(RefreshScope::WORKTREE);
+            self.notice = Some(format!("Saved {path}"));
+            return;
+        }
+
         match formatter::detect(&root, path.as_path()) {
             Ok(command) => {
                 let label = command.label;
                 if self.session.start_format(path.clone(), command) {
                     self.notice = Some(format!("Saved {path}; formatting with {label}…"));
                 } else {
-                    self.notice = Some(format!("Saved {path}; formatter is busy"));
                     self.reload(RefreshScope::WORKTREE);
+                    self.notice = Some(format!("Saved {path}; formatter is busy"));
                 }
             }
             Err(error) => {
-                self.notice = Some(format!("Saved {path}; {error}"));
                 self.reload(RefreshScope::WORKTREE);
+                self.notice = Some(format!("Saved {path}; {error}"));
             }
         }
     }
@@ -1754,21 +1761,24 @@ impl App {
                 self.change_fetch_interval(1);
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 2 => {
-                self.toggle_workspace_panel_enabled();
+                self.toggle_format_on_save();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 3 => {
-                self.toggle_agent_harness();
+                self.toggle_workspace_panel_enabled();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 4 => {
-                self.toggle_agent_time_display();
+                self.toggle_agent_harness();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 5 => {
-                self.clear_agent_timing_history();
+                self.toggle_agent_time_display();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 6 => {
-                self.toggle_media_preview_protocol();
+                self.clear_agent_timing_history();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 7 => {
+                self.toggle_media_preview_protocol();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 8 => {
                 self.open_editor_setting();
             }
             _ => {}
@@ -2729,6 +2739,11 @@ impl App {
 
     fn toggle_workspace_panel_enabled(&mut self) {
         self.settings.workspace_panel_enabled = !self.settings.workspace_panel_enabled;
+        self.settings_changed();
+    }
+
+    fn toggle_format_on_save(&mut self) {
+        self.settings.format_on_save = !self.settings.format_on_save;
         self.settings_changed();
     }
 
@@ -3840,6 +3855,7 @@ mod tests {
             Settings {
                 auto_fetch: true,
                 fetch_interval_minutes: 6,
+                format_on_save: true,
                 worktree_width: 38,
                 workspace_panel_enabled: true,
                 show_agent_harness: false,
@@ -3850,6 +3866,10 @@ mod tests {
                 media_preview_protocol: MediaPreviewProtocol::Auto,
             }
         );
+        assert_eq!(app.settings_store.load(), app.settings);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.settings.format_on_save);
         assert_eq!(app.settings_store.load(), app.settings);
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -4277,6 +4297,28 @@ mod tests {
             app.notice.as_deref(),
             Some("No known formatter for .txt files")
         );
+    }
+
+    #[test]
+    fn inline_save_skips_formatting_when_disabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("notes.txt"), "notes\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+        app.settings.format_on_save = false;
+        let mut editor = FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap();
+        editor.insert("edited ");
+        app.file_editor = Some(editor);
+        app.mode = Mode::FileEdit;
+
+        app.save_file_editor();
+
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "edited notes\n"
+        );
+        assert_eq!(app.notice.as_deref(), Some("Saved notes.txt"));
+        assert!(!app.format_running());
     }
 
     #[test]

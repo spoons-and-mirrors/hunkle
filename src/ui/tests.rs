@@ -1332,6 +1332,7 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(settings_screen.contains("Auto-fetch remotes"));
     assert!(settings_screen.contains("Fetch interval"));
+    assert!(settings_screen.contains("Format on save"));
     assert!(settings_screen.contains("Workspace manager"));
     assert!(settings_screen.contains("Agent harness"));
     assert!(settings_screen.contains("Agent time"));
@@ -1350,12 +1351,14 @@ fn renders_every_primary_surface() {
             .all(|x| buffer[(x, auto_fetch.y)].bg == super::palette().faint)
     );
     assert!(app.regions.fetch_interval_up.is_some());
+    let format_on_save_setting = app.regions.format_on_save_setting.unwrap();
     let workspace_setting = app.regions.workspace_panel_setting.unwrap();
     let agent_harness_setting = app.regions.agent_harness_setting.unwrap();
     let agent_time_setting = app.regions.agent_time_setting.unwrap();
     let clear_agent_timings_setting = app.regions.clear_agent_timings_setting.unwrap();
     let media_preview_setting = app.regions.media_preview_setting.unwrap();
     let editor_setting = app.regions.editor_setting.unwrap();
+    assert!(format_on_save_setting.y < workspace_setting.y);
     assert_eq!(agent_harness_setting.y, workspace_setting.y + 2);
     assert_eq!(agent_time_setting.y, agent_harness_setting.y + 2);
     assert_eq!(clear_agent_timings_setting.y, agent_time_setting.y + 2);
@@ -3199,6 +3202,31 @@ fn explores_and_pages_sqlite_databases_with_keys_and_mouse() {
     });
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!app.changes.sqlite_browser.as_ref().unwrap().active);
+}
+
+#[test]
+fn inline_editor_keeps_line_numbers_in_a_fixed_gutter() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("notes.txt"), "first\nsecond\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor =
+        Some(crate::app::FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap());
+    app.mode = Mode::FileEdit;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let body = app.regions.preview_body.unwrap();
+    let buffer = terminal.backend().buffer();
+    let first_gutter = (body.x.saturating_sub(7)..body.x)
+        .map(|x| buffer[(x, body.y)].symbol())
+        .collect::<String>();
+    let second_gutter = (body.x.saturating_sub(7)..body.x)
+        .map(|x| buffer[(x, body.y + 1)].symbol())
+        .collect::<String>();
+    assert_eq!(first_gutter, "    1  ");
+    assert_eq!(second_gutter, "    2  ");
 }
 
 fn wait_for_halfblock_render(terminal: &mut Terminal<TestBackend>, app: &mut App) {

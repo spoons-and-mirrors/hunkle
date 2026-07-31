@@ -41,6 +41,7 @@ impl AgentTimeDisplay {
 pub struct Settings {
     pub auto_fetch: bool,
     pub fetch_interval_minutes: u16,
+    pub format_on_save: bool,
     pub worktree_width: u16,
     pub workspace_panel_enabled: bool,
     pub show_agent_harness: bool,
@@ -62,6 +63,7 @@ impl Default for Settings {
         Self {
             auto_fetch: false,
             fetch_interval_minutes: 5,
+            format_on_save: true,
             worktree_width: 38,
             workspace_panel_enabled: true,
             show_agent_harness: false,
@@ -126,9 +128,10 @@ impl SettingsStore {
         atomic_write(
             path,
             format!(
-                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
+                "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
                 settings.auto_fetch,
                 settings.fetch_interval_minutes,
+                settings.format_on_save,
                 settings.worktree_width,
                 settings.workspace_panel_enabled,
                 settings.show_agent_harness,
@@ -178,6 +181,7 @@ fn load(path: &Path) -> Settings {
                     settings.fetch_interval_minutes = minutes.clamp(1, 1440);
                 }
             }
+            "format_on_save" => settings.format_on_save = value.trim() == "true",
             "worktree_width" => {
                 if let Ok(width) = value.trim().parse::<u16>() {
                     settings.worktree_width = width.clamp(24, 4096);
@@ -238,6 +242,7 @@ mod tests {
         let settings = Settings {
             auto_fetch: true,
             fetch_interval_minutes: 17,
+            format_on_save: false,
             worktree_width: 61,
             workspace_panel_enabled: false,
             show_agent_harness: true,
@@ -269,6 +274,7 @@ mod tests {
         )
         .unwrap();
         let loaded = store.load();
+        assert!(loaded.format_on_save);
         assert_eq!(loaded.fetch_interval_minutes, 1);
         assert_eq!(loaded.worktree_width, 24);
         assert_eq!(loaded.agents_height, 3);

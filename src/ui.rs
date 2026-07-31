@@ -149,6 +149,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.fetch_interval = Some(regions.fetch_interval);
             app.regions.fetch_interval_down = Some(regions.fetch_interval_down);
             app.regions.fetch_interval_up = Some(regions.fetch_interval_up);
+            app.regions.format_on_save_setting = Some(regions.format_on_save);
             app.regions.workspace_panel_setting = Some(regions.workspace_panel);
             app.regions.agent_harness_setting = Some(regions.agent_harness);
             app.regions.agent_time_setting = Some(regions.agent_time);
@@ -288,7 +289,16 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         header.width,
         panel.bottom().saturating_sub(header.y.saturating_add(3)),
     );
-    app.regions.preview_body = Some(body);
+    const LINE_NUMBER_WIDTH: u16 = 7;
+    let gutter_width = LINE_NUMBER_WIDTH.min(body.width);
+    let gutter = Rect::new(body.x, body.y, gutter_width, body.height);
+    let editor_body = Rect::new(
+        body.x.saturating_add(gutter_width),
+        body.y,
+        body.width.saturating_sub(gutter_width),
+        body.height,
+    );
+    app.regions.preview_body = Some(editor_body);
     app.regions.diff_scrollbar = None;
     app.regions.diff_scroll_thumb = None;
     app.regions.diff_scroll_max = 0;
@@ -301,7 +311,10 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     let Some(editor) = &mut app.file_editor else {
         return;
     };
-    editor.ensure_cursor_visible(usize::from(body.height), usize::from(body.width));
+    editor.ensure_cursor_visible(
+        usize::from(editor_body.height),
+        usize::from(editor_body.width),
+    );
     let (cursor_line, cursor_column) = editor.cursor_position();
     let path = editor.path().display();
     let dirty = if editor.dirty() { "modified" } else { "saved" };
@@ -324,24 +337,39 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         &path,
         0,
         editor.scroll_line,
-        usize::from(body.height),
+        usize::from(editor_body.height),
     );
     while lines.len() <= cursor_line.saturating_sub(editor.scroll_line) {
         lines.push(Line::default().style(Style::default().bg(palette().panel)));
     }
+    let line_count = editor.visible_line_count();
+    let line_numbers = (0..usize::from(gutter.height))
+        .map(|row| {
+            let line = editor.scroll_line.saturating_add(row);
+            if line < line_count {
+                Line::styled(
+                    format!("{:>5}  ", line.saturating_add(1)),
+                    Style::default().fg(palette().faint).bg(palette().panel),
+                )
+            } else {
+                Line::default().style(Style::default().bg(palette().panel))
+            }
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(line_numbers), gutter);
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().bg(palette().panel))
             .scroll((0, u16::try_from(editor.scroll_column).unwrap_or(u16::MAX))),
-        body,
+        editor_body,
     );
-    let cursor_x = body.x.saturating_add(
+    let cursor_x = editor_body.x.saturating_add(
         u16::try_from(cursor_column.saturating_sub(editor.scroll_column)).unwrap_or(u16::MAX),
     );
-    let cursor_y = body.y.saturating_add(
+    let cursor_y = editor_body.y.saturating_add(
         u16::try_from(cursor_line.saturating_sub(editor.scroll_line)).unwrap_or(u16::MAX),
     );
-    if cursor_x < body.right() && cursor_y < body.bottom() {
+    if cursor_x < editor_body.right() && cursor_y < editor_body.bottom() {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 }

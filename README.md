@@ -38,7 +38,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `F2` | Rename the selected file or folder in Files |
 | `F3` | Fuzzy-search repository files from the main view |
 | `Ctrl+Delete` | Permanently delete the selected file or folder from Files after confirmation |
-| `Ctrl+S` | Save and format in the inline editor; otherwise format the selected Files entry |
+| `Ctrl+S` | Save in the inline editor and optionally format; otherwise format the selected Files entry |
 | `Esc` in the inline editor | Close the editor; press twice to discard unsaved edits |
 | `h`, `l`, `Left`, `Right` | Navigate the tree; Right enters/stages in hunk mode and Left exits it |
 | `Enter` | Toggle the selected directory |

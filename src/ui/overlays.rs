@@ -34,6 +34,7 @@ pub(super) struct SettingsRegions {
     pub(super) fetch_interval: Rect,
     pub(super) fetch_interval_down: Rect,
     pub(super) fetch_interval_up: Rect,
+    pub(super) format_on_save: Rect,
     pub(super) workspace_panel: Rect,
     pub(super) agent_harness: Rect,
     pub(super) agent_time: Rect,
@@ -3574,15 +3575,22 @@ pub(super) fn draw_settings(
     let automation_header_y = if compact { 3 } else { 4 };
     let auto_y = if compact { 4 } else { 7 };
     let interval_y = if compact { 5 } else { 9 };
-    let interface_header_y = if compact { 7 } else { 13 };
-    let workspace_y = if compact { 8 } else { 14 };
-    let agent_y = if compact { 9 } else { 16 };
-    let agent_time_y = if compact { 10 } else { 18 };
-    let clear_timings_y = if compact { 11 } else { 20 };
-    let media_y = if compact { 12 } else { 22 };
-    let editor_y = if compact { 13 } else { 24 };
+    let format_on_save_y = if compact { 6 } else { 11 };
+    let interface_header_y = if compact { 8 } else { 14 };
+    let workspace_y = if compact { 9 } else { 15 };
+    let agent_y = if compact { 10 } else { 17 };
+    let agent_time_y = if compact { 11 } else { 19 };
+    let clear_timings_y = if compact { 12 } else { 21 };
+    let media_y = if compact { 13 } else { 23 };
+    let editor_y = if compact { 14 } else { 25 };
     let auto_row = Rect::new(inner.x, area.y.saturating_add(auto_y), inner.width, 1);
     let interval_row = Rect::new(inner.x, area.y.saturating_add(interval_y), inner.width, 1);
+    let format_on_save_row = Rect::new(
+        inner.x,
+        area.y.saturating_add(format_on_save_y),
+        inner.width,
+        1,
+    );
     let workspace_panel_row =
         Rect::new(inner.x, area.y.saturating_add(workspace_y), inner.width, 1);
     let agent_harness_row = Rect::new(inner.x, area.y.saturating_add(agent_y), inner.width, 1);
@@ -3615,7 +3623,7 @@ pub(super) fn draw_settings(
             ),
             Span::styled(media_protocol_label, Style::default().fg(palette().accent)),
         ]))
-        .style(Style::default().bg(if selection == 6 {
+        .style(Style::default().bg(if selection == 7 {
             palette().selected
         } else {
             palette().surface_alt
@@ -3689,6 +3697,30 @@ pub(super) fn draw_settings(
         interval_row,
     );
 
+    let (format_switch, format_switch_color) = settings_toggle(settings.format_on_save);
+    let format_padding = usize::from(format_on_save_row.width)
+        .saturating_sub(14 + UnicodeWidthStr::width(format_switch));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Format on save", Style::default().fg(palette().ink)),
+            Span::raw(" ".repeat(format_padding)),
+            Span::styled(
+                format_switch,
+                Style::default()
+                    .fg(palette().canvas)
+                    .bg(format_switch_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]))
+        .style(Style::default().bg(if selection == 2 {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        format_on_save_row,
+    );
+
     let status = if fetch_running {
         "Fetching remotes now...".to_owned()
     } else if settings.auto_fetch {
@@ -3711,7 +3743,7 @@ pub(super) fn draw_settings(
             } else {
                 palette().faint
             })),
-            Rect::new(inner.x, area.y.saturating_add(11), inner.width, 1),
+            Rect::new(inner.x, area.y.saturating_add(12), inner.width, 1),
         );
     }
 
@@ -3746,7 +3778,7 @@ pub(super) fn draw_settings(
             ),
             Span::raw(" "),
         ]))
-        .style(Style::default().bg(if selection == 2 {
+        .style(Style::default().bg(if selection == 3 {
             palette().selected
         } else {
             palette().surface_alt
@@ -3771,7 +3803,7 @@ pub(super) fn draw_settings(
             ),
             Span::raw(" "),
         ]))
-        .style(Style::default().bg(if selection == 3 {
+        .style(Style::default().bg(if selection == 4 {
             palette().selected
         } else {
             palette().surface_alt
@@ -3788,7 +3820,7 @@ pub(super) fn draw_settings(
             Span::raw(" ".repeat(agent_time_padding)),
             Span::styled(agent_time_label, Style::default().fg(palette().accent)),
         ]))
-        .style(Style::default().bg(if selection == 4 {
+        .style(Style::default().bg(if selection == 5 {
             palette().selected
         } else {
             palette().surface_alt
@@ -3805,7 +3837,7 @@ pub(super) fn draw_settings(
             Span::raw(" ".repeat(clear_padding)),
             Span::styled(clear_label, Style::default().fg(palette().orange)),
         ]))
-        .style(Style::default().bg(if selection == 5 {
+        .style(Style::default().bg(if selection == 6 {
             palette().selected
         } else {
             palette().surface_alt
@@ -3833,7 +3865,7 @@ pub(super) fn draw_settings(
                 }),
             ),
         ]))
-        .style(Style::default().bg(if selection == 7 {
+        .style(Style::default().bg(if selection == 8 {
             palette().selected
         } else {
             palette().surface_alt
@@ -3847,6 +3879,7 @@ pub(super) fn draw_settings(
         fetch_interval: interval_row,
         fetch_interval_down: interval_down,
         fetch_interval_up: interval_up,
+        format_on_save: format_on_save_row,
         workspace_panel: workspace_panel_row,
         agent_harness: agent_harness_row,
         agent_time: agent_time_row,
