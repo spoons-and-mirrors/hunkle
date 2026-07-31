@@ -188,6 +188,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.herdr_prompt_overlay =
                 Some(overlays::draw_herdr_prompt(frame, &app.herdr_prompt));
         }
+        Mode::FileEdit => draw_file_editor(frame, app),
         Mode::Editor => {
             dim(frame);
             app.regions.editor_overlay = Some(overlays::draw_editor(
@@ -269,6 +270,80 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::Normal | Mode::Commit => {}
     }
     finish_selection(frame, app);
+}
+
+fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
+    let Some(panel) = app.regions.diff else {
+        return;
+    };
+    let header = Rect::new(
+        panel.x.saturating_add(1),
+        panel.y.saturating_add(1),
+        panel.width.saturating_sub(2),
+        1,
+    );
+    let body = Rect::new(
+        header.x,
+        header.y.saturating_add(2),
+        header.width,
+        panel.bottom().saturating_sub(header.y.saturating_add(3)),
+    );
+    app.regions.preview_body = Some(body);
+    app.regions.diff_scrollbar = None;
+    app.regions.diff_scroll_thumb = None;
+    app.regions.diff_scroll_max = 0;
+    frame.render_widget(Clear, panel);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette().panel).fg(palette().ink)),
+        panel,
+    );
+
+    let Some(editor) = &mut app.file_editor else {
+        return;
+    };
+    editor.ensure_cursor_visible(usize::from(body.height), usize::from(body.width));
+    let (cursor_line, cursor_column) = editor.cursor_position();
+    let path = editor.path().display();
+    let dirty = if editor.dirty() { "modified" } else { "saved" };
+    let title = format!(
+        "EDIT  {path}  {dirty}  Ln {}, Col {}  ctrl+s save  esc close",
+        cursor_line.saturating_add(1),
+        cursor_column.saturating_add(1)
+    );
+    frame.render_widget(
+        Paragraph::new(truncate_width(&title, usize::from(header.width))).style(
+            Style::default()
+                .fg(palette().accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        header,
+    );
+
+    let mut lines = text::styled_source_window(
+        editor.text(),
+        &path,
+        0,
+        editor.scroll_line,
+        usize::from(body.height),
+    );
+    while lines.len() <= cursor_line.saturating_sub(editor.scroll_line) {
+        lines.push(Line::default().style(Style::default().bg(palette().panel)));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(palette().panel))
+            .scroll((0, u16::try_from(editor.scroll_column).unwrap_or(u16::MAX))),
+        body,
+    );
+    let cursor_x = body.x.saturating_add(
+        u16::try_from(cursor_column.saturating_sub(editor.scroll_column)).unwrap_or(u16::MAX),
+    );
+    let cursor_y = body.y.saturating_add(
+        u16::try_from(cursor_line.saturating_sub(editor.scroll_line)).unwrap_or(u16::MAX),
+    );
+    if cursor_x < body.right() && cursor_y < body.bottom() {
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 }
 
 fn finish_selection(frame: &mut Frame<'_>, app: &mut App) {

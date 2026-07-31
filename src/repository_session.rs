@@ -60,18 +60,14 @@ impl WorkerCompletion {
                 Some(RefreshScope::WORKTREE_AND_INVENTORY)
             }
             WorkerOutcome::DiscardUnstaged(_) => Some(RefreshScope::WORKTREE_AND_INVENTORY),
-            WorkerOutcome::Format(done)
-                if done.result.as_ref().is_ok_and(|output| output.success) =>
-            {
-                Some(RefreshScope::WORKTREE)
-            }
+            // A formatter may rewrite a file before returning a failure.
+            WorkerOutcome::Format(_) => Some(RefreshScope::WORKTREE),
             WorkerOutcome::BranchDelete(_) => Some(RefreshScope::HISTORY_AND_REFS),
             WorkerOutcome::Commit(_)
             | WorkerOutcome::Fetch(_)
             | WorkerOutcome::Command(_)
             | WorkerOutcome::Mutation(_)
-            | WorkerOutcome::FileOperation(_)
-            | WorkerOutcome::Format(_) => None,
+            | WorkerOutcome::FileOperation(_) => None,
         };
         Self {
             outcome,

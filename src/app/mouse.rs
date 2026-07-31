@@ -91,6 +91,10 @@ impl App {
             self.handle_workspace_presets_mouse(mouse);
             return;
         }
+        if self.mode == Mode::FileEdit {
+            self.handle_file_editor_mouse(mouse, point);
+            return;
+        }
 
         if self.workspace_panel.is_dragging_workspace() {
             match mouse.kind {
@@ -264,6 +268,37 @@ impl App {
         }
     }
 
+    fn handle_file_editor_mouse(&mut self, mouse: MouseEvent, point: Position) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                if let Some(editor) = &mut self.file_editor {
+                    editor.move_vertical(3);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if let Some(editor) = &mut self.file_editor {
+                    editor.move_vertical(-3);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection.clear();
+                let region = self.selection_region(point);
+                self.selection.begin(point, region);
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.selection.is_active() => {
+                self.selection.update(point);
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.selection.is_active() => {
+                match self.selection.finish(point) {
+                    SelectionOutcome::Click => self.place_file_editor_cursor(point),
+                    SelectionOutcome::Selected(Some(text)) => self.copy_request = Some(text),
+                    SelectionOutcome::Selected(None) => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn begin_mouse_control(&mut self, point: Position) -> bool {
         if self.mode == Mode::Explorer
             && self.explorer_tab == ExplorerTab::Explorer
@@ -368,6 +403,7 @@ impl App {
             Mode::ActionMenu => self.handle_action_mouse(mouse),
             Mode::Command => self.handle_command_mouse(mouse),
             Mode::HerdrPrompt => {}
+            Mode::FileEdit => self.place_file_editor_cursor(point),
             Mode::Explorer => match self.explorer_tab {
                 ExplorerTab::Explorer => self.handle_explorer_mouse(mouse),
                 ExplorerTab::Worktrees => self.handle_worktree_manager_mouse(mouse),
@@ -490,6 +526,12 @@ impl App {
         } else if self.select_agents_row(point) {
         } else if self.select_graph_row(point) {
             self.open_selected_graph_commit();
+        } else if self
+            .regions
+            .preview_body
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_file_editor_at(point);
         } else if let Some(commit) = self.regions.commit.filter(|rect| rect.contains(point)) {
             let scroll = self.regions.commit_scroll;
             self.focus_commit();
@@ -500,6 +542,88 @@ impl App {
             self.commit_input
                 .set_cursor_at_visual_position(width, row, column);
             self.commit_scroll = Some(scroll.min(self.regions.commit_scroll_max));
+        }
+    }
+
+    fn open_file_editor_at(&mut self, point: Position) {
+        let Some(body) = self.regions.preview_body else {
+            return;
+        };
+        let rendered_row = self
+            .changes
+            .diff_scroll
+            .saturating_add(usize::from(point.y.saturating_sub(body.y)));
+        let wrapped = self.changes.diff_wrap;
+        let width = usize::from(body.width);
+
+        if self.changes.pane == LeftPane::Files {
+            let Some(path) = self.selected_explorer_file_path().cloned() else {
+                return;
+            };
+            let Some(line) = self
+                .changes
+                .preview_presentation
+                .source_line_at_rendered_row(rendered_row)
+            else {
+                return;
+            };
+            let gutter = usize::from(width >= 72) * 7;
+            let column = if wrapped {
+                0
+            } else {
+                usize::from(point.x.saturating_sub(body.x)).saturating_sub(gutter)
+            };
+            self.start_file_editor(path, line, column);
+            return;
+        }
+
+        let change = self.session.data().and_then(|repo| {
+            self.changes
+                .selected_change_index(repo)
+                .and_then(|index| repo.changes.get(index))
+                .cloned()
+        });
+        let Some(change) = change else {
+            return;
+        };
+        if change.staged {
+            self.notice =
+                Some("Staged diffs are read-only; edit the working file instead".to_owned());
+            return;
+        }
+        let Some(line) = self
+            .changes
+            .preview_presentation
+            .diff_new_line_at_rendered_row(&self.changes.diff, rendered_row)
+        else {
+            self.notice = Some("Click an added or context line to edit this file".to_owned());
+            return;
+        };
+        let gutter = if width >= 72 { 6 } else { 1 };
+        let column = if wrapped {
+            0
+        } else {
+            usize::from(point.x.saturating_sub(body.x)).saturating_sub(gutter)
+        };
+        self.start_file_editor(change.path, line, column);
+    }
+
+    fn place_file_editor_cursor(&mut self, point: Position) {
+        let Some(body) = self
+            .regions
+            .preview_body
+            .filter(|body| body.contains(point))
+        else {
+            return;
+        };
+        if let Some(editor) = &mut self.file_editor {
+            let line = editor
+                .scroll_line
+                .saturating_add(usize::from(point.y.saturating_sub(body.y)));
+            let column = editor
+                .scroll_column
+                .saturating_add(usize::from(point.x.saturating_sub(body.x)));
+            editor.set_cursor(line, column);
         }
     }
 

@@ -215,6 +215,33 @@ impl PreviewPresentation {
         self.hide_media();
     }
 
+    pub(crate) fn source_line_at_rendered_row(&self, row: usize) -> Option<usize> {
+        let cache = self.cache.as_ref()?;
+        if cache.display_count == 0 && !cache.is_diff && !cache.markdown && row == 0 {
+            Some(1)
+        } else {
+            self.display_line_at_rendered_row(row)
+                .map(|line| line.saturating_add(1))
+        }
+    }
+
+    pub(crate) fn diff_new_line_at_rendered_row(&self, diff: &str, row: usize) -> Option<usize> {
+        let display_row = self.display_line_at_rendered_row(row)?;
+        super::text::diff_new_line_at_display_row(diff, display_row, false)
+    }
+
+    fn display_line_at_rendered_row(&self, row: usize) -> Option<usize> {
+        let cache = self.cache.as_ref()?;
+        if let Some(starts) = &cache.wrapped_line_starts {
+            starts
+                .partition_point(|start| *start <= row)
+                .checked_sub(1)
+                .filter(|line| *line < cache.display_count)
+        } else {
+            (row < cache.display_count).then_some(row)
+        }
+    }
+
     pub(crate) fn hide_media(&mut self) {
         if self.active_kitty_image.take().is_some() {
             self.pending_terminal_cleanup

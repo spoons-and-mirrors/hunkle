@@ -459,6 +459,66 @@ fn parse_hunk_lines(line: &str) -> Option<(u32, u32)> {
     Some((old, new))
 }
 
+pub(super) fn diff_new_line_at_display_row(
+    diff: &str,
+    target: usize,
+    show_initial_header: bool,
+) -> Option<usize> {
+    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
+    let mut in_hunk = false;
+    let mut seen_header = false;
+    let mut display_index = 0;
+    let mut old_line = None;
+    let mut new_line = None;
+
+    for line in diff.lines() {
+        let file_header = line.starts_with("diff --git");
+        if file_header {
+            in_hunk = false;
+            old_line = None;
+            new_line = None;
+            if show_initial_header {
+                if seen_header {
+                    if display_index == target {
+                        return None;
+                    }
+                    display_index += 1;
+                }
+                seen_header = true;
+            } else if has_hunks {
+                continue;
+            }
+        }
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header && !file_header {
+            continue;
+        }
+        if hunk_header {
+            if in_hunk {
+                if display_index == target {
+                    return None;
+                }
+                display_index += 1;
+            }
+            in_hunk = true;
+            if let Some((old, new)) = parse_hunk_lines(line) {
+                old_line = Some(old);
+                new_line = Some(new);
+            }
+        }
+        if display_index == target {
+            return if in_hunk && (line.starts_with('+') || line.starts_with(' ')) {
+                new_line.map(|line| line.max(1) as usize)
+            } else {
+                None
+            };
+        }
+        advance_diff_line(line, &mut old_line, &mut new_line);
+        display_index += 1;
+    }
+    None
+}
+
 fn line_number(new: Option<u32>) -> Vec<Span<'static>> {
     vec![Span::styled(
         format!(
@@ -476,6 +536,18 @@ fn finish_line(spans: Vec<Span<'static>>, _width: usize, background: Color) -> L
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_only_new_side_diff_rows() {
+        let diff =
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -2,2 +2,3 @@\n context\n-old\n+new\n+more\n";
+
+        assert_eq!(diff_new_line_at_display_row(diff, 0, false), None);
+        assert_eq!(diff_new_line_at_display_row(diff, 1, false), Some(2));
+        assert_eq!(diff_new_line_at_display_row(diff, 2, false), None);
+        assert_eq!(diff_new_line_at_display_row(diff, 3, false), Some(3));
+        assert_eq!(diff_new_line_at_display_row(diff, 4, false), Some(4));
+    }
 
     #[test]
     fn styles_source_diff_with_numbers_and_tinted_changes() {

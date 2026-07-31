@@ -261,7 +261,7 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(file_screen.contains("FILE"));
-    assert!(file_screen.contains("read-only"));
+    assert!(file_screen.contains("click to edit"));
     assert!(file_screen.contains("fixture"));
 
     let worktree_tab = app

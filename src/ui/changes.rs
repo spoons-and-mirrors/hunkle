@@ -512,6 +512,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     }
     let show_hunk_actions =
         !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
+    let editable_diff = selected_change.is_some_and(|change| !change.staged);
     let mut preview = prepare_preview_lines(
         app,
         diff_body,
@@ -521,6 +522,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         false,
         scrollable_metadata_height,
     );
+    if editable_diff {
+        app.regions.preview_body = Some(diff_body);
+    }
     let (hunk_rows, rendered_height) = if show_hunk_actions {
         app.changes
             .preview_presentation
@@ -951,6 +955,11 @@ fn draw_explorer_changes(
     };
     let markdown_available = app.markdown_preview_available();
     let markdown_rendered = app.markdown_preview_rendered();
+    let access_label = if media_loaded || database_loaded || markdown_rendered {
+        "read-only"
+    } else {
+        "click to edit"
+    };
     let markdown_button_width = if markdown_available { 11 } else { 0 };
     let header_content_width = preview_header
         .width
@@ -960,7 +969,7 @@ fn draw_explorer_changes(
     let display_path = truncate_width(
         &selected_path,
         usize::from(header_content_width).saturating_sub(
-            preview_kind.len() + 2 + "read-only".len() + UnicodeWidthStr::width(wrap_label),
+            preview_kind.len() + 2 + access_label.len() + UnicodeWidthStr::width(wrap_label),
         ),
     );
     frame.render_widget(
@@ -977,7 +986,10 @@ fn draw_explorer_changes(
                     .fg(palette().ink)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  read-only", Style::default().fg(palette().accent)),
+            Span::styled(
+                format!("  {access_label}"),
+                Style::default().fg(palette().accent),
+            ),
             Span::styled(
                 wrap_label,
                 Style::default().fg(if app.changes.diff_wrap {
@@ -1098,6 +1110,9 @@ fn draw_explorer_changes(
             .map_or_else(String::new, RepoPath::display);
         let preview =
             prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered, 0);
+        if !markdown_rendered {
+            app.regions.preview_body = Some(preview_body);
+        }
         render_scrollable_content(frame, app, columns[1], preview_body, preview, 0);
     }
 }

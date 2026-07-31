@@ -1,7 +1,7 @@
 # hunkle
 
 - A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
-- A switchable repository file tree that includes tracked, untracked, and Git-ignored content, with read-only, syntax-colored previews and rendered Markdown.
+- A switchable repository file tree that includes tracked, untracked, and Git-ignored content, with syntax-colored inline editing and rendered Markdown previews.
 - Local workspaces for browsing, searching, and previewing directories that are not Git repositories.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
@@ -38,7 +38,8 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `F2` | Rename the selected file or folder in Files |
 | `F3` | Fuzzy-search repository files from the main view |
 | `Ctrl+Delete` | Permanently delete the selected file or folder from Files after confirmation |
-| `Ctrl+S` | Format the selected file using an available file-type formatter |
+| `Ctrl+S` | Save and format in the inline editor; otherwise format the selected Files entry |
+| `Esc` in the inline editor | Close the editor; press twice to discard unsaved edits |
 | `h`, `l`, `Left`, `Right` | Navigate the tree; Right enters/stages in hunk mode and Left exits it |
 | `Enter` | Toggle the selected directory |
 | `Space` | Stage or unstage the selected entry, or stage the selected hunk |
@@ -86,7 +87,7 @@ Click `+ New` in the manager to create a Herdr workspace at Hunkle's current pat
 - Click `x ACTIONS` above History to push, fetch, pull with rebase, or run a custom Git command.
 - Click or scroll History to inspect a commit's patch; click a Changes file to return to its current diff, or double-click it to open its current content in Files.
 - Click a directory to expand or collapse it. Click a file's right-aligned checkbox or right-click its row to stage or unstage it.
-- Click `CHANGES` or `FILES` in the left header to switch modes; clicking a repository file previews its contents.
+- Click `CHANGES` or `FILES` in the left header to switch modes; clicking a repository file previews its contents. Click plain source, or an added/context line in an unstaged diff, to edit the working file inline.
 - Markdown files in Files show a top-right `Preview` button for switching between rendered Markdown and source.
 - Click `+` in the Files header to create a file or folder. Drag a Files entry onto a folder or the Files header to move it.
 - The wheel pans Changes and Files as viewports without changing the selected file; click a visible row to select it.

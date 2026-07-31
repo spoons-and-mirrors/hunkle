@@ -54,6 +54,40 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     file.commit()
 }
 
+pub(crate) fn atomic_write_if_unchanged(
+    root: &Path,
+    relative: &RepoPath,
+    expected: &[u8],
+    content: &[u8],
+) -> Result<()> {
+    let path = safe_regular_file(root, relative)?;
+    let current = fs::read(&path)
+        .with_context(|| format!("could not read {} before saving", path.display()))?;
+    if current != expected {
+        bail!(
+            "{} changed on disk; your edits were not saved",
+            relative.display()
+        );
+    }
+
+    let mut file = atomic_write_file::AtomicWriteFile::open(&path)
+        .with_context(|| format!("could not prepare {} for saving", path.display()))?;
+    file.write_all(content)
+        .with_context(|| format!("could not write {}", path.display()))?;
+
+    let checked_path = safe_regular_file(root, relative)?;
+    let current = fs::read(&checked_path)
+        .with_context(|| format!("could not verify {} before saving", path.display()))?;
+    if current != expected {
+        bail!(
+            "{} changed on disk; your edits were not saved",
+            relative.display()
+        );
+    }
+    file.commit()
+        .with_context(|| format!("could not save {}", path.display()))
+}
+
 pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     left == right
         || fs::canonicalize(left)

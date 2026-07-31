@@ -4,6 +4,7 @@ mod changes;
 mod commit_message;
 mod commit_summary;
 mod explorer;
+mod file_editor;
 mod file_search;
 mod files;
 mod fuzzy;
@@ -23,6 +24,7 @@ pub(crate) use commit_message::CommitMessageGenerator;
 pub(crate) use commit_summary::CommitSummaryCache;
 pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use explorer::{ExplorerHitTarget, SurroundingEntry};
+pub(crate) use file_editor::FileEditor;
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use herdr_prompt::HerdrPrompt;
@@ -97,6 +99,7 @@ pub enum Mode {
     ActionMenu,
     Command,
     HerdrPrompt,
+    FileEdit,
     Editor,
     Files,
     WorkspacePanel,
@@ -202,6 +205,7 @@ pub struct Regions {
     pub agents_splitter: Option<Rect>,
     pub agents_bounds: Option<Rect>,
     pub diff: Option<Rect>,
+    pub preview_body: Option<Rect>,
     pub diff_scrollbar: Option<Rect>,
     pub diff_scroll_thumb: Option<Rect>,
     pub diff_scroll_max: usize,
@@ -307,6 +311,7 @@ pub struct App {
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
     reload_queued: Option<RefreshScope>,
     pub(crate) editor_input: String,
+    pub(crate) file_editor: Option<FileEditor>,
     pub(crate) editor_error: Option<String>,
     pub(crate) editor_configure_only: bool,
     editor_request: Option<EditorRequest>,
@@ -444,6 +449,7 @@ impl App {
             pending_reload: None,
             reload_queued: None,
             editor_input: String::new(),
+            file_editor: None,
             editor_error: None,
             editor_configure_only: false,
             editor_request: None,
@@ -587,6 +593,10 @@ impl App {
                 return;
             }
         }
+        if self.mode == Mode::FileEdit {
+            self.handle_file_editor(key);
+            return;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return;
@@ -626,6 +636,7 @@ impl App {
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
             Mode::HerdrPrompt => self.handle_herdr_prompt(key),
+            Mode::FileEdit => unreachable!("file editor keys are handled first"),
             Mode::Editor => self.handle_editor(key),
             Mode::Files => self.handle_file_dialog(key),
             Mode::WorkspacePanel => self.handle_workspace_panel(key),
@@ -643,6 +654,11 @@ impl App {
             return;
         }
         match self.mode {
+            Mode::FileEdit => {
+                if let Some(editor) = &mut self.file_editor {
+                    editor.insert(text);
+                }
+            }
             Mode::Commit => {
                 self.commit_input.insert(text);
                 self.schedule_commit_draft();
@@ -1401,6 +1417,124 @@ impl App {
             KeyCode::Home => self.select_first(),
             KeyCode::End | KeyCode::Char('G') => self.select_last(),
             _ => {}
+        }
+    }
+
+    fn handle_file_editor(&mut self, key: KeyEvent) {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if control && key.code == KeyCode::Char('s') {
+            self.save_file_editor();
+            return;
+        }
+        if control && key.code == KeyCode::Char('c') {
+            if self.file_editor.as_ref().is_some_and(FileEditor::dirty) {
+                self.notice = Some("Save or press Esc twice before quitting".to_owned());
+            } else {
+                self.should_quit = true;
+            }
+            return;
+        }
+
+        if key.code == KeyCode::Esc {
+            let Some(editor) = &mut self.file_editor else {
+                self.mode = Mode::Normal;
+                return;
+            };
+            if editor.dirty() && !editor.discard_armed {
+                editor.discard_armed = true;
+                self.notice = Some("Unsaved edits; press Esc again to discard".to_owned());
+                return;
+            }
+            self.file_editor = None;
+            self.mode = Mode::Normal;
+            self.notice = None;
+            return;
+        }
+
+        let viewport = self
+            .regions
+            .preview_body
+            .map_or(10, |area| usize::from(area.height).max(1));
+        let Some(editor) = &mut self.file_editor else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        editor.discard_armed = false;
+        match key.code {
+            KeyCode::Left if control => editor.move_home(),
+            KeyCode::Right if control => editor.move_end(),
+            KeyCode::Home if control => editor.move_document_start(),
+            KeyCode::End if control => editor.move_document_end(),
+            KeyCode::Left => editor.move_left(),
+            KeyCode::Right => editor.move_right(),
+            KeyCode::Up => editor.move_vertical(-1),
+            KeyCode::Down => editor.move_vertical(1),
+            KeyCode::Home => editor.move_home(),
+            KeyCode::End => editor.move_end(),
+            KeyCode::PageUp => editor.move_vertical(-(viewport as isize)),
+            KeyCode::PageDown => editor.move_vertical(viewport as isize),
+            KeyCode::Backspace => editor.backspace(),
+            KeyCode::Delete => editor.delete(),
+            KeyCode::Enter => editor.insert_newline(),
+            KeyCode::Tab => editor.insert("\t"),
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                editor.insert_char(character);
+            }
+            _ => {}
+        }
+    }
+
+    fn start_file_editor(&mut self, path: RepoPath, line: usize, column: usize) {
+        if self.format_running() {
+            self.notice = Some("Wait for the formatter to finish".to_owned());
+            return;
+        }
+        let Some(root) = self.repository().map(|repo| repo.root.clone()) else {
+            self.notice = Some("Open a workspace first".to_owned());
+            return;
+        };
+        match FileEditor::open(&root, path, line, column) {
+            Ok(editor) => {
+                self.file_editor = Some(editor);
+                self.mode = Mode::FileEdit;
+                self.notice = None;
+            }
+            Err(error) => self.notice = Some(format!("Could not edit file: {error}")),
+        }
+    }
+
+    fn save_file_editor(&mut self) {
+        let Some(editor) = &self.file_editor else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        if let Err(error) = editor.save() {
+            self.notice = Some(format!("Could not save file: {error}"));
+            return;
+        }
+        let root = editor.root().to_owned();
+        let path = editor.path().clone();
+        self.file_editor = None;
+        self.mode = Mode::Normal;
+
+        match formatter::detect(&root, path.as_path()) {
+            Ok(command) => {
+                let label = command.label;
+                if self.session.start_format(path.clone(), command) {
+                    self.notice = Some(format!("Saved {path}; formatting with {label}…"));
+                } else {
+                    self.notice = Some(format!("Saved {path}; formatter is busy"));
+                    self.reload(RefreshScope::WORKTREE);
+                }
+            }
+            Err(error) => {
+                self.notice = Some(format!("Saved {path}; {error}"));
+                self.reload(RefreshScope::WORKTREE);
+            }
         }
     }
 
