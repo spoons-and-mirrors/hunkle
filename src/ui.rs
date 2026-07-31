@@ -1124,7 +1124,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let width = usize::from(start_x.saturating_sub(area.x));
         frame.render_widget(
             Paragraph::new(truncate_width(&format!(" {path}"), width))
-                .style(Style::default().fg(palette().faint)),
+                .style(Style::default().fg(palette().soft)),
             Rect::new(area.x, area.y, start_x.saturating_sub(area.x), 1),
         );
     }
