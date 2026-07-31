@@ -107,6 +107,7 @@ struct PendingHunkSelection {
 
 pub(super) struct ChangesSelection {
     change: Option<(RepoPath, bool)>,
+    section: Option<WorktreeSection>,
     directory: Option<(RepoPath, WorktreeSection)>,
     explorer_file: Option<RepoPath>,
     explorer_directory: Option<RepoPath>,
@@ -225,6 +226,7 @@ impl ChangesState {
                 .selected_change_index(repo)
                 .and_then(|index| repo.changes.get(index))
                 .map(|change| (change.path.clone(), change.staged)),
+            section: self.selected_diff_section(),
             directory: self.selected_directory_path(repo).and_then(|path| {
                 let section = self.selected_worktree_section()?;
                 Some((path, section))
@@ -247,6 +249,12 @@ impl ChangesState {
         });
         let change_row = change_index
             .and_then(|index| self.row_for_change(repo, index))
+            .or_else(|| {
+                let section = selection.section?;
+                self.worktree_rows(repo)
+                    .iter()
+                    .position(|row| row.section == Some(section) && row.section_stats.is_some())
+            })
             .or_else(|| {
                 let (directory, section) = selection.directory.as_ref()?;
                 self.worktree_rows(repo)
@@ -305,6 +313,12 @@ impl ChangesState {
         self.worktree_state
             .selected()
             .and_then(|index| self.worktree_section(index))
+    }
+
+    pub(crate) fn selected_diff_section(&self) -> Option<WorktreeSection> {
+        let selected = self.worktree_state.selected()?;
+        let row = self.worktree_rows_cache.get(selected)?;
+        row.section.filter(|_| row.section_stats.is_some())
     }
 
     fn worktree_section(&self, index: usize) -> Option<WorktreeSection> {
@@ -395,11 +409,10 @@ impl ChangesState {
     }
 
     pub(super) fn select_worktree_row(&mut self, repo: &RepositoryData, index: usize) -> bool {
-        if self
-            .worktree_rows(repo)
-            .get(index)
-            .is_none_or(|row| row.section.is_some())
-        {
+        let Some(row) = self.worktree_rows(repo).get(index) else {
+            return false;
+        };
+        if row.section.is_some() && row.section_stats.is_none() {
             return false;
         }
         self.worktree_state.select(Some(index));
@@ -435,6 +448,9 @@ impl ChangesState {
                 if !self.select_worktree_row(repo, index) {
                     self.refresh_diff(Some(repo));
                     return None;
+                }
+                if self.selected_diff_section().is_some() {
+                    return Some(ChangesEffect::PaneActivated);
                 }
                 if self.selected_directory_path(repo).is_some() {
                     self.toggle_selected_directory(Some(repo));
@@ -1219,6 +1235,13 @@ impl ChangesState {
             self.set_diff("Loading preview…".to_owned());
             self.preview_loader
                 .request_diff(&repo.root, repo.changes[index].clone());
+        } else if let Some(section) = row.section.filter(|_| row.section_stats.is_some()) {
+            self.set_diff("Loading preview…".to_owned());
+            self.preview_loader.request_section_diff(
+                &repo.root,
+                repo.changes.clone(),
+                section == WorktreeSection::Staged,
+            );
         } else if let Some(path) = &row.directory_path {
             self.set_diff(format!("{} changed files in {path}/", row.descendant_count));
         }

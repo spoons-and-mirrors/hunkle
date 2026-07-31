@@ -22,6 +22,7 @@ use crate::{
 const GIT_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
 const GIT_STDERR_LIMIT: usize = 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+const SECTION_DIFF_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_NETWORK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const COMMAND_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const DIFF_PREVIEW_LIMIT: usize = 2 * 1024 * 1024;
@@ -1256,6 +1257,96 @@ pub fn diff(root: &Path, change: &Change) -> Result<String> {
     Ok(preview_text(output.stdout, output.stdout_truncated))
 }
 
+pub fn section_diff(root: &Path, changes: &[Change], staged: bool) -> Result<String> {
+    let section = changes
+        .iter()
+        .filter(|change| change.staged == staged)
+        .collect::<Vec<_>>();
+    let (mut bytes, mut truncated) = if section.iter().any(|change| change.code != '?') {
+        let args = if staged {
+            &["diff", "--cached", "--no-ext-diff", "--unified=3"][..]
+        } else {
+            &["diff", "--no-ext-diff", "--unified=3"][..]
+        };
+        let output = run_limited(
+            root,
+            args,
+            Limits::new(DIFF_PREVIEW_LIMIT, GIT_STDERR_LIMIT, SECTION_DIFF_TIMEOUT),
+        )?;
+        if output.timed_out {
+            bail!("Git diff timed out");
+        }
+        if !output.status.success() {
+            bail!("{}", clean_stderr(&output));
+        }
+        (output.stdout, output.stdout_truncated)
+    } else {
+        (Vec::new(), false)
+    };
+
+    for change in section
+        .iter()
+        .filter(|change| !staged && change.code == '?')
+    {
+        if truncated || bytes.len() >= DIFF_PREVIEW_LIMIT {
+            truncated = true;
+            break;
+        }
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        let description = diff(root, change)?;
+        let prefix = format!("Untracked file: {}\n\n", change.path);
+        let body = description.strip_prefix(&prefix).unwrap_or(&description);
+        let old_path = quoted_diff_path(&change.path, b"a/")?;
+        let new_path = quoted_diff_path(&change.path, b"b/")?;
+        let line_count = body.lines().count();
+        let hunk = if line_count == 0 {
+            "@@ -0,0 +0,0 @@".to_owned()
+        } else {
+            format!("@@ -0,0 +1,{line_count} @@")
+        };
+        let mut content =
+            format!("diff --git {old_path} {new_path}\n--- /dev/null\n+++ {new_path}\n{hunk}\n");
+        for line in body.lines() {
+            content.push('+');
+            content.push_str(line);
+            content.push('\n');
+        }
+        let remaining = DIFF_PREVIEW_LIMIT.saturating_sub(bytes.len());
+        let content = content.as_bytes();
+        let retained = content.len().min(remaining);
+        bytes.extend_from_slice(&content[..retained]);
+        if retained < content.len() {
+            truncated = true;
+            break;
+        }
+    }
+
+    Ok(preview_text(bytes, truncated))
+}
+
+fn quoted_diff_path(path: &RepoPath, prefix: &[u8]) -> Result<String> {
+    use std::fmt::Write;
+
+    let mut bytes = prefix.to_vec();
+    bytes.extend(path.git_bytes()?);
+    let mut quoted = String::from("\"");
+    for byte in bytes {
+        match byte {
+            b'"' => quoted.push_str("\\\""),
+            b'\\' => quoted.push_str("\\\\"),
+            b'\t' => quoted.push_str("\\t"),
+            b'\n' => quoted.push_str("\\n"),
+            b'\r' => quoted.push_str("\\r"),
+            0x20..=0x7e => quoted.push(char::from(byte)),
+            _ => write!(quoted, "\\{byte:03o}")?,
+        }
+    }
+    quoted.push('"');
+    Ok(quoted)
+}
+
 pub fn commit_diff(root: &Path, oid: &str) -> Result<String> {
     let output = run_limited(
         root,
@@ -1958,6 +2049,35 @@ mod tests {
         assert_eq!(count_file_lines(&path, 3).unwrap(), (0, 0));
     }
 
+    #[test]
+    fn section_diffs_include_every_file_in_the_selected_section() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Section Test"]);
+        git(root, &["config", "user.email", "section@example.com"]);
+        fs::write(root.join("staged.txt"), "before\n").unwrap();
+        fs::write(root.join("unstaged.txt"), "before\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "initial"]);
+
+        fs::write(root.join("staged.txt"), "after\n").unwrap();
+        fs::write(root.join("unstaged.txt"), "after\n").unwrap();
+        fs::write(root.join("untracked.txt"), "new\n").unwrap();
+        git(root, &["add", "staged.txt"]);
+        let (changes, _) = status(root).unwrap();
+
+        let staged = section_diff(root, &changes, true).unwrap();
+        assert!(staged.contains("diff --git a/staged.txt b/staged.txt"));
+        assert!(!staged.contains("unstaged.txt"));
+        assert!(!staged.contains("untracked.txt"));
+
+        let unstaged = section_diff(root, &changes, false).unwrap();
+        assert!(unstaged.contains("diff --git a/unstaged.txt b/unstaged.txt"));
+        assert!(unstaged.contains("untracked.txt"));
+        assert_eq!(unstaged.matches("diff --git").count(), 2);
+    }
+
     #[cfg(unix)]
     #[test]
     fn untracked_symlink_preview_does_not_read_its_target() {
@@ -1980,6 +2100,10 @@ mod tests {
 
         assert!(preview.contains("Untracked symbolic link"));
         assert!(!preview.contains("outside secret"));
+        let section = section_diff(workspace.path(), &[change], false).unwrap();
+        assert!(section.contains("diff --git \"a/link\" \"b/link\""));
+        assert!(section.contains("Untracked symbolic link"));
+        assert!(!section.contains("outside secret"));
     }
 
     #[cfg(unix)]
@@ -2011,6 +2135,11 @@ mod tests {
         );
         assert!(
             diff(workspace.path(), &change)
+                .unwrap()
+                .contains("Untracked special file")
+        );
+        assert!(
+            section_diff(workspace.path(), &[change], false)
                 .unwrap()
                 .contains("Untracked special file")
         );

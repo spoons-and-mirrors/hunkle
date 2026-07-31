@@ -295,6 +295,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         .then(|| app.selected_graph_commit())
         .flatten();
     let selected_commit = selected_graph_commit;
+    let selected_section = selected_commit
+        .is_none()
+        .then(|| app.changes.selected_diff_section())
+        .flatten();
     let selected_change = if selected_commit.is_none() {
         app.changes
             .worktree_state
@@ -308,7 +312,15 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     let selected_label = selected_commit.map_or_else(
         || {
             selected_change.map_or_else(
-                || "No file selected".to_owned(),
+                || {
+                    selected_section.map_or_else(
+                        || "No file selected".to_owned(),
+                        |section| match section {
+                            WorktreeSection::Staged => "All staged changes".to_owned(),
+                            WorktreeSection::Unstaged => "All unstaged changes".to_owned(),
+                        },
+                    )
+                },
                 |change| change.path.display(),
             )
         },
@@ -321,19 +333,26 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         columns[1].width.saturating_sub(2),
         1,
     );
-    let state = selected_commit.map_or_else(
-        || {
-            selected_change.map_or(
-                "",
-                |change| {
-                    if change.staged { "staged" } else { "unstaged" }
-                },
-            )
-        },
-        |_| "commit",
-    );
+    let state =
+        selected_commit.map_or_else(
+            || {
+                selected_section.map_or_else(
+                    || {
+                        selected_change.map_or("", |change| {
+                            if change.staged { "staged" } else { "unstaged" }
+                        })
+                    },
+                    |section| match section {
+                        WorktreeSection::Staged => "staged",
+                        WorktreeSection::Unstaged => "unstaged",
+                    },
+                )
+            },
+            |_| "commit",
+        );
     let inspecting_commit = selected_commit.is_some();
-    let show_summary = inspecting_commit || selected_change.is_some();
+    let show_file_headers = inspecting_commit || selected_section.is_some();
+    let show_summary = show_file_headers || selected_change.is_some();
     let metadata_width = diff_header.width.saturating_sub(2);
     let message_height = selected_commit.map_or(0, |commit| {
         commit_message_height(
@@ -348,9 +367,20 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         additions: change.additions,
         deletions: change.deletions,
     });
+    let section_summary = selected_section.map(|section| {
+        let staged = section == WorktreeSection::Staged;
+        let changes = repo.changes.iter().filter(|change| change.staged == staged);
+        DiffSummary {
+            files: changes.clone().map(|change| change.path.clone()).collect(),
+            files_truncated: false,
+            additions: changes.clone().map(|change| change.additions).sum(),
+            deletions: changes.map(|change| change.deletions).sum(),
+        }
+    });
     let summary = selected_commit
         .and_then(|commit| app.commit_summaries.get(&commit.oid))
-        .or(live_summary.as_ref());
+        .or(live_summary.as_ref())
+        .or(section_summary.as_ref());
     let summary_unavailable =
         selected_commit.is_some_and(|commit| app.commit_summaries.failed(&commit.oid));
     let scrolled_commit_message = selected_commit.map(|commit| commit.message.clone());
@@ -470,7 +500,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         diff_body,
         &syntax_path,
         true,
-        inspecting_commit,
+        show_file_headers,
         false,
         scrollable_metadata_height,
     );
@@ -501,7 +531,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
                 diff_body,
                 &syntax_path,
                 true,
-                inspecting_commit,
+                show_file_headers,
                 false,
                 scrollable_metadata_height,
             );
@@ -1226,7 +1256,7 @@ fn render_scrollable_content(
         .changes
         .diff_scroll
         .saturating_sub(usize::from(leading_height));
-    let file_headers = (0..preview.lines.len())
+    let file_headers = (0..preview.lines.len().min(usize::from(preview_body.height)))
         .filter_map(|row| {
             app.changes
                 .preview_presentation

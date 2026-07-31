@@ -730,6 +730,7 @@ impl App {
     fn apply_changes_effect(&mut self, effect: Option<ChangesEffect>) {
         match effect {
             Some(ChangesEffect::PaneActivated) => {
+                self.last_worktree_file_click = None;
                 self.mode = Mode::Normal;
                 self.show_main_pane();
             }

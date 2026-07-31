@@ -695,12 +695,15 @@ fn diff_file_destination(lines: &[&str], header_index: usize) -> Option<(RepoPat
     }
     let destination = destination.or_else(|| {
         let header = lines[header_index].strip_prefix("diff --git ")?;
+        if let Some((_, path)) = parse_git_diff_tokens(header) {
+            return path
+                .strip_prefix(b"b/")
+                .and_then(|path| RepoPath::from_git_bytes(path).ok());
+        }
         if let Some((_, path)) = header.rsplit_once(" b/") {
             return RepoPath::from_git_bytes(path.as_bytes()).ok();
         }
-        let (_, path) = parse_git_diff_tokens(header)?;
-        path.strip_prefix(b"b/")
-            .and_then(|path| RepoPath::from_git_bytes(path).ok())
+        None
     })?;
     Some((destination, first_line))
 }
@@ -851,6 +854,17 @@ mod tests {
             Some((RepoPath::from("src/space name.rs"), 42))
         );
         assert_eq!(diff_file_header_at_display_row(diff, 0, false), None);
+    }
+
+    #[test]
+    fn maps_quoted_header_only_paths_containing_the_diff_separator() {
+        let diff =
+            "diff --git \"a/odd b/target\" \"b/odd b/target\"\nold mode 100644\nnew mode 100755\n";
+
+        assert_eq!(
+            diff_file_header_at_display_row(diff, 0, true),
+            Some((RepoPath::from("odd b/target"), 1))
+        );
     }
 
     #[test]

@@ -564,6 +564,36 @@ fn renders_every_primary_surface() {
             assert_eq!(cell.bg, trailing.bg);
         }
     }
+    let staged_row = app
+        .changes
+        .worktree_rows(app.repository().unwrap())
+        .iter()
+        .position(|row| row.label == "STAGED")
+        .unwrap();
+    let staged_target = app.changes.worktree_row_target(staged_row);
+    let staged_title = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(staged_target))
+        .unwrap();
+    click(&mut app, staged_title.x + 2, staged_title.y);
+    assert_eq!(
+        app.changes.selected_diff_section(),
+        Some(crate::tree::WorktreeSection::Staged)
+    );
+    wait_for(&mut app, |app| {
+        app.changes.diff.matches("diff --git").count() == 2
+    });
+    assert!(app.changes.diff.contains("tracked.txt"));
+    assert!(app.changes.diff.contains("untracked.txt"));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let section_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(section_screen.contains("All staged changes"));
     let stage_all = app
         .regions
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::StageAll))
