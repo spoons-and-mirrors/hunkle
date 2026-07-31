@@ -6,6 +6,8 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::repo_path::RepoPath;
+
 mod markdown;
 mod syntax;
 pub(super) use markdown::{markdown_prefix_style, styled_markdown};
@@ -617,6 +619,162 @@ pub(super) fn diff_new_line_and_payload_at_display_row(
     None
 }
 
+pub(super) fn diff_file_header_at_display_row(
+    diff: &str,
+    target: usize,
+    show_initial_header: bool,
+) -> Option<(RepoPath, usize)> {
+    if !show_initial_header {
+        return None;
+    }
+    let lines = diff.lines().collect::<Vec<_>>();
+    let has_hunks = lines.iter().any(|line| line.starts_with("@@"));
+    let mut display_index = 0;
+    let mut in_hunk = false;
+    let mut seen_header = false;
+
+    for (index, line) in lines.iter().copied().enumerate() {
+        let file_header = line.starts_with("diff --git");
+        if file_header {
+            in_hunk = false;
+            if seen_header {
+                if display_index == target {
+                    return None;
+                }
+                display_index += 1;
+            }
+            seen_header = true;
+        }
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header && !file_header {
+            continue;
+        }
+        if hunk_header {
+            if in_hunk {
+                if display_index == target {
+                    return None;
+                }
+                display_index += 1;
+            }
+            in_hunk = true;
+        }
+        if display_index == target {
+            return file_header
+                .then(|| diff_file_destination(&lines, index))
+                .flatten();
+        }
+        display_index += 1;
+    }
+    None
+}
+
+fn diff_file_destination(lines: &[&str], header_index: usize) -> Option<(RepoPath, usize)> {
+    let mut destination = None;
+    let mut deleted = false;
+    let mut first_line = 1;
+    for line in lines.iter().copied().skip(header_index + 1) {
+        if line.starts_with("diff --git") {
+            break;
+        }
+        if destination.is_none()
+            && let Some(path) = line.strip_prefix("+++ ")
+        {
+            if path == "/dev/null" {
+                deleted = true;
+            } else {
+                destination = parse_git_diff_path(path);
+            }
+        }
+        if line.starts_with("@@") {
+            first_line = parse_hunk_lines(line).map_or(1, |(_, line)| line.max(1) as usize);
+            break;
+        }
+    }
+    if deleted {
+        return None;
+    }
+    let destination = destination.or_else(|| {
+        let header = lines[header_index].strip_prefix("diff --git ")?;
+        if let Some((_, path)) = header.rsplit_once(" b/") {
+            return RepoPath::from_git_bytes(path.as_bytes()).ok();
+        }
+        let (_, path) = parse_git_diff_tokens(header)?;
+        path.strip_prefix(b"b/")
+            .and_then(|path| RepoPath::from_git_bytes(path).ok())
+    })?;
+    Some((destination, first_line))
+}
+
+fn parse_git_diff_path(value: &str) -> Option<RepoPath> {
+    let bytes = if value.starts_with('"') {
+        parse_git_diff_token(value.as_bytes())?.0
+    } else {
+        value.as_bytes().to_vec()
+    };
+    let path = bytes.strip_prefix(b"b/").unwrap_or(bytes.as_slice());
+    RepoPath::from_git_bytes(path).ok()
+}
+
+fn parse_git_diff_tokens(value: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let bytes = value.as_bytes();
+    let (first, consumed) = parse_git_diff_token(bytes)?;
+    let remaining = bytes.get(consumed..)?;
+    let whitespace = remaining
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    let (second, _) = parse_git_diff_token(&remaining[whitespace..])?;
+    Some((first, second))
+}
+
+fn parse_git_diff_token(value: &[u8]) -> Option<(Vec<u8>, usize)> {
+    if value.first() != Some(&b'"') {
+        let end = value
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .unwrap_or(value.len());
+        return Some((value[..end].to_vec(), end));
+    }
+    let mut output = Vec::new();
+    let mut index = 1;
+    while index < value.len() {
+        match value[index] {
+            b'"' => return Some((output, index + 1)),
+            b'\\' => {
+                index += 1;
+                let escaped = *value.get(index)?;
+                if escaped.is_ascii_digit() && escaped < b'8' {
+                    let mut byte = 0_u8;
+                    let mut digits = 0;
+                    while digits < 3
+                        && value
+                            .get(index)
+                            .is_some_and(|byte| (b'0'..=b'7').contains(byte))
+                    {
+                        byte = byte.saturating_mul(8).saturating_add(value[index] - b'0');
+                        index += 1;
+                        digits += 1;
+                    }
+                    output.push(byte);
+                    continue;
+                }
+                output.push(match escaped {
+                    b'a' => 0x07,
+                    b'b' => 0x08,
+                    b't' => b'\t',
+                    b'n' => b'\n',
+                    b'v' => 0x0b,
+                    b'f' => 0x0c,
+                    b'r' => b'\r',
+                    other => other,
+                });
+            }
+            byte => output.push(byte),
+        }
+        index += 1;
+    }
+    None
+}
+
 fn line_number(new: Option<u32>) -> Vec<Span<'static>> {
     vec![Span::styled(
         format!(
@@ -647,6 +805,33 @@ mod tests {
         assert_eq!(mapped_line(2), None);
         assert_eq!(mapped_line(3), Some(3));
         assert_eq!(mapped_line(4), Some(4));
+    }
+
+    #[test]
+    fn maps_commit_diff_file_headers_to_paths_and_first_new_lines() {
+        let diff = concat!(
+            "diff --git a/src/first.rs b/src/first.rs\n",
+            "--- a/src/first.rs\n",
+            "+++ b/src/first.rs\n",
+            "@@ -10 +12 @@\n",
+            "+first\n",
+            "diff --git \"a/src/space name.rs\" \"b/src/space name.rs\"\n",
+            "--- \"a/src/space name.rs\"\n",
+            "+++ \"b/src/space\\040name.rs\"\n",
+            "@@ -40 +42 @@\n",
+            "+second\n",
+        );
+
+        assert_eq!(
+            diff_file_header_at_display_row(diff, 0, true),
+            Some((RepoPath::from("src/first.rs"), 12))
+        );
+        assert_eq!(diff_file_header_at_display_row(diff, 3, true), None);
+        assert_eq!(
+            diff_file_header_at_display_row(diff, 4, true),
+            Some((RepoPath::from("src/space name.rs"), 42))
+        );
+        assert_eq!(diff_file_header_at_display_row(diff, 0, false), None);
     }
 
     #[test]

@@ -267,6 +267,20 @@ impl PreviewPresentation {
         Some((source_line, source_column))
     }
 
+    pub(crate) fn diff_file_header_at_rendered_row(
+        &self,
+        diff: &str,
+        row: usize,
+    ) -> Option<(crate::repo_path::RepoPath, usize)> {
+        let cache = self.cache.as_ref()?;
+        let (display_line, _) = self.display_position_at_rendered_row(row)?;
+        super::text::diff_file_header_at_display_row(
+            diff,
+            display_line,
+            cache.show_initial_diff_header,
+        )
+    }
+
     fn display_position_at_rendered_row(&self, row: usize) -> Option<(usize, usize)> {
         let cache = self.cache.as_ref()?;
         if let Some(starts) = &cache.wrapped_line_starts {

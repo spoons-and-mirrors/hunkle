@@ -156,6 +156,13 @@ pub struct DiffHunkRegion {
     pub scroll_end: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DiffFileHeaderRegion {
+    pub(crate) rect: Rect,
+    pub(crate) path: RepoPath,
+    pub(crate) line: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HitTarget {
     HeaderRepository,
@@ -300,6 +307,7 @@ pub struct Regions {
     pub preview_generation: u64,
     pub preview_scroll: usize,
     pub(crate) editor_rows: Vec<EditorRenderedRow>,
+    pub(crate) diff_file_headers: Vec<DiffFileHeaderRegion>,
     pub diff_scrollbar: Option<Rect>,
     pub diff_scroll_thumb: Option<Rect>,
     pub diff_scroll_max: usize,

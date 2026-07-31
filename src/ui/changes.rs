@@ -1190,11 +1190,10 @@ fn render_scrollable_content(
     app: &mut App,
     panel: Rect,
     body: Rect,
-    preview: PreparedPreview,
+    mut preview: PreparedPreview,
     leading_height: u16,
 ) {
     let rendered_height = preview.rendered_height;
-    let paragraph = Paragraph::new(preview.lines).style(Style::default().bg(palette().panel));
     let viewport_height = usize::from(body.height);
     let total_height = usize::from(leading_height).saturating_add(rendered_height);
     let max_scroll = total_height.saturating_sub(viewport_height);
@@ -1223,6 +1222,43 @@ fn render_scrollable_content(
         body.width,
         body.height.saturating_sub(preview_offset as u16),
     );
+    let content_scroll = app
+        .changes
+        .diff_scroll
+        .saturating_sub(usize::from(leading_height));
+    let file_headers = (0..preview.lines.len())
+        .filter_map(|row| {
+            app.changes
+                .preview_presentation
+                .diff_file_header_at_rendered_row(
+                    &app.changes.diff,
+                    content_scroll.saturating_add(row),
+                )
+                .map(|destination| (row, destination))
+        })
+        .collect::<Vec<_>>();
+    for (row, (path, line)) in file_headers {
+        let index = app.regions.diff_file_headers.len();
+        let target = ChangesHitTarget::DiffFileHeader {
+            generation: app.changes.preview_content_generation,
+            index,
+        };
+        if app.hovered_hit_target == Some(HitTarget::Changes(target)) {
+            preview.lines[row].style = preview.lines[row].style.bg(palette().raised);
+        }
+        let rect = Rect::new(
+            preview_body.x,
+            preview_body.y.saturating_add(row as u16),
+            preview_body.width,
+            1,
+        );
+        app.regions
+            .diff_file_headers
+            .push(crate::app::DiffFileHeaderRegion { rect, path, line });
+        app.regions
+            .register_hit_target(HitTarget::Changes(target), rect);
+    }
+    let paragraph = Paragraph::new(preview.lines).style(Style::default().bg(palette().panel));
     frame.render_widget(paragraph, preview_body);
     if let Some(thumb) = app.regions.diff_scroll_thumb {
         frame.render_widget(

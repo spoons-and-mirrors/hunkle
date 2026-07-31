@@ -38,6 +38,7 @@ pub(crate) enum ChangesHitTarget {
     WorktreeRow { generation: u64, index: usize },
     WorktreeStage { generation: u64, index: usize },
     HunkAction { generation: u64, index: usize },
+    DiffFileHeader { generation: u64, index: usize },
     SqliteObjectsPane { generation: u64 },
     SqliteRowsPane { generation: u64 },
     SqliteObject { generation: u64, index: usize },
@@ -53,6 +54,7 @@ pub(super) enum ChangesEffect {
     ToggleAllStaging,
     ToggleSelectedStage,
     StageHunk(usize),
+    OpenDiffFileHeader(usize),
     WorktreeFileSelected { path: RepoPath, staged: bool },
 }
 
@@ -449,6 +451,9 @@ impl ChangesState {
             ChangesHitTarget::HunkAction { generation, index } => (generation
                 == self.preview_content_generation)
                 .then_some(ChangesEffect::StageHunk(index)),
+            ChangesHitTarget::DiffFileHeader { generation, index } => (generation
+                == self.preview_content_generation)
+                .then_some(ChangesEffect::OpenDiffFileHeader(index)),
             ChangesHitTarget::SqliteObjectsPane { generation } => {
                 let browser = self.current_sqlite_target(generation)?;
                 browser.active = true;

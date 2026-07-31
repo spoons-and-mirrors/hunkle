@@ -742,6 +742,17 @@ impl App {
                 self.toggle_stage();
             }
             Some(ChangesEffect::StageHunk(index)) => self.stage_hunk(index, false),
+            Some(ChangesEffect::OpenDiffFileHeader(index)) => {
+                let Some(header) = self.regions.diff_file_headers.get(index).cloned() else {
+                    return;
+                };
+                self.start_file_editor(
+                    header.path,
+                    header.line,
+                    0,
+                    Position::new(header.rect.x, header.rect.y),
+                );
+            }
             Some(ChangesEffect::WorktreeFileSelected { path, staged }) => {
                 if self.register_worktree_file_click(&path, staged)
                     && self.open_worktree_file_in_files(&path)

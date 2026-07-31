@@ -1310,6 +1310,29 @@ fn renders_every_primary_surface() {
         commit_diff_screen.contains("diff --git a/fixtures/file-00"),
         "the first file heading should be visible"
     );
+    let file_header = app.regions.diff_file_headers[0].clone();
+    assert_eq!(file_header.path, RepoPath::from("fixtures/file-00.txt"));
+    assert!(file_header.line > 0);
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        file_header.rect.x + 1,
+        file_header.rect.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(file_header.rect.x, file_header.rect.y)].bg,
+        super::palette().raised
+    );
+    click(&mut app, file_header.rect.x + 1, file_header.rect.y);
+    assert_eq!(app.mode, Mode::FileEdit);
+    assert_eq!(app.file_editor.as_ref().unwrap().path(), &file_header.path);
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().cursor_position().0,
+        file_header.line - 1
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let commit_diff = app.regions.diff.unwrap();
     let files_row = (commit_diff.y..commit_diff.bottom())
         .find(|row| {
@@ -3662,7 +3685,17 @@ fn inline_editor_keeps_line_numbers_in_a_fixed_gutter() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let body = app.regions.preview_body.unwrap();
+    let editor_panel = app.regions.diff.unwrap();
     let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(editor_panel.x, editor_panel.y)].symbol(), "▀");
+    assert_eq!(
+        buffer[(editor_panel.x, editor_panel.y)].fg,
+        super::palette().surface_alt
+    );
+    assert_eq!(
+        buffer[(editor_panel.x, editor_panel.y)].bg,
+        super::palette().panel
+    );
     let first_gutter = (body.x.saturating_sub(7)..body.x)
         .map(|x| buffer[(x, body.y)].symbol())
         .collect::<String>();

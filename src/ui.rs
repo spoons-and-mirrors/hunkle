@@ -249,7 +249,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 &app.settings.shortcuts,
             ));
         }
-        Mode::FileEdit => draw_file_editor(frame, app),
+        Mode::FileEdit => {
+            draw_file_editor(frame, app);
+            draw_main_top_padding(frame, app, layout[1]);
+        }
         Mode::Editor => {
             dim(frame);
             app.regions.editor_overlay = Some(overlays::draw_editor(
