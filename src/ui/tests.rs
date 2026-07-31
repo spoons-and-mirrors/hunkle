@@ -638,6 +638,24 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(section_screen.contains("All staged changes"));
+    let preview_body = app.regions.preview_body.unwrap();
+    let changed_row = (preview_body.y..preview_body.bottom())
+        .find(|row| {
+            (preview_body.x..preview_body.right())
+                .map(|column| terminal.backend().buffer()[(column, *row)].symbol())
+                .collect::<String>()
+                .contains("changed")
+        })
+        .unwrap();
+    click(&mut app, preview_body.x + 8, changed_row);
+    assert_eq!(app.mode, Mode::FileEdit);
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().path(),
+        &RepoPath::from("tracked.txt")
+    );
+    assert_eq!(app.file_editor.as_ref().unwrap().cursor_position().0, 0);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let stage_all = app
         .regions
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::StageAll))

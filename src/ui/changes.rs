@@ -507,9 +507,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     }
     let show_hunk_actions =
         !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
-    let editable_diff = selected_change
-        .filter(|change| !change.staged)
-        .map(|change| (change.path.clone(), change.code == '?'));
+    let editable_diff = selected_change.map(|change| (change.path.clone(), change.code == '?'));
+    let editable_combined_diff = selected_section.is_some() || branch_comparison.is_some();
     let mut preview = prepare_preview_lines(
         app,
         diff_body,
@@ -523,6 +522,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         app.regions.preview_body = Some(diff_body);
         app.regions.preview_path = Some(path);
         app.regions.preview_untracked = untracked;
+        app.regions.preview_generation = app.changes.preview_content_generation;
+        app.regions.preview_scroll = app.changes.diff_scroll;
+    } else if editable_combined_diff {
+        app.regions.preview_body = Some(diff_body);
         app.regions.preview_generation = app.changes.preview_content_generation;
         app.regions.preview_scroll = app.changes.diff_scroll;
     }

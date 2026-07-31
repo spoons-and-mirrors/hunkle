@@ -267,6 +267,34 @@ impl PreviewPresentation {
         Some((source_line, source_column))
     }
 
+    pub(crate) fn diff_file_position_at_rendered_position(
+        &self,
+        diff: &str,
+        row: usize,
+        column: usize,
+        gutter: usize,
+    ) -> Option<(crate::repo_path::RepoPath, usize, usize)> {
+        let cache = self.cache.as_ref()?;
+        let (display_line, wrapped_row) = self.display_position_at_rendered_row(row)?;
+        let (path, source_line, payload) = super::text::diff_file_position_at_display_row(
+            diff,
+            display_line,
+            cache.show_initial_diff_header,
+        )?;
+        let column = column.saturating_sub(gutter);
+        let source_column = if cache.wrapped_line_starts.is_some() {
+            super::text::word_wrapped_column_at(
+                payload,
+                cache.width.saturating_sub(gutter).max(1),
+                wrapped_row,
+                column,
+            )?
+        } else {
+            column
+        };
+        Some((path, source_line, source_column))
+    }
+
     pub(crate) fn diff_file_header_at_rendered_row(
         &self,
         diff: &str,
@@ -1140,9 +1168,9 @@ fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool, markdown: bool) -> 
     let marker = |span: &Span<'_>| matches!(span.content.as_ref(), "+" | "-" | " ");
     let (gutter, spans) = match line.spans.as_slice() {
         [number, marker_span, ..]
-            if UnicodeWidthStr::width(number.content.as_ref()) == 5 && marker(marker_span) =>
+            if UnicodeWidthStr::width(number.content.as_ref()) == 6 && marker(marker_span) =>
         {
-            (6, 2)
+            (7, 2)
         }
         [marker_span, ..] if marker(marker_span) => (1, 1),
         _ => (0, 0),
@@ -1457,6 +1485,30 @@ mod tests {
         let wrapped = hard_wrap_lines(lines, 18, 0, 10, false, false);
         assert_eq!(wrapped.len(), 2);
         assert_eq!(wrapped[1].spans[0].content, "       committing");
+    }
+
+    #[test]
+    fn wrapped_diff_continuations_stay_after_the_line_number_gutter() {
+        let lines = vec![Line::from(vec![
+            Span::raw("    1 "),
+            Span::raw("+"),
+            Span::raw("abcdefghijklmnop"),
+        ])];
+
+        let wrapped = hard_wrap_lines(lines, 12, 0, 10, true, false);
+
+        assert_eq!(wrapped.len(), 4);
+        let first = wrapped[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(first.starts_with("    1 +"));
+        assert!(
+            wrapped[1..]
+                .iter()
+                .all(|line| line.spans[0].content.starts_with("       "))
+        );
     }
 
     #[test]

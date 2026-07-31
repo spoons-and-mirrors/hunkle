@@ -651,10 +651,10 @@ impl App {
             return;
         }
 
-        let Some(path) = self.regions.preview_path.clone() else {
-            return;
-        };
         if self.regions.preview_untracked {
+            let Some(path) = self.regions.preview_path.clone() else {
+                return;
+            };
             let Some((display_line, column)) = self
                 .changes
                 .preview_presentation
@@ -688,16 +688,28 @@ impl App {
             return;
         }
         let gutter = if width >= 72 { 7 } else { 1 };
-        let Some((line, column)) = self
-            .changes
-            .preview_presentation
-            .diff_position_at_rendered_position(
-                &self.changes.diff,
-                rendered_row,
-                rendered_column,
-                gutter,
-            )
-        else {
+        let position = self.regions.preview_path.clone().and_then(|path| {
+            self.changes
+                .preview_presentation
+                .diff_position_at_rendered_position(
+                    &self.changes.diff,
+                    rendered_row,
+                    rendered_column,
+                    gutter,
+                )
+                .map(|(line, column)| (path, line, column))
+        });
+        let position = position.or_else(|| {
+            self.changes
+                .preview_presentation
+                .diff_file_position_at_rendered_position(
+                    &self.changes.diff,
+                    rendered_row,
+                    rendered_column,
+                    gutter,
+                )
+        });
+        let Some((path, line, column)) = position else {
             self.notice = Some("Click an added or context line to edit this file".to_owned());
             return;
         };
