@@ -17,8 +17,6 @@ use crate::{
 };
 use serde_json::Value;
 
-const MODEL: &str = "opencode/deepseek-v4-flash-free";
-const VARIANT: &str = "max";
 const MAX_MESSAGE_BYTES: usize = 2_000;
 const MAX_DIFF_BYTES: usize = 1024 * 1024;
 const MAX_OPENCODE_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -89,7 +87,13 @@ impl CommitMessageGenerator {
         self.running
     }
 
-    pub(crate) fn start(&mut self, root: PathBuf, baseline: String) -> Result<(), String> {
+    pub(crate) fn start(
+        &mut self,
+        root: PathBuf,
+        baseline: String,
+        model: String,
+        variant: Option<String>,
+    ) -> Result<(), String> {
         if !self.available {
             return Err("OpenCode is not installed".to_owned());
         }
@@ -103,7 +107,9 @@ impl CommitMessageGenerator {
         thread::Builder::new()
             .name("hunkle-commit-message".to_owned())
             .spawn(move || {
-                let result = catch_generation_panic(|| generate_message(&worker_root));
+                let result = catch_generation_panic(|| {
+                    generate_message(&worker_root, &model, variant.as_deref())
+                });
                 let _ = sender.send(CommitMessageCompletion {
                     root: worker_root,
                     baseline: worker_baseline,
@@ -153,11 +159,11 @@ fn command_available(name: &str) -> bool {
     })
 }
 
-fn generate_message(root: &Path) -> Result<String, String> {
+fn generate_message(root: &Path, model: &str, variant: Option<&str>) -> Result<String, String> {
     let started = Instant::now();
     let (source, diff) = read_diff(root)?;
     let diff_len = diff.len();
-    let args = opencode_args(source);
+    let args = opencode_args(source, model, variant);
     let working_directory = opencode_working_directory()?;
     let mut input = Vec::with_capacity(DIFF_START.len() + diff.len() + DIFF_END.len());
     write_prompt_input(&mut input, &diff)
@@ -359,20 +365,24 @@ fn write_prompt_input(writer: &mut impl Write, diff: &[u8]) -> std::io::Result<(
     writer.write_all(DIFF_END.as_bytes())
 }
 
-fn opencode_args(source: DiffSource) -> Vec<OsString> {
-    vec![
+fn opencode_args(source: DiffSource, model: &str, variant: Option<&str>) -> Vec<OsString> {
+    let mut args = vec![
         "run".into(),
         "--pure".into(),
         "--model".into(),
-        MODEL.into(),
-        "--variant".into(),
-        VARIANT.into(),
-        "--format".into(),
+        model.into(),
+    ];
+    if let Some(variant) = variant {
+        args.extend([OsString::from("--variant"), variant.into()]);
+    }
+    args.extend([
+        OsString::from("--format"),
         "json".into(),
         "--title".into(),
         "Hunkle commit message".into(),
         commit_prompt(source).into(),
-    ]
+    ]);
+    args
 }
 
 fn commit_prompt(source: DiffSource) -> String {
@@ -430,8 +440,12 @@ mod tests {
     }
 
     #[test]
-    fn builds_deepseek_flash_max_opencode_command() {
-        let args = opencode_args(DiffSource::Staged);
+    fn builds_configured_model_and_reasoning_command() {
+        let args = opencode_args(
+            DiffSource::Staged,
+            "opencode/deepseek-v4-flash-free",
+            Some("max"),
+        );
         let args = args
             .iter()
             .map(|arg| arg.to_string_lossy())
@@ -453,6 +467,12 @@ mod tests {
         );
         assert!(args[10].contains("complete staged diff supplied on stdin"));
         assert!(!args.iter().any(|arg| arg == "--file"));
+    }
+
+    #[test]
+    fn omits_the_variant_when_reasoning_uses_the_model_default() {
+        let args = opencode_args(DiffSource::Unstaged, "provider/model", None);
+        assert!(!args.iter().any(|arg| arg == "--variant"));
     }
 
     #[test]

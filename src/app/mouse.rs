@@ -537,8 +537,7 @@ impl App {
             .settings
             .is_some_and(|rect| rect.contains(point))
         {
-            self.mode = Mode::Settings;
-            self.settings_page = SettingsPage::General;
+            self.open_settings();
         } else if self.regions.help.is_some_and(|rect| rect.contains(point)) {
             self.mode = Mode::Help;
         } else if self.select_explorer_row(point) {
@@ -1145,7 +1144,7 @@ impl App {
             .settings_overlay
             .is_some_and(|rect| !rect.contains(point))
         {
-            self.mode = Mode::Normal;
+            self.close_settings();
         } else if self
             .regions
             .settings_general_tab
@@ -1154,6 +1153,8 @@ impl App {
             self.settings_page = SettingsPage::General;
             self.shortcut_capture = false;
             self.shortcut_error = None;
+            self.opencode_model_input = None;
+            self.opencode_error = None;
         } else if self
             .regions
             .settings_shortcuts_tab
@@ -1162,6 +1163,32 @@ impl App {
             self.settings_page = SettingsPage::Shortcuts;
             self.shortcut_capture = false;
             self.shortcut_error = None;
+            self.opencode_model_input = None;
+            self.opencode_error = None;
+        } else if self
+            .regions
+            .settings_opencode_tab
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_page = SettingsPage::OpenCode;
+            self.shortcut_capture = false;
+            self.shortcut_error = None;
+            self.opencode_model_input = None;
+            self.opencode_error = None;
+        } else if self
+            .regions
+            .opencode_model_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.opencode_selection = 0;
+            self.begin_opencode_model_input();
+        } else if self
+            .regions
+            .opencode_reasoning_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.opencode_selection = 1;
+            self.change_opencode_reasoning(1);
         } else if let Some((action, _)) = self
             .regions
             .shortcut_rows

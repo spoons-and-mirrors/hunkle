@@ -14,6 +14,68 @@ pub enum AgentTimeDisplay {
     AgentTotal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenCodeReasoning {
+    Default,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl OpenCodeReasoning {
+    const ALL: [Self; 6] = [
+        Self::Default,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Max,
+    ];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Minimal => "Minimal",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::Max => "Max",
+        }
+    }
+
+    pub(crate) fn variant(self) -> Option<&'static str> {
+        (self != Self::Default).then(|| self.as_str())
+    }
+
+    pub(crate) fn next(self, delta: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|value| *value == self)
+            .unwrap_or(0);
+        let count = Self::ALL.len() as isize;
+        Self::ALL[(index as isize + delta).rem_euclid(count) as usize]
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|reasoning| reasoning.as_str() == value)
+    }
+}
+
 impl AgentTimeDisplay {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -55,6 +117,8 @@ pub struct Settings {
     pub graph_commit_width: u16,
     pub explorer_left_pane_width: Option<u16>,
     pub editor_command: Option<String>,
+    pub opencode_model: String,
+    pub opencode_reasoning: OpenCodeReasoning,
     pub media_preview_protocol: MediaPreviewProtocol,
     pub shortcuts: Shortcuts,
 }
@@ -107,6 +171,8 @@ impl Default for Settings {
             graph_commit_width: 7,
             explorer_left_pane_width: None,
             editor_command: None,
+            opencode_model: "opencode/deepseek-v4-flash-free".to_owned(),
+            opencode_reasoning: OpenCodeReasoning::Max,
             media_preview_protocol: MediaPreviewProtocol::Auto,
             shortcuts: Shortcuts::default(),
         }
@@ -163,7 +229,7 @@ impl SettingsStore {
             fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nopencode_model={}\nopencode_reasoning={}\nmedia_preview_protocol={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.format_on_save,
@@ -183,6 +249,8 @@ impl SettingsStore {
                 .map(|width| width.to_string())
                 .unwrap_or_default(),
             settings.editor_command.as_deref().unwrap_or_default(),
+            settings.opencode_model,
+            settings.opencode_reasoning.as_str(),
             settings.media_preview_protocol.as_str(),
         );
         for (id, binding) in settings.shortcuts.serialized() {
@@ -301,6 +369,17 @@ fn load(path: &Path) -> Settings {
                 let command = value.trim();
                 settings.editor_command = (!command.is_empty()).then(|| command.to_owned());
             }
+            "opencode_model" => {
+                let model = value.trim();
+                if valid_opencode_model(model) {
+                    settings.opencode_model = model.to_owned();
+                }
+            }
+            "opencode_reasoning" => {
+                if let Some(reasoning) = OpenCodeReasoning::parse(value.trim()) {
+                    settings.opencode_reasoning = reasoning;
+                }
+            }
             "media_preview_protocol" => {
                 settings.media_preview_protocol = match value.trim() {
                     "auto" => MediaPreviewProtocol::Auto,
@@ -314,6 +393,10 @@ fn load(path: &Path) -> Settings {
         }
     }
     settings
+}
+
+pub(crate) fn valid_opencode_model(model: &str) -> bool {
+    !model.is_empty() && !model.chars().any(char::is_whitespace)
 }
 
 #[cfg(test)]
@@ -343,6 +426,8 @@ mod tests {
             graph_commit_width: 9,
             explorer_left_pane_width: Some(47),
             editor_command: Some("code --wait".to_owned()),
+            opencode_model: "anthropic/claude-sonnet-4-5".to_owned(),
+            opencode_reasoning: OpenCodeReasoning::High,
             media_preview_protocol: MediaPreviewProtocol::Sixel,
             shortcuts: {
                 let mut shortcuts = Shortcuts::default();

@@ -32,11 +32,14 @@ pub(super) struct SettingsRegions {
     pub(super) overlay: Rect,
     pub(super) general_tab: Rect,
     pub(super) shortcuts_tab: Rect,
+    pub(super) opencode_tab: Rect,
     pub(super) auto_fetch: Option<Rect>,
     pub(super) fetch_interval: Option<Rect>,
     pub(super) fetch_interval_down: Option<Rect>,
     pub(super) fetch_interval_up: Option<Rect>,
     pub(super) format_on_save: Option<Rect>,
+    pub(super) opencode_model: Option<Rect>,
+    pub(super) opencode_reasoning: Option<Rect>,
     pub(super) workspace_panel: Option<Rect>,
     pub(super) agent_harness: Option<Rect>,
     pub(super) agent_time: Option<Rect>,
@@ -3562,6 +3565,9 @@ pub(super) struct SettingsView<'a> {
     pub(super) shortcut_scroll: usize,
     pub(super) shortcut_capture: bool,
     pub(super) shortcut_error: Option<&'a str>,
+    pub(super) opencode_selection: usize,
+    pub(super) opencode_model_input: Option<&'a str>,
+    pub(super) opencode_error: Option<&'a str>,
 }
 
 pub(super) fn draw_settings(
@@ -3577,6 +3583,9 @@ pub(super) fn draw_settings(
         shortcut_scroll,
         shortcut_capture,
         shortcut_error,
+        opencode_selection,
+        opencode_model_input,
+        opencode_error,
     } = view;
     let area = centered_min(frame.area(), 58, 0, 48, 28);
     frame.render_widget(Clear, area);
@@ -3617,9 +3626,11 @@ pub(super) fn draw_settings(
         12,
         1,
     );
-    let general_tab = Rect::new(shortcuts_tab.x.saturating_sub(11), shortcuts_tab.y, 10, 1);
+    let opencode_tab = Rect::new(shortcuts_tab.x.saturating_sub(13), shortcuts_tab.y, 12, 1);
+    let general_tab = Rect::new(opencode_tab.x.saturating_sub(11), opencode_tab.y, 10, 1);
     for (label, rect, active) in [
         (" General ", general_tab, page == SettingsPage::General),
+        (" OpenCode ", opencode_tab, page == SettingsPage::OpenCode),
         (
             " Shortcuts ",
             shortcuts_tab,
@@ -3723,11 +3734,14 @@ pub(super) fn draw_settings(
             overlay: area,
             general_tab,
             shortcuts_tab,
+            opencode_tab,
             auto_fetch: None,
             fetch_interval: None,
             fetch_interval_down: None,
             fetch_interval_up: None,
             format_on_save: None,
+            opencode_model: None,
+            opencode_reasoning: None,
             workspace_panel: None,
             agent_harness: None,
             agent_time: None,
@@ -3735,6 +3749,126 @@ pub(super) fn draw_settings(
             media_preview: None,
             editor: None,
             shortcut_rows,
+        };
+    }
+    if page == SettingsPage::OpenCode {
+        let inner = Rect::new(
+            area.x.saturating_add(2),
+            area.y,
+            area.width.saturating_sub(4),
+            area.height,
+        );
+        let model_row = Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1);
+        let reasoning_row = Rect::new(inner.x, area.y.saturating_add(12), inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "COMMIT MESSAGE GENERATION",
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("OpenCode generates commit messages from the current Git diff.")
+                .style(Style::default().fg(palette().faint)),
+            Rect::new(inner.x, area.y.saturating_add(5), inner.width, 1),
+        );
+
+        let editing = opencode_model_input.is_some();
+        let model = opencode_model_input.unwrap_or(&settings.opencode_model);
+        let model = truncate_width(model, usize::from(model_row.width).saturating_sub(15));
+        let model_padding = usize::from(model_row.width)
+            .saturating_sub("Model".len() + model.len() + usize::from(editing));
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Model", Style::default().fg(palette().ink)),
+                Span::raw(" ".repeat(model_padding)),
+                Span::styled(model, Style::default().fg(palette().accent)),
+                Span::styled(
+                    if editing { "▏" } else { "" },
+                    Style::default().fg(palette().orange),
+                ),
+            ]))
+            .style(Style::default().bg(if opencode_selection == 0 {
+                palette().selected
+            } else {
+                palette().surface_alt
+            })),
+            model_row,
+        );
+        frame.render_widget(
+            Paragraph::new("Use any model ID reported by `opencode models`.")
+                .style(Style::default().fg(palette().faint)),
+            Rect::new(inner.x, area.y.saturating_add(8), inner.width, 1),
+        );
+
+        let reasoning = settings.opencode_reasoning.label();
+        let reasoning_padding = usize::from(reasoning_row.width)
+            .saturating_sub("Reasoning".len() + reasoning.len() + 4);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Reasoning", Style::default().fg(palette().ink)),
+                Span::raw(" ".repeat(reasoning_padding)),
+                Span::styled("← ", Style::default().fg(palette().muted)),
+                Span::styled(reasoning, Style::default().fg(palette().accent)),
+                Span::styled(" →", Style::default().fg(palette().muted)),
+            ]))
+            .style(Style::default().bg(if opencode_selection == 1 {
+                palette().selected
+            } else {
+                palette().surface_alt
+            })),
+            reasoning_row,
+        );
+        frame.render_widget(
+            Paragraph::new("Default lets the selected model choose its own variant.")
+                .style(Style::default().fg(palette().faint)),
+            Rect::new(inner.x, area.y.saturating_add(13), inner.width, 1),
+        );
+
+        let footer = opencode_error.unwrap_or(if editing {
+            "Enter save   Ctrl+U clear   Esc cancel"
+        } else {
+            "Enter edit   ←/→ reasoning   Tab next   Esc close"
+        });
+        frame.render_widget(
+            Paragraph::new(truncate_width(
+                footer,
+                usize::from(area.width.saturating_sub(4)),
+            ))
+            .style(Style::default().fg(if opencode_error.is_some() {
+                palette().red
+            } else {
+                palette().muted
+            }))
+            .alignment(Alignment::Right),
+            Rect::new(
+                area.x.saturating_add(2),
+                area.bottom().saturating_sub(1),
+                area.width.saturating_sub(4),
+                1,
+            ),
+        );
+        return SettingsRegions {
+            overlay: area,
+            general_tab,
+            shortcuts_tab,
+            opencode_tab,
+            auto_fetch: None,
+            fetch_interval: None,
+            fetch_interval_down: None,
+            fetch_interval_up: None,
+            format_on_save: None,
+            opencode_model: Some(model_row),
+            opencode_reasoning: Some(reasoning_row),
+            workspace_panel: None,
+            agent_harness: None,
+            agent_time: None,
+            clear_agent_timings: None,
+            media_preview: None,
+            editor: None,
+            shortcut_rows: Vec::new(),
         };
     }
     frame.render_widget(
@@ -4061,11 +4195,14 @@ pub(super) fn draw_settings(
         overlay: area,
         general_tab,
         shortcuts_tab,
+        opencode_tab,
         auto_fetch: Some(auto_row),
         fetch_interval: Some(interval_row),
         fetch_interval_down: Some(interval_down),
         fetch_interval_up: Some(interval_up),
         format_on_save: Some(format_on_save_row),
+        opencode_model: None,
+        opencode_reasoning: None,
         workspace_panel: Some(workspace_panel_row),
         agent_harness: Some(agent_harness_row),
         agent_time: Some(agent_time_row),

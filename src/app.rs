@@ -33,8 +33,8 @@ pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, Issue, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserEffect,
 };
-pub use settings::Settings;
-pub(crate) use settings::SettingsStore;
+pub use settings::{OpenCodeReasoning, Settings};
+pub(crate) use settings::{SettingsStore, valid_opencode_model};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
 pub(crate) use workspace_panel::{
     AgentStatus, SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
@@ -118,7 +118,26 @@ pub(crate) enum ExplorerTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsPage {
     General,
+    OpenCode,
     Shortcuts,
+}
+
+impl SettingsPage {
+    fn next(self) -> Self {
+        match self {
+            Self::General => Self::OpenCode,
+            Self::OpenCode => Self::Shortcuts,
+            Self::Shortcuts => Self::General,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::General => Self::Shortcuts,
+            Self::OpenCode => Self::General,
+            Self::Shortcuts => Self::OpenCode,
+        }
+    }
 }
 
 impl ExplorerTab {
@@ -274,6 +293,7 @@ pub struct Regions {
     pub settings_overlay: Option<Rect>,
     pub settings_general_tab: Option<Rect>,
     pub settings_shortcuts_tab: Option<Rect>,
+    pub settings_opencode_tab: Option<Rect>,
     pub shortcut_rows: Vec<(ShortcutAction, Rect)>,
     pub action_menu: Option<Rect>,
     pub action_list: Option<Rect>,
@@ -291,6 +311,8 @@ pub struct Regions {
     pub editor_setting: Option<Rect>,
     pub media_preview_setting: Option<Rect>,
     pub format_on_save_setting: Option<Rect>,
+    pub opencode_model_setting: Option<Rect>,
+    pub opencode_reasoning_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub workspace_panel_setting: Option<Rect>,
     pub agent_harness_setting: Option<Rect>,
@@ -367,6 +389,9 @@ pub struct App {
     pub(crate) shortcut_scroll: usize,
     pub(crate) shortcut_capture: bool,
     pub(crate) shortcut_error: Option<String>,
+    pub(crate) opencode_selection: usize,
+    pub(crate) opencode_model_input: Option<String>,
+    pub(crate) opencode_error: Option<String>,
     pub notice: Option<String>,
     pub regions: Regions,
     pub(crate) selection: SelectionState,
@@ -514,6 +539,9 @@ impl App {
             shortcut_scroll: 0,
             shortcut_capture: false,
             shortcut_error: None,
+            opencode_selection: 0,
+            opencode_model_input: None,
+            opencode_error: None,
             notice: open_in_background.then(|| "Opening workspace…".to_owned()),
             regions: Regions::default(),
             selection: SelectionState::default(),
@@ -822,6 +850,12 @@ impl App {
             Mode::Editor => {
                 self.editor_input.push_str(text);
                 self.editor_error = None;
+            }
+            Mode::Settings => {
+                if let Some(input) = &mut self.opencode_model_input {
+                    input.push_str(text);
+                    self.opencode_error = None;
+                }
             }
             Mode::Files => {
                 if let Some(dialog) = &mut self.file_dialog
@@ -1505,10 +1539,7 @@ impl App {
             ShortcutAction::Refresh => self.reload(RefreshScope::ALL),
             ShortcutAction::OpenExplorer => self.open_explorer(),
             ShortcutAction::OpenWorktrees => self.open_worktree_manager(),
-            ShortcutAction::OpenSettings => {
-                self.mode = Mode::Settings;
-                self.settings_page = SettingsPage::General;
-            }
+            ShortcutAction::OpenSettings => self.open_settings(),
             ShortcutAction::OpenRepositoryBrowser => self.open_repository_browser(),
             ShortcutAction::OpenActions => self.open_actions(),
             ShortcutAction::OpenGitCommand => self.open_git_command(),
@@ -1930,6 +1961,10 @@ impl App {
     }
 
     fn handle_settings(&mut self, key: KeyEvent) {
+        if self.opencode_model_input.is_some() {
+            self.handle_opencode_model_input(key);
+            return;
+        }
         if self.shortcut_capture {
             if key.code == KeyCode::Esc {
                 self.shortcut_capture = false;
@@ -1952,25 +1987,31 @@ impl App {
             return;
         }
         if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
-            self.settings_page = match self.settings_page {
-                SettingsPage::General => SettingsPage::Shortcuts,
-                SettingsPage::Shortcuts => SettingsPage::General,
+            self.settings_page = if key.code == KeyCode::BackTab {
+                self.settings_page.previous()
+            } else {
+                self.settings_page.next()
             };
             self.shortcut_error = None;
+            self.opencode_error = None;
             return;
         }
         if self.settings_page == SettingsPage::Shortcuts {
             self.handle_shortcut_settings(key);
             return;
         }
+        if self.settings_page == SettingsPage::OpenCode {
+            self.handle_opencode_settings(key);
+            return;
+        }
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Esc => self.close_settings(),
             _ if self
                 .settings
                 .shortcuts
                 .matches(ShortcutAction::OpenSettings, key) =>
             {
-                self.mode = Mode::Normal;
+                self.close_settings();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.settings_selection = (self.settings_selection + 1) % SETTINGS_ROW_COUNT;
@@ -2015,10 +2056,120 @@ impl App {
         }
     }
 
+    fn handle_opencode_settings(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_settings(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.opencode_selection = (self.opencode_selection + 1) % 2;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.opencode_selection = (self.opencode_selection + 1) % 2;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.opencode_selection == 0 => {
+                self.begin_opencode_model_input();
+            }
+            KeyCode::Left if self.opencode_selection == 1 => {
+                self.change_opencode_reasoning(-1);
+            }
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ')
+                if self.opencode_selection == 1 =>
+            {
+                self.change_opencode_reasoning(1);
+            }
+            KeyCode::Home if self.opencode_selection == 1 => {
+                self.settings.opencode_reasoning = OpenCodeReasoning::Default;
+                self.settings_changed();
+            }
+            KeyCode::End if self.opencode_selection == 1 => {
+                self.settings.opencode_reasoning = OpenCodeReasoning::Max;
+                self.settings_changed();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_opencode_model_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.opencode_model_input = None;
+                self.opencode_error = None;
+            }
+            KeyCode::Enter => {
+                let model = self
+                    .opencode_model_input
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim();
+                if valid_opencode_model(model) {
+                    self.settings.opencode_model = model.to_owned();
+                    self.opencode_model_input = None;
+                    self.opencode_error = None;
+                    self.settings_changed();
+                } else {
+                    self.opencode_error = Some(
+                        "Enter a non-empty model ID without spaces, such as provider/model"
+                            .to_owned(),
+                    );
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = &mut self.opencode_model_input {
+                    input.pop();
+                }
+                self.opencode_error = None;
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(input) = &mut self.opencode_model_input {
+                    input.clear();
+                }
+                self.opencode_error = None;
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(input) = &mut self.opencode_model_input {
+                    input.push(character);
+                }
+                self.opencode_error = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn begin_opencode_model_input(&mut self) {
+        self.opencode_model_input = Some(self.settings.opencode_model.clone());
+        self.opencode_error = None;
+    }
+
+    fn change_opencode_reasoning(&mut self, delta: isize) {
+        self.settings.opencode_reasoning = self.settings.opencode_reasoning.next(delta);
+        self.opencode_error = None;
+        self.settings_changed();
+    }
+
+    fn open_settings(&mut self) {
+        self.mode = Mode::Settings;
+        self.settings_page = SettingsPage::General;
+        self.shortcut_capture = false;
+        self.shortcut_error = None;
+        self.opencode_model_input = None;
+        self.opencode_error = None;
+    }
+
+    fn close_settings(&mut self) {
+        self.mode = Mode::Normal;
+        self.shortcut_capture = false;
+        self.shortcut_error = None;
+        self.opencode_model_input = None;
+        self.opencode_error = None;
+    }
+
     fn handle_shortcut_settings(&mut self, key: KeyEvent) {
         let count = Shortcuts::definitions().len();
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Esc => self.close_settings(),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.shortcut_selection = (self.shortcut_selection + 1) % count;
                 self.keep_shortcut_selection_visible();
@@ -2320,7 +2471,7 @@ impl App {
                     self.settings.editor_command = Some(command);
                     self.persist_settings();
                     self.editor_error = None;
-                    self.mode = Mode::Settings;
+                    self.open_settings();
                 }
                 Err(error) => self.editor_error = Some(error),
             }
@@ -3455,7 +3606,16 @@ impl App {
         }
         let root = repo.root.clone();
         let baseline = self.commit_input.text().to_owned();
-        match self.commit_message_generator.start(root, baseline) {
+        let model = self.settings.opencode_model.clone();
+        let variant = self
+            .settings
+            .opencode_reasoning
+            .variant()
+            .map(str::to_owned);
+        match self
+            .commit_message_generator
+            .start(root, baseline, model, variant)
+        {
             Ok(()) => {
                 self.mode = Mode::Commit;
                 self.commit_input.focus();
@@ -4213,6 +4373,8 @@ mod tests {
                 graph_commit_width: 7,
                 explorer_left_pane_width: None,
                 editor_command: None,
+                opencode_model: "opencode/deepseek-v4-flash-free".to_owned(),
+                opencode_reasoning: OpenCodeReasoning::Max,
                 media_preview_protocol: MediaPreviewProtocol::Auto,
                 shortcuts: Shortcuts::default(),
             }
@@ -4305,6 +4467,37 @@ mod tests {
             "o"
         );
         assert_eq!(app.settings_store.load(), app.settings);
+    }
+
+    #[test]
+    fn opencode_settings_edit_model_reasoning_and_persist() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config");
+        let mut app = App::new(directory.path().to_path_buf());
+        app.settings = Settings::default();
+        app.settings_store = SettingsStore::at(path);
+        app.mode = Mode::Settings;
+        app.settings_page = SettingsPage::OpenCode;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_paste("provider/model");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.settings.opencode_model, "provider/model");
+        assert_eq!(app.settings_store.load(), app.settings);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.settings.opencode_reasoning, OpenCodeReasoning::High);
+        assert_eq!(app.settings_store.load(), app.settings);
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_paste("not a model");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.settings.opencode_model, "provider/model");
+        assert!(app.opencode_error.is_some());
     }
 
     #[test]

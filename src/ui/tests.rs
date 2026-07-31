@@ -1550,6 +1550,24 @@ fn renders_every_primary_surface() {
             .all(|x| buffer[(x, agent_harness_setting.y)].bg == super::palette().faint)
     );
 
+    app.settings_page = SettingsPage::OpenCode;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let opencode_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(opencode_screen.contains("OpenCode"));
+    assert!(opencode_screen.contains("deepseek-v4-flash-free"));
+    assert!(opencode_screen.contains("Reasoning"));
+    assert!(opencode_screen.contains("Max"));
+    let model_row = app.regions.opencode_model_setting.unwrap();
+    click(&mut app, model_row.x + 1, model_row.y);
+    assert!(app.opencode_model_input.is_some());
+    app.opencode_model_input = None;
+
     app.settings_page = SettingsPage::Shortcuts;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let shortcuts_screen = terminal
