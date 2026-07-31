@@ -413,6 +413,7 @@ pub(crate) struct WorkspacePanel {
     workspace_drag: Option<WorkspaceDrag>,
     last_click: Option<(SelectionKey, Instant)>,
     focus: WorkspaceFocusState,
+    host_tab_id: Option<String>,
     destructive_actions_running: usize,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
@@ -447,6 +448,7 @@ impl WorkspacePanel {
         let mut panel = Self::new(enabled, groups_path, snapshots_path);
         if let Some(environment) = environment {
             panel.focus.set_host(environment.workspace_id);
+            panel.host_tab_id = environment.tab_id;
             panel.start_event_listener();
         }
         panel
@@ -521,6 +523,7 @@ impl WorkspacePanel {
             workspace_drag: None,
             last_click: None,
             focus: WorkspaceFocusState::default(),
+            host_tab_id: None,
             destructive_actions_running: 0,
             sender,
             receiver,
@@ -1826,9 +1829,10 @@ impl WorkspacePanel {
         }
     }
 
-    pub(crate) fn agent_is_in_active_workspace(&self, index: usize) -> bool {
+    pub(crate) fn agent_is_in_host_tab(&self, index: usize) -> bool {
         self.agents.get(index).is_some_and(|agent| {
-            self.focus.active_workspace_id() == Some(agent.workspace_id.as_str())
+            self.focus.host() == Some(agent.workspace_id.as_str())
+                && self.host_tab_id.as_deref() == Some(agent.tab_id.as_str())
         })
     }
 
@@ -2342,6 +2346,12 @@ impl WorkspacePanel {
         panel.apply_agent_snapshot(agents);
         panel.restore_selection(None);
         panel
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_host_location_for_test(&mut self, workspace_id: &str, tab_id: &str) {
+        self.focus.set_host(Some(workspace_id.to_owned()));
+        self.host_tab_id = Some(tab_id.to_owned());
     }
 }
 

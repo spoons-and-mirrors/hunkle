@@ -1717,7 +1717,7 @@ fn clicking_an_agent_focuses_it_without_opening_the_workspace_manager() {
 }
 
 #[test]
-fn colors_every_agent_in_the_active_workspace_yellow() {
+fn colors_only_agents_in_hunkles_herdr_tab_yellow() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -1726,30 +1726,38 @@ fn colors_every_agent_in_the_active_workspace_yellow() {
         "result": {
             "snapshot": {
                 "workspaces": [
-                    { "workspace_id": "active", "label": "ACTIVE", "focused": true },
-                    { "workspace_id": "other", "label": "OTHER", "focused": false }
+                    { "workspace_id": "host", "label": "HOST", "focused": false },
+                    { "workspace_id": "other", "label": "OTHER", "focused": true }
                 ],
                 "agents": [
                     {
                         "agent": "opencode",
                         "agent_status": "working",
+                        "focused": false,
+                        "pane_id": "host:p1",
+                        "tab_id": "host:t1",
+                        "workspace_id": "host"
+                    },
+                    {
+                        "agent": "opencode",
+                        "agent_status": "idle",
+                        "focused": false,
+                        "pane_id": "host:p2",
+                        "tab_id": "host:t1",
+                        "workspace_id": "host"
+                    },
+                    {
+                        "agent": "opencode",
+                        "agent_status": "idle",
+                        "focused": false,
+                        "pane_id": "host:p3",
+                        "tab_id": "host:t2",
+                        "workspace_id": "host"
+                    },
+                    {
+                        "agent": "opencode",
+                        "agent_status": "idle",
                         "focused": true,
-                        "pane_id": "active:p1",
-                        "tab_id": "active:t1",
-                        "workspace_id": "active"
-                    },
-                    {
-                        "agent": "opencode",
-                        "agent_status": "idle",
-                        "focused": false,
-                        "pane_id": "active:p2",
-                        "tab_id": "active:t1",
-                        "workspace_id": "active"
-                    },
-                    {
-                        "agent": "opencode",
-                        "agent_status": "idle",
-                        "focused": false,
                         "pane_id": "other:p1",
                         "tab_id": "other:t1",
                         "workspace_id": "other"
@@ -1758,6 +1766,8 @@ fn colors_every_agent_in_the_active_workspace_yellow() {
             }
         }
     }));
+    app.workspace_panel
+        .set_host_location_for_test("host", "host:t1");
     app.settings.agents_height = 9;
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
 
@@ -1772,20 +1782,25 @@ fn colors_every_agent_in_the_active_workspace_yellow() {
             )))
             .unwrap();
         assert_eq!(buffer[(row.x + 2, row.y)].fg, super::palette().yellow);
+        assert_eq!(buffer[(row.x + 2, row.y)].bg, super::palette().surface_alt);
+    }
+    for index in [2, 3] {
+        let row = app
+            .regions
+            .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(
+                index,
+            )))
+            .unwrap();
+        assert_eq!(buffer[(row.x + 2, row.y)].fg, super::palette().ink);
         assert_eq!(
             buffer[(row.x + 2, row.y)].bg,
-            if index == 0 {
+            if index == 3 {
                 super::palette().selected
             } else {
                 super::palette().surface_alt
             }
         );
     }
-    let other = app
-        .regions
-        .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(2)))
-        .unwrap();
-    assert_eq!(buffer[(other.x + 2, other.y)].fg, super::palette().ink);
 }
 
 #[test]

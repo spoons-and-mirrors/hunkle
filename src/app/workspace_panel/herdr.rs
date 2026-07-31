@@ -14,6 +14,7 @@ use super::{AgentSessionIdentity, AgentStatus, AgentTimingKey, HerdrAgent, Herdr
 
 pub(super) struct Environment {
     pub(super) workspace_id: Option<String>,
+    pub(super) tab_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +113,7 @@ pub(super) fn environment() -> Option<Environment> {
     environment_from(
         std::env::var("HERDR_ENV").ok().as_deref(),
         std::env::var("HERDR_WORKSPACE_ID").ok(),
+        std::env::var("HERDR_TAB_ID").ok(),
     )
 }
 
@@ -300,8 +302,15 @@ fn send_command_below_with(
     Ok(pane_id)
 }
 
-fn environment_from(enabled: Option<&str>, workspace_id: Option<String>) -> Option<Environment> {
-    (enabled == Some("1")).then_some(Environment { workspace_id })
+fn environment_from(
+    enabled: Option<&str>,
+    workspace_id: Option<String>,
+    tab_id: Option<String>,
+) -> Option<Environment> {
+    (enabled == Some("1")).then_some(Environment {
+        workspace_id,
+        tab_id,
+    })
 }
 
 fn restore_args(request: RestoreRequest) -> Vec<String> {
@@ -896,14 +905,18 @@ mod tests {
 
     #[test]
     fn detects_environment_and_nested_workspace_ids() {
-        assert!(environment_from(Some("0"), Some("w1".to_owned())).is_none());
-        assert_eq!(
-            environment_from(Some("1"), Some("w1".to_owned()))
-                .unwrap()
-                .workspace_id
-                .as_deref(),
-            Some("w1")
+        assert!(
+            environment_from(Some("0"), Some("w1".to_owned()), Some("w1:t1".to_owned()))
+                .is_none()
         );
+        let environment = environment_from(
+            Some("1"),
+            Some("w1".to_owned()),
+            Some("w1:t1".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(environment.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(environment.tab_id.as_deref(), Some("w1:t1"));
         let response = serde_json::json!({
             "result": { "event": { "workspace": { "workspace_id": "workspace-42" } } }
         });
