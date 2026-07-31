@@ -111,14 +111,20 @@ pub(super) struct ChangesSelection {
 }
 
 impl ChangesState {
+    pub(super) fn initial_pane(repo: Option<&RepositoryData>) -> LeftPane {
+        if repo.is_some_and(|repo| {
+            !repo.is_local() && repo.details_ready && !repo.changes.is_empty()
+        }) {
+            LeftPane::Worktree
+        } else {
+            LeftPane::Files
+        }
+    }
+
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
         let file_tree = repo.map(|repo| FileTree::from_root(&repo.root));
         let mut state = Self {
-            pane: if repo.is_some_and(|repo| repo.is_local() || !repo.details_ready) {
-                LeftPane::Files
-            } else {
-                LeftPane::Worktree
-            },
+            pane: Self::initial_pane(repo),
             worktree_state: ListState::default(),
             explorer_state: ListState::default(),
             worktree_scroll: 0,
@@ -126,7 +132,7 @@ impl ChangesState {
             explorer_scroll: 0,
             diff: String::new(),
             diff_scroll: 0,
-            diff_wrap: false,
+            diff_wrap: true,
             markdown_rendered: false,
             markdown_alternate_scroll: None,
             hunk_selection: None,
@@ -172,11 +178,7 @@ impl ChangesState {
         repo: Option<&RepositoryData>,
         prepared_file_tree: Option<PreparedFileTree>,
     ) {
-        self.pane = if repo.is_some_and(|repo| repo.is_local() || !repo.details_ready) {
-            LeftPane::Files
-        } else {
-            LeftPane::Worktree
-        };
+        self.pane = Self::initial_pane(repo);
         self.worktree_state = ListState::default();
         self.explorer_state = ListState::default();
         self.worktree_scroll = 0;
@@ -287,21 +289,6 @@ impl ChangesState {
     pub(super) fn selected_change_index(&self, repo: &RepositoryData) -> Option<usize> {
         let selected = self.worktree_state.selected()?;
         self.worktree_rows(repo).get(selected)?.change_index
-    }
-
-    pub(super) fn has_preview_target(&self, _repo: &RepositoryData) -> bool {
-        match self.pane {
-            LeftPane::Files => self
-                .explorer_state
-                .selected()
-                .and_then(|index| self.explorer_rows_cache.get(index))
-                .is_some_and(|row| row.file_path.is_some() || row.directory_path.is_some()),
-            LeftPane::Worktree => self
-                .worktree_state
-                .selected()
-                .and_then(|index| self.worktree_rows_cache.get(index))
-                .is_some_and(|row| row.change_index.is_some() || row.directory_path.is_some()),
-        }
     }
 
     pub(super) fn selected_directory_path(&self, repo: &RepositoryData) -> Option<RepoPath> {

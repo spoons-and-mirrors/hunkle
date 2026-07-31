@@ -63,25 +63,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     }
 
     let worktree_content = columns[0].inner(Margin::new(1, 0));
-    let repo = app.session.data().expect("checked above");
-    let local_workspace = repo.is_local();
-    let details_ready = repo.details_ready;
-    let has_changes = !repo.changes.is_empty();
-    let staged_count = repo.change_counts.0;
-    let checkbox = if !repo.changes.is_empty() && staged_count == repo.changes.len() {
-        "◉"
-    } else if staged_count > 0 {
-        "◐"
-    } else {
-        "○"
-    };
-    let checkbox_color = if staged_count == repo.changes.len() && staged_count > 0 {
-        palette().green
-    } else if staged_count > 0 {
-        palette().yellow
-    } else {
-        palette().muted
-    };
     let worktree_header = Rect::new(
         worktree_content.x,
         worktree_content.y.saturating_add(1),
@@ -102,54 +83,31 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         1,
     );
     let worktree_list_y = actions_row.bottom();
-    let maximum_agents = worktree_content
-        .bottom()
-        .saturating_sub(worktree_list_y)
-        .saturating_sub(2)
-        .max(3);
-    let agents_height = app
-        .settings
-        .agents_height
-        .clamp(3, maximum_agents)
-        .min(worktree_content.bottom().saturating_sub(worktree_list_y));
-    let agents_area = Rect::new(
-        worktree_content.x,
-        worktree_content.bottom().saturating_sub(agents_height),
-        worktree_content.width,
-        agents_height,
-    );
-    let worktree_list = Rect::new(
-        worktree_header.x,
-        worktree_list_y,
-        worktree_header.width,
-        agents_area.y.saturating_sub(worktree_list_y),
-    );
+    let worktree_list = layout_agents_pane(app, worktree_content, worktree_list_y);
     app.regions.worktree_list = Some(worktree_list);
     app.regions.register_hit_target(
         HitTarget::Changes(app.changes.worktree_background_target()),
         worktree_list,
     );
-    app.regions.agents_bounds = Some(Rect::new(
-        worktree_content.x,
-        worktree_list_y.saturating_add(2),
-        worktree_content.width,
-        worktree_content
-            .bottom()
-            .saturating_sub(worktree_list_y.saturating_add(2)),
-    ));
-    app.regions.agents_splitter = Some(Rect::new(
-        agents_area.x,
-        agents_area.y,
-        agents_area.width,
-        1,
-    ));
-    app.regions.agents_list = Some(Rect::new(
-        agents_area.x,
-        agents_area.y.saturating_add(1),
-        agents_area.width,
-        agents_area.height.saturating_sub(1),
-    ));
-
+    let repo = app.session.data().expect("checked above");
+    let local_workspace = repo.is_local();
+    let details_ready = repo.details_ready;
+    let has_changes = !repo.changes.is_empty();
+    let staged_count = repo.change_counts.0;
+    let checkbox = if !repo.changes.is_empty() && staged_count == repo.changes.len() {
+        "◉"
+    } else if staged_count > 0 {
+        "◐"
+    } else {
+        "○"
+    };
+    let checkbox_color = if staged_count == repo.changes.len() && staged_count > 0 {
+        palette().green
+    } else if staged_count > 0 {
+        palette().yellow
+    } else {
+        palette().muted
+    };
     let worktree_len = app.changes.worktree_rows(repo).len();
     let worktree_viewport = usize::from(worktree_list.height);
     app.changes.worktree_scroll = app
@@ -304,8 +262,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     );
     frame.render_widget(list, worktree_list);
 
-    let agents_header = app.regions.agents_splitter.expect("set above");
-    let agents_list = app.regions.agents_list.expect("set above");
     app.regions.actions = if local_workspace {
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -318,23 +274,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     } else {
         Some(draw_actions(frame, actions_row, app.mode))
     };
-    let hovered_agent = match &app.hovered_hit_target {
-        Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index))) => Some(*index),
-        _ => None,
-    };
-    let agents_ready = app.workspace_panel_enabled();
-    for (target, rect) in workspace_panel::draw_agents_pane(
-        frame,
-        &mut app.workspace_panel,
-        &app.settings,
-        agents_header,
-        agents_list,
-        app.dragging_agents,
-        agents_ready,
-        hovered_agent,
-    ) {
-        app.regions.register_hit_target(target, rect);
-    }
+    draw_agents_section(frame, app);
     if !draw_details {
         draw_commit_editor(
             frame,
@@ -347,6 +287,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         );
         return;
     }
+    let repo = app.session.data().expect("checked above");
 
     let selected_graph_commit = (app.view == View::Graph && app.graph_commit_open)
         .then(|| app.selected_graph_commit())
@@ -454,9 +395,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         ),
     );
     let wrap_label = if app.changes.diff_wrap {
-        "  alt+w:on"
+        "  z:on"
     } else {
-        "  alt+w:off"
+        "  z:off"
     };
     let display_path = truncate_width(
         &selected_label,
@@ -820,18 +761,9 @@ fn draw_explorer_changes(
 ) {
     app.regions.worktree_list = None;
     app.regions.commit = None;
-    app.regions.agents_list = None;
-    app.regions.agents_splitter = None;
-    app.regions.agents_bounds = None;
-
     let content = columns[0].inner(Margin::new(1, 0));
     let header = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);
-    let list_area = Rect::new(
-        content.x,
-        header.y.saturating_add(2),
-        content.width,
-        content.bottom().saturating_sub(header.y.saturating_add(2)),
-    );
+    let list_area = layout_agents_pane(app, content, header.y.saturating_add(2));
     let files_title = "FILES";
     let add_width = 5.min(header.width);
     let add_button = Rect::new(
@@ -930,6 +862,7 @@ fn draw_explorer_changes(
             .collect()
     };
     frame.render_widget(List::new(items), list_area);
+    draw_agents_section(frame, app);
     if !draw_details {
         return;
     }
@@ -956,9 +889,9 @@ fn draw_explorer_changes(
     let wrap_label = if media_loaded || database_loaded {
         ""
     } else if app.changes.diff_wrap {
-        "  alt+w:on"
+        "  z:on"
     } else {
-        "  alt+w:off"
+        "  z:off"
     };
     let markdown_available = app.markdown_preview_available();
     let markdown_rendered = app.markdown_preview_rendered();
@@ -1126,6 +1059,76 @@ fn draw_explorer_changes(
             app.regions.preview_wrap = app.changes.diff_wrap;
         }
         render_scrollable_content(frame, app, columns[1], preview_body, preview, 0);
+    }
+}
+
+fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> Rect {
+    app.regions.agents_list = None;
+    app.regions.agents_splitter = None;
+    app.regions.agents_bounds = None;
+
+    let available = content.bottom().saturating_sub(list_y);
+    if !app.agents_visible || available < 5 {
+        return Rect::new(content.x, list_y, content.width, available);
+    }
+
+    let agents_height = app
+        .settings
+        .agents_height
+        .clamp(3, available.saturating_sub(2));
+    let agents_area = Rect::new(
+        content.x,
+        content.bottom().saturating_sub(agents_height),
+        content.width,
+        agents_height,
+    );
+    app.regions.agents_bounds = Some(Rect::new(
+        content.x,
+        list_y.saturating_add(2),
+        content.width,
+        available.saturating_sub(2),
+    ));
+    app.regions.agents_splitter = Some(Rect::new(
+        agents_area.x,
+        agents_area.y,
+        agents_area.width,
+        1,
+    ));
+    app.regions.agents_list = Some(Rect::new(
+        agents_area.x,
+        agents_area.y.saturating_add(1),
+        agents_area.width,
+        agents_area.height.saturating_sub(1),
+    ));
+    Rect::new(
+        content.x,
+        list_y,
+        content.width,
+        agents_area.y.saturating_sub(list_y),
+    )
+}
+
+fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
+    let (Some(header), Some(list)) = (app.regions.agents_splitter, app.regions.agents_list)
+    else {
+        return;
+    };
+    let hovered = match &app.hovered_hit_target {
+        Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index))) => Some(*index),
+        _ => None,
+    };
+    let enabled = app.workspace_panel_enabled();
+    for (target, rect) in workspace_panel::draw_agents_pane(
+        frame,
+        &mut app.workspace_panel,
+        &app.settings,
+        header,
+        list,
+        app.dragging_agents,
+        enabled,
+        hovered,
+    ) {
+        app.regions.register_hit_target(target, rect);
     }
 }
 

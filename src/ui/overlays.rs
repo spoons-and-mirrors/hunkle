@@ -4040,9 +4040,10 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
         ),
-        help_line("1 / 2 / Tab", "Switch view"),
+        help_line("Tab", "Changes / files"),
+        help_line("g", "Show / hide Git graph"),
         help_line("j / k", "Move / scroll hunk ×10"),
-        help_line("Home / G", "First / last"),
+        help_line("Home / End", "First / last"),
         help_line("r", "Refresh"),
         help_line("o", "Explorer"),
         help_line("W", "Linked worktrees"),
@@ -4051,13 +4052,12 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("p", "Workspace presets"),
         help_line("s", "Settings"),
         help_line("x", "Git actions"),
-        help_line("g", "Git command"),
+        help_line("G", "Git command"),
         help_line("F1", "Send to Herdr pane below"),
         help_line("e / E", "Edit / configure editor"),
-        help_line("f", "Changes / files"),
         help_line("m", "Markdown preview / source"),
         help_line("F3", "Find repository file"),
-        help_line("Alt+w", "Wrap preview"),
+        help_line("z", "Toggle preview wrapping"),
     ];
     let worktree = vec![
         Line::styled(
@@ -4071,7 +4071,8 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("Enter", "Toggle folder"),
         help_line("Space", "Stage file / hunk"),
         help_line("Delete", "Discard unstaged file changes"),
-        help_line("a / u", "Stage / unstage all"),
+        help_line("a", "Show / hide agents"),
+        help_line("u", "Unstage all"),
         help_line("F2", "Rename file / folder / workspace"),
         help_line("Ctrl+Delete", "Delete from Files"),
         help_line("Ctrl+S", "Save editor / format file"),

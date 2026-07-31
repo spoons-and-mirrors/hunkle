@@ -305,6 +305,7 @@ pub struct App {
     pub(crate) repository_browser: RepositoryBrowser,
     pub(crate) worktree_manager: WorktreeManager,
     pub(crate) workspace_panel: WorkspacePanel,
+    pub(crate) agents_visible: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
     pub settings_selection: usize,
@@ -327,6 +328,7 @@ pub struct App {
     pending_file_selection: Option<RepoPath>,
     workspace_focus_restore_path: Option<PathBuf>,
     pending_workspace_restore: Option<PathBuf>,
+    initial_pane_pending: bool,
     recent_fetches: HashMap<PathBuf, Instant>,
     workspace_fetch_pending: bool,
 }
@@ -387,6 +389,7 @@ impl App {
             .unwrap_or(path);
 
         let changes = ChangesState::new(session.data());
+        let initial_pane_pending = session.data().is_none_or(|repo| !repo.details_ready);
         let file_search = FileSearch::new(
             session.data().map_or(&[], |repo| repo.files.as_slice()),
             session.data().map(|repo| repo.files_fingerprint),
@@ -443,6 +446,7 @@ impl App {
                 workspace_groups_path,
                 workspace_snapshots_path,
             ),
+            agents_visible: true,
             hovered_hit_target: None,
             settings,
             settings_selection: 0,
@@ -465,11 +469,11 @@ impl App {
             pending_file_selection: None,
             workspace_focus_restore_path: None,
             pending_workspace_restore: None,
+            initial_pane_pending,
             recent_fetches: HashMap::new(),
             workspace_fetch_pending: false,
         };
         app.restore_commit_draft();
-        app.show_graph_if_diff_empty();
         app
     }
 
@@ -614,6 +618,13 @@ impl App {
         }
         if key.code == KeyCode::F(3) && self.mode == Mode::Normal {
             self.open_file_search();
+            return;
+        }
+        if matches!(self.mode, Mode::Normal | Mode::Commit) && self.handle_main_navigation(key) {
+            if self.mode == Mode::Commit {
+                self.flush_commit_draft();
+                self.mode = Mode::Normal;
+            }
             return;
         }
         let explorer_dialog_open = match self.explorer_tab {
@@ -1006,16 +1017,21 @@ impl App {
                     }
                     self.changes
                         .reset_repository(self.session.data(), prepared_file_tree);
-                    if let Some(path) = self.pending_file_selection.take()
-                        && let Some(repo) = self.session.data()
-                    {
-                        self.view = View::Changes;
-                        self.changes.set_pane(LeftPane::Files, Some(repo));
+                    self.initial_pane_pending = self
+                        .session
+                        .data()
+                        .is_some_and(|repository| !repository.details_ready);
+                    if let Some(path) = self.pending_file_selection.take() {
+                        self.show_left_pane(LeftPane::Files);
                         let viewport = self
                             .regions
                             .explorer_list
                             .map_or(0, |rect| usize::from(rect.height));
-                        self.changes.select_explorer_path(repo, &path, viewport);
+                        if let Some(repo) = self.session.data() {
+                            self.changes.select_explorer_path(repo, &path, viewport);
+                        }
+                    } else {
+                        self.show_main_pane();
                     }
                     self.file_search.invalidate();
                     self.graph_state.select(
@@ -1080,6 +1096,11 @@ impl App {
                         }
                     }
                     if let Some(repo) = self.session.data() {
+                        if self.initial_pane_pending && repo.details_ready {
+                            let pane = ChangesState::initial_pane(Some(repo));
+                            self.changes.set_pane(pane, Some(repo));
+                            self.initial_pane_pending = false;
+                        }
                         if self.mode == Mode::FileSearch {
                             self.file_search
                                 .reindex(&repo.files, Some(repo.files_fingerprint));
@@ -1091,7 +1112,6 @@ impl App {
                             self.repository_browser.sync_branches(&repo.branches);
                         }
                     }
-                    self.show_graph_if_diff_empty();
                     self.prefetch_repository_browser();
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());
@@ -1225,15 +1245,8 @@ impl App {
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {
-        if matches!(key.code, KeyCode::Esc | KeyCode::Tab)
-            && self.view == View::Graph
-            && self.graph_commit_open
-        {
+        if key.code == KeyCode::Esc && self.view == View::Graph && self.graph_commit_open {
             self.graph_commit_open = false;
-            return;
-        }
-        if key.code == KeyCode::Char('f') && self.view == View::Graph {
-            self.toggle_changes_files();
             return;
         }
         if key.code == KeyCode::Delete
@@ -1290,33 +1303,20 @@ impl App {
             {
                 self.open_workspace_presets();
             }
-            KeyCode::Char('1') => {
-                self.view = View::Changes;
-                self.graph_commit_open = false;
-                self.show_graph_if_diff_empty();
-            }
-            KeyCode::Char('2') => {
-                self.view = View::Graph;
-                self.graph_commit_open = false;
-            }
-            KeyCode::Tab => {
-                self.view = match self.view {
-                    View::Changes => View::Graph,
-                    View::Graph => View::Changes,
-                };
-                self.graph_commit_open = false;
-                self.show_graph_if_diff_empty();
-            }
             KeyCode::Char('r') => self.reload(RefreshScope::ALL),
             KeyCode::Char('o') => self.open_explorer(),
             KeyCode::Char('W') => self.open_worktree_manager(),
             KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => self.mode = Mode::Settings,
             KeyCode::Char('b') => self.open_repository_browser(),
             KeyCode::Char('x') => self.open_actions(),
-            KeyCode::Char('g') => self.open_git_command(),
+            KeyCode::Char('G')
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.open_git_command();
+            }
             KeyCode::Char('?') => self.mode = Mode::Help,
-            KeyCode::Char('w')
-                if key.modifiers == KeyModifiers::ALT
+            KeyCode::Char('z')
+                if key.modifiers.is_empty()
                     && (self.view == View::Changes || self.graph_commit_open) =>
             {
                 let wrapped = self.changes.toggle_wrap();
@@ -1344,13 +1344,19 @@ impl App {
             }
             KeyCode::Char('e') => self.open_selected_file(false),
             KeyCode::Char('E') => self.open_selected_file(true),
-            KeyCode::Char('f') if self.view == View::Changes => self.toggle_changes_files(),
             KeyCode::Char('c') => {
-                self.set_left_pane(LeftPane::Worktree);
+                self.show_left_pane(LeftPane::Worktree);
                 self.focus_commit();
             }
-            KeyCode::Char('a') if self.changes.pane == LeftPane::Worktree => {
-                self.stage_all();
+            KeyCode::Char('a') if key.modifiers == KeyModifiers::NONE => {
+                self.agents_visible = !self.agents_visible;
+                self.dragging_agents = false;
+                self.notice = Some(if self.agents_visible {
+                    "Agents shown"
+                } else {
+                    "Agents hidden"
+                }
+                .to_owned());
             }
             KeyCode::Char('u') if self.changes.pane == LeftPane::Worktree => {
                 self.unstage_all();
@@ -1430,7 +1436,7 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Home => self.select_first(),
-            KeyCode::End | KeyCode::Char('G') => self.select_last(),
+            KeyCode::End => self.select_last(),
             _ => {}
         }
     }
@@ -1597,7 +1603,7 @@ impl App {
             .map(|browser| browser.focus);
         match key.code {
             KeyCode::Esc => self.changes.deactivate_sqlite(),
-            KeyCode::Tab | KeyCode::BackTab => self.changes.toggle_sqlite_focus(),
+            KeyCode::BackTab => self.changes.toggle_sqlite_focus(),
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(repo) = self.session.data() {
                     self.changes
@@ -1640,7 +1646,7 @@ impl App {
                         .select_sqlite_boundary(repo, false, object_viewport, row_viewport);
                 }
             }
-            KeyCode::End | KeyCode::Char('G') => {
+            KeyCode::End => {
                 if let Some(repo) = self.session.data() {
                     self.changes
                         .select_sqlite_boundary(repo, true, object_viewport, row_viewport);
@@ -2036,8 +2042,7 @@ impl App {
         self.graph_state.select(Some(index));
         *self.graph_state.offset_mut() = index.saturating_sub(5);
         self.graph_scroll_to_selection = false;
-        self.graph_commit_open = false;
-        self.view = View::Graph;
+        self.show_graph();
         self.mode = Mode::Normal;
     }
 
@@ -2553,8 +2558,7 @@ impl App {
     fn activate_action(&mut self) {
         let action = self.actions.selected();
         if action == ActionId::Commit {
-            self.view = View::Changes;
-            self.set_left_pane(LeftPane::Worktree);
+            self.show_left_pane(LeftPane::Worktree);
             if self.commit_input.text().trim().is_empty() {
                 self.focus_commit();
             } else {
@@ -2758,16 +2762,15 @@ impl App {
             .regions
             .explorer_list
             .map_or(0, |rect| usize::from(rect.height));
-        let Some(repo) = self.session.data() else {
+        if self.session.data().is_none() {
             return;
-        };
-        self.changes.set_pane(LeftPane::Files, Some(repo));
+        }
+        self.show_left_pane(LeftPane::Files);
+        let repo = self.session.data().expect("repository checked above");
         if self
             .changes
             .select_explorer_file(repo, file_index, viewport)
         {
-            self.view = View::Changes;
-            self.graph_commit_open = false;
             self.mode = Mode::Normal;
         }
     }
@@ -3106,42 +3109,47 @@ impl App {
         self.changes.toggle_markdown_rendered();
     }
 
-    fn set_left_pane(&mut self, pane: LeftPane) {
-        if self.changes.set_pane(pane, self.session.data()) {
-            self.mode = Mode::Normal;
+    fn handle_main_navigation(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Tab if key.modifiers.is_empty() => self.toggle_left_pane(),
+            KeyCode::Char('g') if key.modifiers.is_empty() => {
+                self.toggle_graph();
+            }
+            _ => return false,
         }
+        true
+    }
+
+    pub(super) fn show_main_pane(&mut self) {
+        self.view = View::Changes;
+        self.graph_commit_open = false;
+    }
+
+    fn show_left_pane(&mut self, pane: LeftPane) {
+        self.initial_pane_pending = false;
+        self.changes.set_pane(pane, self.session.data());
+        self.show_main_pane();
+    }
+
+    fn show_graph(&mut self) {
+        self.view = View::Graph;
+        self.graph_commit_open = false;
     }
 
     fn toggle_left_pane(&mut self) {
-        self.set_left_pane(match self.changes.pane {
+        self.show_left_pane(match self.changes.pane {
             LeftPane::Worktree => LeftPane::Files,
             LeftPane::Files => LeftPane::Worktree,
         });
-        self.show_graph_if_diff_empty();
     }
 
-    fn toggle_changes_files(&mut self) {
+    fn toggle_graph(&mut self) {
         if self.view == View::Graph {
-            self.view = View::Changes;
-            self.graph_commit_open = false;
-            self.set_left_pane(LeftPane::Files);
-            self.show_graph_if_diff_empty();
-        } else {
-            self.toggle_left_pane();
+            self.show_main_pane();
+            return;
         }
-    }
-
-    fn show_graph_if_diff_empty(&mut self) {
-        let should_show_graph = self.view == View::Changes
-            && self.mode != Mode::Commit
-            && self.repository().is_some_and(|repo| {
-                !repo.is_local()
-                    && !repo.commits.is_empty()
-                    && !self.changes.has_preview_target(repo)
-            });
-        if should_show_graph {
-            self.view = View::Graph;
-            self.graph_commit_open = false;
+        if self.require_git_repository() {
+            self.show_graph();
         }
     }
 
@@ -3234,7 +3242,7 @@ fn is_workspace_passthrough_shortcut(key: KeyEvent) -> bool {
         | KeyCode::PageUp
         | KeyCode::PageDown => true,
         KeyCode::Delete => key.modifiers.contains(KeyModifiers::CONTROL),
-        KeyCode::Char('w') => key.modifiers.contains(KeyModifiers::ALT),
+        KeyCode::Char('z') => key.modifiers.is_empty(),
         KeyCode::Char(
             'q' | '1' | '2' | 'o' | 's' | 'b' | 'x' | '?' | 'e' | 'E' | 'f' | 'm' | 'c' | 'a' | 'u'
             | ' ',
@@ -3537,12 +3545,15 @@ mod tests {
         let mut app = App::new(root.to_path_buf());
         assert!(app.repository().unwrap().is_local());
 
-        for key in ['x', 'g', 'c', 'a', 'u', 'b'] {
+        for key in ['x', 'g', 'c', 'u', 'b'] {
             app.mode = Mode::Normal;
             app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
             assert_eq!(app.mode, Mode::Normal, "{key}");
             assert_eq!(app.notice.as_deref(), Some("Not a Git repository"), "{key}");
         }
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(!app.agents_visible);
+        assert_eq!(app.notice.as_deref(), Some("Agents hidden"));
 
         fs::write(root.join("two.txt"), "two\n").unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
@@ -3776,36 +3787,59 @@ mod tests {
     }
 
     #[test]
-    fn empty_diff_falls_back_to_the_graph() {
+    fn graph_visibility_is_explicit_and_survives_reload() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         initialize_repository(root);
 
         let mut app = App::new(root.to_path_buf());
-        assert_eq!(app.view, View::Graph);
+        assert_eq!(app.view, View::Changes);
+        assert_eq!(app.changes.pane, LeftPane::Files);
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
         assert_eq!(app.view, View::Graph);
-
-        app.changes.pane = LeftPane::Files;
-        app.changes.explorer_state.select(None);
-        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        wait_for_state(&mut app, |app| app.notice.as_deref() != Some("Refreshing…"));
         assert_eq!(app.view, View::Graph);
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.view, View::Changes);
 
         fs::write(root.join("tracked.txt"), "edited\n").unwrap();
         let mut dirty_app = App::new(root.to_path_buf());
         assert_eq!(dirty_app.view, View::Changes);
+        assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
 
         fs::write(root.join("tracked.txt"), "base\n").unwrap();
         dirty_app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         wait_for_state(&mut dirty_app, |app| {
             app.repository().is_some_and(|repo| repo.changes.is_empty())
         });
-        assert_eq!(dirty_app.view, View::Graph);
+        assert_eq!(dirty_app.view, View::Changes);
+        assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
     }
 
     #[test]
-    fn stages_worktree_changes_while_the_graph_is_visible() {
+    fn background_startup_selects_the_pane_after_repository_details_load() {
+        let clean_directory = tempfile::tempdir().unwrap();
+        initialize_repository(clean_directory.path());
+        let mut clean_app = App::opening(clean_directory.path().to_path_buf());
+        wait_for_state(&mut clean_app, |app| {
+            app.repository().is_some_and(|repo| repo.details_ready)
+        });
+        assert_eq!(clean_app.changes.pane, LeftPane::Files);
+
+        let dirty_directory = tempfile::tempdir().unwrap();
+        initialize_repository(dirty_directory.path());
+        fs::write(dirty_directory.path().join("tracked.txt"), "edited\n").unwrap();
+        let mut dirty_app = App::opening(dirty_directory.path().to_path_buf());
+        wait_for_state(&mut dirty_app, |app| {
+            app.repository().is_some_and(|repo| repo.details_ready)
+        });
+        assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
+    }
+
+    #[test]
+    fn worktree_actions_preserve_the_visible_graph() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         initialize_repository(root);
@@ -3813,7 +3847,7 @@ mod tests {
 
         let mut app = App::new(root.to_path_buf());
         app.view = View::Graph;
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.stage_all();
         wait_for_state(&mut app, |app| {
             app.repository()
                 .is_some_and(|repo| repo.changes.iter().all(|change| change.staged))
@@ -3848,6 +3882,10 @@ mod tests {
         let mut app = App::new(directory.path().to_path_buf());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        let pane = app.changes.pane;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Explorer);
+        assert_eq!(app.changes.pane, pane);
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
 
@@ -3858,31 +3896,42 @@ mod tests {
     }
 
     #[test]
-    fn switches_views_with_tab_and_edits_settings() {
+    fn primary_navigation_has_stable_precedence_and_edits_settings() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config");
-        let mut app = App::new(directory.path().join("missing"));
+        initialize_repository(directory.path());
+        fs::write(directory.path().join("tracked.txt"), "edited\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf());
         app.mode = Mode::Normal;
         app.settings = Settings::default();
         app.settings_store = SettingsStore::at(path.clone());
 
+        assert!(app.agents_visible);
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(!app.agents_visible);
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.agents_visible);
+
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.view, View::Graph);
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.view, View::Changes);
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        app.graph_commit_open = true;
-        app.changes.pane = LeftPane::Files;
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert_eq!(app.changes.pane, LeftPane::Worktree);
-        assert_eq!(app.view, View::Graph);
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert_eq!(app.view, View::Changes);
         assert_eq!(app.changes.pane, LeftPane::Files);
-        assert!(!app.graph_commit_open);
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.view, View::Graph);
+        app.graph_commit_open = true;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.changes.pane, LeftPane::Worktree);
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.view, View::Changes);
+        assert!(!app.graph_commit_open);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.view, View::Graph);
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.view, View::Changes);
+        assert_eq!(app.changes.pane, LeftPane::Worktree);
+        app.mode = Mode::Commit;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.changes.pane, LeftPane::Files);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
@@ -3949,11 +3998,12 @@ mod tests {
 
         app.mode = Mode::Normal;
         app.changes.diff_scroll = 37;
-        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
         assert!(app.changes.diff_wrap);
-        assert_eq!(app.changes.diff_scroll, 37);
-        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
         assert!(!app.changes.diff_wrap);
+        assert_eq!(app.changes.diff_scroll, 37);
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert!(app.changes.diff_wrap);
         assert_eq!(app.changes.diff_scroll, 37);
     }
 
@@ -4426,7 +4476,7 @@ mod tests {
         assert_eq!(app.changes.pane, LeftPane::Worktree);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
         assert_eq!(app.mode, Mode::Command);
         assert_eq!(app.actions.status, CommandStatus::Input);
 

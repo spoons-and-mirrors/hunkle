@@ -483,7 +483,7 @@ impl App {
             .left_pane_toggle
             .is_some_and(|rect| rect.contains(point))
         {
-            self.toggle_changes_files();
+            self.toggle_left_pane();
             return;
         }
         if self
@@ -491,16 +491,9 @@ impl App {
             .changes
             .is_some_and(|rect| rect.contains(point))
         {
-            self.view = View::Changes;
-            self.graph_commit_open = false;
-            self.show_graph_if_diff_empty();
+            self.show_main_pane();
         } else if self.regions.graph.is_some_and(|rect| rect.contains(point)) {
-            self.view = match self.view {
-                View::Changes => View::Graph,
-                View::Graph => View::Changes,
-            };
-            self.graph_commit_open = false;
-            self.show_graph_if_diff_empty();
+            self.toggle_graph();
         } else if self
             .regions
             .explorer
@@ -520,8 +513,7 @@ impl App {
                 let repo = self.session.data();
                 self.changes.toggle_selected_explorer_directory(repo);
             } else {
-                self.view = View::Changes;
-                self.graph_commit_open = false;
+                self.show_main_pane();
             }
         } else if self.select_agents_row(point) {
         } else if self.select_graph_row(point) {
@@ -657,7 +649,7 @@ impl App {
         match effect {
             Some(ChangesEffect::PaneActivated) => {
                 self.mode = Mode::Normal;
-                self.show_graph_if_diff_empty();
+                self.show_main_pane();
             }
             Some(ChangesEffect::WorktreeDirectoryActivated) => {
                 self.last_worktree_file_click = None;
@@ -674,8 +666,7 @@ impl App {
                 {
                     return;
                 }
-                self.view = View::Changes;
-                self.graph_commit_open = false;
+                self.show_main_pane();
             }
             None => {}
         }
@@ -705,10 +696,8 @@ impl App {
         if !self.changes.select_explorer_path(repo, path, viewport) {
             return false;
         }
-        self.changes.set_pane(LeftPane::Files, Some(repo));
+        self.show_left_pane(LeftPane::Files);
         self.mode = Mode::Normal;
-        self.view = View::Changes;
-        self.graph_commit_open = false;
         true
     }
 
@@ -1206,16 +1195,15 @@ impl App {
     }
 
     fn select_agents_row(&mut self, point: Position) -> bool {
-        let Some(rect) = self
+        if !self
             .regions
             .agents_list
-            .filter(|rect| rect.contains(point))
-        else {
+            .is_some_and(|rect| rect.contains(point))
+        {
             return false;
-        };
-        let index = self.workspace_panel.agent_scroll + usize::from(point.y - rect.y);
-        let effect = self.workspace_panel.click_agent(index);
-        self.apply_workspace_panel_effect(effect);
+        }
+        // Agent cards have semantic hit targets. Consume clicks on the padding
+        // between them without translating visual rows into agent indexes.
         true
     }
 

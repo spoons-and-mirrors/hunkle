@@ -95,8 +95,17 @@ fn renders_every_primary_surface() {
     );
     assert_eq!(
         buffer.content[agents_offset].bg,
-        super::palette().surface_alt
+        super::palette().panel
     );
+    let agents_header: String = (agents.x..agents.right())
+        .map(|x| terminal.backend().buffer()[(x, agents.y)].symbol())
+        .collect();
+    assert!(agents_header.contains("AGENTS "));
+    assert!(agents_header.contains('─'));
+    assert!(!agents_header.contains("click focus"));
+    assert!((agents.x..agents.right()).all(|x| {
+        terminal.backend().buffer()[(x, agents.y)].bg == super::palette().panel
+    }));
     let header: String = terminal.backend().buffer().content[..120]
         .iter()
         .map(|cell| cell.symbol())
@@ -106,15 +115,15 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(footer.contains("f Files"));
+    assert!(footer.contains("Tab Files"));
     assert!(footer.contains("e Edit"));
-    assert!(footer.contains("Tab Git Graph"));
+    assert!(footer.contains("g Git Graph"));
     assert!(!footer.contains("W Worktrees"));
     assert!(!footer.contains("b Branches"));
     assert!(!footer.contains("r Refresh"));
     assert!(!footer.contains("1 Changes"));
     assert!(!footer.contains("2 Graph"));
-    for shortcut in ["Tab Git Graph", "f Files", "o Explorer"] {
+    for shortcut in ["g Git Graph", "Tab Files", "o Explorer"] {
         let offset = footer.find(shortcut).unwrap();
         assert_eq!(
             terminal.backend().buffer().content[35 * 120 + offset].fg,
@@ -168,7 +177,7 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(footer.contains("f Changes"));
+    assert!(footer.contains("Tab Changes"));
     assert!(footer.contains("e Edit"));
     let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
@@ -183,7 +192,13 @@ fn renders_every_primary_surface() {
     assert_eq!(app.changes.pane, LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.commit.is_none());
+    assert!(app.regions.agents_list.is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agents_list.is_none());
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.agents_list.is_some());
     let mut explorer = app.regions.explorer_list.unwrap();
     let directory_row = app
         .changes
@@ -480,7 +495,7 @@ fn renders_every_primary_surface() {
         }
     }));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    click(&mut app, agents.x + 2, agents.y + 2);
+    click(&mut app, agents.x + 2, agents.y);
     assert_eq!(app.mode, Mode::Normal);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1005,7 +1020,8 @@ fn renders_every_primary_surface() {
     assert!(scrolled_commit_diff.contains("CHANGES"));
     app.changes.diff_scroll = 0;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
+    app.changes.diff_wrap = false;
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let mut wrapped_patch_file_summary = String::new();
     for row in files_row..files_row.saturating_add(6).min(commit_diff.bottom()) {
@@ -1015,9 +1031,9 @@ fn renders_every_primary_surface() {
         }
     }
     assert!(wrapped_patch_file_summary.contains("fixtures/file-05.txt"));
-    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
 
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.view, View::Graph);
     assert!(!app.graph_commit_open);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1658,6 +1674,7 @@ fn clicking_an_agent_focuses_it_without_opening_the_workspace_manager() {
     run_git(root, &["commit", "-m", "initial commit"]);
 
     let mut app = App::new(root.to_path_buf());
+    app.settings.agents_height = 9;
     app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
         "result": {
             "snapshot": {
@@ -1683,36 +1700,60 @@ fn clicking_an_agent_focuses_it_without_opening_the_workspace_manager() {
     assert_eq!(app.mode, Mode::Normal);
 
     let agents = app.regions.agents_list.unwrap();
-    let agent_row: String = (agents.x..agents.right())
-        .map(|column| terminal.backend().buffer()[(column, agents.y)].symbol())
+    let agent = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)))
+        .unwrap();
+    let top_padding_row = agent.y - 1;
+    assert_eq!(top_padding_row, agents.y);
+    assert!((agent.x..agent.right()).all(|column| {
+        terminal.backend().buffer()[(column, top_padding_row)].symbol() == "▀"
+    }));
+    assert_eq!(
+        app.regions
+            .hit_target_at(Position::new(agent.x + 2, top_padding_row)),
+        None
+    );
+    let agent_row: String = (agent.x..agent.right())
+        .map(|column| terminal.backend().buffer()[(column, agent.y)].symbol())
         .collect();
     assert!(agent_row.contains("HUNKLE"), "agent row was: {agent_row:?}");
     assert!(agent_row.contains("WORKING"));
     assert_eq!(
-        terminal.backend().buffer()[(agents.x, agents.y)].symbol(),
+        terminal.backend().buffer()[(agent.x, agent.y)].symbol(),
         "●",
         "status dot should be the first character of the row"
     );
-    let session_row: String = (agents.x..agents.right())
-        .map(|column| terminal.backend().buffer()[(column, agents.y + 1)].symbol())
+    let session_row: String = (agent.x..agent.right())
+        .map(|column| terminal.backend().buffer()[(column, agent.y + 1)].symbol())
         .collect();
     assert!(
         session_row.contains("Refine workspace"),
         "session row was: {session_row:?}"
     );
+    let padding_row = agent.bottom();
+    assert!(padding_row < agents.bottom());
+    assert!((agent.x..agent.right()).all(|column| {
+        terminal.backend().buffer()[(column, padding_row)].symbol() == "▀"
+    }));
+    assert_eq!(
+        app.regions
+            .hit_target_at(Position::new(agent.x + 2, padding_row)),
+        None
+    );
 
     app.handle_mouse(mouse(
         MouseEventKind::Moved,
-        agents.x + 2,
-        agents.y,
+        agent.x + 2,
+        agent.y,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
-        terminal.backend().buffer()[(agents.x + 2, agents.y)].bg,
+        terminal.backend().buffer()[(agent.x + 2, agent.y)].bg,
         super::palette().selected
     );
 
-    click(&mut app, agents.x + 2, agents.y);
+    click(&mut app, agent.x + 2, agent.y);
     assert_eq!(app.mode, Mode::Normal);
 }
 
@@ -1768,7 +1809,7 @@ fn colors_only_agents_in_hunkles_herdr_tab_yellow() {
     }));
     app.workspace_panel
         .set_host_location_for_test("host", "host:t1");
-    app.settings.agents_height = 9;
+    app.settings.agents_height = 15;
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1914,6 +1955,7 @@ fn renders_colored_file_type_icons_in_the_files_view() {
     }
 
     let mut app = App::new(root.to_path_buf());
+    app.agents_visible = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -1952,6 +1994,7 @@ fn keeps_file_tree_connectors_faint_and_folder_names_bright() {
     fs::write(root.join("root.txt"), "root\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
+    app.agents_visible = false;
     let src = app
         .changes
         .explorer_rows()
@@ -2062,6 +2105,7 @@ fn colors_changed_files_in_the_files_view() {
 
     let mut app = App::new(root.to_path_buf());
     app.changes.pane = LeftPane::Files;
+    app.agents_visible = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -2148,6 +2192,7 @@ fn colors_collapsed_folders_for_the_changes_they_contain() {
 
     let mut app = App::new(root.to_path_buf());
     app.changes.pane = LeftPane::Files;
+    app.agents_visible = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -2400,7 +2445,7 @@ fn left_pane_files_take_over_the_preview_from_graph() {
     assert_eq!(app.view, View::Changes);
     assert!(!app.graph_commit_open);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.changes.pane, LeftPane::Files);
     app.view = View::Graph;
     app.graph_commit_open = true;
@@ -2473,7 +2518,7 @@ fn double_clicking_worktree_files_opens_them_in_files() {
         );
         assert_eq!(app.changes.diff, content);
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.changes.pane, LeftPane::Worktree);
     }
 }
@@ -2493,7 +2538,7 @@ fn renders_markdown_files_and_toggles_back_to_source() {
 
     let mut app = App::new(root.to_path_buf());
     app.settings.worktree_width = 48;
-    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     wait_for_preview(&mut app);
     assert_eq!(app.changes.pane, LeftPane::Files);
     assert_eq!(
@@ -2573,8 +2618,10 @@ fn workspace_focus_passes_through_application_shortcuts() {
 
     app.mode = Mode::WorkspacePanel;
     app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::WorkspacePanel);
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(!app.changes.diff_wrap);
 
+    app.mode = Mode::WorkspacePanel;
     app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Settings);
 
@@ -3193,7 +3240,7 @@ fn explores_and_pages_sqlite_databases_with_keys_and_mouse() {
             .is_some_and(|page| page.key.offset == 100 && page.rows.len() == 5)
     });
 
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let objects = app.regions.sqlite_objects.unwrap();
     click(&mut app, objects.x + 2, objects.y + 1);

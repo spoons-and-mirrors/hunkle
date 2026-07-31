@@ -26,13 +26,13 @@ hunkle opens exactly the current or requested directory. When that directory is 
 
 | Key | Action |
 |---|---|
-| `1`, `2`, `Tab` | Changes, Graph, or switch view |
+| `Tab` | Switch between Changes and Files, closing Graph if necessary |
+| `g` | Show or hide the Git graph without changing the selected Changes/Files pane |
 | `j`, `k` | Move selection; scroll oversized hunks by 10 rows |
-| `Home`, `G` | First or last row |
+| `Home`, `End` | First or last row |
 | `PageUp`, `PageDown` | Scroll the selected file's diff |
-| `Alt+w` | Toggle wrapping in the Diff or File preview |
+| `z` | Toggle wrapping in the Diff or File preview (on by default) |
 | `e`, `E` | Open the selected file in your editor, or configure the editor |
-| `f` | Switch the left pane between Changes and Files |
 | `m` | Toggle rendered Markdown and source for Markdown files in Files |
 | `F1` | Send a command or prompt to the Herdr pane directly below Hunkle, creating it when needed |
 | `F2` | Rename the selected file or folder in Files |
@@ -45,7 +45,8 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `Space` | Stage or unstage the selected entry, or stage the selected hunk |
 | `Delete` in Changes | Discard the selected file's unstaged changes after confirmation; staged changes are preserved |
 | `Right`, `l` in hunk mode | Stage the selected hunk |
-| `a`, `u` | Stage all or unstage all |
+| `a` | Show or hide the Agents section |
+| `u` | Unstage all changes |
 | `c` | Focus the commit message editor |
 | `Enter`, `Ctrl+Enter` | New commit-message line, create commit |
 | `Left`, `Right`, `Home`, `End` | Move within the commit message |
@@ -64,7 +65,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `p` | Open workspace presets; create, update, load, or delete saved setups |
 | `s` | Open settings |
 | `x` | Open repository Actions |
-| `g` | Open Git command |
+| `G` | Open Git command |
 | `?` | Help |
 | `q` | Quit |
 

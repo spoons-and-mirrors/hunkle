@@ -721,38 +721,29 @@ pub(super) fn draw_agents_pane(
     if header.width == 0 || header.height == 0 {
         return targets;
     }
-    fill(
-        frame,
-        header,
-        if dragging {
-            palette().selected
-        } else {
-            palette().surface_alt
-        },
-    );
-    let title = format!("AGENTS  {}", panel.agents.len());
-    let hint = if enabled {
-        "click  focus"
-    } else {
-        "w  workspace manager"
-    };
-    let padding = usize::from(header.width)
-        .saturating_sub(UnicodeWidthStr::width(title.as_str()) + UnicodeWidthStr::width(hint) + 1);
+    let title = format!("AGENTS {}", panel.agents.len());
+    let title = truncate_width(&title, usize::from(header.width));
+    let separator_width = usize::from(header.width)
+        .saturating_sub(UnicodeWidthStr::width(title.as_str()).saturating_add(1));
+    let mut header_spans = vec![Span::styled(
+        title,
+        Style::default()
+            .fg(palette().cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if separator_width > 0 {
+        header_spans.push(Span::raw(" "));
+        header_spans.push(Span::styled(
+            "─".repeat(separator_width),
+            Style::default().fg(if dragging {
+                palette().cyan
+            } else {
+                palette().faint
+            }),
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                truncate_width(
-                    &title,
-                    usize::from(header.width)
-                        .saturating_sub(UnicodeWidthStr::width(hint) + 1),
-                ),
-                Style::default()
-                    .fg(palette().cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" ".repeat(padding)),
-            Span::styled(hint, Style::default().fg(palette().faint)),
-        ])),
+        Paragraph::new(Line::from(header_spans)),
         header,
     );
     if !enabled {
@@ -794,20 +785,30 @@ pub(super) fn draw_agents_pane(
         return targets;
     }
     let card_height = if list.height >= 2 { 2 } else { 1 };
-    let viewport = usize::from((list.height + 1) / card_height).max(1);
+    let card_gap = 1;
+    let top_padding = u16::from(list.height > card_height);
+    let card_list = Rect::new(
+        list.x,
+        list.y.saturating_add(top_padding),
+        list.width,
+        list.height.saturating_sub(top_padding),
+    );
+    let item_step = card_height + card_gap;
+    let viewport = usize::from((card_list.height + card_gap) / item_step).max(1);
     let scroll = panel
         .agent_scroll
         .min(panel.agents.len().saturating_sub(viewport));
+    let mut last_card = None;
     for (screen_row, index) in (scroll..panel.agents.len()).enumerate() {
         if screen_row >= viewport {
             break;
         }
-        let offset = u16::try_from(screen_row).unwrap_or(0) * card_height;
+        let offset = u16::try_from(screen_row).unwrap_or(0) * item_step;
         let row_area = Rect::new(
-            list.x,
-            list.y.saturating_add(offset),
-            list.width,
-            card_height.min(list.height.saturating_sub(offset)),
+            card_list.x,
+            card_list.y.saturating_add(offset),
+            card_list.width,
+            card_height.min(card_list.height.saturating_sub(offset)),
         );
         let agent = &panel.agents[index];
         let state = panel.agent_entry_state(index, false);
@@ -823,6 +824,24 @@ pub(super) fn draw_agents_pane(
         let elapsed = panel
             .agent_elapsed(index, settings.agent_time_display)
             .map(format_duration);
+        let background = agents_pane_row_background(&state, hovered == Some(index));
+        if row_area.y > list.y {
+            let previous_background = screen_row
+                .checked_sub(1)
+                .and_then(|_| index.checked_sub(1))
+                .map(|previous| {
+                    agents_pane_row_background(
+                        &panel.agent_entry_state(previous, false),
+                        hovered == Some(previous),
+                    )
+                });
+            draw_agent_gap(
+                frame,
+                Rect::new(row_area.x, row_area.y - 1, row_area.width, 1),
+                previous_background.unwrap_or(palette().panel),
+                background,
+            );
+        }
         draw_agents_pane_row(
             frame,
             row_area,
@@ -834,12 +853,27 @@ pub(super) fn draw_agents_pane(
             in_host_tab,
             hovered == Some(index),
         );
+        last_card = Some((row_area, background));
         targets.push((
             HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index)),
             row_area,
         ));
     }
+    if let Some((card, background)) = last_card {
+        let gap = Rect::new(card.x, card.bottom(), card.width, 1);
+        if gap.bottom() <= list.bottom() {
+            draw_agent_gap(frame, gap, background, palette().panel);
+        }
+    }
     targets
+}
+
+fn agents_pane_row_background(state: &WorkspacePanelEntryState, hovered: bool) -> Color {
+    if state.selected || hovered {
+        palette().selected
+    } else {
+        palette().surface_alt
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -858,11 +892,7 @@ fn draw_agents_pane_row(
         return;
     }
     let highlighted = state.selected || hovered;
-    let background = if highlighted {
-        palette().selected
-    } else {
-        palette().surface_alt
-    };
+    let background = agents_pane_row_background(&state, hovered);
     fill(frame, area, background);
     let content = Rect::new(
         area.x.saturating_add(2),

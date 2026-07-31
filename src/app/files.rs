@@ -459,8 +459,7 @@ impl App {
                 if drag.source.is_directory {
                     self.changes.toggle_selected_explorer_directory(Some(repo));
                 } else {
-                    self.view = View::Changes;
-                    self.graph_commit_open = false;
+                    self.show_main_pane();
                 }
             }
             return;

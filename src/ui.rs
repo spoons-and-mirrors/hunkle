@@ -530,12 +530,12 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
 
     let compact = area.width < 100;
-    let left_pane_label = if app.view == View::Graph || app.changes.pane == LeftPane::Worktree {
+    let left_pane_label = if app.changes.pane == LeftPane::Worktree {
         "Files"
     } else {
         "Changes"
     };
-    let mut labels = vec![("Tab", "Git Graph"), ("f", left_pane_label)];
+    let mut labels = vec![("g", "Git Graph"), ("Tab", left_pane_label)];
     let show_edit = app.can_edit_selected_file();
     if app.workspace_panel_available() {
         labels.push(("w", "Workspaces"));

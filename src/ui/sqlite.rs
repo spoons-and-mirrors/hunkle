@@ -52,9 +52,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let hint = if !active {
         "Enter explore"
     } else if focus == SqliteFocus::Objects {
-        "↑↓ objects   Enter rows   Tab pane   Esc files"
+        "↑↓ objects   Enter rows   Shift+Tab pane   Esc files"
     } else {
-        "↑↓ rows   ←→ columns   PgUp/PgDn page   Tab pane   Esc files"
+        "↑↓ rows   ←→ columns   PgUp/PgDn page   Shift+Tab pane   Esc files"
     };
     let (has_previous, has_next) = app
         .changes
