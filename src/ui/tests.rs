@@ -167,6 +167,11 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(rendered.contains("topic...feature/header"));
+    let diff = app.regions.diff.unwrap();
+    let diff_header = (diff.x..diff.right())
+        .map(|x| terminal.backend().buffer()[(x, diff.y + 1)].symbol())
+        .collect::<String>();
+    assert!(!diff_header.contains("topic..."));
 
     click(&mut app, repository.x, repository.y);
     assert_eq!(app.mode, Mode::Normal);

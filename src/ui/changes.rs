@@ -333,7 +333,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
                 |commit| commit.oid.chars().take(7).collect(),
             )
         },
-        |comparison| format!("{}...{}", comparison.target, comparison.current),
+        |_| String::new(),
     );
     let syntax_path = selected_change.map_or_else(String::new, |change| change.path.display());
     let diff_header = Rect::new(
@@ -460,7 +460,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "DIFF  ",
+                if branch_comparison.is_some() {
+                    "DIFF"
+                } else {
+                    "DIFF  "
+                },
                 Style::default()
                     .fg(palette().muted)
                     .add_modifier(Modifier::BOLD),

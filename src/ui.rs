@@ -675,7 +675,21 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let branch_width = UnicodeWidthStr::width(branch_badge.as_str()) as u16;
     let diff_badge = " DIFF ";
     let diff_width = UnicodeWidthStr::width(diff_badge) as u16;
+    let comparison = app
+        .changes
+        .branch_comparison()
+        .map(|comparison| format!(" {}...{}", comparison.target, comparison.current));
+    let requested_comparison_width = comparison
+        .as_deref()
+        .map_or(0, |comparison| UnicodeWidthStr::width(comparison).min(40));
     let available = usize::from(area.width);
+    let comparison_width = if is_local {
+        0
+    } else {
+        requested_comparison_width.min(available.saturating_sub(
+            1 + 5 + 1 + 5 + 1 + usize::from(branch_width) + 1 + usize::from(diff_width),
+        ))
+    };
     let repository_width = UnicodeWidthStr::width(repository.as_str())
         .saturating_add(2)
         .min(20);
@@ -692,6 +706,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             + usize::from(branch_width)
             + 1
             + usize::from(diff_width)
+            + comparison_width
     };
     let notice_budget = available
         .saturating_sub(badge_width.saturating_add(4))
@@ -728,7 +743,10 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         room.saturating_sub(if is_local {
             0
         } else {
-            branch_width.saturating_add(diff_width).saturating_add(6)
+            branch_width
+                .saturating_add(diff_width)
+                .saturating_add(comparison_width as u16)
+                .saturating_add(8)
         })
         .min(20),
     );
@@ -755,8 +773,13 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             &mut x,
             format!(" {worktree} "),
             header_badge_style(palette().orange),
-            room.saturating_sub(branch_width.saturating_add(diff_width).saturating_add(2))
-                .min(18),
+            room.saturating_sub(
+                branch_width
+                    .saturating_add(diff_width)
+                    .saturating_add(comparison_width as u16)
+                    .saturating_add(2),
+            )
+            .min(18),
         );
         if let Some(rect) = worktree_rect {
             app.regions
@@ -770,7 +793,11 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             &mut x,
             branch_badge,
             header_badge_style(palette().accent),
-            room.saturating_sub(diff_width.saturating_add(1)),
+            room.saturating_sub(
+                diff_width
+                    .saturating_add(comparison_width as u16)
+                    .saturating_add(1),
+            ),
         );
         if let Some(rect) = branch_rect {
             app.regions
@@ -788,6 +815,18 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
         if let Some(rect) = diff_rect {
             app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
+        }
+        if let Some(comparison) = comparison {
+            let room = content_right.saturating_sub(x);
+            let _ = render(
+                frame,
+                &mut x,
+                comparison,
+                Style::default()
+                    .fg(palette().purple)
+                    .add_modifier(Modifier::BOLD),
+                room.min(comparison_width as u16),
+            );
         }
     }
 
