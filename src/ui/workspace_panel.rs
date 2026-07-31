@@ -506,9 +506,16 @@ fn draw_agent_section(
             )
         });
     let card_height = if list.height >= 8 { 2 } else { 1 };
-    let card_gap = u16::from(card_height > 1);
+    let card_gap = 1;
+    let card_padding = u16::from(list.height >= card_height + 2);
+    let card_list = Rect::new(
+        list.x,
+        list.y.saturating_add(card_padding),
+        list.width,
+        list.height.saturating_sub(card_padding.saturating_mul(2)),
+    );
     let item_step = card_height + card_gap;
-    let viewport = usize::from((list.height + card_gap) / item_step).max(1);
+    let viewport = usize::from((card_list.height + card_gap) / item_step).max(1);
     keep_section_visible(
         &mut panel.agent_scroll,
         panel
@@ -518,17 +525,19 @@ fn draw_agent_section(
         rows.len(),
         viewport,
     );
+    let mut last_card = None;
     for (visual_row, row) in rows.iter().copied().enumerate().skip(panel.agent_scroll) {
         let screen_row = visual_row.saturating_sub(panel.agent_scroll);
         if screen_row >= viewport {
             break;
         }
         let row_area = Rect::new(
-            list.x,
-            list.y + u16::try_from(screen_row).unwrap_or(0) * item_step,
-            list.width,
+            card_list.x,
+            card_list.y + u16::try_from(screen_row).unwrap_or(0) * item_step,
+            card_list.width,
             card_height.min(
-                list.height
+                card_list
+                    .height
                     .saturating_sub(u16::try_from(screen_row).unwrap_or(0) * item_step),
             ),
         );
@@ -544,8 +553,32 @@ fn draw_agent_section(
                 let elapsed = panel
                     .agent_elapsed(index, settings.agent_time_display)
                     .map(format_duration);
-                let session = agent.session_name.as_deref().unwrap_or("terminal session");
+                let session = panel
+                    .agent_display_name(index)
+                    .unwrap_or("terminal session");
                 let target = WorkspacePanelHitTarget::Agent(index);
+                let current_background = agent_card_background(&state, hovered == Some(target));
+                let previous_background = visual_row.checked_sub(1).and_then(|previous| match rows
+                    .get(previous)
+                    .copied()
+                {
+                    Some(WorkspacePanelRow::Agent(index)) => {
+                        let previous_state = panel.agent_entry_state(index, true);
+                        Some(agent_card_background(
+                            &previous_state,
+                            hovered == Some(WorkspacePanelHitTarget::Agent(index)),
+                        ))
+                    }
+                    _ => None,
+                });
+                if row_area.y > list.y {
+                    draw_agent_gap(
+                        frame,
+                        Rect::new(row_area.x, row_area.y - 1, row_area.width, 1),
+                        previous_background.unwrap_or(palette().panel),
+                        current_background,
+                    );
+                }
                 draw_agent_card(
                     frame,
                     row_area,
@@ -556,6 +589,7 @@ fn draw_agent_section(
                     state,
                     hovered == Some(target),
                 );
+                last_card = Some((row_area, current_background));
                 targets.push((HitTarget::WorkspacePanel(target), row_area));
             }
             WorkspacePanelRow::EmptyAgents => {
@@ -584,6 +618,12 @@ fn draw_agent_section(
             _ => {}
         }
     }
+    if let Some((card, background)) = last_card {
+        let gap = Rect::new(card.x, card.bottom(), card.width, 1);
+        if gap.bottom() <= list.bottom() {
+            draw_agent_gap(frame, gap, background, palette().panel);
+        }
+    }
     if panel.agents.is_empty() && list.height > 0 && !panel.loading && panel.error.is_none() {
         frame.render_widget(
             Paragraph::new("  No agents detected").style(
@@ -593,6 +633,26 @@ fn draw_agent_section(
             ),
             list,
         );
+    }
+}
+
+fn draw_agent_gap(frame: &mut Frame<'_>, gap: Rect, above: Color, below: Color) {
+    if gap.width == 0 || gap.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new("▀".repeat(usize::from(gap.width)))
+            .style(Style::default().fg(above).bg(below)),
+        gap,
+    );
+}
+
+fn agent_card_background(state: &WorkspacePanelEntryState, hovered: bool) -> Color {
+    let highlighted = state.selected || hovered;
+    if highlighted {
+        palette().inactive_selected
+    } else {
+        palette().surface_alt
     }
 }
 
@@ -820,24 +880,12 @@ fn draw_agent_card(
     hovered: bool,
 ) {
     let highlighted = state.selected || hovered;
-    let background = if highlighted {
-        palette().inactive_selected
-    } else {
-        palette().surface_alt
-    };
+    let background = agent_card_background(&state, hovered);
     fill(frame, area, background);
-    let rail = if highlighted {
-        palette().accent
-    } else if state.active {
-        palette().cyan
-    } else {
-        status_color(status)
-    };
-    fill(frame, Rect::new(area.x, area.y, 1, area.height), rail);
     let content = Rect::new(
-        area.x.saturating_add(2),
+        area.x.saturating_add(1),
         area.y,
-        area.width.saturating_sub(3),
+        area.width.saturating_sub(2),
         area.height,
     );
     let status_text = status_label(status);

@@ -35,7 +35,7 @@ pub(crate) use settings::SettingsStore;
 pub(crate) use workspace_panel::{
     AgentStatus, SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
     WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect, WorkspacePanelEntryState,
-    WorkspacePanelRow, WorkspaceRenameDialog,
+    WorkspacePanelRow, WorkspaceRenameDialog, WorkspaceRenameTarget,
 };
 pub(crate) use worktree_manager::{
     WorktreeCandidate, WorktreeCreateDialog, WorktreeCreateField, WorktreeManager,
@@ -2291,6 +2291,11 @@ impl App {
                     "Herdr workspace rename requested workspace={workspace_id}"
                 ));
                 self.workspace_panel.rename_workspace(workspace_id, label);
+            }
+            WorkspacePanelEffect::RenameAgent { identity, label } => {
+                if let Err(error) = self.workspace_panel.rename_agent(identity, label) {
+                    self.notice = Some(error);
+                }
             }
             WorkspacePanelEffect::CloseWorkspace(workspace_id) => {
                 if self.session.open_running() || self.worktree_removal_running() {

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{TextInput, settings::AgentTimeDisplay, worktree_manager::WorktreeCandidate};
+use crate::filesystem::atomic_write;
 
 mod focus;
 mod herdr;
@@ -53,6 +54,17 @@ fn unix_time_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
+}
+
+fn load_agent_names(path: &Path) -> Result<HashMap<String, String>, String> {
+    let content = match fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(format!("Could not read agent names: {error}")),
+    };
+    serde_json::from_slice::<AgentNamesFile>(&content)
+        .map(|file| file.names)
+        .map_err(|error| format!("Could not parse agent names: {error}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -234,6 +246,12 @@ pub(crate) struct WorkspaceSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspaceRenameTarget {
+    Workspace { workspace_id: String },
+    Agent { identity: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspaceSnapshotEntry {
     label: String,
     path: PathBuf,
@@ -267,10 +285,16 @@ pub(crate) struct WorkspaceDeleteDialog {
 }
 
 pub(crate) struct WorkspaceRenameDialog {
-    pub(crate) workspace_id: String,
+    pub(crate) target: WorkspaceRenameTarget,
     pub(crate) original_label: String,
     pub(crate) input: TextInput,
     pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct AgentNamesFile {
+    #[serde(default)]
+    names: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,6 +407,9 @@ pub(crate) struct WorkspacePanel {
     pub(crate) delete_dialog: Option<WorkspaceDeleteDialog>,
     pub(crate) snapshot_load_dialog: Option<SnapshotLoadDialog>,
     preset_store: presets::PresetStore,
+    agent_names: HashMap<String, String>,
+    agent_names_path: Option<PathBuf>,
+    agent_names_writable: bool,
     workspace_drag: Option<WorkspaceDrag>,
     last_click: Option<(SelectionKey, Instant)>,
     focus: WorkspaceFocusState,
@@ -431,11 +458,31 @@ impl WorkspacePanel {
             .as_deref()
             .and_then(Path::parent)
             .map(|path| path.join("agent-timings.json"));
+        let agent_names_path = groups_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|path| path.join("agent-names.json"));
         let preset_store = presets::PresetStore::new(groups_path, snapshots_path);
         let (mut groups, snapshots, preset_error) = if enabled {
             preset_store.load()
         } else {
             (Vec::new(), Vec::new(), None)
+        };
+        let (agent_names, agent_names_writable, agent_names_error) = if enabled {
+            agent_names_path.as_deref().map_or_else(
+                || (HashMap::new(), true, None),
+                |path| match load_agent_names(path) {
+                    Ok(names) => (names, true, None),
+                    Err(error) => (HashMap::new(), false, Some(error)),
+                },
+            )
+        } else {
+            (HashMap::new(), true, None)
+        };
+        let preset_error = match (preset_error, agent_names_error) {
+            (Some(preset), Some(names)) => Some(format!("{preset}; {names}")),
+            (Some(error), None) | (None, Some(error)) => Some(error),
+            (None, None) => None,
         };
         presets::sort_groups(&mut groups);
         Self {
@@ -468,6 +515,9 @@ impl WorkspacePanel {
             delete_dialog: None,
             snapshot_load_dialog: None,
             preset_store,
+            agent_names,
+            agent_names_path,
+            agent_names_writable,
             workspace_drag: None,
             last_click: None,
             focus: WorkspaceFocusState::default(),
@@ -782,6 +832,58 @@ impl WorkspacePanel {
         self.agent_elapsed_for_at(index, display, unix_time_ms())
     }
 
+    pub(crate) fn agent_display_name(&self, index: usize) -> Option<&str> {
+        let agent = self.agents.get(index)?;
+        self.agent_names
+            .get(&agent.timing_key.stable_id())
+            .map(String::as_str)
+            .or(agent.session_name.as_deref())
+    }
+
+    fn save_agent_names(&self) -> Result<(), String> {
+        if !self.agent_names_writable {
+            return Err(
+                "Could not save agent names: repair or remove the malformed agent names file first"
+                    .to_owned(),
+            );
+        }
+        let Some(path) = self.agent_names_path.as_deref() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create Hunkle config directory: {error}"))?;
+        }
+        let content = serde_json::to_vec_pretty(&AgentNamesFile {
+            names: self.agent_names.clone(),
+        })
+        .map_err(|error| format!("Could not serialize agent names: {error}"))?;
+        atomic_write(
+            path,
+            format!("{}\n", String::from_utf8_lossy(&content)).as_bytes(),
+        )
+        .map_err(|error| format!("Could not save agent names: {error}"))
+    }
+
+    pub(crate) fn rename_agent(&mut self, identity: String, label: String) -> Result<(), String> {
+        let previous = self.agent_names.insert(identity.clone(), label.clone());
+        if label.is_empty() {
+            self.agent_names.remove(&identity);
+        }
+        if let Err(error) = self.save_agent_names() {
+            match previous {
+                Some(previous) => {
+                    self.agent_names.insert(identity, previous);
+                }
+                None => {
+                    self.agent_names.remove(&identity);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn agent_elapsed_at(&self, index: usize, now_ms: u64) -> Option<Duration> {
         self.agent_elapsed_for_at(index, AgentTimeDisplay::LatestLoop, now_ms)
@@ -906,19 +1008,43 @@ impl WorkspacePanel {
     }
 
     fn begin_rename(&mut self) -> WorkspacePanelEffect {
-        let Some(workspace) = self
-            .selected
-            .and_then(|selected| self.workspaces.get(selected))
-        else {
-            return WorkspacePanelEffect::Notice("Select a workspace to rename".to_owned());
+        let Some(selected) = self.selected else {
+            return WorkspacePanelEffect::Notice(
+                "Select a workspace or agent to rename".to_owned(),
+            );
+        };
+        let (target, original_label) = if let Some(workspace) = self.workspaces.get(selected) {
+            (
+                WorkspaceRenameTarget::Workspace {
+                    workspace_id: workspace.id.clone(),
+                },
+                workspace.label.clone(),
+            )
+        } else {
+            let Some(agent_index) = selected.checked_sub(self.workspaces.len()) else {
+                return WorkspacePanelEffect::Notice(
+                    "Select a workspace or agent to rename".to_owned(),
+                );
+            };
+            let Some(agent) = self.agents.get(agent_index) else {
+                return WorkspacePanelEffect::Notice(
+                    "Select a workspace or agent to rename".to_owned(),
+                );
+            };
+            let identity = agent.timing_key.stable_id();
+            let original_label = self
+                .agent_display_name(agent_index)
+                .unwrap_or("terminal session")
+                .to_owned();
+            (WorkspaceRenameTarget::Agent { identity }, original_label)
         };
         let mut input = TextInput::default();
-        input.set(workspace.label.clone());
+        input.set(original_label.clone());
         input.focus();
         input.select_all();
         self.rename_dialog = Some(WorkspaceRenameDialog {
-            workspace_id: workspace.id.clone(),
-            original_label: workspace.label.clone(),
+            target,
+            original_label,
             input,
             error: None,
         });
@@ -976,7 +1102,7 @@ impl WorkspacePanel {
             return WorkspacePanelEffect::None;
         };
         let label = dialog.input.text().trim();
-        if label.is_empty() {
+        if label.is_empty() && matches!(dialog.target, WorkspaceRenameTarget::Workspace { .. }) {
             dialog.error = Some("Workspace name is required".to_owned());
             return WorkspacePanelEffect::None;
         }
@@ -984,12 +1110,19 @@ impl WorkspacePanel {
             self.rename_dialog = None;
             return WorkspacePanelEffect::None;
         }
-        let workspace_id = dialog.workspace_id.clone();
+        let target = dialog.target.clone();
         let label = label.to_owned();
         self.rename_dialog = None;
-        WorkspacePanelEffect::RenameWorkspace {
-            workspace_id,
-            label,
+        match target {
+            WorkspaceRenameTarget::Workspace { workspace_id } => {
+                WorkspacePanelEffect::RenameWorkspace {
+                    workspace_id,
+                    label,
+                }
+            }
+            WorkspaceRenameTarget::Agent { identity } => {
+                WorkspacePanelEffect::RenameAgent { identity, label }
+            }
         }
     }
 
@@ -2217,6 +2350,10 @@ pub(crate) enum WorkspacePanelEffect {
         workspace_id: String,
         label: String,
     },
+    RenameAgent {
+        identity: String,
+        label: String,
+    },
     CloseWorkspace(String),
     DeleteWorktree {
         workspace_id: String,
@@ -2643,6 +2780,30 @@ mod tests {
     }
 
     #[test]
+    fn persists_agent_aliases_between_panel_restarts() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let groups_path = directory.path().join("workspace-groups.json");
+        let agent = agent("alpha", AgentStatus::Idle);
+        let identity = agent.timing_key.stable_id();
+
+        let mut panel = WorkspacePanel::new(true, Some(groups_path.clone()), None);
+        panel.agents = vec![agent.clone()];
+        panel
+            .rename_agent(identity.clone(), "Reviewer".to_owned())
+            .unwrap();
+        assert_eq!(panel.agent_display_name(0), Some("Reviewer"));
+
+        let mut restored = WorkspacePanel::new(true, Some(groups_path.clone()), None);
+        restored.agents = vec![agent.clone()];
+        assert_eq!(restored.agent_display_name(0), Some("Reviewer"));
+
+        restored.rename_agent(identity, String::new()).unwrap();
+        let mut cleared = WorkspacePanel::new(true, Some(groups_path), None);
+        cleared.agents = vec![agent];
+        assert_eq!(cleared.agent_display_name(0), None);
+    }
+
+    #[test]
     fn orders_agents_by_latest_state_change() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.agents = vec![
@@ -3025,7 +3186,12 @@ mod tests {
             WorkspacePanelEffect::None
         );
         let dialog = panel.rename_dialog.as_ref().unwrap();
-        assert_eq!(dialog.workspace_id, "w1");
+        assert_eq!(
+            dialog.target,
+            WorkspaceRenameTarget::Workspace {
+                workspace_id: "w1".to_owned()
+            }
+        );
         assert_eq!(dialog.original_label, "HUNKLE");
         assert_eq!(dialog.input.selection(), Some((0, "HUNKLE".len())));
 
@@ -3056,11 +3222,25 @@ mod tests {
         assert!(panel.rename_dialog.is_none());
 
         assert!(panel.select_agent(0));
+        let agent_identity = panel.agents[0].timing_key.stable_id();
         assert_eq!(
             panel.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
-            WorkspacePanelEffect::Notice("Select a workspace to rename".to_owned())
+            WorkspacePanelEffect::None
         );
-        assert!(panel.rename_dialog.is_none());
+        let agent_dialog = panel.rename_dialog.as_ref().unwrap();
+        assert!(matches!(
+            &agent_dialog.target,
+            WorkspaceRenameTarget::Agent { .. }
+        ));
+        assert_eq!(agent_dialog.original_label, "terminal session");
+        panel.paste("reviewer");
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            WorkspacePanelEffect::RenameAgent {
+                identity: agent_identity,
+                label: "reviewer".to_owned(),
+            }
+        );
     }
 
     #[test]

@@ -16,8 +16,9 @@ use crate::app::{
     FileSearch, HerdrPrompt, HitTarget, Issue, PickerAction, PickerEntry, PullRequest, RemoteItems,
     RepositoryBrowser, RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
-    WorkspaceRenameDialog, WorktreeCreateDialog, WorktreeCreateField, WorktreeManager,
-    WorktreeManagerHitTarget, WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
+    WorkspaceRenameDialog, WorkspaceRenameTarget, WorktreeCreateDialog, WorktreeCreateField,
+    WorktreeManager, WorktreeManagerHitTarget, WorktreeManagerRow, WorktreeRemoveDialog,
+    short_head, worktree_label,
 };
 
 use super::{fill, palette, text::word_wrapped_height, truncate_width};
@@ -1383,8 +1384,12 @@ pub(super) fn draw_workspace_rename_dialog(frame: &mut Frame<'_>, dialog: &Works
         palette().surface_alt,
     );
     let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    let (title, subject) = match &dialog.target {
+        WorkspaceRenameTarget::Workspace { .. } => ("RENAME WORKSPACE", "workspace"),
+        WorkspaceRenameTarget::Agent { .. } => ("RENAME AGENT", "agent"),
+    };
     frame.render_widget(
-        Paragraph::new("RENAME WORKSPACE").style(
+        Paragraph::new(title).style(
             Style::default()
                 .fg(palette().ink)
                 .add_modifier(Modifier::BOLD),
@@ -1393,7 +1398,7 @@ pub(super) fn draw_workspace_rename_dialog(frame: &mut Frame<'_>, dialog: &Works
     );
     frame.render_widget(
         Paragraph::new(truncate_width(
-            &format!("Rename {}", dialog.original_label),
+            &format!("Rename {subject} {}", dialog.original_label),
             usize::from(inner.width),
         ))
         .style(Style::default().fg(palette().muted)),
