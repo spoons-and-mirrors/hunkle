@@ -127,7 +127,7 @@ pub(super) fn wrapped_preview_line_starts(
             && !line.starts_with("---")
             && (line.starts_with('+') || line.starts_with('-') || line.starts_with(' '))
         {
-            usize::from(numbered) * 5 + 1
+            usize::from(numbered) * 6 + 1
         } else {
             0
         };
@@ -778,7 +778,7 @@ fn parse_git_diff_token(value: &[u8]) -> Option<(Vec<u8>, usize)> {
 fn line_number(new: Option<u32>) -> Vec<Span<'static>> {
     vec![Span::styled(
         format!(
-            "{:>4} ",
+            "{:>5} ",
             new.map_or_else(String::new, |value| value.to_string())
         ),
         Style::default().fg(palette().faint),
@@ -805,6 +805,25 @@ mod tests {
         assert_eq!(mapped_line(2), None);
         assert_eq!(mapped_line(3), Some(3));
         assert_eq!(mapped_line(4), Some(4));
+    }
+
+    #[test]
+    fn diff_and_source_line_numbers_share_the_same_gutter() {
+        let diff = "@@ -2 +2 @@\n-old\n+new\n";
+        let diff_line = styled_diff(diff, "notes.txt", 100, false)[2]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let source_line = styled_source("old\nnew\n", "notes.txt", 100)[1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(diff_line, "    2 +new");
+        assert_eq!(source_line, "    2  new");
+        assert_eq!(diff_line.find("new"), source_line.find("new"));
     }
 
     #[test]

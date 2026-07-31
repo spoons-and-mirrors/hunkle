@@ -683,7 +683,7 @@ impl App {
             self.start_file_editor(path, source_line, column, point);
             return;
         }
-        let gutter = if width >= 72 { 6 } else { 1 };
+        let gutter = if width >= 72 { 7 } else { 1 };
         let Some((line, column)) = self
             .changes
             .preview_presentation
