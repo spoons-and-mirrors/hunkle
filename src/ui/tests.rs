@@ -84,8 +84,25 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .regions
         .hit_target_rect(HitTarget::HeaderBranch)
         .unwrap();
+    assert_eq!(repository.x, 1);
     assert_eq!(repository.right().saturating_add(1), worktrees.x);
     assert!(worktrees.right() <= branch.x);
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x, repository.y)].bg,
+        super::palette().yellow
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x, repository.y)].fg,
+        super::palette().canvas
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(worktrees.x, worktrees.y)].bg,
+        super::palette().orange
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(branch.x, branch.y)].bg,
+        super::palette().accent
+    );
     assert_eq!(worktrees.width, " worktree ".width() as u16);
     let worktree_text = (worktrees.x..worktrees.right())
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())

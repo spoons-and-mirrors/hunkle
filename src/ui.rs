@@ -675,7 +675,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .as_deref()
         .map_or(0, |notice| UnicodeWidthStr::width(notice) + 2);
     let content_right = area.right().saturating_sub(notice_width as u16);
-    let mut x = area.x.saturating_add(2);
+    let mut x = area.x.saturating_add(1);
     let render = |frame: &mut Frame<'_>, x: &mut u16, text: String, style: Style, limit: u16| {
         let width = (UnicodeWidthStr::width(text.as_str()) as u16).min(limit);
         if width == 0 {
@@ -695,11 +695,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         frame,
         &mut x,
         format!(" {repository} "),
-        header_badge_style(
-            app.header_picker.kind == Some(HeaderPickerKind::Repositories),
-            app.hovered_hit_target == Some(HitTarget::HeaderRepository),
-            palette().ink,
-        ),
+        header_badge_style(palette().yellow),
         room.saturating_sub(if is_local { 0 } else { 16 }).min(20),
     );
     if let Some(rect) = repository_rect {
@@ -724,11 +720,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame,
             &mut x,
             format!(" {worktree} "),
-            header_badge_style(
-                app.header_picker.kind == Some(HeaderPickerKind::Worktrees),
-                app.hovered_hit_target == Some(HitTarget::HeaderWorktrees),
-                palette().purple,
-            ),
+            header_badge_style(palette().orange),
             room.saturating_sub(8).min(18),
         );
         if let Some(rect) = worktree_rect {
@@ -739,8 +731,8 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let _ = render(
             frame,
             &mut x,
-            " / ".to_owned(),
-            Style::default().fg(palette().faint),
+            " ".to_owned(),
+            Style::default(),
             room,
         );
         let dirty = if dirty { "*" } else { "" };
@@ -749,11 +741,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame,
             &mut x,
             format!(" {branch}{dirty} "),
-            header_badge_style(
-                app.header_picker.kind == Some(HeaderPickerKind::Branches),
-                app.hovered_hit_target == Some(HitTarget::HeaderBranch),
-                palette().accent,
-            ),
+            header_badge_style(palette().accent),
             room.min(20),
         );
         if let Some(rect) = branch_rect {
@@ -805,14 +793,10 @@ fn repository_root(repo: &crate::git::RepositoryData) -> &std::path::Path {
     }
 }
 
-fn header_badge_style(active: bool, hovered: bool, foreground: Color) -> Style {
+fn header_badge_style(background: Color) -> Style {
     Style::default()
-        .fg(foreground)
-        .bg(if active || hovered {
-            palette().selected
-        } else {
-            palette().raised
-        })
+        .fg(palette().canvas)
+        .bg(background)
         .add_modifier(Modifier::BOLD)
 }
 
