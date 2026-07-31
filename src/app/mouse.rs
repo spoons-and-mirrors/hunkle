@@ -5,10 +5,11 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphColumnDrag, GraphHitTarget, HitTarget,
-    LeftPane, Mode, RepositoryBrowserEffect, RepositoryBrowserHitTarget, SettingsPage, Shortcuts,
-    View, WorkspaceDropTarget, WorkspacePanelHitTarget, WorktreeManagerEffect,
-    WorktreeManagerHitTarget, changes::ChangesEffect, scroll_table,
+    ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphColumnDrag, GraphHitTarget,
+    HeaderPickerKind, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
+    RepositoryBrowserHitTarget, SettingsPage, Shortcuts, View, WorkspaceDropTarget,
+    WorkspacePanelHitTarget, WorktreeManagerEffect, WorktreeManagerHitTarget,
+    changes::ChangesEffect, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -93,6 +94,47 @@ impl App {
             && self.explorer_tab == ExplorerTab::Worktrees
             && self.worktree_manager.dialog_open()
         {
+            return;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            match self.regions.hit_target_at(point) {
+                Some(HitTarget::HeaderRepository) => {
+                    self.toggle_header_picker(HeaderPickerKind::Repositories);
+                    return;
+                }
+                Some(HitTarget::HeaderWorktrees) => {
+                    self.toggle_header_picker(HeaderPickerKind::Worktrees);
+                    return;
+                }
+                Some(HitTarget::HeaderBranch) => {
+                    self.toggle_header_picker(HeaderPickerKind::Branches);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if self.header_picker.is_open() {
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some(HitTarget::HeaderPickerItem(index)) =
+                        self.regions.hit_target_at(point)
+                    {
+                        self.header_picker.select(index);
+                    }
+                }
+                MouseEventKind::ScrollDown => self.header_picker.move_selection(1),
+                MouseEventKind::ScrollUp => self.header_picker.move_selection(-1),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    match self.regions.hit_target_at(point) {
+                        Some(HitTarget::HeaderPickerItem(index)) => {
+                            self.activate_header_picker(index)
+                        }
+                        Some(HitTarget::HeaderPickerOverlay) => {}
+                        _ => self.header_picker.close(),
+                    }
+                }
+                _ => {}
+            }
             return;
         }
         if self.mode == Mode::Explorer
@@ -1004,6 +1046,13 @@ impl App {
                 Some(HitTarget::Changes(_)) => {}
                 Some(HitTarget::CommitMessageGenerate) => {}
                 Some(HitTarget::MarkdownPreviewToggle) => {}
+                Some(
+                    HitTarget::HeaderRepository
+                    | HitTarget::HeaderWorktrees
+                    | HitTarget::HeaderBranch
+                    | HitTarget::HeaderPickerOverlay
+                    | HitTarget::HeaderPickerItem(_),
+                ) => {}
             },
             _ => {}
         }
@@ -1054,6 +1103,13 @@ impl App {
                 Some(HitTarget::Changes(_)) => {}
                 Some(HitTarget::CommitMessageGenerate) => {}
                 Some(HitTarget::MarkdownPreviewToggle) => {}
+                Some(
+                    HitTarget::HeaderRepository
+                    | HitTarget::HeaderWorktrees
+                    | HitTarget::HeaderBranch
+                    | HitTarget::HeaderPickerOverlay
+                    | HitTarget::HeaderPickerItem(_),
+                ) => {}
             },
             _ => {}
         }

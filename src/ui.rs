@@ -21,8 +21,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        App, ExplorerTab, FileDialogKind, GraphHitTarget, HitTarget, LeftPane, Mode, Regions,
-        ShortcutAction, TAB_WIDTH, View, WorkspacePanelHitTarget,
+        App, ExplorerTab, FileDialogKind, GraphHitTarget, HeaderPickerItem, HeaderPickerKind,
+        HitTarget, LeftPane, Mode, Regions, ShortcutAction, TAB_WIDTH, View,
+        WorkspacePanelHitTarget,
     },
     theme::{Palette, load_theme},
 };
@@ -331,6 +332,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Normal | Mode::Commit => {}
     }
+    if app.header_picker.is_open() {
+        draw_header_picker(frame, app);
+    }
     finish_selection(frame, app);
 }
 
@@ -637,76 +641,328 @@ fn dim(frame: &mut Frame<'_>) {
 }
 
 fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let (path, branch) = app.repository().map_or_else(
-        || ("No repository selected".to_owned(), "offline".to_owned()),
-        |repo| {
-            let branch = if !repo.is_local() && !repo.details_ready {
-                "loading".to_owned()
-            } else {
-                repo.branch.clone()
-            };
-            (repo.root.display().to_string(), branch)
-        },
-    );
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().surface_alt)),
         Rect::new(area.x, area.y, area.width, 1),
     );
-    let repository = std::path::Path::new(&path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("hunkle");
-    let branch_label = format!(" {branch} ");
-    let branch_width = UnicodeWidthStr::width(branch_label.as_str())
-        .min(usize::from(area.width.saturating_sub(12)));
-    let notice_label = app
-        .notice
-        .as_ref()
-        .map_or_else(String::new, |notice| format!("  {notice}"));
-    let fixed_width = UnicodeWidthStr::width(repository)
-        .saturating_add(UnicodeWidthStr::width(notice_label.as_str()))
-        .saturating_add(4);
-    let left_width = usize::from(area.width).saturating_sub(branch_width);
-    let display_path = truncate_width(&path, left_width.saturating_sub(fixed_width));
-    let mut title = vec![
-        Span::styled(
-            format!("  {repository}"),
-            Style::default()
-                .fg(palette().ink)
-                .add_modifier(Modifier::BOLD),
+    let Some(repo) = app.repository() else {
+        frame.render_widget(
+            Paragraph::new("  No workspace selected").style(Style::default().fg(palette().muted)),
+            area,
+        );
+        return;
+    };
+
+    let repository = repository_label(repo);
+    let root = repo.root.clone();
+    let worktree = app
+        .header_worktree_name
+        .clone()
+        .unwrap_or_else(|| "worktree".to_owned());
+    let is_local = repo.is_local();
+    let branch = if !is_local && !repo.details_ready {
+        "loading".to_owned()
+    } else {
+        repo.branch.clone()
+    };
+    let dirty = !repo.changes.is_empty();
+    let available = usize::from(area.width);
+    let notice = (available >= 100)
+        .then(|| app.notice.as_deref())
+        .flatten()
+        .map(|notice| truncate_width(notice, 30));
+    let notice_width = notice
+        .as_deref()
+        .map_or(0, |notice| UnicodeWidthStr::width(notice) + 2);
+    let content_right = area.right().saturating_sub(notice_width as u16);
+    let mut x = area.x.saturating_add(2);
+    let render = |frame: &mut Frame<'_>, x: &mut u16, text: String, style: Style, limit: u16| {
+        let width = (UnicodeWidthStr::width(text.as_str()) as u16).min(limit);
+        if width == 0 {
+            return None;
+        }
+        frame.render_widget(
+            Paragraph::new(truncate_width(&text, usize::from(width))).style(style),
+            Rect::new(*x, area.y, width, 1),
+        );
+        let rect = Rect::new(*x, area.y, width, 1);
+        *x = x.saturating_add(width);
+        Some(rect)
+    };
+
+    let room = content_right.saturating_sub(x);
+    let repository_rect = render(
+        frame,
+        &mut x,
+        format!(" {repository} "),
+        header_badge_style(
+            app.header_picker.kind == Some(HeaderPickerKind::Repositories),
+            app.hovered_hit_target == Some(HitTarget::HeaderRepository),
+            palette().ink,
         ),
-        Span::styled(
-            format!("  {display_path}"),
+        room.saturating_sub(if is_local { 0 } else { 16 }).min(20),
+    );
+    if let Some(rect) = repository_rect {
+        app.regions
+            .register_hit_target(HitTarget::HeaderRepository, rect);
+    }
+    let room = content_right.saturating_sub(x);
+    let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+
+    if is_local {
+        let room = content_right.saturating_sub(x);
+        let _ = render(
+            frame,
+            &mut x,
+            "LOCAL".to_owned(),
+            Style::default().fg(palette().muted),
+            room,
+        );
+    } else {
+        let room = content_right.saturating_sub(x);
+        let worktree_rect = render(
+            frame,
+            &mut x,
+            format!(" {worktree} "),
+            header_badge_style(
+                app.header_picker.kind == Some(HeaderPickerKind::Worktrees),
+                app.hovered_hit_target == Some(HitTarget::HeaderWorktrees),
+                palette().purple,
+            ),
+            room.saturating_sub(8).min(18),
+        );
+        if let Some(rect) = worktree_rect {
+            app.regions
+                .register_hit_target(HitTarget::HeaderWorktrees, rect);
+        }
+        let room = content_right.saturating_sub(x);
+        let _ = render(
+            frame,
+            &mut x,
+            " / ".to_owned(),
             Style::default().fg(palette().faint),
-        ),
-    ];
-    if !notice_label.is_empty() {
-        title.push(Span::styled(
-            notice_label,
-            Style::default().fg(palette().yellow),
-        ));
+            room,
+        );
+        let dirty = if dirty { "*" } else { "" };
+        let room = content_right.saturating_sub(x);
+        let branch_rect = render(
+            frame,
+            &mut x,
+            format!(" {branch}{dirty} "),
+            header_badge_style(
+                app.header_picker.kind == Some(HeaderPickerKind::Branches),
+                app.hovered_hit_target == Some(HitTarget::HeaderBranch),
+                palette().accent,
+            ),
+            room.min(20),
+        );
+        if let Some(rect) = branch_rect {
+            app.regions
+                .register_hit_target(HitTarget::HeaderBranch, rect);
+        }
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(title)),
-        Rect::new(area.x, area.y, left_width as u16, 1),
+    let room = content_right.saturating_sub(x);
+    if room > 3 {
+        let _ = render(
+            frame,
+            &mut x,
+            format!("  {}", root.display()),
+            Style::default().fg(palette().faint),
+            room,
+        );
+    }
+    if let Some(notice) = notice {
+        frame.render_widget(
+            Paragraph::new(notice)
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(palette().yellow)),
+            Rect::new(
+                content_right,
+                area.y,
+                area.right().saturating_sub(content_right),
+                1,
+            ),
+        );
+    }
+}
+
+fn repository_label(repo: &crate::git::RepositoryData) -> String {
+    repository_root(repo)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("hunkle")
+        .trim_end_matches(".git")
+        .to_owned()
+}
+
+fn repository_root(repo: &crate::git::RepositoryData) -> &std::path::Path {
+    let common_dir = repo.common_dir.as_deref().unwrap_or(&repo.root);
+    if common_dir.file_name().is_some_and(|name| name == ".git") {
+        common_dir.parent().unwrap_or(common_dir)
+    } else {
+        common_dir
+    }
+}
+
+fn header_badge_style(active: bool, hovered: bool, foreground: Color) -> Style {
+    Style::default()
+        .fg(foreground)
+        .bg(if active || hovered {
+            palette().selected
+        } else {
+            palette().raised
+        })
+        .add_modifier(Modifier::BOLD)
+}
+
+fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
+    let Some(kind) = app.header_picker.kind else {
+        return;
+    };
+    let target = match kind {
+        HeaderPickerKind::Repositories => HitTarget::HeaderRepository,
+        HeaderPickerKind::Worktrees => HitTarget::HeaderWorktrees,
+        HeaderPickerKind::Branches => HitTarget::HeaderBranch,
+    };
+    let anchor = app.regions.hit_target_rect(target).unwrap_or(Rect::new(
+        frame.area().x,
+        frame.area().y,
+        1,
+        1,
+    ));
+    let available_height = frame.area().bottom().saturating_sub(anchor.bottom());
+    if available_height < 2 || frame.area().width < 12 {
+        return;
+    }
+    let visible_items = usize::from(available_height.saturating_sub(1).min(10));
+    let row_count = if app.header_picker.items.is_empty() {
+        1
+    } else {
+        app.header_picker.items.len().min(visible_items)
+    };
+    let width = frame.area().width.saturating_sub(2).min(58).max(12);
+    let x = anchor
+        .x
+        .min(frame.area().right().saturating_sub(width).saturating_sub(1));
+    let area = Rect::new(
+        x,
+        anchor.bottom(),
+        width,
+        u16::try_from(row_count + 1).unwrap_or(available_height),
     );
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().raised);
+    let title = match kind {
+        HeaderPickerKind::Repositories => " RECENT REPOSITORIES",
+        HeaderPickerKind::Worktrees => " WORKTREES",
+        HeaderPickerKind::Branches => " BRANCHES",
+    };
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            truncate_width(&branch_label, branch_width),
-            Style::default()
-                .fg(palette().accent)
-                .bg(palette().surface_alt)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .alignment(Alignment::Right),
-        Rect::new(
-            area.right().saturating_sub(branch_width as u16),
-            area.y,
-            branch_width as u16,
-            1,
-        ),
+        Paragraph::new(title).style(Style::default().fg(palette().muted)),
+        Rect::new(area.x, area.y, area.width, 1),
     );
+    app.regions
+        .register_hit_target(HitTarget::HeaderPickerOverlay, area);
+
+    if app.header_picker.items.is_empty() {
+        let message = app.header_picker.message.as_deref().unwrap_or("No entries");
+        frame.render_widget(
+            Paragraph::new(format!(" {message}")).style(Style::default().fg(palette().faint)),
+            Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        );
+        return;
+    }
+
+    let start = app
+        .header_picker
+        .selected
+        .saturating_add(1)
+        .saturating_sub(row_count);
+    let current_root = app.repository().map(|repository| repository.root.as_path());
+    let current_common_dir = app
+        .repository()
+        .and_then(|repository| repository.common_dir.as_deref());
+    let rows = app
+        .header_picker
+        .items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(row_count)
+        .map(|(index, item)| {
+            let (label, detail, current) = match item {
+                HeaderPickerItem::Repository { common_dir, path } => (
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("repository")
+                        .to_owned(),
+                    path.display().to_string(),
+                    current_common_dir.is_some_and(|current| current == common_dir),
+                ),
+                HeaderPickerItem::Worktree(worktree) => (
+                    if worktree.is_main {
+                        "worktree".to_owned()
+                    } else {
+                        worktree
+                            .path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("worktree")
+                            .to_owned()
+                    },
+                    worktree
+                        .branch
+                        .as_deref()
+                        .and_then(|branch| branch.strip_prefix("refs/heads/"))
+                        .unwrap_or(if worktree.is_detached { "detached" } else { "" })
+                        .to_owned(),
+                    current_root.is_some_and(|current| current == worktree.path),
+                ),
+                HeaderPickerItem::Branch(branch) => (
+                    branch.name.clone(),
+                    if branch.remote {
+                        "remote"
+                    } else if branch.current {
+                        "current"
+                    } else {
+                        "local"
+                    }
+                    .to_owned(),
+                    branch.current,
+                ),
+            };
+            (index, label, detail, current)
+        })
+        .collect::<Vec<_>>();
+    for (row, (index, label, detail, current)) in rows.into_iter().enumerate() {
+        let rect = Rect::new(area.x, area.y.saturating_add(1 + row as u16), area.width, 1);
+        let selected = app.header_picker.selected == index;
+        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerItem(index));
+        let marker = if current { "●" } else { " " };
+        let text = truncate_width(
+            &format!(" {marker} {label}  {detail}"),
+            usize::from(rect.width),
+        );
+        frame.render_widget(
+            Paragraph::new(text).style(
+                Style::default()
+                    .fg(if current {
+                        palette().accent
+                    } else {
+                        palette().ink
+                    })
+                    .bg(if selected || hovered {
+                        palette().selected
+                    } else {
+                        palette().raised
+                    }),
+            ),
+            rect,
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerItem(index), rect);
+    }
 }
 
 fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {

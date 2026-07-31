@@ -568,6 +568,15 @@ pub(crate) fn delete_branch(
     Ok(())
 }
 
+pub(crate) fn checkout_branch(root: &Path, branch: &str, remote: bool) -> Result<CommandOutput> {
+    let output = if remote {
+        run(root, &["switch", "--track", "--", branch])?
+    } else {
+        run(root, &["switch", "--no-guess", "--", branch])?
+    };
+    Ok(command_output(output))
+}
+
 #[cfg(test)]
 pub fn load(path: &Path) -> Result<RepositoryData> {
     load_git_root(discover(path)?)
@@ -2796,6 +2805,56 @@ mod tests {
             .unwrap()
             .status
             .success()
+        );
+    }
+
+    #[test]
+    fn checks_out_local_and_remote_branches_without_overriding_git_safety() {
+        let directory = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        let occupied = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Test Author"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        fs::write(root.join("tracked.txt"), "main\n").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        git(root, &["commit", "-m", "initial"]);
+        git(root, &["branch", "topic"]);
+
+        let output = checkout_branch(root, "topic", false).unwrap();
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(branch_name(root).unwrap(), "topic");
+        git(root, &["switch", "main"]);
+
+        git(
+            root,
+            &[
+                "worktree",
+                "add",
+                occupied.path().to_str().unwrap(),
+                "topic",
+            ],
+        );
+        let output = checkout_branch(root, "topic", false).unwrap();
+        assert!(!output.success);
+        assert_eq!(branch_name(root).unwrap(), "main");
+
+        git(remote.path(), &["init", "--bare"]);
+        git(
+            root,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(root, &["branch", "remote-topic"]);
+        git(root, &["push", "origin", "remote-topic"]);
+        git(root, &["branch", "-D", "remote-topic"]);
+        let output = checkout_branch(root, "origin/remote-topic", true).unwrap();
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(branch_name(root).unwrap(), "remote-topic");
+        let upstream = run(root, &["rev-parse", "--abbrev-ref", "@{upstream}"]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&upstream.stdout).trim(),
+            "origin/remote-topic"
         );
     }
 

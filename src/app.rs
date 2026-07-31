@@ -8,6 +8,7 @@ mod file_editor;
 mod file_search;
 mod files;
 mod fuzzy;
+mod header_picker;
 mod herdr_prompt;
 mod mouse;
 mod repository_browser;
@@ -28,6 +29,7 @@ pub(crate) use explorer::{ExplorerHitTarget, SurroundingEntry};
 pub(crate) use file_editor::{FileEditor, TAB_WIDTH};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
+pub(crate) use header_picker::{HeaderPicker, HeaderPickerItem, HeaderPickerKind};
 pub(crate) use herdr_prompt::HerdrPrompt;
 pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, Issue, PullRequest, RemoteItems, RepositoryBrowser,
@@ -156,6 +158,11 @@ pub struct DiffHunkRegion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HitTarget {
+    HeaderRepository,
+    HeaderWorktrees,
+    HeaderBranch,
+    HeaderPickerOverlay,
+    HeaderPickerItem(usize),
     Changes(ChangesHitTarget),
     CommitMessageGenerate,
     MarkdownPreviewToggle,
@@ -399,6 +406,8 @@ pub struct App {
     pub(crate) actions: ActionsState,
     pub(crate) herdr_prompt: HerdrPrompt,
     pub(crate) repository_browser: RepositoryBrowser,
+    pub(crate) header_picker: HeaderPicker,
+    pub(crate) header_worktree_name: Option<String>,
     pub(crate) worktree_manager: WorktreeManager,
     pub(crate) workspace_panel: WorkspacePanel,
     pub(crate) agents_visible: bool,
@@ -512,9 +521,12 @@ impl App {
             repository_browser.prefetch(&repo.root);
         }
         let mut worktree_manager = WorktreeManager::new(known_repositories_path);
-        if let Some(common_dir) = session.data().and_then(|repo| repo.common_dir.as_deref()) {
-            let _ = worktree_manager.remember(common_dir);
+        if let Some(repository) = session.data()
+            && let Some(common_dir) = repository.common_dir.as_deref()
+        {
+            let _ = worktree_manager.remember(common_dir, &repository.root);
         }
+        let header_worktree_name = session.data().and_then(current_worktree_name);
         let mut author_filter = AuthorFilter::default();
         if let Some(repo) = session.data() {
             author_filter.sync(&repo.root, &repo.commits);
@@ -548,6 +560,8 @@ impl App {
             actions: ActionsState::default(),
             herdr_prompt: HerdrPrompt::default(),
             repository_browser,
+            header_picker: HeaderPicker::default(),
+            header_worktree_name,
             worktree_manager,
             workspace_panel: WorkspacePanel::detect(
                 workspace_groups_path,
@@ -750,6 +764,10 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+        if self.header_picker.is_open() {
+            self.handle_header_picker(key);
             return;
         }
         if self.mode == Mode::Normal
@@ -1154,6 +1172,15 @@ impl App {
                         Err(error) => error,
                     });
                 }
+                WorkerOutcome::BranchCheckout(done) => match done.result {
+                    Ok(output) if output.success => {
+                        self.notice = Some(format!("Checked out {}", done.branch));
+                    }
+                    Ok(output) => {
+                        self.notice = Some(first_error(&output.stderr, "Branch checkout failed"));
+                    }
+                    Err(error) => self.notice = Some(error),
+                },
             }
         }
         while let Some(scope) = self.session.next_worktree_change() {
@@ -1169,6 +1196,7 @@ impl App {
             let prepared_file_tree = done.prepared_file_tree;
             match (done.kind, done.result) {
                 (LoadKind::Open, Ok(())) => {
+                    self.header_worktree_name = self.session.data().and_then(current_worktree_name);
                     let _activity =
                         diagnostics::activity("apply-workspace", self.diagnostic_context());
                     diagnostics::event(format!("workspace opened {}", self.diagnostic_context()));
@@ -1210,11 +1238,13 @@ impl App {
                             .then_some(0),
                     );
                     self.restore_commit_draft();
-                    let remember_error = self
-                        .session
-                        .data()
-                        .and_then(|repository| repository.common_dir.as_deref())
-                        .and_then(|common_dir| self.worktree_manager.remember(common_dir).err());
+                    let remember_error = self.session.data().and_then(|repository| {
+                        repository.common_dir.as_deref().and_then(|common_dir| {
+                            self.worktree_manager
+                                .remember(common_dir, &repository.root)
+                                .err()
+                        })
+                    });
                     self.reload(RefreshScope::ALL);
                     self.notice = remember_error.or_else(|| {
                         Some(
@@ -2512,6 +2542,14 @@ impl App {
         match effect {
             RepositoryBrowserEffect::Close => self.mode = Mode::Normal,
             RepositoryBrowserEffect::OpenBranch(oid) => self.open_browser_branch(&oid),
+            RepositoryBrowserEffect::CheckoutBranch { branch, remote } => {
+                if self.session.start_branch_checkout(branch.clone(), remote) {
+                    self.mode = Mode::Normal;
+                    self.notice = Some(format!("Checking out {branch}…"));
+                } else {
+                    self.notice = Some("Another repository operation is running".to_owned());
+                }
+            }
             RepositoryBrowserEffect::DeleteBranch {
                 branch,
                 remote,
@@ -2675,6 +2713,187 @@ impl App {
         self.repository_browser.open(&root, &branches, prefetch);
         self.explorer_tab = ExplorerTab::Branches;
         self.mode = Mode::Explorer;
+    }
+
+    pub(crate) fn toggle_header_picker(&mut self, kind: HeaderPickerKind) {
+        if self.mode != Mode::Normal || self.session.open_running() {
+            return;
+        }
+        if self.header_picker.kind == Some(kind) {
+            self.header_picker.close();
+            return;
+        }
+        match kind {
+            HeaderPickerKind::Repositories => self.open_header_repositories(),
+            HeaderPickerKind::Worktrees => self.open_header_worktrees(),
+            HeaderPickerKind::Branches => self.open_header_branches(),
+        }
+    }
+
+    fn open_header_repositories(&mut self) {
+        let current = self
+            .git_repository()
+            .and_then(|repository| repository.common_dir.as_deref());
+        let items = self
+            .worktree_manager
+            .recent_repositories()
+            .map(|(common_dir, root)| HeaderPickerItem::Repository {
+                path: root.to_owned(),
+                common_dir: common_dir.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let selected = current
+            .and_then(|current| {
+                items.iter().position(|item| {
+                    matches!(item, HeaderPickerItem::Repository { common_dir, .. } if same_path(common_dir, current))
+                })
+            })
+            .unwrap_or(0);
+        if items.is_empty() {
+            self.header_picker.open_message(
+                HeaderPickerKind::Repositories,
+                "No recent repositories".to_owned(),
+            );
+        } else {
+            self.header_picker
+                .open(HeaderPickerKind::Repositories, items, selected);
+        }
+    }
+
+    fn open_header_worktrees(&mut self) {
+        let Some(repository) = self.git_repository() else {
+            self.header_picker.open_message(
+                HeaderPickerKind::Worktrees,
+                "Not a Git repository".to_owned(),
+            );
+            return;
+        };
+        let Some(common_dir) = repository.common_dir.as_deref() else {
+            self.header_picker.open_message(
+                HeaderPickerKind::Worktrees,
+                "Worktrees are unavailable".to_owned(),
+            );
+            return;
+        };
+        let current = repository.root.clone();
+        match git::list_worktrees(common_dir) {
+            Ok(worktrees) => {
+                let worktrees = worktrees
+                    .into_iter()
+                    .filter(|worktree| !worktree.is_bare)
+                    .collect::<Vec<_>>();
+                let selected = worktrees
+                    .iter()
+                    .position(|worktree| same_path(&worktree.path, &current))
+                    .unwrap_or(0);
+                self.header_picker.open(
+                    HeaderPickerKind::Worktrees,
+                    worktrees
+                        .into_iter()
+                        .map(HeaderPickerItem::Worktree)
+                        .collect(),
+                    selected,
+                );
+            }
+            Err(error) => self.header_picker.open_message(
+                HeaderPickerKind::Worktrees,
+                format!("Could not list worktrees: {error}"),
+            ),
+        }
+    }
+
+    fn open_header_branches(&mut self) {
+        let Some(repository) = self.git_repository() else {
+            self.header_picker.open_message(
+                HeaderPickerKind::Branches,
+                "Not a Git repository".to_owned(),
+            );
+            return;
+        };
+        if !repository.details_ready {
+            self.header_picker.open_message(
+                HeaderPickerKind::Branches,
+                "Repository details are still loading".to_owned(),
+            );
+            return;
+        }
+        let selected = repository
+            .branches
+            .iter()
+            .position(|branch| branch.current)
+            .unwrap_or(0);
+        let items = repository
+            .branches
+            .iter()
+            .cloned()
+            .map(HeaderPickerItem::Branch)
+            .collect();
+        self.header_picker
+            .open(HeaderPickerKind::Branches, items, selected);
+    }
+
+    fn handle_header_picker(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.header_picker.close(),
+            KeyCode::Up | KeyCode::Char('k') => self.header_picker.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.header_picker.move_selection(1),
+            KeyCode::Home => self.header_picker.select(0),
+            KeyCode::End => self
+                .header_picker
+                .select(self.header_picker.items.len().saturating_sub(1)),
+            KeyCode::Enter => self.activate_header_picker(self.header_picker.selected),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn activate_header_picker(&mut self, index: usize) {
+        let Some(item) = self.header_picker.items.get(index).cloned() else {
+            return;
+        };
+        self.header_picker.close();
+        match item {
+            HeaderPickerItem::Repository { common_dir, path } => {
+                if self
+                    .git_repository()
+                    .and_then(|repository| repository.common_dir.as_deref())
+                    .is_some_and(|current| same_path(current, &common_dir))
+                {
+                    return;
+                }
+                self.open_header_path(path);
+            }
+            HeaderPickerItem::Worktree(worktree) => {
+                if self
+                    .repository()
+                    .is_some_and(|repository| same_path(&repository.root, &worktree.path))
+                {
+                    return;
+                }
+                self.open_header_path(worktree.path);
+            }
+            HeaderPickerItem::Branch(branch) => {
+                if branch.current {
+                    self.notice = Some(format!("{} is already checked out", branch.name));
+                    return;
+                }
+                self.apply_repository_browser_effect(RepositoryBrowserEffect::CheckoutBranch {
+                    branch: branch.name,
+                    remote: branch.remote,
+                });
+            }
+        }
+    }
+
+    fn open_header_path(&mut self, path: PathBuf) {
+        if !self.session.can_start_open() {
+            self.notice = Some("Another workspace operation is still running".to_owned());
+            return;
+        }
+        if !self.start_repository_open(path, true)
+            && let Some(error) = self.workspace_explorer.error.clone()
+        {
+            self.notice = Some(error);
+        }
     }
 
     fn prefetch_repository_browser(&mut self) {
@@ -3171,6 +3390,7 @@ impl App {
             .session
             .start_open(path, self.settings.fetch_interval())
         {
+            self.header_picker.close();
             self.pending_reload = None;
             self.reload_queued = None;
             self.workspace_fetch_pending = fetch_if_stale;
@@ -3715,6 +3935,22 @@ fn first_error(stderr: &str, fallback: &str) -> String {
         .find(|line| !line.trim().is_empty())
         .unwrap_or(fallback)
         .to_owned()
+}
+
+fn current_worktree_name(repository: &RepositoryData) -> Option<String> {
+    let common_dir = repository.common_dir.as_deref()?;
+    let worktree = git::list_worktrees(common_dir)
+        .ok()?
+        .into_iter()
+        .find(|worktree| same_path(&worktree.path, &repository.root))?;
+    if worktree.is_main {
+        return None;
+    }
+    worktree
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
 }
 
 fn is_markdown_path(path: &RepoPath) -> bool {

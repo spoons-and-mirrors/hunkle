@@ -172,8 +172,16 @@ impl WorktreeManager {
         }
     }
 
-    pub(crate) fn remember(&mut self, common_dir: &Path) -> Result<(), String> {
-        self.store.extend_and_save(vec![common_dir.to_owned()])
+    pub(crate) fn remember(&mut self, common_dir: &Path, root: &Path) -> Result<(), String> {
+        self.store
+            .remember_and_save(common_dir.to_owned(), root.to_owned())
+    }
+
+    pub(crate) fn recent_repositories(&self) -> impl Iterator<Item = (&Path, &Path)> {
+        self.store
+            .recent
+            .iter()
+            .map(|recent| (recent.common_dir.as_path(), recent.root.as_path()))
     }
 
     pub(crate) fn open(
@@ -1187,10 +1195,63 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("known-repositories.json");
         let mut manager = WorktreeManager::new(Some(path.clone()));
-        manager.remember(Path::new("/repo/.git")).unwrap();
+        manager
+            .remember(Path::new("/metadata/repo.git"), Path::new("/checkout/repo"))
+            .unwrap();
 
         let restored = WorktreeManager::new(Some(path));
-        assert_eq!(restored.store.repositories, [PathBuf::from("/repo/.git")]);
+        assert_eq!(
+            restored.store.repositories,
+            [PathBuf::from("/metadata/repo.git")]
+        );
+        assert_eq!(
+            restored.store.recent[0].common_dir,
+            PathBuf::from("/metadata/repo.git")
+        );
+        assert_eq!(
+            restored.store.recent[0].root,
+            PathBuf::from("/checkout/repo")
+        );
+    }
+
+    #[test]
+    fn persists_the_ten_most_recent_repositories_in_recency_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("known-repositories.json");
+        let mut manager = WorktreeManager::new(Some(path.clone()));
+        for index in 0..12 {
+            manager
+                .remember(
+                    Path::new(&format!("/repo-{index}/.git")),
+                    Path::new(&format!("/repo-{index}")),
+                )
+                .unwrap();
+        }
+        manager
+            .remember(Path::new("/repo-5/.git"), Path::new("/repo-5-linked"))
+            .unwrap();
+
+        let restored = WorktreeManager::new(Some(path));
+        assert_eq!(restored.store.recent.len(), 10);
+        assert_eq!(
+            restored.store.recent[0].common_dir,
+            PathBuf::from("/repo-5/.git")
+        );
+        assert_eq!(
+            restored.store.recent[1].common_dir,
+            PathBuf::from("/repo-11/.git")
+        );
+        assert_eq!(
+            restored.store.recent[0].root,
+            PathBuf::from("/repo-5-linked")
+        );
+        assert!(
+            !restored
+                .store
+                .recent
+                .iter()
+                .any(|recent| recent.common_dir == Path::new("/repo-0/.git"))
+        );
     }
 
     #[test]
@@ -1338,7 +1399,11 @@ mod tests {
         fs::write(&path, b"not json").unwrap();
         let mut manager = WorktreeManager::new(Some(path.clone()));
 
-        assert!(manager.remember(Path::new("/repo/.git")).is_err());
+        assert!(
+            manager
+                .remember(Path::new("/repo/.git"), Path::new("/repo"))
+                .is_err()
+        );
         assert!(manager.store.repositories.is_empty());
         assert_eq!(fs::read(path).unwrap(), b"not json");
     }
@@ -1351,10 +1416,12 @@ mod tests {
         let common_dir = PathBuf::from(std::ffi::OsString::from_vec(b"/repo/\xff/.git".to_vec()));
         let mut manager = WorktreeManager::new(Some(path.clone()));
 
-        manager.remember(&common_dir).unwrap();
+        let root = PathBuf::from(std::ffi::OsString::from_vec(b"/repo/\xff".to_vec()));
+        manager.remember(&common_dir, &root).unwrap();
 
         let restored = WorktreeManager::new(Some(path));
         assert_eq!(restored.store.repositories, [common_dir]);
+        assert_eq!(restored.store.recent[0].root, root);
     }
 
     #[test]

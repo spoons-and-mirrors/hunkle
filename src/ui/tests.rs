@@ -11,10 +11,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, ExplorerTab,
-    GraphColumn, GraphHitTarget, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
-    RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus,
-    View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget, WorktreeManagerHitTarget,
-    WorktreeManagerRow,
+    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode,
+    PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore,
+    ShortcutAction, SqliteFocus, View, WorkspaceDropTarget, WorkspacePanel,
+    WorkspacePanelHitTarget, WorktreeManagerHitTarget, WorktreeManagerRow,
 };
 use crate::repo_path::RepoPath;
 
@@ -46,6 +46,131 @@ fn background_startup_renders_one_stable_loading_surface() {
     assert!(screen.contains("Loading workspace…"));
     assert!(app.regions.worktree.is_none());
     assert!(app.regions.explorer_list.is_none());
+}
+
+#[test]
+fn header_cards_open_pickers_and_checkout_branches() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("repository");
+    fs::create_dir(&root).unwrap();
+    let root = root.as_path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Header Test"]);
+    run_git(root, &["config", "user.email", "header@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "tracked.txt"]);
+    run_git(root, &["commit", "-m", "initial"]);
+    run_git(root, &["branch", "topic"]);
+    run_git(root, &["branch", "linked"]);
+    let linked = directory.path().join("linked");
+    run_git(
+        root,
+        &["worktree", "add", linked.to_str().unwrap(), "linked"],
+    );
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let repository = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderRepository)
+        .unwrap();
+    let worktrees = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderWorktrees)
+        .unwrap();
+    let branch = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderBranch)
+        .unwrap();
+    assert_eq!(repository.right().saturating_add(1), worktrees.x);
+    assert!(worktrees.right() <= branch.x);
+    assert_eq!(worktrees.width, " worktree ".width() as u16);
+    let worktree_text = (worktrees.x..worktrees.right())
+        .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())
+        .collect::<String>();
+    assert_eq!(worktree_text, " worktree ");
+
+    click(&mut app, repository.x, repository.y);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::Repositories));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderPickerItem(0))
+            .is_some()
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let worktrees = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderWorktrees)
+        .unwrap();
+    click(&mut app, worktrees.x, worktrees.y);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::Worktrees));
+    assert_eq!(app.header_picker.items.len(), 2);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderPickerItem(0))
+            .is_some()
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let branch = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderBranch)
+        .unwrap();
+    click(&mut app, branch.x, branch.y);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::Branches));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let topic_index = app
+        .header_picker
+        .items
+        .iter()
+        .position(|item| matches!(item, HeaderPickerItem::Branch(branch) if branch.name == "topic"))
+        .unwrap();
+    let topic = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(topic_index))
+        .unwrap();
+    click(&mut app, topic.x, topic.y);
+    assert_eq!(app.mode, Mode::Normal);
+
+    wait_for(&mut app, |app| {
+        app.repository()
+            .is_some_and(|repo| repo.details_ready && repo.branch == "topic")
+    });
+    assert_eq!(
+        String::from_utf8_lossy(
+            &Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["branch", "--show-current"])
+                .output()
+                .unwrap()
+                .stdout
+        )
+        .trim(),
+        "topic"
+    );
+
+    drop(app);
+    let mut linked_app = App::new(linked);
+    terminal.draw(|frame| draw(frame, &mut linked_app)).unwrap();
+    let linked_card = linked_app
+        .regions
+        .hit_target_rect(HitTarget::HeaderWorktrees)
+        .unwrap();
+    let linked_text = (linked_card.x..linked_card.right())
+        .map(|x| terminal.backend().buffer()[(x, linked_card.y)].symbol())
+        .collect::<String>();
+    assert_eq!(linked_text, " linked ");
 }
 
 #[test]
@@ -175,7 +300,8 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(header.trim_end().ends_with("main"));
+    assert!(header.contains("worktree"));
+    assert!(header.contains("main"));
     let footer: String = terminal.backend().buffer().content[35 * 120..]
         .iter()
         .map(|cell| cell.symbol())

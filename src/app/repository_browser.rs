@@ -26,6 +26,10 @@ pub(crate) enum BrowserTab {
 pub(crate) enum RepositoryBrowserEffect {
     Close,
     OpenBranch(String),
+    CheckoutBranch {
+        branch: String,
+        remote: bool,
+    },
     DeleteBranch {
         branch: String,
         remote: Option<(String, String)>,
