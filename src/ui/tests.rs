@@ -67,6 +67,8 @@ fn header_cards_open_pickers_and_checkout_branches() {
         root,
         &["worktree", "add", linked.to_str().unwrap(), "linked"],
     );
+    let long_branch = "feature/header-branch-name-is-never-truncated";
+    run_git(root, &["branch", "-m", long_branch]);
 
     let mut app = App::new(root.to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -85,6 +87,15 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .hit_target_rect(HitTarget::HeaderBranch)
         .unwrap();
     assert_eq!(repository.x, 1);
+    assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), "▀");
+    assert_eq!(
+        terminal.backend().buffer()[(0, 1)].fg,
+        super::palette().surface_alt
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(0, 1)].bg,
+        super::palette().panel
+    );
     assert_eq!(repository.right().saturating_add(1), worktrees.x);
     assert!(worktrees.right() <= branch.x);
     assert_eq!(
@@ -108,6 +119,10 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())
         .collect::<String>();
     assert_eq!(worktree_text, " worktree ");
+    let branch_text = (branch.x..branch.right())
+        .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
+        .collect::<String>();
+    assert_eq!(branch_text, format!(" {long_branch} "));
 
     click(&mut app, repository.x, repository.y);
     assert_eq!(app.mode, Mode::Normal);
@@ -287,6 +302,18 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.worktree.unwrap().x, 0);
     assert_eq!(app.regions.worktree.unwrap().y, 1);
     assert_eq!(app.regions.diff.unwrap().right(), 120);
+    let left = app.regions.worktree.unwrap();
+    let right = app.regions.diff.unwrap();
+    for point in [(left.x, left.y), (right.x, right.y)] {
+        let cell = &terminal.backend().buffer()[point];
+        assert_eq!(cell.symbol(), "▀");
+        assert_eq!(cell.fg, super::palette().surface_alt);
+        assert_eq!(cell.bg, super::palette().panel);
+    }
+    assert_eq!(
+        terminal.backend().buffer()[(left.right(), left.y)].bg,
+        super::palette().canvas
+    );
     assert!(app.regions.changes.is_none());
     assert_eq!(app.regions.graph.unwrap().y, 35);
     assert_eq!(app.regions.help.unwrap().y, 35);
@@ -324,7 +351,8 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(footer.contains("Tab Files"));
-    assert!(footer.contains("e Edit"));
+    assert!(footer.contains(root.to_str().unwrap()));
+    assert!(!footer.contains("e Edit"));
     assert!(footer.contains("g Git Graph"));
     assert!(!footer.contains("W Worktrees"));
     assert!(!footer.contains("b Branches"));
@@ -386,7 +414,8 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(footer.contains("Tab Changes"));
-    assert!(footer.contains("e Edit"));
+    assert!(footer.contains(root.to_str().unwrap()));
+    assert!(!footer.contains("e Edit"));
     let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
     assert_eq!(app.changes.pane, LeftPane::Worktree);
@@ -435,17 +464,21 @@ fn renders_every_primary_surface() {
     let explorer_rows = app.changes.explorer_rows();
     let selected_file_row = explorer_rows
         .iter()
-        .position(|row| row.file_path.is_some())
+        .enumerate()
+        .skip(app.changes.explorer_scroll)
+        .take(usize::from(explorer.height))
+        .find_map(|(index, row)| row.file_path.is_some().then_some(index))
         .unwrap();
     let selected_file = explorer_rows[selected_file_row]
         .file_path
         .as_ref()
         .unwrap()
         .clone();
+    let selected_file_screen_row = selected_file_row - app.changes.explorer_scroll;
     click(
         &mut app,
         explorer.x + 2,
-        explorer.y + selected_file_row as u16,
+        explorer.y + selected_file_screen_row as u16,
     );
     wait_for_preview(&mut app);
     assert_eq!(app.selected_explorer_file_path(), Some(&selected_file));
@@ -458,7 +491,7 @@ fn renders_every_primary_surface() {
     app.handle_mouse(mouse(
         MouseEventKind::ScrollDown,
         explorer.x + 2,
-        explorer.y + 2,
+        explorer.y + explorer.height.saturating_sub(1),
     ));
     assert_eq!(app.changes.explorer_scroll, 3);
     assert_eq!(
@@ -3452,7 +3485,7 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
         .content
         .iter()
         .enumerate()
-        .filter(|(_, cell)| cell.symbol() == "▀")
+        .filter(|(index, cell)| cell.symbol() == "▀" && index / 100 != 1)
         .collect();
     assert!(!image_cells.is_empty());
     assert!(image_cells.iter().all(|(index, _)| {
@@ -3472,7 +3505,8 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
             .buffer()
             .content
             .iter()
-            .any(|cell| cell.symbol() == "▀")
+            .enumerate()
+            .any(|(index, cell)| cell.symbol() == "▀" && index / 100 != 1)
     );
 
     app.mode = Mode::Normal;
@@ -3489,7 +3523,15 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(screen.contains("plain text preview"));
-    assert!(!screen.contains('▀'));
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .enumerate()
+            .any(|(index, cell)| cell.symbol() == "▀" && index / 100 != 1)
+    );
 }
 
 #[test]
@@ -3868,12 +3910,13 @@ fn wait_for_halfblock_render(terminal: &mut Terminal<TestBackend>, app: &mut App
     loop {
         let _ = app.poll_worker();
         terminal.draw(|frame| draw(frame, app)).unwrap();
-        if terminal
-            .backend()
-            .buffer()
+        let buffer = terminal.backend().buffer();
+        let width = usize::from(buffer.area.width);
+        if buffer
             .content
             .iter()
-            .any(|cell| cell.symbol() == "▀")
+            .enumerate()
+            .any(|(index, cell)| cell.symbol() == "▀" && index / width != 1)
         {
             return;
         }

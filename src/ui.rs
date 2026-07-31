@@ -118,6 +118,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.register_hit_target(target, rect);
         }
     }
+    draw_main_top_padding(frame, app, layout[1]);
     draw_navigation(frame, app, layout[2]);
     match app.mode {
         Mode::FileSearch => {
@@ -641,20 +642,20 @@ fn dim(frame: &mut Frame<'_>) {
 }
 
 fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let row = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().surface_alt)),
-        Rect::new(area.x, area.y, area.width, 1),
+        row,
     );
     let Some(repo) = app.repository() else {
         frame.render_widget(
             Paragraph::new("  No workspace selected").style(Style::default().fg(palette().muted)),
-            area,
+            row,
         );
         return;
     };
 
     let repository = repository_label(repo);
-    let root = repo.root.clone();
     let worktree = app
         .header_worktree_name
         .clone()
@@ -666,11 +667,22 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         repo.branch.clone()
     };
     let dirty = !repo.changes.is_empty();
+    let dirty_marker = if dirty { "*" } else { "" };
+    let branch_badge = format!(" {branch}{dirty_marker} ");
+    let branch_width = UnicodeWidthStr::width(branch_badge.as_str()) as u16;
     let available = usize::from(area.width);
-    let notice = (available >= 100)
+    let repository_width = UnicodeWidthStr::width(repository.as_str()).saturating_add(2).min(20);
+    let worktree_width = UnicodeWidthStr::width(worktree.as_str()).saturating_add(2).min(18);
+    let badge_width = if is_local {
+        1 + repository_width + 1 + "LOCAL".len()
+    } else {
+        1 + repository_width + 1 + worktree_width + 1 + usize::from(branch_width)
+    };
+    let notice_budget = available.saturating_sub(badge_width.saturating_add(4)).min(30);
+    let notice = (available >= 100 && notice_budget > 0)
         .then(|| app.notice.as_deref())
         .flatten()
-        .map(|notice| truncate_width(notice, 30));
+        .map(|notice| truncate_width(notice, notice_budget));
     let notice_width = notice
         .as_deref()
         .map_or(0, |notice| UnicodeWidthStr::width(notice) + 2);
@@ -696,7 +708,12 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         &mut x,
         format!(" {repository} "),
         header_badge_style(palette().yellow),
-        room.saturating_sub(if is_local { 0 } else { 16 }).min(20),
+        room.saturating_sub(if is_local {
+            0
+        } else {
+            branch_width.saturating_add(5)
+        })
+        .min(20),
     );
     if let Some(rect) = repository_rect {
         app.regions
@@ -721,7 +738,9 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             &mut x,
             format!(" {worktree} "),
             header_badge_style(palette().orange),
-            room.saturating_sub(8).min(18),
+            room
+                .saturating_sub(branch_width.saturating_add(1))
+                .min(18),
         );
         if let Some(rect) = worktree_rect {
             app.regions
@@ -735,14 +754,13 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Style::default(),
             room,
         );
-        let dirty = if dirty { "*" } else { "" };
         let room = content_right.saturating_sub(x);
         let branch_rect = render(
             frame,
             &mut x,
-            format!(" {branch}{dirty} "),
+            branch_badge,
             header_badge_style(palette().accent),
-            room.min(20),
+            room,
         );
         if let Some(rect) = branch_rect {
             app.regions
@@ -750,16 +768,6 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     }
 
-    let room = content_right.saturating_sub(x);
-    if room > 3 {
-        let _ = render(
-            frame,
-            &mut x,
-            format!("  {}", root.display()),
-            Style::default().fg(palette().faint),
-            room,
-        );
-    }
     if let Some(notice) = notice {
         frame.render_widget(
             Paragraph::new(notice)
@@ -771,6 +779,35 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 area.right().saturating_sub(content_right),
                 1,
             ),
+        );
+    }
+}
+
+fn draw_main_top_padding(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let transition = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(
+        Paragraph::new("▀".repeat(usize::from(transition.width)))
+            .style(Style::default().fg(palette().surface_alt).bg(palette().canvas)),
+        transition,
+    );
+    let (Some(bounds), Some(left)) = (app.regions.split_bounds, app.regions.worktree) else {
+        return;
+    };
+    let right_x = left.right().saturating_add(1);
+    let right = Rect::new(
+        right_x,
+        bounds.y,
+        bounds.right().saturating_sub(right_x),
+        1,
+    );
+    for pane in [Rect::new(left.x, left.y, left.width, 1), right] {
+        if pane.is_empty() {
+            continue;
+        }
+        frame.render_widget(
+            Paragraph::new("▀".repeat(usize::from(pane.width)))
+                .style(Style::default().fg(palette().surface_alt).bg(palette().panel)),
+            pane,
         );
     }
 }
@@ -815,7 +852,8 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         1,
         1,
     ));
-    let available_height = frame.area().bottom().saturating_sub(anchor.bottom());
+    let picker_y = anchor.bottom().saturating_add(1);
+    let available_height = frame.area().bottom().saturating_sub(picker_y);
     if available_height < 2 || frame.area().width < 12 {
         return;
     }
@@ -831,7 +869,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         .min(frame.area().right().saturating_sub(width).saturating_sub(1));
     let area = Rect::new(
         x,
-        anchor.bottom(),
+        picker_y,
         width,
         u16::try_from(row_count + 1).unwrap_or(available_height),
     );
@@ -971,7 +1009,6 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             left_pane_label,
         ),
     ];
-    let show_edit = app.can_edit_selected_file();
     if app.workspace_panel_available() {
         labels.push((
             app.settings
@@ -1005,19 +1042,13 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     });
     let mut spans = Vec::new();
     let start_x = area.right().saturating_sub(total_width).max(area.x);
-    if show_edit && start_x > area.x {
-        let mut edit = vec![
-            Span::raw(" "),
-            Span::styled(
-                app.settings.shortcuts.label(ShortcutAction::EditFile),
-                Style::default().fg(palette().orange),
-            ),
-        ];
-        if !compact {
-            edit.push(Span::styled(" Edit", Style::default().fg(palette().muted)));
-        }
+    if start_x > area.x
+        && let Some(path) = app.repository().map(|repository| repository.root.display().to_string())
+    {
+        let width = usize::from(start_x.saturating_sub(area.x));
         frame.render_widget(
-            Paragraph::new(Line::from(edit)),
+            Paragraph::new(truncate_width(&format!(" {path}"), width))
+                .style(Style::default().fg(palette().faint)),
             Rect::new(area.x, area.y, start_x.saturating_sub(area.x), 1),
         );
     }

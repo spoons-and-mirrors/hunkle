@@ -2636,13 +2636,6 @@ impl App {
         Some((repo.root.clone(), PathBuf::from(path)))
     }
 
-    pub(crate) fn can_edit_selected_file(&self) -> bool {
-        self.mode == Mode::Normal
-            && self.view == View::Changes
-            && self.changes.hunk_selection.is_none()
-            && self.selected_file_to_edit().is_some()
-    }
-
     fn format_selected_file(&mut self) {
         let Some(repo) = self.repository() else {
             self.notice = Some("Open a workspace first".to_owned());
