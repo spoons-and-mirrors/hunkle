@@ -1256,7 +1256,7 @@ impl App {
     }
 
     fn select_graph_row(&mut self, point: Position) -> bool {
-        if self.view != View::Graph {
+        if self.visible_view() != View::Graph {
             return false;
         }
         let Some(rect) = self.regions.graph_table.filter(|rect| rect.contains(point)) else {

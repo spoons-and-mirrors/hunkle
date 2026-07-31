@@ -82,13 +82,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         finish_selection(frame, app);
         return;
     }
+    let visible_view = app.visible_view();
     changes::draw(
         frame,
         app,
         main_content,
-        app.view != View::Graph || app.graph_commit_open,
+        visible_view != View::Graph || app.graph_commit_open,
     );
-    if app.view == View::Graph && !app.graph_commit_open {
+    if visible_view == View::Graph && !app.graph_commit_open {
         let graph_area = app.regions.diff.unwrap_or(main_content);
         frame.render_widget(Clear, graph_area);
         app.regions.diff = None;
@@ -643,7 +644,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut x = start_x;
     let mut rects = Vec::new();
     for (index, (key, label)) in labels.iter().enumerate() {
-        let active = index == 0 && app.view == View::Graph;
+        let active = index == 0 && app.visible_view() == View::Graph;
         let background = active.then_some(palette().raised);
         spans.push(Span::styled(
             " ",

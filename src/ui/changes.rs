@@ -291,7 +291,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     }
     let repo = app.session.data().expect("checked above");
 
-    let selected_graph_commit = (app.view == View::Graph && app.graph_commit_open)
+    let selected_graph_commit = (app.visible_view() == View::Graph && app.graph_commit_open)
         .then(|| app.selected_graph_commit())
         .flatten();
     let selected_commit = selected_graph_commit;

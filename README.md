@@ -20,7 +20,7 @@ cargo run -p hunkle
 cargo run -p hunkle -- /path/to/repository
 ```
 
-hunkle opens exactly the current or requested directory. When that directory is a Git repository root, Git status and history are available. Any other directory opens as a local file workspace with recursive file browsing, fuzzy search, and previews; it never climbs into an enclosing repository.
+hunkle opens exactly the current or requested directory. When that directory is a Git repository root, Git status and history are available. The Changes pane uses the Git graph as its detail surface while the working tree is clean, then returns to the diff as soon as changes appear. Any other directory opens as a local file workspace with recursive file browsing, fuzzy search, and previews; it never climbs into an enclosing repository.
 
 ## Keys
 

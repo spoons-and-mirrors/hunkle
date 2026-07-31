@@ -49,6 +49,42 @@ fn background_startup_renders_one_stable_loading_surface() {
 }
 
 #[test]
+fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Graph Test"]);
+    run_git(root, &["config", "user.email", "graph@example.com"]);
+    fs::write(root.join("tracked.txt"), "clean\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial"]);
+
+    let mut app = App::new(root.to_path_buf());
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.visible_view(), View::Graph);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.graph_table.is_some());
+    assert!(app.regions.diff.is_none());
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.graph_commit_open);
+
+    fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
+    let mut dirty_app = App::new(root.to_path_buf());
+    assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
+    assert_eq!(dirty_app.visible_view(), View::Changes);
+    terminal
+        .draw(|frame| draw(frame, &mut dirty_app))
+        .unwrap();
+    assert!(dirty_app.regions.graph_table.is_none());
+    assert!(dirty_app.regions.diff.is_some());
+}
+
+#[test]
 fn renders_every_primary_surface() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

@@ -506,6 +506,21 @@ impl App {
         self.initial_pane_pending && self.mode == Mode::Normal
     }
 
+    pub(crate) fn visible_view(&self) -> View {
+        if self.view == View::Graph
+            || self.graph_commit_open
+            || (self.view == View::Changes
+                && self.changes.pane == LeftPane::Worktree
+                && self.repository().is_some_and(|repo| {
+                    repo.details_ready && !repo.is_local() && repo.changes.is_empty()
+                }))
+        {
+            View::Graph
+        } else {
+            View::Changes
+        }
+    }
+
     pub(crate) fn diagnostic_context(&self) -> String {
         self.repository().map_or_else(
             || format!("mode={:?} workspace=none", self.mode),
@@ -1269,7 +1284,7 @@ impl App {
             return;
         };
         let mut oids = Vec::new();
-        if self.view == View::Graph {
+        if self.visible_view() == View::Graph {
             let viewport = self
                 .regions
                 .graph_table
@@ -1301,7 +1316,10 @@ impl App {
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc && self.view == View::Graph && self.graph_commit_open {
+        if key.code == KeyCode::Esc
+            && self.visible_view() == View::Graph
+            && self.graph_commit_open
+        {
             self.graph_commit_open = false;
             return;
         }
@@ -1347,7 +1365,7 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Enter if self.view == View::Graph && !self.graph_commit_open => {
+            KeyCode::Enter if self.visible_view() == View::Graph && !self.graph_commit_open => {
                 self.open_selected_graph_commit();
             }
             KeyCode::Enter
@@ -1406,10 +1424,10 @@ impl App {
                 let repo = self.session.data();
                 self.changes.collapse_or_ascend_worktree(repo);
             }
-            KeyCode::PageDown if self.view == View::Changes || self.graph_commit_open => {
+            KeyCode::PageDown if self.visible_view() == View::Changes || self.graph_commit_open => {
                 self.scroll_diff_by(10)
             }
-            KeyCode::PageUp if self.view == View::Changes || self.graph_commit_open => {
+            KeyCode::PageUp if self.visible_view() == View::Changes || self.graph_commit_open => {
                 self.scroll_diff_by(-10)
             }
             KeyCode::Down | KeyCode::Char('j') if self.graph_commit_open => self.scroll_diff_by(1),
@@ -1455,7 +1473,9 @@ impl App {
             ShortcutAction::OpenActions => self.open_actions(),
             ShortcutAction::OpenGitCommand => self.open_git_command(),
             ShortcutAction::OpenHelp => self.mode = Mode::Help,
-            ShortcutAction::ToggleWrap if self.view == View::Changes || self.graph_commit_open => {
+            ShortcutAction::ToggleWrap
+                if self.visible_view() == View::Changes || self.graph_commit_open =>
+            {
                 let wrapped = self.changes.toggle_wrap();
                 let subject = if self.view == View::Changes && self.changes.pane == LeftPane::Files
                 {
@@ -3115,7 +3135,7 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        match self.view {
+        match self.visible_view() {
             View::Changes => {
                 let worktree_viewport = self
                     .regions
@@ -3141,7 +3161,7 @@ impl App {
     }
 
     fn select_first(&mut self) {
-        match self.view {
+        match self.visible_view() {
             View::Changes => {
                 let worktree_viewport = self
                     .regions
@@ -3166,7 +3186,7 @@ impl App {
     }
 
     fn select_last(&mut self) {
-        match self.view {
+        match self.visible_view() {
             View::Changes => {
                 let worktree_viewport = self
                     .regions
@@ -4239,6 +4259,28 @@ mod tests {
             "o"
         );
         assert_eq!(app.settings_store.load(), app.settings);
+    }
+
+    #[test]
+    fn workspace_group_shortcut_only_works_in_the_workspace_manager() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new(directory.path().to_path_buf());
+        app.settings
+            .shortcuts
+            .set(
+                ShortcutAction::WorkspaceGroup,
+                KeyChord::new(KeyCode::Char('v'), KeyModifiers::ALT),
+            )
+            .unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(!app.workspace_panel.group_editing);
+
+        app.mode = Mode::WorkspacePanel;
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        assert!(app.workspace_panel.group_editing);
     }
 
     #[test]
