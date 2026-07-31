@@ -481,8 +481,6 @@ fn renders_every_primary_surface() {
     }));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     click(&mut app, agents.x + 2, agents.y + 2);
-    assert_eq!(app.mode, Mode::WorkspacePanel);
-    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1646,7 +1644,7 @@ fn toggles_worktree_directories_with_the_mouse() {
 }
 
 #[test]
-fn clicking_the_agents_pane_opens_the_workspace_manager() {
+fn clicking_an_agent_focuses_it_without_opening_the_workspace_manager() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -1712,8 +1710,6 @@ fn clicking_the_agents_pane_opens_the_workspace_manager() {
     );
 
     click(&mut app, agents.x + 2, agents.y);
-    assert_eq!(app.mode, Mode::WorkspacePanel);
-    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
 }
 

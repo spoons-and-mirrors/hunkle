@@ -125,7 +125,6 @@ impl App {
                 }
                 WorkspacePanelHitTarget::Agent(_) => {
                     self.selection.clear();
-                    self.mode = Mode::WorkspacePanel;
                     self.activate_workspace_panel_target(target);
                     return;
                 }
@@ -639,7 +638,6 @@ impl App {
                 self.apply_workspace_panel_effect(effect);
             }
             WorkspacePanelHitTarget::Agent(index) => {
-                self.mode = Mode::WorkspacePanel;
                 let effect = self.workspace_panel.click_agent(index);
                 self.apply_workspace_panel_effect(effect);
             }
@@ -1051,14 +1049,16 @@ impl App {
     }
 
     fn select_agents_row(&mut self, point: Position) -> bool {
-        if !self
+        let Some(rect) = self
             .regions
             .agents_list
-            .is_some_and(|rect| rect.contains(point))
-        {
+            .filter(|rect| rect.contains(point))
+        else {
             return false;
-        }
-        self.open_workspace_panel();
+        };
+        let index = self.workspace_panel.agent_scroll + usize::from(point.y - rect.y);
+        let effect = self.workspace_panel.click_agent(index);
+        self.apply_workspace_panel_effect(effect);
         true
     }
 

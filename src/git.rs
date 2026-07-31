@@ -2275,7 +2275,13 @@ mod tests {
         fs::create_dir_all(root.join("empty/nested")).unwrap();
         fs::create_dir_all(root.join("empty/ignored")).unwrap();
         fs::create_dir(root.join("config")).unwrap();
-        fs::write(root.join(".gitignore"), "empty/ignored/\n.env*\nconfig/\n").unwrap();
+        fs::create_dir(root.join("logs")).unwrap();
+        fs::write(root.join("logs/debug.log"), "debug\n").unwrap();
+        fs::write(
+            root.join(".gitignore"),
+            "empty/ignored/\n.env*\nconfig/\nlogs/*.log\n",
+        )
+        .unwrap();
         fs::write(root.join(".env"), "SECRET=value\n").unwrap();
         fs::write(root.join(".env.local"), "SECRET=local\n").unwrap();
         fs::write(root.join(".envrc"), "not an env file\n").unwrap();
@@ -2292,12 +2298,13 @@ mod tests {
                 ".envrc",
                 ".gitignore",
                 "config/.env.production",
+                "logs/debug.log",
                 "untracked.txt"
             ]
         );
         assert_eq!(
             directories,
-            ["config", "empty", "empty/ignored", "empty/nested"]
+            ["config", "empty", "empty/ignored", "empty/nested", "logs"]
         );
     }
 

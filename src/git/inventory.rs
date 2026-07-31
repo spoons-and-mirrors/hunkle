@@ -15,6 +15,9 @@ use crate::{
 
 pub(super) const MAX_INVENTORY_ENTRIES: usize = 100_000;
 const MAX_INVENTORY_PATH_BYTES: usize = 64 * 1024 * 1024;
+const MAX_IGNORED_FILES: usize = 10_000;
+const MAX_IGNORED_FILE_PATH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_IGNORED_DIRECTORIES: usize = 10_000;
 
 pub(super) fn git_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, bool)> {
     let mut truncated = false;
@@ -150,33 +153,6 @@ fn ignored_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, bool)> 
             "--others",
             "--ignored",
             "--exclude-standard",
-        ],
-        &mut truncated,
-    )?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    let mut files: Vec<_> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(RepoPath::from_git_bytes)
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .take(MAX_INVENTORY_ENTRIES + 1)
-        .collect();
-    if files.len() > MAX_INVENTORY_ENTRIES {
-        files.pop();
-        truncated = true;
-    }
-    let output = inventory_output(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
             "--directory",
         ],
         &mut truncated,
@@ -184,22 +160,131 @@ fn ignored_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, bool)> 
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    let mut directories: Vec<_> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter_map(|path| path.strip_suffix(b"/"))
-        .map(RepoPath::from_git_bytes)
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|path| !path.is_empty())
-        .take(MAX_INVENTORY_ENTRIES.saturating_sub(files.len()) + 1)
-        .collect();
-    let remaining = MAX_INVENTORY_ENTRIES.saturating_sub(files.len());
-    if directories.len() > remaining {
-        directories.pop();
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    for path in output.stdout.split(|byte| *byte == 0) {
+        if path.is_empty() {
+            continue;
+        }
+        let (path, directory) = path
+            .strip_suffix(b"/")
+            .map_or((path, false), |path| (path, true));
+        let path = RepoPath::from_git_bytes(path)?;
+        if path.is_empty() {
+            continue;
+        }
+        if directory {
+            directories.push(path);
+        } else {
+            files.push(path);
+        }
+    }
+    files.sort_unstable();
+    files.dedup();
+    directories.sort_unstable();
+    directories.dedup();
+    if directories.len() > MAX_INVENTORY_ENTRIES {
+        directories.truncate(MAX_INVENTORY_ENTRIES);
         truncated = true;
     }
+
+    // The Files explorer reads directories lazily, so do not ask Git to emit every
+    // file below a generated directory just to populate the search inventory.
+    let mut candidates = Vec::new();
+    let mut candidate_bytes = 0_usize;
+    for file in files {
+        if add_ignored_file_candidate(file, &mut candidates, &mut candidate_bytes) {
+            truncated = true;
+            break;
+        }
+    }
+    if !truncated {
+        let mut roots = Vec::new();
+        for directory in &directories {
+            if roots
+                .last()
+                .is_none_or(|parent: &RepoPath| !directory.as_path().starts_with(parent.as_path()))
+            {
+                roots.push(directory.clone());
+            }
+        }
+        let mut directories_seen = 0;
+        for directory in roots {
+            if collect_recursive_file_candidates(
+                root,
+                &root.join(directory.as_path()),
+                &mut candidates,
+                &mut candidate_bytes,
+                &mut directories_seen,
+            )? {
+                truncated = true;
+                break;
+            }
+        }
+    }
+
+    let ignored = ignored_paths(root, &candidates)?;
+    let files = candidates
+        .into_iter()
+        .filter(|path| ignored.contains(path))
+        .collect();
     Ok((files, directories, truncated))
+}
+
+fn collect_recursive_file_candidates(
+    root: &Path,
+    directory: &Path,
+    candidates: &mut Vec<RepoPath>,
+    candidate_bytes: &mut usize,
+    directories_seen: &mut usize,
+) -> Result<bool> {
+    let mut directories = vec![directory.to_owned()];
+    while let Some(directory) = directories.pop() {
+        *directories_seen += 1;
+        if *directories_seen > MAX_IGNORED_DIRECTORIES {
+            return Ok(true);
+        }
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("could not read ignored directory {}", directory.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!(
+                    "could not read an entry in ignored directory {}",
+                    directory.display()
+                )
+            })?;
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let file_type = entry.file_type().with_context(|| {
+                format!("could not inspect ignored entry {}", entry.path().display())
+            })?;
+            if file_type.is_dir() && !file_type.is_symlink() {
+                directories.push(entry.path());
+            } else if let Ok(relative) = entry.path().strip_prefix(root) {
+                if add_ignored_file_candidate(RepoPath::from(relative), candidates, candidate_bytes)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn add_ignored_file_candidate(
+    path: RepoPath,
+    candidates: &mut Vec<RepoPath>,
+    candidate_bytes: &mut usize,
+) -> bool {
+    if candidates.len() >= MAX_IGNORED_FILES
+        || candidate_bytes.saturating_add(path.byte_len()) > MAX_IGNORED_FILE_PATH_BYTES
+    {
+        return true;
+    }
+    *candidate_bytes = candidate_bytes.saturating_add(path.byte_len());
+    candidates.push(path);
+    false
 }
 
 fn expand_directories(
