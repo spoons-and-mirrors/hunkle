@@ -154,7 +154,7 @@ struct WrappedGrapheme {
     width: usize,
 }
 
-struct WrappedCursorRow {
+pub(super) struct WrappedCursorRow {
     boundaries: Vec<(usize, usize)>,
 }
 
@@ -165,7 +165,7 @@ impl WrappedCursorRow {
         }
     }
 
-    fn width(&self) -> usize {
+    pub(super) fn width(&self) -> usize {
         self.boundaries.last().map_or(0, |boundary| boundary.0)
     }
 
@@ -176,11 +176,26 @@ impl WrappedCursorRow {
         ));
     }
 
-    fn source_column_at(&self, column: usize) -> usize {
+    pub(super) fn source_column_at(&self, column: usize) -> usize {
         self.boundaries
             .iter()
             .min_by_key(|(rendered, _)| rendered.abs_diff(column))
             .map_or(0, |(_, source)| *source)
+    }
+
+    pub(super) fn source_start(&self) -> usize {
+        self.boundaries.first().map_or(0, |boundary| boundary.1)
+    }
+
+    pub(super) fn rendered_column_at(&self, source_column: usize) -> usize {
+        self.boundaries
+            .iter()
+            .min_by_key(|(_, source)| source.abs_diff(source_column))
+            .map_or(0, |(rendered, _)| *rendered)
+    }
+
+    pub(super) fn columns(&self) -> Vec<(usize, usize)> {
+        self.boundaries.clone()
     }
 }
 
@@ -199,7 +214,7 @@ pub(super) fn word_wrapped_column_at(
         .map(|row| row.source_column_at(column))
 }
 
-fn word_wrapped_rows(content: &str, width: usize) -> Vec<WrappedCursorRow> {
+pub(super) fn word_wrapped_rows(content: &str, width: usize) -> Vec<WrappedCursorRow> {
     let width = width.max(1);
     let mut source_column = 0usize;
     let mut tokens: Vec<(bool, Vec<WrappedGrapheme>)> = Vec::new();

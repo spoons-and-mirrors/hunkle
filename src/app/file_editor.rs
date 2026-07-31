@@ -19,6 +19,7 @@ pub(crate) struct FileEditor {
     preferred_column: Option<usize>,
     pub(crate) scroll_line: usize,
     pub(crate) scroll_column: usize,
+    pub(crate) wrap_scroll_row: usize,
     pub(crate) discard_armed: bool,
 }
 
@@ -55,6 +56,7 @@ impl FileEditor {
             preferred_column: None,
             scroll_line: 0,
             scroll_column: 0,
+            wrap_scroll_row: 0,
             discard_armed: false,
         };
         editor.set_cursor(line.saturating_sub(1), column);
@@ -130,6 +132,21 @@ impl FileEditor {
         let (cursor_line, cursor_column) = self.cursor_position();
         self.scroll_line = cursor_line.saturating_sub(row);
         self.scroll_column = cursor_column.saturating_sub(column);
+    }
+
+    pub(crate) fn ensure_wrapped_cursor_visible(&mut self, cursor_row: usize, height: usize) {
+        let height = height.max(1);
+        if cursor_row < self.wrap_scroll_row {
+            self.wrap_scroll_row = cursor_row;
+        } else if cursor_row >= self.wrap_scroll_row.saturating_add(height) {
+            self.wrap_scroll_row = cursor_row.saturating_sub(height - 1);
+        }
+        self.scroll_column = 0;
+    }
+
+    pub(crate) fn anchor_wrapped_cursor_at(&mut self, cursor_row: usize, row: usize) {
+        self.wrap_scroll_row = cursor_row.saturating_sub(row);
+        self.scroll_column = 0;
     }
 
     pub(crate) fn insert(&mut self, value: &str) -> Result<()> {

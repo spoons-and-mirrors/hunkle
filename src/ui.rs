@@ -363,6 +363,7 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     app.regions.diff_scrollbar = None;
     app.regions.diff_scroll_thumb = None;
     app.regions.diff_scroll_max = 0;
+    app.regions.editor_rows.clear();
     frame.render_widget(Clear, panel);
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().panel).fg(palette().ink)),
@@ -370,20 +371,10 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     );
 
     let save_label = app.settings.shortcuts.label(ShortcutAction::SaveOrFormat);
+    let wrapped = app.changes.diff_wrap;
     let Some(editor) = &mut app.file_editor else {
         return;
     };
-    if let Some(anchor) = app.file_editor_anchor.take() {
-        let row = usize::from(anchor.y.saturating_sub(editor_body.y))
-            .min(usize::from(editor_body.height.saturating_sub(1)));
-        let column = usize::from(anchor.x.saturating_sub(editor_body.x))
-            .min(usize::from(editor_body.width.saturating_sub(1)));
-        editor.anchor_cursor_at(row, column);
-    }
-    editor.ensure_cursor_visible(
-        usize::from(editor_body.height),
-        usize::from(editor_body.width),
-    );
     let (cursor_line, cursor_column) = editor.cursor_position();
     let path = editor.path().display();
     let dirty = if editor.dirty() { "modified" } else { "saved" };
@@ -401,46 +392,177 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         header,
     );
 
-    let lines = text::styled_source_window(
-        editor.text(),
-        &path,
-        0,
-        editor.scroll_line,
-        usize::from(editor_body.height),
-    );
-    let mut lines =
-        editor_visible_lines(lines, editor.scroll_column, usize::from(editor_body.width));
-    while lines.len() <= cursor_line.saturating_sub(editor.scroll_line) {
-        lines.push(Line::default().style(Style::default().bg(palette().panel)));
-    }
-    let line_count = editor.visible_line_count();
-    let line_numbers = (0..usize::from(gutter.height))
-        .map(|row| {
-            let line = editor.scroll_line.saturating_add(row);
-            if line < line_count {
-                Line::styled(
-                    format!("{:>5}  ", line.saturating_add(1)),
-                    Style::default().fg(palette().faint).bg(palette().panel),
-                )
-            } else {
-                Line::default().style(Style::default().bg(palette().panel))
-            }
-        })
-        .collect::<Vec<_>>();
+    let viewport_height = usize::from(editor_body.height);
+    let viewport_width = usize::from(editor_body.width).max(1);
+    let (lines, line_numbers, cursor_row, rendered_cursor_column) = if wrapped {
+        let (cursor_row, rendered_cursor_column) =
+            wrapped_editor_cursor(editor.text(), viewport_width, cursor_line, cursor_column);
+        if let Some(anchor) = app.file_editor_anchor.take() {
+            let row = usize::from(anchor.y.saturating_sub(editor_body.y))
+                .min(viewport_height.saturating_sub(1));
+            editor.anchor_wrapped_cursor_at(cursor_row, row);
+        }
+        editor.ensure_wrapped_cursor_visible(cursor_row, viewport_height);
+        let (lines, line_numbers, rows) = wrapped_editor_view(
+            editor.text(),
+            &path,
+            viewport_width,
+            editor.wrap_scroll_row,
+            viewport_height,
+        );
+        app.regions.editor_rows = rows;
+        (
+            lines,
+            line_numbers,
+            cursor_row.saturating_sub(editor.wrap_scroll_row),
+            rendered_cursor_column,
+        )
+    } else {
+        if let Some(anchor) = app.file_editor_anchor.take() {
+            let row = usize::from(anchor.y.saturating_sub(editor_body.y))
+                .min(viewport_height.saturating_sub(1));
+            let column = usize::from(anchor.x.saturating_sub(editor_body.x))
+                .min(viewport_width.saturating_sub(1));
+            editor.anchor_cursor_at(row, column);
+        }
+        editor.ensure_cursor_visible(viewport_height, viewport_width);
+        let lines = text::styled_source_window(
+            editor.text(),
+            &path,
+            0,
+            editor.scroll_line,
+            viewport_height,
+        );
+        let mut lines = editor_visible_lines(lines, editor.scroll_column, viewport_width);
+        while lines.len() <= cursor_line.saturating_sub(editor.scroll_line) {
+            lines.push(Line::default().style(Style::default().bg(palette().panel)));
+        }
+        let line_count = editor.visible_line_count();
+        let line_numbers = (0..viewport_height)
+            .map(|row| {
+                let line = editor.scroll_line.saturating_add(row);
+                editor_line_number((line < line_count).then_some(line))
+            })
+            .collect::<Vec<_>>();
+        (
+            lines,
+            line_numbers,
+            cursor_line.saturating_sub(editor.scroll_line),
+            cursor_column.saturating_sub(editor.scroll_column),
+        )
+    };
     frame.render_widget(Paragraph::new(line_numbers), gutter);
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(palette().panel)),
         editor_body,
     );
-    let cursor_x = editor_body.x.saturating_add(
-        u16::try_from(cursor_column.saturating_sub(editor.scroll_column)).unwrap_or(u16::MAX),
-    );
-    let cursor_y = editor_body.y.saturating_add(
-        u16::try_from(cursor_line.saturating_sub(editor.scroll_line)).unwrap_or(u16::MAX),
-    );
+    let cursor_x = editor_body
+        .x
+        .saturating_add(u16::try_from(rendered_cursor_column).unwrap_or(u16::MAX));
+    let cursor_y = editor_body
+        .y
+        .saturating_add(u16::try_from(cursor_row).unwrap_or(u16::MAX));
     if cursor_x < editor_body.right() && cursor_y < editor_body.bottom() {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+fn editor_line_number(line: Option<usize>) -> Line<'static> {
+    line.map_or_else(
+        || Line::default().style(Style::default().bg(palette().panel)),
+        |line| {
+            Line::styled(
+                format!("{:>5}  ", line.saturating_add(1)),
+                Style::default().fg(palette().faint).bg(palette().panel),
+            )
+        },
+    )
+}
+
+fn wrapped_editor_cursor(
+    source: &str,
+    width: usize,
+    cursor_line: usize,
+    cursor_column: usize,
+) -> (usize, usize) {
+    let mut visual_row = 0usize;
+    for (line, content) in editor_source_lines(source).enumerate() {
+        let rows = text::word_wrapped_rows(content, width);
+        if line == cursor_line {
+            let (row, rendered_column) = rows
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, row)| {
+                    row.source_column_at(row.rendered_column_at(cursor_column))
+                        .abs_diff(cursor_column)
+                })
+                .map_or((0, 0), |(index, row)| {
+                    (index, row.rendered_column_at(cursor_column))
+                });
+            return (visual_row.saturating_add(row), rendered_column);
+        }
+        visual_row = visual_row.saturating_add(rows.len());
+    }
+    (visual_row, 0)
+}
+
+fn wrapped_editor_view(
+    source: &str,
+    path: &str,
+    width: usize,
+    scroll: usize,
+    height: usize,
+) -> (
+    Vec<Line<'static>>,
+    Vec<Line<'static>>,
+    Vec<crate::app::EditorRenderedRow>,
+) {
+    let mut lines = Vec::new();
+    let mut line_numbers = Vec::new();
+    let mut rendered_rows = Vec::new();
+    let mut visual_row = 0usize;
+    for (line_number, content) in editor_source_lines(source).enumerate() {
+        let rows = text::word_wrapped_rows(content, width);
+        let line_end = visual_row.saturating_add(rows.len());
+        if line_end > scroll && visual_row < scroll.saturating_add(height) {
+            let styled = text::styled_source_window(source, path, 0, line_number, 1)
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            for (index, row) in rows.iter().enumerate() {
+                let absolute_row = visual_row.saturating_add(index);
+                if absolute_row < scroll || absolute_row >= scroll.saturating_add(height) {
+                    continue;
+                }
+                let rendered =
+                    editor_visible_lines(vec![styled.clone()], row.source_start(), row.width())
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default();
+                lines.push(rendered);
+                line_numbers.push(editor_line_number((index == 0).then_some(line_number)));
+                rendered_rows.push(crate::app::EditorRenderedRow {
+                    line: line_number,
+                    columns: row.columns(),
+                });
+            }
+        }
+        visual_row = line_end;
+        if visual_row >= scroll.saturating_add(height) {
+            break;
+        }
+    }
+    while lines.len() < height {
+        lines.push(Line::default().style(Style::default().bg(palette().panel)));
+        line_numbers.push(editor_line_number(None));
+    }
+    (lines, line_numbers, rendered_rows)
+}
+
+fn editor_source_lines(source: &str) -> impl Iterator<Item = &str> {
+    source
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
 }
 
 fn editor_visible_lines(

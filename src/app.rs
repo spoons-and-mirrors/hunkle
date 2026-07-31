@@ -251,6 +251,21 @@ pub(crate) struct HitRegion {
     rect: Rect,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct EditorRenderedRow {
+    pub line: usize,
+    pub columns: Vec<(usize, usize)>,
+}
+
+impl EditorRenderedRow {
+    pub(crate) fn source_column_at(&self, column: usize) -> usize {
+        self.columns
+            .iter()
+            .min_by_key(|(rendered, _)| rendered.abs_diff(column))
+            .map_or(0, |(_, source)| *source)
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Regions {
     pub screen: Option<Rect>,
@@ -277,6 +292,7 @@ pub struct Regions {
     pub preview_untracked: bool,
     pub preview_generation: u64,
     pub preview_scroll: usize,
+    pub(crate) editor_rows: Vec<EditorRenderedRow>,
     pub diff_scrollbar: Option<Rect>,
     pub diff_scroll_thumb: Option<Rect>,
     pub diff_scroll_max: usize,
@@ -3584,7 +3600,7 @@ impl App {
     fn handle_main_navigation(&mut self, key: KeyEvent) -> bool {
         match self.settings.shortcuts.main_action(key) {
             Some(ShortcutAction::TogglePane) => self.toggle_left_pane(),
-            Some(ShortcutAction::ToggleGraph) => self.toggle_graph(),
+            Some(ShortcutAction::ToggleGraph) if self.mode == Mode::Normal => self.toggle_graph(),
             _ => return false,
         }
         true
@@ -4397,6 +4413,10 @@ mod tests {
         assert_eq!(app.view, View::Changes);
         assert_eq!(app.changes.pane, LeftPane::Worktree);
         app.mode = Mode::Commit;
+        app.commit_input.clear();
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Commit);
+        assert_eq!(app.commit_input.text(), "g");
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.changes.pane, LeftPane::Files);

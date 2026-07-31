@@ -3548,12 +3548,17 @@ fn preview_click_preserves_wrapped_position_and_scroll_through_editing() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let editor_body = app.regions.preview_body.unwrap();
     let editor = app.file_editor.as_ref().unwrap();
-    let (line, column) = editor.cursor_position();
-    assert_eq!(line - editor.scroll_line, 0);
+    let (cursor_row, rendered_column) = super::wrapped_editor_cursor(
+        editor.text(),
+        usize::from(editor_body.width),
+        0,
+        expected_column,
+    );
+    assert_eq!(cursor_row - editor.wrap_scroll_row, 0);
     assert_eq!(editor_body.y, click_position.y);
     assert_eq!(
-        column - editor.scroll_column,
-        usize::from(click_position.x.saturating_sub(editor_body.x))
+        app.regions.editor_rows[0].source_column_at(rendered_column),
+        expected_column
     );
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -3580,6 +3585,43 @@ fn preview_click_preserves_wrapped_position_and_scroll_through_editing() {
 }
 
 #[test]
+fn inline_editor_renders_and_clicks_wrapped_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let content = (0..80)
+        .map(|index| format!("word{index:02}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    fs::write(root.join("notes.txt"), format!("{content}\n")).unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor =
+        Some(crate::app::FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap());
+    app.mode = Mode::FileEdit;
+    app.changes.diff_wrap = true;
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let body = app.regions.preview_body.unwrap();
+    assert!(app.regions.editor_rows.len() > 1);
+    let continuation_gutter = (body.x.saturating_sub(7)..body.x)
+        .map(|x| terminal.backend().buffer()[(x, body.y + 1)].symbol())
+        .collect::<String>();
+    assert_eq!(continuation_gutter, "       ");
+    let expected_column = app.regions.editor_rows[1].source_column_at(3);
+    click(&mut app, body.x + 3, body.y + 1);
+    app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().cursor_position(),
+        (0, expected_column + 1)
+    );
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().text().as_bytes()[expected_column],
+        b'X'
+    );
+}
+
+#[test]
 fn inline_editor_scrolls_past_u16_columns_without_clipping() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -3589,6 +3631,7 @@ fn inline_editor_scrolls_past_u16_columns_without_clipping() {
     app.file_editor =
         Some(crate::app::FileEditor::open(root, RepoPath::from("long.txt"), 1, 70_001).unwrap());
     app.mode = Mode::FileEdit;
+    app.changes.diff_wrap = false;
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

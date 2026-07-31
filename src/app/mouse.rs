@@ -667,6 +667,14 @@ impl App {
             return;
         };
         if let Some(editor) = &mut self.file_editor {
+            if self.changes.diff_wrap {
+                let row = usize::from(point.y.saturating_sub(body.y));
+                if let Some(rendered) = self.regions.editor_rows.get(row) {
+                    let column = usize::from(point.x.saturating_sub(body.x));
+                    editor.set_cursor(rendered.line, rendered.source_column_at(column));
+                }
+                return;
+            }
             let line = editor
                 .scroll_line
                 .saturating_add(usize::from(point.y.saturating_sub(body.y)));
