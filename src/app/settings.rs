@@ -6,7 +6,7 @@ use std::{
 
 use crate::{filesystem::atomic_write, media::MediaPreviewProtocol};
 
-use super::explorer::MINIMUM_EXPLORER_PANE_WIDTH;
+use super::{Shortcuts, explorer::MINIMUM_EXPLORER_PANE_WIDTH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTimeDisplay {
@@ -50,6 +50,7 @@ pub struct Settings {
     pub explorer_left_pane_width: Option<u16>,
     pub editor_command: Option<String>,
     pub media_preview_protocol: MediaPreviewProtocol,
+    pub shortcuts: Shortcuts,
 }
 
 impl Settings {
@@ -72,6 +73,7 @@ impl Default for Settings {
             explorer_left_pane_width: None,
             editor_command: None,
             media_preview_protocol: MediaPreviewProtocol::Auto,
+            shortcuts: Shortcuts::default(),
         }
     }
 }
@@ -125,27 +127,27 @@ impl SettingsStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        atomic_write(
-            path,
-            format!(
-                "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
-                settings.auto_fetch,
-                settings.fetch_interval_minutes,
-                settings.format_on_save,
-                settings.worktree_width,
-                settings.workspace_panel_enabled,
-                settings.show_agent_harness,
-                settings.agent_time_display.as_str(),
-                settings.agents_height,
-                settings
-                    .explorer_left_pane_width
-                    .map(|width| width.to_string())
-                    .unwrap_or_default(),
-                settings.editor_command.as_deref().unwrap_or_default(),
-                settings.media_preview_protocol.as_str(),
-            )
-            .as_bytes(),
-        )
+        let mut contents = format!(
+            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
+            settings.auto_fetch,
+            settings.fetch_interval_minutes,
+            settings.format_on_save,
+            settings.worktree_width,
+            settings.workspace_panel_enabled,
+            settings.show_agent_harness,
+            settings.agent_time_display.as_str(),
+            settings.agents_height,
+            settings
+                .explorer_left_pane_width
+                .map(|width| width.to_string())
+                .unwrap_or_default(),
+            settings.editor_command.as_deref().unwrap_or_default(),
+            settings.media_preview_protocol.as_str(),
+        );
+        for (id, binding) in settings.shortcuts.serialized() {
+            contents.push_str(&format!("shortcut.{id}={binding}\n"));
+        }
+        atomic_write(path, contents.as_bytes())
     }
 }
 
@@ -174,7 +176,12 @@ fn load(path: &Path) -> Settings {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        match key.trim() {
+        let key = key.trim();
+        if let Some(id) = key.strip_prefix("shortcut.") {
+            settings.shortcuts.load_override(id, value.trim());
+            continue;
+        }
+        match key {
             "auto_fetch" => settings.auto_fetch = value.trim() == "true",
             "fetch_interval_minutes" => {
                 if let Ok(minutes) = value.trim().parse::<u16>() {
@@ -233,6 +240,7 @@ fn load(path: &Path) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{KeyChord, ShortcutAction};
 
     #[test]
     fn saves_loads_and_clamps_settings() {
@@ -251,10 +259,27 @@ mod tests {
             explorer_left_pane_width: Some(47),
             editor_command: Some("code --wait".to_owned()),
             media_preview_protocol: MediaPreviewProtocol::Sixel,
+            shortcuts: {
+                let mut shortcuts = Shortcuts::default();
+                shortcuts
+                    .set(
+                        ShortcutAction::OpenExplorer,
+                        KeyChord::new(
+                            crossterm::event::KeyCode::Char('v'),
+                            crossterm::event::KeyModifiers::ALT,
+                        ),
+                    )
+                    .unwrap();
+                shortcuts
+            },
         };
 
         store.save(&settings).unwrap();
         assert_eq!(store.load(), settings);
+        assert_eq!(
+            settings.shortcuts.label(ShortcutAction::OpenExplorer),
+            "Alt+v"
+        );
 
         fs::write(&path, "agent_time_display=session\n").unwrap();
         assert_eq!(

@@ -22,7 +22,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{
         App, ExplorerTab, FileDialogKind, GraphHitTarget, HitTarget, LeftPane, Mode, Regions,
-        TAB_WIDTH, View, WorkspacePanelHitTarget,
+        ShortcutAction, TAB_WIDTH, View, WorkspacePanelHitTarget,
     },
     theme::{Palette, load_theme},
 };
@@ -43,9 +43,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if frame.area().width < 60 || frame.area().height < 16 {
         app.reset_media_presentation();
         let message = if app.mode == Mode::FileEdit {
-            "hunkle editor needs at least 60 columns and 16 rows\n\nctrl+s  save + close    esc  close"
+            format!(
+                "hunkle editor needs at least 60 columns and 16 rows\n\n{}  save + close    esc  close",
+                app.settings.shortcuts.label(ShortcutAction::SaveOrFormat)
+            )
         } else {
-            "hunkle needs at least 60 columns and 16 rows\n\nq  quit"
+            format!(
+                "hunkle needs at least 60 columns and 16 rows\n\n{}  quit",
+                app.settings.shortcuts.label(ShortcutAction::Quit)
+            )
         };
         frame.render_widget(
             Paragraph::new(message)
@@ -113,22 +119,33 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .session
                 .data()
                 .map_or(&[][..], |repo| repo.files.as_slice());
-            let regions = overlays::draw_file_search(frame, &mut app.file_search, files);
+            let regions = overlays::draw_file_search(
+                frame,
+                &mut app.file_search,
+                files,
+                &app.settings.shortcuts,
+            );
             app.regions.file_search_overlay = Some(regions.overlay);
             app.regions.file_search_list = Some(regions.list);
         }
         Mode::Explorer => {
             dim(frame);
             let targets = match app.explorer_tab {
-                ExplorerTab::Explorer => {
-                    overlays::draw_explorer(frame, &mut app.workspace_explorer)
-                }
-                ExplorerTab::Worktrees => {
-                    overlays::draw_worktree_manager(frame, &mut app.worktree_manager)
-                }
-                ExplorerTab::Branches => {
-                    overlays::draw_repository_browser(frame, &mut app.repository_browser)
-                }
+                ExplorerTab::Explorer => overlays::draw_explorer(
+                    frame,
+                    &mut app.workspace_explorer,
+                    &app.settings.shortcuts,
+                ),
+                ExplorerTab::Worktrees => overlays::draw_worktree_manager(
+                    frame,
+                    &mut app.worktree_manager,
+                    &app.settings.shortcuts,
+                ),
+                ExplorerTab::Branches => overlays::draw_repository_browser(
+                    frame,
+                    &mut app.repository_browser,
+                    &app.settings.shortcuts,
+                ),
             };
             for (target, rect) in targets {
                 app.regions.register_hit_target(target, rect);
@@ -152,30 +169,44 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             dim(frame);
             let regions = overlays::draw_settings(
                 frame,
-                &app.settings,
-                app.settings_selection,
+                overlays::SettingsView {
+                    settings: &app.settings,
+                    page: app.settings_page,
+                    selection: app.settings_selection,
+                    shortcut_selection: app.shortcut_selection,
+                    shortcut_scroll: app.shortcut_scroll,
+                    shortcut_capture: app.shortcut_capture,
+                    shortcut_error: app.shortcut_error.as_deref(),
+                },
                 app.fetch_running(),
             );
             app.regions.settings_overlay = Some(regions.overlay);
-            app.regions.auto_fetch = Some(regions.auto_fetch);
-            app.regions.fetch_interval = Some(regions.fetch_interval);
-            app.regions.fetch_interval_down = Some(regions.fetch_interval_down);
-            app.regions.fetch_interval_up = Some(regions.fetch_interval_up);
-            app.regions.format_on_save_setting = Some(regions.format_on_save);
-            app.regions.workspace_panel_setting = Some(regions.workspace_panel);
-            app.regions.agent_harness_setting = Some(regions.agent_harness);
-            app.regions.agent_time_setting = Some(regions.agent_time);
-            app.regions.clear_agent_timings_setting = Some(regions.clear_agent_timings);
-            app.regions.media_preview_setting = Some(regions.media_preview);
-            app.regions.editor_setting = Some(regions.editor);
+            app.regions.settings_general_tab = Some(regions.general_tab);
+            app.regions.settings_shortcuts_tab = Some(regions.shortcuts_tab);
+            app.regions.auto_fetch = regions.auto_fetch;
+            app.regions.fetch_interval = regions.fetch_interval;
+            app.regions.fetch_interval_down = regions.fetch_interval_down;
+            app.regions.fetch_interval_up = regions.fetch_interval_up;
+            app.regions.format_on_save_setting = regions.format_on_save;
+            app.regions.workspace_panel_setting = regions.workspace_panel;
+            app.regions.agent_harness_setting = regions.agent_harness;
+            app.regions.agent_time_setting = regions.agent_time;
+            app.regions.clear_agent_timings_setting = regions.clear_agent_timings;
+            app.regions.media_preview_setting = regions.media_preview;
+            app.regions.editor_setting = regions.editor;
+            app.regions.shortcut_rows = regions.shortcut_rows;
         }
         Mode::AuthorFilter => {
             let anchor = app
                 .regions
                 .hit_target_rect(HitTarget::Graph(GraphHitTarget::AuthorHeader))
                 .unwrap_or(Rect::new(main_content.x, main_content.y, 1, 1));
-            for (target, rect) in history::draw_author_filter(frame, anchor, &mut app.author_filter)
-            {
+            for (target, rect) in history::draw_author_filter(
+                frame,
+                anchor,
+                &mut app.author_filter,
+                &app.settings.shortcuts,
+            ) {
                 app.regions.register_hit_target(target, rect);
             }
         }
@@ -198,8 +229,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::HerdrPrompt => {
             dim(frame);
-            app.regions.herdr_prompt_overlay =
-                Some(overlays::draw_herdr_prompt(frame, &app.herdr_prompt));
+            app.regions.herdr_prompt_overlay = Some(overlays::draw_herdr_prompt(
+                frame,
+                &app.herdr_prompt,
+                &app.settings.shortcuts,
+            ));
         }
         Mode::FileEdit => draw_file_editor(frame, app),
         Mode::Editor => {
@@ -232,7 +266,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Help => {
             dim(frame);
-            overlays::draw_help(frame);
+            overlays::draw_help(frame, &app.settings.shortcuts);
         }
         Mode::WorkspacePanel => {
             dim(frame);
@@ -272,8 +306,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             if let Some(dialog) = &app.workspace_panel.snapshot_load_dialog {
                 overlays::draw_snapshot_load_dialog(frame, dialog);
             } else {
-                let (overlay, targets) =
-                    overlays::draw_workspace_presets(frame, &app.workspace_panel);
+                let (overlay, targets) = overlays::draw_workspace_presets(
+                    frame,
+                    &app.workspace_panel,
+                    &app.settings.shortcuts,
+                );
                 app.regions.workspace_presets_overlay = Some(overlay);
                 for (target, rect) in targets {
                     app.regions.register_hit_target(target, rect);
@@ -320,6 +357,7 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         panel,
     );
 
+    let save_label = app.settings.shortcuts.label(ShortcutAction::SaveOrFormat);
     let Some(editor) = &mut app.file_editor else {
         return;
     };
@@ -331,7 +369,7 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     let path = editor.path().display();
     let dirty = if editor.dirty() { "modified" } else { "saved" };
     let title = format!(
-        "EDIT  {path}  {dirty}  Ln {}, Col {}  ctrl+s save + close  esc close",
+        "EDIT  {path}  {dirty}  Ln {}, Col {}  {save_label} save + close  esc close",
         cursor_line.saturating_add(1),
         cursor_column.saturating_add(1)
     );
@@ -542,12 +580,39 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         "Changes"
     };
-    let mut labels = vec![("g", "Git Graph"), ("Tab", left_pane_label)];
+    let mut labels = vec![
+        (
+            app.settings.shortcuts.label(ShortcutAction::ToggleGraph),
+            "Git Graph",
+        ),
+        (
+            app.settings.shortcuts.label(ShortcutAction::TogglePane),
+            left_pane_label,
+        ),
+    ];
     let show_edit = app.can_edit_selected_file();
     if app.workspace_panel_available() {
-        labels.push(("w", "Workspaces"));
+        labels.push((
+            app.settings
+                .shortcuts
+                .label(ShortcutAction::ToggleWorkspace),
+            "Workspaces",
+        ));
     }
-    labels.extend([("o", "Explorer"), ("s", "Settings"), ("?", "Help")]);
+    labels.extend([
+        (
+            app.settings.shortcuts.label(ShortcutAction::OpenExplorer),
+            "Explorer",
+        ),
+        (
+            app.settings.shortcuts.label(ShortcutAction::OpenSettings),
+            "Settings",
+        ),
+        (
+            app.settings.shortcuts.label(ShortcutAction::OpenHelp),
+            "Help",
+        ),
+    ]);
 
     let total_width = labels.iter().fold(0_u16, |width, (key, label)| {
         let label_width = if compact {
@@ -555,14 +620,17 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         } else {
             UnicodeWidthStr::width(*label) as u16 + 1
         };
-        width.saturating_add(UnicodeWidthStr::width(*key) as u16 + label_width + 2)
+        width.saturating_add(UnicodeWidthStr::width(key.as_str()) as u16 + label_width + 2)
     });
     let mut spans = Vec::new();
     let start_x = area.right().saturating_sub(total_width).max(area.x);
     if show_edit && start_x > area.x {
         let mut edit = vec![
             Span::raw(" "),
-            Span::styled("e", Style::default().fg(palette().orange)),
+            Span::styled(
+                app.settings.shortcuts.label(ShortcutAction::EditFile),
+                Style::default().fg(palette().orange),
+            ),
         ];
         if !compact {
             edit.push(Span::styled(" Edit", Style::default().fg(palette().muted)));
@@ -582,7 +650,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Style::default().bg(background.unwrap_or(palette().surface_alt)),
         ));
         spans.push(Span::styled(
-            *key,
+            key.as_str(),
             Style::default()
                 .fg(palette().orange)
                 .bg(background.unwrap_or(palette().surface_alt))
@@ -613,7 +681,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             " ",
             Style::default().bg(background.unwrap_or(palette().surface_alt)),
         ));
-        let width = UnicodeWidthStr::width(*key) as u16
+        let width = UnicodeWidthStr::width(key.as_str()) as u16
             + if compact {
                 2
             } else {

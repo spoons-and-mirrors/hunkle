@@ -14,11 +14,11 @@ use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandRecord, CommandStatus,
     Explorer, ExplorerHitTarget, ExplorerTab, FileDialog, FileDialogKind, FileNameAction,
     FileSearch, HerdrPrompt, HitTarget, Issue, PickerAction, PickerEntry, PullRequest, RemoteItems,
-    RepositoryBrowser, RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
-    WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
-    WorkspaceRenameDialog, WorkspaceRenameTarget, WorktreeCreateDialog, WorktreeCreateField,
-    WorktreeManager, WorktreeManagerHitTarget, WorktreeManagerRow, WorktreeRemoveDialog,
-    short_head, worktree_label,
+    RepositoryBrowser, RepositoryBrowserHitTarget, Settings, SettingsPage, ShortcutAction,
+    Shortcuts, SnapshotLoadDialog, SurroundingEntry, WorkspaceDeleteDialog, WorkspaceDeleteKind,
+    WorkspacePanel, WorkspacePanelHitTarget, WorkspaceRenameDialog, WorkspaceRenameTarget,
+    WorktreeCreateDialog, WorktreeCreateField, WorktreeManager, WorktreeManagerHitTarget,
+    WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
 };
 
 use super::{fill, palette, text::word_wrapped_height, truncate_width};
@@ -30,17 +30,20 @@ pub(super) struct FileSearchRegions {
 
 pub(super) struct SettingsRegions {
     pub(super) overlay: Rect,
-    pub(super) auto_fetch: Rect,
-    pub(super) fetch_interval: Rect,
-    pub(super) fetch_interval_down: Rect,
-    pub(super) fetch_interval_up: Rect,
-    pub(super) format_on_save: Rect,
-    pub(super) workspace_panel: Rect,
-    pub(super) agent_harness: Rect,
-    pub(super) agent_time: Rect,
-    pub(super) clear_agent_timings: Rect,
-    pub(super) media_preview: Rect,
-    pub(super) editor: Rect,
+    pub(super) general_tab: Rect,
+    pub(super) shortcuts_tab: Rect,
+    pub(super) auto_fetch: Option<Rect>,
+    pub(super) fetch_interval: Option<Rect>,
+    pub(super) fetch_interval_down: Option<Rect>,
+    pub(super) fetch_interval_up: Option<Rect>,
+    pub(super) format_on_save: Option<Rect>,
+    pub(super) workspace_panel: Option<Rect>,
+    pub(super) agent_harness: Option<Rect>,
+    pub(super) agent_time: Option<Rect>,
+    pub(super) clear_agent_timings: Option<Rect>,
+    pub(super) media_preview: Option<Rect>,
+    pub(super) editor: Option<Rect>,
+    pub(super) shortcut_rows: Vec<(ShortcutAction, Rect)>,
 }
 
 pub(super) struct ActionMenuRegions {
@@ -62,6 +65,7 @@ pub(super) struct FileDialogRegions {
 pub(super) fn draw_repository_browser(
     frame: &mut Frame<'_>,
     browser: &mut RepositoryBrowser,
+    shortcuts: &Shortcuts,
 ) -> Vec<(HitTarget, Rect)> {
     let area = centered_min(frame.area(), 88, 78, 68, 20);
     let mut hit_targets = vec![(
@@ -75,7 +79,12 @@ pub(super) fn draw_repository_browser(
         Rect::new(area.x, area.y, area.width, 3),
         palette().surface_alt,
     );
-    hit_targets.extend(draw_explorer_tabs(frame, area, ExplorerTab::Branches));
+    hit_targets.extend(draw_explorer_tabs(
+        frame,
+        area,
+        ExplorerTab::Branches,
+        shortcuts,
+    ));
     fill(
         frame,
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -467,11 +476,12 @@ pub(super) fn draw_repository_browser(
         row_y = row_y.saturating_add(row_height);
     }
 
+    let delete = shortcuts.label(ShortcutAction::BranchDelete);
     let footer = if browser.tab == BrowserTab::Branches {
         key_hint_line(
             &[
                 ("Enter", "graph"),
-                ("Del", "delete"),
+                (delete.as_str(), "delete"),
                 ("Tab/←→", "section"),
                 ("↑↓", "select"),
                 ("Ctrl-U", "clear"),
@@ -502,6 +512,7 @@ pub(super) fn draw_repository_browser(
 pub(super) fn draw_worktree_manager(
     frame: &mut Frame<'_>,
     manager: &mut WorktreeManager,
+    shortcuts: &Shortcuts,
 ) -> Vec<(HitTarget, Rect)> {
     let area = centered_min(frame.area(), 88, 78, 68, 20);
     frame.render_widget(Clear, area);
@@ -520,7 +531,12 @@ pub(super) fn draw_worktree_manager(
         HitTarget::WorktreeManager(WorktreeManagerHitTarget::Overlay),
         area,
     )];
-    hit_targets.extend(draw_explorer_tabs(frame, area, ExplorerTab::Worktrees));
+    hit_targets.extend(draw_explorer_tabs(
+        frame,
+        area,
+        ExplorerTab::Worktrees,
+        shortcuts,
+    ));
 
     let inner_x = area.x.saturating_add(2);
     let inner_width = area.width.saturating_sub(4);
@@ -887,14 +903,17 @@ pub(super) fn draw_worktree_manager(
         row_y = row_y.saturating_add(row_height);
     }
 
+    let create = shortcuts.label(ShortcutAction::CreateWorktree);
+    let remove = shortcuts.label(ShortcutAction::DeleteWorktree);
+    let refresh = shortcuts.label(ShortcutAction::RefreshWorktrees);
     frame.render_widget(
         Paragraph::new(key_hint_line(
             &[
                 ("Enter", "open"),
-                ("N", "new"),
-                ("Del", "remove"),
+                (create.as_str(), "new"),
+                (remove.as_str(), "remove"),
                 ("↑↓", "select"),
-                ("Ctrl-R", "refresh"),
+                (refresh.as_str(), "refresh"),
                 ("Ctrl-U", "clear"),
                 ("Esc", ""),
             ],
@@ -1514,6 +1533,7 @@ pub(super) fn draw_snapshot_load_dialog(frame: &mut Frame<'_>, dialog: &Snapshot
 pub(super) fn draw_workspace_presets(
     frame: &mut Frame<'_>,
     panel: &WorkspacePanel,
+    shortcuts: &Shortcuts,
 ) -> (Rect, Vec<(HitTarget, Rect)>) {
     let item_count = panel.snapshots.len() + 1;
     let desired_height = if panel.snapshot_editing {
@@ -1671,10 +1691,14 @@ pub(super) fn draw_workspace_presets(
         );
         targets.push((HitTarget::WorkspacePanel(target), row));
     }
-    let status = panel
-        .snapshot_error
-        .as_deref()
-        .unwrap_or("Enter load  n new  u update  Del delete  Esc");
+    let status = panel.snapshot_error.clone().unwrap_or_else(|| {
+        format!(
+            "Enter load  {} new  {} update  {} delete  Esc",
+            shortcuts.label(ShortcutAction::PresetCreate),
+            shortcuts.label(ShortcutAction::PresetUpdate),
+            shortcuts.label(ShortcutAction::PresetDelete)
+        )
+    });
     frame.render_widget(
         Paragraph::new(status)
             .alignment(Alignment::Right)
@@ -2451,7 +2475,11 @@ pub(super) fn draw_command(frame: &mut Frame<'_>, actions: &mut ActionsState) ->
     }
 }
 
-pub(super) fn draw_herdr_prompt(frame: &mut Frame<'_>, prompt: &HerdrPrompt) -> Rect {
+pub(super) fn draw_herdr_prompt(
+    frame: &mut Frame<'_>,
+    prompt: &HerdrPrompt,
+    shortcuts: &Shortcuts,
+) -> Rect {
     let area = centered_min(frame.area(), 70, 0, 56, 12);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
@@ -2563,9 +2591,12 @@ pub(super) fn draw_herdr_prompt(frame: &mut Frame<'_>, prompt: &HerdrPrompt) -> 
     );
     frame.render_widget(
         Paragraph::new(if prompt.sending {
-            "Sending…   Esc close"
+            "Sending…   Esc close".to_owned()
         } else {
-            "Enter send   Ctrl+U clear   F1 / Esc close"
+            format!(
+                "Enter send   Ctrl+U clear   {} / Esc close",
+                shortcuts.label(ShortcutAction::OpenHerdr)
+            )
         })
         .alignment(Alignment::Right)
         .style(Style::default().fg(palette().muted)),
@@ -2686,6 +2717,7 @@ fn rendered_height(lines: &[Line<'_>], width: usize) -> usize {
 pub(super) fn draw_explorer(
     frame: &mut Frame<'_>,
     explorer: &mut Explorer,
+    shortcuts: &Shortcuts,
 ) -> Vec<(HitTarget, Rect)> {
     let area = centered_min(frame.area(), 88, 78, 68, 20);
     frame.render_widget(Clear, area);
@@ -2695,7 +2727,7 @@ pub(super) fn draw_explorer(
         Rect::new(area.x, area.y, area.width, 3),
         palette().surface_alt,
     );
-    let tab_targets = draw_explorer_tabs(frame, area, ExplorerTab::Explorer);
+    let tab_targets = draw_explorer_tabs(frame, area, ExplorerTab::Explorer, shortcuts);
     fill(
         frame,
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -3077,6 +3109,7 @@ pub(super) fn draw_explorer(
             footer,
         );
     } else {
+        let favorite = shortcuts.label(ShortcutAction::ExplorerFavorite);
         let hint = if explorer.naming_favorite {
             key_hint_line(
                 &[("Enter", "save"), ("Ctrl+U", "clear"), ("Esc", "cancel")],
@@ -3099,7 +3132,7 @@ pub(super) fn draw_explorer(
                     ("Tab", "pane"),
                     ("↑↓", "select"),
                     ("Enter", "open"),
-                    ("Ctrl+F", "favorite"),
+                    (favorite.as_str(), "favorite"),
                     ("type", "path"),
                     ("Esc", ""),
                 ],
@@ -3191,18 +3224,21 @@ fn draw_explorer_tabs(
     frame: &mut Frame<'_>,
     area: Rect,
     active: ExplorerTab,
+    shortcuts: &Shortcuts,
 ) -> Vec<(HitTarget, Rect)> {
     let mut x = area.x.saturating_add(2);
     ExplorerTab::ALL
         .into_iter()
         .enumerate()
         .map(|(index, tab)| {
-            let label = match tab {
-                ExplorerTab::Explorer => "F1  EXPLORER",
-                ExplorerTab::Worktrees => "F2  WORKTREES",
-                ExplorerTab::Branches => "F3  BRANCHES",
+            let (action, title) = match tab {
+                ExplorerTab::Explorer => (ShortcutAction::ExplorerTabFiles, "EXPLORER"),
+                ExplorerTab::Worktrees => (ShortcutAction::ExplorerTabWorktrees, "WORKTREES"),
+                ExplorerTab::Branches => (ShortcutAction::ExplorerTabBranches, "BRANCHES"),
             };
-            let width = u16::try_from(UnicodeWidthStr::width(label) + 2).unwrap_or(u16::MAX);
+            let label = format!("{}  {title}", shortcuts.label(action));
+            let width =
+                u16::try_from(UnicodeWidthStr::width(label.as_str()) + 2).unwrap_or(u16::MAX);
             let rect = Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1);
             let selected = tab == active;
             frame.render_widget(
@@ -3236,6 +3272,7 @@ pub(super) fn draw_file_search(
     frame: &mut Frame<'_>,
     search: &mut FileSearch,
     files: &[RepoPath],
+    shortcuts: &Shortcuts,
 ) -> FileSearchRegions {
     let desired_height = (11 + search.results.len().clamp(1, 13) as u16).clamp(15, 24);
     let area = centered_min(frame.area(), 78, 0, 56, desired_height);
@@ -3386,9 +3423,12 @@ pub(super) fn draw_file_search(
     }
 
     frame.render_widget(
-        Paragraph::new("Enter open   ↑↓ select   Ctrl+U clear   F3 / Esc close")
-            .style(Style::default().fg(palette().muted))
-            .alignment(Alignment::Right),
+        Paragraph::new(format!(
+            "Enter open   ↑↓ select   Ctrl+U clear   {} / Esc close",
+            shortcuts.label(ShortcutAction::FindFile)
+        ))
+        .style(Style::default().fg(palette().muted))
+        .alignment(Alignment::Right),
         Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1),
     );
 
@@ -3483,7 +3523,7 @@ fn explorer_empty_list(message: &'static str) -> List<'static> {
     ))])
 }
 
-fn key_hint_line(items: &[(&'static str, &'static str)], maximum_width: usize) -> Line<'static> {
+fn key_hint_line<'a>(items: &[(&'a str, &'a str)], maximum_width: usize) -> Line<'a> {
     let mut spans = Vec::with_capacity(items.len() * 3);
     let mut width = 0;
     for (index, (key, description)) in items.iter().enumerate() {
@@ -3514,12 +3554,30 @@ fn key_hint_line(items: &[(&'static str, &'static str)], maximum_width: usize) -
     Line::from(spans)
 }
 
+pub(super) struct SettingsView<'a> {
+    pub(super) settings: &'a Settings,
+    pub(super) page: SettingsPage,
+    pub(super) selection: usize,
+    pub(super) shortcut_selection: usize,
+    pub(super) shortcut_scroll: usize,
+    pub(super) shortcut_capture: bool,
+    pub(super) shortcut_error: Option<&'a str>,
+}
+
 pub(super) fn draw_settings(
     frame: &mut Frame<'_>,
-    settings: &Settings,
-    selection: usize,
+    view: SettingsView<'_>,
     fetch_running: bool,
 ) -> SettingsRegions {
+    let SettingsView {
+        settings,
+        page,
+        selection,
+        shortcut_selection,
+        shortcut_scroll,
+        shortcut_capture,
+        shortcut_error,
+    } = view;
     let area = centered_min(frame.area(), 58, 0, 48, 28);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
@@ -3553,6 +3611,132 @@ pub(super) fn draw_settings(
             1,
         ),
     );
+    let shortcuts_tab = Rect::new(
+        area.right().saturating_sub(14),
+        area.y.saturating_add(1),
+        12,
+        1,
+    );
+    let general_tab = Rect::new(shortcuts_tab.x.saturating_sub(11), shortcuts_tab.y, 10, 1);
+    for (label, rect, active) in [
+        (" General ", general_tab, page == SettingsPage::General),
+        (
+            " Shortcuts ",
+            shortcuts_tab,
+            page == SettingsPage::Shortcuts,
+        ),
+    ] {
+        frame.render_widget(
+            Paragraph::new(label).style(
+                Style::default()
+                    .fg(if active {
+                        palette().accent
+                    } else {
+                        palette().muted
+                    })
+                    .add_modifier(if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            rect,
+        );
+    }
+    if page == SettingsPage::Shortcuts {
+        let body = Rect::new(
+            area.x.saturating_add(2),
+            area.y.saturating_add(4),
+            area.width.saturating_sub(4),
+            area.height.saturating_sub(6),
+        );
+        let definitions = Shortcuts::definitions();
+        let mut shortcut_rows = Vec::new();
+        for (row, (index, definition)) in definitions
+            .iter()
+            .enumerate()
+            .skip(shortcut_scroll)
+            .take(usize::from(body.height))
+            .enumerate()
+        {
+            let rect = Rect::new(body.x, body.y.saturating_add(row as u16), body.width, 1);
+            let selected = index == shortcut_selection;
+            let binding = if selected && shortcut_capture {
+                "press a key…".to_owned()
+            } else {
+                settings.shortcuts.label(definition.action)
+            };
+            let marker = if settings.shortcuts.is_overridden(definition.action) {
+                "•"
+            } else {
+                " "
+            };
+            let prefix = format!("{marker} {} · {}", definition.section, definition.label);
+            let padding = usize::from(rect.width)
+                .saturating_sub(UnicodeWidthStr::width(prefix.as_str()) + binding.len());
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(palette().ink)),
+                    Span::raw(" ".repeat(padding)),
+                    Span::styled(
+                        binding,
+                        Style::default().fg(if selected && shortcut_capture {
+                            palette().orange
+                        } else {
+                            palette().accent
+                        }),
+                    ),
+                ]))
+                .style(Style::default().bg(if selected {
+                    palette().selected
+                } else {
+                    palette().surface_alt
+                })),
+                rect,
+            );
+            shortcut_rows.push((definition.action, rect));
+        }
+        let footer = shortcut_error.unwrap_or(if shortcut_capture {
+            "Press a key   Esc cancel"
+        } else {
+            "Enter change   Delete reset   Tab general   Esc close"
+        });
+        frame.render_widget(
+            Paragraph::new(truncate_width(
+                footer,
+                usize::from(area.width.saturating_sub(4)),
+            ))
+            .style(Style::default().fg(if shortcut_error.is_some() {
+                palette().red
+            } else {
+                palette().muted
+            }))
+            .alignment(Alignment::Right),
+            Rect::new(
+                area.x.saturating_add(2),
+                area.bottom().saturating_sub(1),
+                area.width.saturating_sub(4),
+                1,
+            ),
+        );
+        return SettingsRegions {
+            overlay: area,
+            general_tab,
+            shortcuts_tab,
+            auto_fetch: None,
+            fetch_interval: None,
+            fetch_interval_down: None,
+            fetch_interval_up: None,
+            format_on_save: None,
+            workspace_panel: None,
+            agent_harness: None,
+            agent_time: None,
+            clear_agent_timings: None,
+            media_preview: None,
+            editor: None,
+            shortcut_rows,
+        };
+    }
     frame.render_widget(
         Paragraph::new("Space toggle   ←/→ interval   Enter edit   Esc close")
             .style(Style::default().fg(palette().muted))
@@ -3875,17 +4059,20 @@ pub(super) fn draw_settings(
 
     SettingsRegions {
         overlay: area,
-        auto_fetch: auto_row,
-        fetch_interval: interval_row,
-        fetch_interval_down: interval_down,
-        fetch_interval_up: interval_up,
-        format_on_save: format_on_save_row,
-        workspace_panel: workspace_panel_row,
-        agent_harness: agent_harness_row,
-        agent_time: agent_time_row,
-        clear_agent_timings: clear_agent_timings_row,
-        media_preview: media_preview_row,
-        editor: editor_row,
+        general_tab,
+        shortcuts_tab,
+        auto_fetch: Some(auto_row),
+        fetch_interval: Some(interval_row),
+        fetch_interval_down: Some(interval_down),
+        fetch_interval_up: Some(interval_up),
+        format_on_save: Some(format_on_save_row),
+        workspace_panel: Some(workspace_panel_row),
+        agent_harness: Some(agent_harness_row),
+        agent_time: Some(agent_time_row),
+        clear_agent_timings: Some(clear_agent_timings_row),
+        media_preview: Some(media_preview_row),
+        editor: Some(editor_row),
+        shortcut_rows: Vec::new(),
     }
 }
 
@@ -3990,7 +4177,7 @@ pub(super) fn draw_editor(
     area
 }
 
-pub(super) fn draw_help(frame: &mut Frame<'_>) {
+pub(super) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
     let area = centered_min(frame.area(), 72, 0, 58, 24);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
@@ -4040,24 +4227,53 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
         ),
-        help_line("Tab", "Changes / files"),
-        help_line("g", "Show / hide Git graph"),
+        shortcut_help(shortcuts, ShortcutAction::TogglePane, "Changes / files"),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::ToggleGraph,
+            "Show / hide Git graph",
+        ),
         help_line("j / k", "Move / scroll hunk ×10"),
         help_line("Home / End", "First / last"),
-        help_line("r", "Refresh"),
-        help_line("o", "Explorer"),
-        help_line("W", "Linked worktrees"),
-        help_line("b", "Branches / PRs / issues"),
-        help_line("w", "Open workspace manager"),
-        help_line("p", "Workspace presets"),
-        help_line("s", "Settings"),
-        help_line("x", "Git actions"),
-        help_line("G", "Git command"),
-        help_line("F1", "Send to Herdr pane below"),
-        help_line("e / E", "Edit / configure editor"),
-        help_line("m", "Markdown preview / source"),
-        help_line("F3", "Find repository file"),
-        help_line("z", "Toggle preview wrapping"),
+        shortcut_help(shortcuts, ShortcutAction::Refresh, "Refresh"),
+        shortcut_help(shortcuts, ShortcutAction::OpenExplorer, "Explorer"),
+        shortcut_help(shortcuts, ShortcutAction::OpenWorktrees, "Linked worktrees"),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::OpenRepositoryBrowser,
+            "Branches / PRs / issues",
+        ),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::ToggleWorkspace,
+            "Open workspace manager",
+        ),
+        shortcut_help(shortcuts, ShortcutAction::OpenPresets, "Workspace presets"),
+        shortcut_help(shortcuts, ShortcutAction::OpenSettings, "Settings"),
+        shortcut_help(shortcuts, ShortcutAction::OpenActions, "Git actions"),
+        shortcut_help(shortcuts, ShortcutAction::OpenGitCommand, "Git command"),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::OpenHerdr,
+            "Send to Herdr pane below",
+        ),
+        shortcut_pair_help(
+            shortcuts,
+            ShortcutAction::EditFile,
+            ShortcutAction::ConfigureEditor,
+            "Edit / configure editor",
+        ),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::ToggleMarkdown,
+            "Markdown preview / source",
+        ),
+        shortcut_help(shortcuts, ShortcutAction::FindFile, "Find repository file"),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::ToggleWrap,
+            "Toggle preview wrapping",
+        ),
     ];
     let worktree = vec![
         Line::styled(
@@ -4069,27 +4285,50 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("← / h", "Tree / exit hunk"),
         help_line("→ / l", "Enter / stage hunk"),
         help_line("Enter", "Toggle folder"),
-        help_line("Space", "Stage file / hunk"),
-        help_line("Delete", "Discard unstaged file changes"),
-        help_line("a", "Show / hide agents"),
-        help_line("u", "Unstage all"),
-        help_line("F2", "Rename file / folder / workspace"),
-        help_line("Ctrl+Delete", "Delete from Files"),
-        help_line("Ctrl+S", "Save editor / format file"),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::StageSelection,
+            "Stage file / hunk",
+        ),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::DiscardChanges,
+            "Discard unstaged file changes",
+        ),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::ToggleAgents,
+            "Show / hide agents",
+        ),
+        shortcut_help(shortcuts, ShortcutAction::UnstageAll, "Unstage all"),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::RenameFile,
+            "Rename file / folder / workspace",
+        ),
+        shortcut_help(shortcuts, ShortcutAction::DeleteFile, "Delete from Files"),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::SaveOrFormat,
+            "Save editor / format file",
+        ),
         help_line("Drag", "Move file / folder"),
-        help_line("c", "Commit editor"),
+        shortcut_help(shortcuts, ShortcutAction::FocusCommit, "Commit editor"),
         help_line("Arrow keys", "Commit cursor"),
         help_line("C-A / C-⌫", "Select all / del word"),
-        help_line("Ctrl+Enter", "Commit"),
+        shortcut_help(shortcuts, ShortcutAction::SubmitCommit, "Commit"),
         help_line("Esc", "Close / unfocus"),
-        help_line("q", "Quit"),
+        shortcut_help(shortcuts, ShortcutAction::Quit, "Quit"),
     ];
     frame.render_widget(Paragraph::new(navigation), columns[0]);
     frame.render_widget(Paragraph::new(worktree), columns[2]);
     frame.render_widget(
-        Paragraph::new("? / Esc close")
-            .style(Style::default().fg(palette().muted))
-            .alignment(Alignment::Right),
+        Paragraph::new(format!(
+            "{} / Esc close",
+            shortcuts.label(ShortcutAction::OpenHelp)
+        ))
+        .style(Style::default().fg(palette().muted))
+        .alignment(Alignment::Right),
         Rect::new(
             area.x.saturating_add(2),
             area.bottom().saturating_sub(1),
@@ -4097,6 +4336,38 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
             1,
         ),
     );
+}
+
+fn shortcut_help(
+    shortcuts: &Shortcuts,
+    action: ShortcutAction,
+    description: &'static str,
+) -> Line<'static> {
+    help_line_owned(shortcuts.label(action), description)
+}
+
+fn shortcut_pair_help(
+    shortcuts: &Shortcuts,
+    first: ShortcutAction,
+    second: ShortcutAction,
+    description: &'static str,
+) -> Line<'static> {
+    help_line_owned(
+        format!("{} / {}", shortcuts.label(first), shortcuts.label(second)),
+        description,
+    )
+}
+
+fn help_line_owned(key: String, description: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {key:<12}"),
+            Style::default()
+                .fg(palette().accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(description, Style::default().fg(palette().ink)),
+    ])
 }
 
 fn truncate_start_width(value: &str, width: usize) -> String {

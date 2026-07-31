@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{AuthorFilter, CommitSummaryCache, GraphHitTarget, HitTarget},
+    app::{AuthorFilter, CommitSummaryCache, GraphHitTarget, HitTarget, ShortcutAction, Shortcuts},
     git::{Commit, RepositoryData},
 };
 
@@ -190,6 +190,7 @@ pub(super) fn draw_author_filter(
     frame: &mut Frame<'_>,
     anchor: Rect,
     filter: &mut AuthorFilter,
+    shortcuts: &Shortcuts,
 ) -> Vec<(HitTarget, Rect)> {
     let width = filter
         .entries()
@@ -255,8 +256,12 @@ pub(super) fn draw_author_filter(
     let authors = List::new(items).highlight_style(Style::default().bg(palette().selected));
     frame.render_stateful_widget(authors, list, &mut filter.state);
     frame.render_widget(
-        Paragraph::new("Space toggle   a all   n none   Esc close")
-            .style(Style::default().fg(palette().faint)),
+        Paragraph::new(format!(
+            "Space toggle   {} all   {} none   Esc close",
+            shortcuts.label(ShortcutAction::AuthorEnableAll),
+            shortcuts.label(ShortcutAction::AuthorDisableAll)
+        ))
+        .style(Style::default().fg(palette().faint)),
         Rect::new(
             area.x.saturating_add(1),
             area.bottom().saturating_sub(1),

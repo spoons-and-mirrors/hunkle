@@ -12,8 +12,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{
     App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, ExplorerTab,
     GraphHitTarget, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
-    RepositoryBrowserHitTarget, Settings, SettingsStore, SqliteFocus, View, WorkspaceDropTarget,
-    WorkspacePanel, WorkspacePanelHitTarget, WorktreeManagerHitTarget, WorktreeManagerRow,
+    RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus,
+    View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget, WorktreeManagerHitTarget,
+    WorktreeManagerRow,
 };
 use crate::repo_path::RepoPath;
 
@@ -1417,6 +1418,31 @@ fn renders_every_primary_surface() {
         (harness_switch_x..harness_switch_x + 5)
             .all(|x| buffer[(x, agent_harness_setting.y)].bg == super::palette().faint)
     );
+
+    app.settings_page = SettingsPage::Shortcuts;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let shortcuts_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(shortcuts_screen.contains("Shortcuts"));
+    assert!(shortcuts_screen.contains("Changes / files"));
+    assert!(shortcuts_screen.contains("Show / hide Git graph"));
+    assert!(!app.regions.shortcut_rows.is_empty());
+    let explorer_row = app
+        .regions
+        .shortcut_rows
+        .iter()
+        .find(|(action, _)| *action == ShortcutAction::OpenExplorer)
+        .map(|(_, rect)| *rect)
+        .unwrap();
+    click(&mut app, explorer_row.x + 1, explorer_row.y);
+    assert!(app.shortcut_capture);
+    app.shortcut_capture = false;
+    app.settings_page = SettingsPage::General;
 
     app.settings.workspace_panel_enabled = false;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

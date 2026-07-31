@@ -9,7 +9,7 @@ use std::{path::Path, time::Duration};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AgentStatus, HitTarget, Settings, WorkspaceDropTarget, WorkspacePanel,
+    AgentStatus, HitTarget, Settings, ShortcutAction, WorkspaceDropTarget, WorkspacePanel,
     WorkspacePanelEntryState, WorkspacePanelHitTarget, WorkspacePanelRow,
 };
 
@@ -85,7 +85,7 @@ pub(super) fn draw(
         palette().surface_alt,
     );
 
-    draw_header(frame, panel, area, &mut targets, hovered);
+    draw_header(frame, panel, area, &mut targets, hovered, settings);
 
     let (workspace_section, agent_section) = section_areas(area);
     draw_workspace_section(
@@ -98,7 +98,7 @@ pub(super) fn draw(
     );
     draw_agent_section(frame, panel, agent_section, settings, hovered, &mut targets);
 
-    draw_footer(frame, panel, area);
+    draw_footer(frame, panel, area, settings);
 
     if panel.create_menu_open
         && let Some(anchor) = targets.iter().find_map(|(target, rect)| {
@@ -179,6 +179,7 @@ fn draw_header(
     area: Rect,
     targets: &mut Vec<(HitTarget, Rect)>,
     hovered: Option<WorkspacePanelHitTarget>,
+    settings: &Settings,
 ) {
     let inner = Rect::new(
         area.x.saturating_add(2),
@@ -292,7 +293,11 @@ fn draw_header(
         hovered == Some(WorkspacePanelHitTarget::SnapshotMenu) || panel.snapshot_menu_open,
     );
     frame.render_widget(
-        Paragraph::new("r Refresh").style(Style::default().fg(palette().muted)),
+        Paragraph::new(format!(
+            "{} Refresh",
+            settings.shortcuts.label(ShortcutAction::WorkspaceRefresh)
+        ))
+        .style(Style::default().fg(palette().muted)),
         Rect::new(
             row.x.saturating_add(20),
             row.y,
@@ -647,7 +652,7 @@ fn agent_card_background(state: &WorkspacePanelEntryState, hovered: bool) -> Col
     }
 }
 
-fn draw_footer(frame: &mut Frame<'_>, panel: &WorkspacePanel, area: Rect) {
+fn draw_footer(frame: &mut Frame<'_>, panel: &WorkspacePanel, area: Rect, settings: &Settings) {
     let (header_height, footer_height) = chrome_heights(area);
     let inner = Rect::new(
         area.x.saturating_add(2),
@@ -671,7 +676,12 @@ fn draw_footer(frame: &mut Frame<'_>, panel: &WorkspacePanel, area: Rect) {
     } else if panel.create_menu_open {
         "↑/↓ choose  Enter create  Esc cancel".to_owned()
     } else {
-        "Enter focus Herdr  Click open in Hunkle  g group  F2 rename  Del remove".to_owned()
+        format!(
+            "Enter focus Herdr  Click open in Hunkle  {} group  {} rename  {} remove",
+            settings.shortcuts.label(ShortcutAction::WorkspaceGroup),
+            settings.shortcuts.label(ShortcutAction::WorkspaceRename),
+            settings.shortcuts.label(ShortcutAction::WorkspaceDelete)
+        )
     };
     frame.render_widget(
         Paragraph::new(message).style(Style::default().fg(
@@ -684,9 +694,14 @@ fn draw_footer(frame: &mut Frame<'_>, panel: &WorkspacePanel, area: Rect) {
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     frame.render_widget(
-        Paragraph::new("j/k navigate  r refresh  p presets  w / Esc close")
-            .alignment(ratatui::layout::Alignment::Right)
-            .style(Style::default().fg(palette().faint)),
+        Paragraph::new(format!(
+            "j/k navigate  {} refresh  {} presets  {} / Esc close",
+            settings.shortcuts.label(ShortcutAction::WorkspaceRefresh),
+            settings.shortcuts.label(ShortcutAction::OpenPresets),
+            settings.shortcuts.label(ShortcutAction::ToggleWorkspace)
+        ))
+        .alignment(ratatui::layout::Alignment::Right)
+        .style(Style::default().fg(palette().faint)),
         Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
     );
     if inner.height > 2 {

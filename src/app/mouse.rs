@@ -6,8 +6,8 @@ use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
     ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphHitTarget, HitTarget, LeftPane, Mode,
-    RepositoryBrowserEffect, RepositoryBrowserHitTarget, View, WorkspaceDropTarget,
-    WorkspacePanelHitTarget, WorktreeManagerEffect, WorktreeManagerHitTarget,
+    RepositoryBrowserEffect, RepositoryBrowserHitTarget, SettingsPage, Shortcuts, View,
+    WorkspaceDropTarget, WorkspacePanelHitTarget, WorktreeManagerEffect, WorktreeManagerHitTarget,
     changes::ChangesEffect, scroll_table,
 };
 
@@ -506,6 +506,7 @@ impl App {
             .is_some_and(|rect| rect.contains(point))
         {
             self.mode = Mode::Settings;
+            self.settings_page = SettingsPage::General;
         } else if self.regions.help.is_some_and(|rect| rect.contains(point)) {
             self.mode = Mode::Help;
         } else if self.select_explorer_row(point) {
@@ -1087,6 +1088,22 @@ impl App {
     }
 
     fn handle_settings_mouse(&mut self, mouse: MouseEvent) {
+        if self.settings_page == SettingsPage::Shortcuts
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+        {
+            let key = if mouse.kind == MouseEventKind::ScrollUp {
+                KeyCode::Up
+            } else {
+                KeyCode::Down
+            };
+            for _ in 0..3 {
+                self.handle_shortcut_settings(KeyEvent::new(key, KeyModifiers::NONE));
+            }
+            return;
+        }
         let point = Position::new(mouse.column, mouse.row);
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
             return;
@@ -1097,6 +1114,37 @@ impl App {
             .is_some_and(|rect| !rect.contains(point))
         {
             self.mode = Mode::Normal;
+        } else if self
+            .regions
+            .settings_general_tab
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_page = SettingsPage::General;
+            self.shortcut_capture = false;
+            self.shortcut_error = None;
+        } else if self
+            .regions
+            .settings_shortcuts_tab
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_page = SettingsPage::Shortcuts;
+            self.shortcut_capture = false;
+            self.shortcut_error = None;
+        } else if let Some((action, _)) = self
+            .regions
+            .shortcut_rows
+            .iter()
+            .find(|(_, rect)| rect.contains(point))
+            .copied()
+        {
+            if let Some(index) = Shortcuts::definitions()
+                .iter()
+                .position(|definition| definition.action == action)
+            {
+                self.shortcut_selection = index;
+                self.shortcut_capture = true;
+                self.shortcut_error = None;
+            }
         } else if self
             .regions
             .auto_fetch

@@ -9,7 +9,10 @@ use ratatui_image::{Resize, StatefulImage};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, TextInput, View, WorkspacePanelHitTarget},
+    app::{
+        App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, ShortcutAction,
+        TextInput, View, WorkspacePanelHitTarget,
+    },
     git::{Change, DiffSummary},
     repo_path::{RepoPath, display_os_str},
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
@@ -19,8 +22,7 @@ use super::{
     fill, palette,
     preview::{PreparedPreview, PreviewInput, take_inline_transmission, take_kitty_transmission},
     text::word_wrapped_height,
-    truncate_width,
-    workspace_panel,
+    truncate_width, workspace_panel,
 };
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
@@ -395,14 +397,21 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         ),
     );
     let wrap_label = if app.changes.diff_wrap {
-        "  z:on"
+        format!(
+            "  {}:on",
+            app.settings.shortcuts.label(ShortcutAction::ToggleWrap)
+        )
     } else {
-        "  z:off"
+        format!(
+            "  {}:off",
+            app.settings.shortcuts.label(ShortcutAction::ToggleWrap)
+        )
     };
     let display_path = truncate_width(
         &selected_label,
-        usize::from(diff_header.width)
-            .saturating_sub(8 + UnicodeWidthStr::width(state) + UnicodeWidthStr::width(wrap_label)),
+        usize::from(diff_header.width).saturating_sub(
+            8 + UnicodeWidthStr::width(state) + UnicodeWidthStr::width(wrap_label.as_str()),
+        ),
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -592,7 +601,10 @@ fn draw_commit_editor(
         let height = rendered_text_height(&lines, usize::from(commit_content.width), true);
         (Text::from(lines), height)
     } else {
-        let hint = "Ctrl+Enter commit";
+        let hint = format!(
+            "{} commit",
+            app.settings.shortcuts.label(ShortcutAction::SubmitCommit)
+        );
         let placeholder = "Write a commit message";
         if commit_content.width >= 40 {
             let padding =
@@ -887,11 +899,17 @@ fn draw_explorer_changes(
     let media_loaded = app.changes.preview_image.is_some();
     let database_loaded = app.changes.sqlite_browser.is_some();
     let wrap_label = if media_loaded || database_loaded {
-        ""
+        String::new()
     } else if app.changes.diff_wrap {
-        "  z:on"
+        format!(
+            "  {}:on",
+            app.settings.shortcuts.label(ShortcutAction::ToggleWrap)
+        )
     } else {
-        "  z:off"
+        format!(
+            "  {}:off",
+            app.settings.shortcuts.label(ShortcutAction::ToggleWrap)
+        )
     };
     let markdown_available = app.markdown_preview_available();
     let markdown_rendered = app.markdown_preview_rendered();
@@ -909,7 +927,10 @@ fn draw_explorer_changes(
     let display_path = truncate_width(
         &selected_path,
         usize::from(header_content_width).saturating_sub(
-            preview_kind.len() + 2 + access_label.len() + UnicodeWidthStr::width(wrap_label),
+            preview_kind.len()
+                + 2
+                + access_label.len()
+                + UnicodeWidthStr::width(wrap_label.as_str()),
         ),
     );
     frame.render_widget(

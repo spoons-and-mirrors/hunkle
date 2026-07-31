@@ -12,6 +12,7 @@ mod herdr_prompt;
 mod mouse;
 mod repository_browser;
 mod settings;
+mod shortcuts;
 mod text_input;
 mod workspace_panel;
 mod worktree_manager;
@@ -34,6 +35,7 @@ pub(crate) use repository_browser::{
 };
 pub use settings::Settings;
 pub(crate) use settings::SettingsStore;
+pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
 pub(crate) use workspace_panel::{
     AgentStatus, SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
     WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect, WorkspacePanelEntryState,
@@ -111,6 +113,12 @@ pub(crate) enum ExplorerTab {
     Explorer,
     Worktrees,
     Branches,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsPage {
+    General,
+    Shortcuts,
 }
 
 impl ExplorerTab {
@@ -223,6 +231,9 @@ pub struct Regions {
     pub commit_scroll_max: usize,
     pub graph_table: Option<Rect>,
     pub settings_overlay: Option<Rect>,
+    pub settings_general_tab: Option<Rect>,
+    pub settings_shortcuts_tab: Option<Rect>,
+    pub shortcut_rows: Vec<(ShortcutAction, Rect)>,
     pub action_menu: Option<Rect>,
     pub action_list: Option<Rect>,
     pub command_overlay: Option<Rect>,
@@ -309,6 +320,11 @@ pub struct App {
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
     pub settings_selection: usize,
+    pub(crate) settings_page: SettingsPage,
+    pub(crate) shortcut_selection: usize,
+    pub(crate) shortcut_scroll: usize,
+    pub(crate) shortcut_capture: bool,
+    pub(crate) shortcut_error: Option<String>,
     pub notice: Option<String>,
     pub regions: Regions,
     pub(crate) selection: SelectionState,
@@ -450,6 +466,11 @@ impl App {
             hovered_hit_target: None,
             settings,
             settings_selection: 0,
+            settings_page: SettingsPage::General,
+            shortcut_selection: 0,
+            shortcut_scroll: 0,
+            shortcut_capture: false,
+            shortcut_error: None,
             notice: open_in_background.then(|| "Opening workspace…".to_owned()),
             regions: Regions::default(),
             selection: SelectionState::default(),
@@ -620,7 +641,12 @@ impl App {
             self.should_quit = true;
             return;
         }
-        if key.code == KeyCode::F(3) && self.mode == Mode::Normal {
+        if self.mode == Mode::Normal
+            && self
+                .settings
+                .shortcuts
+                .matches(ShortcutAction::FindFile, key)
+        {
             self.open_file_search();
             return;
         }
@@ -634,14 +660,31 @@ impl App {
         let explorer_dialog_open = match self.explorer_tab {
             ExplorerTab::Worktrees => self.worktree_manager.dialog_open(),
             ExplorerTab::Branches => self.repository_browser.branch_delete_open(),
-            ExplorerTab::Explorer => false,
+            ExplorerTab::Explorer => {
+                self.workspace_explorer.editing_path || self.workspace_explorer.naming_favorite
+            }
         };
         if self.mode == Mode::Explorer && !explorer_dialog_open {
-            let tab = match key.code {
-                KeyCode::F(1) => Some(ExplorerTab::Explorer),
-                KeyCode::F(2) => Some(ExplorerTab::Worktrees),
-                KeyCode::F(3) => Some(ExplorerTab::Branches),
-                _ => None,
+            let tab = if self
+                .settings
+                .shortcuts
+                .matches(ShortcutAction::ExplorerTabFiles, key)
+            {
+                Some(ExplorerTab::Explorer)
+            } else if self
+                .settings
+                .shortcuts
+                .matches(ShortcutAction::ExplorerTabWorktrees, key)
+            {
+                Some(ExplorerTab::Worktrees)
+            } else if self
+                .settings
+                .shortcuts
+                .matches(ShortcutAction::ExplorerTabBranches, key)
+            {
+                Some(ExplorerTab::Branches)
+            } else {
+                None
             };
             if let Some(tab) = tab {
                 self.select_explorer_tab(tab);
@@ -668,7 +711,12 @@ impl App {
             Mode::WorkspacePanel => self.handle_workspace_panel(key),
             Mode::WorkspacePresets => self.handle_workspace_presets(key),
             Mode::Help => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+                if key.code == KeyCode::Esc
+                    || self
+                        .settings
+                        .shortcuts
+                        .matches(ShortcutAction::OpenHelp, key)
+                {
                     self.mode = Mode::Normal;
                 }
             }
@@ -1257,25 +1305,38 @@ impl App {
             self.graph_commit_open = false;
             return;
         }
-        if key.code == KeyCode::Delete
-            && key.modifiers.is_empty()
+        if self
+            .settings
+            .shortcuts
+            .matches(ShortcutAction::DiscardChanges, key)
             && self.changes.pane == LeftPane::Worktree
         {
             self.open_discard_unstaged_dialog();
             return;
         }
         if let Some(index) = self.changes.hunk_selection {
+            if self
+                .settings
+                .shortcuts
+                .matches(ShortcutAction::StageSelection, key)
+            {
+                self.stage_hunk(index, true);
+                return;
+            }
             match key.code {
                 KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
                     self.changes.leave_hunk_selection();
                 }
                 KeyCode::Down | KeyCode::Char('j') => self.scroll_or_move_hunk(1),
                 KeyCode::Up | KeyCode::Char('k') => self.scroll_or_move_hunk(-1),
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                KeyCode::Right | KeyCode::Char('l') => {
                     self.stage_hunk(index, true);
                 }
                 _ => {}
             }
+            return;
+        }
+        if self.handle_normal_shortcut(key) {
             return;
         }
         if self.view == View::Changes
@@ -1286,94 +1347,6 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::F(1) => self.open_herdr_prompt(),
-            KeyCode::F(3) => self.open_file_search(),
-            KeyCode::Char('s')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.changes.pane == LeftPane::Files =>
-            {
-                self.format_selected_file();
-            }
-            KeyCode::Char('q') if self.format_running() => {
-                self.notice = Some("A formatter is still running".to_owned())
-            }
-            KeyCode::Char('q') if self.commit_running() || self.session.command_running() => {
-                self.notice = Some("A Git operation is still running".to_owned())
-            }
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('w')
-                if key.modifiers == KeyModifiers::NONE && self.workspace_panel_enabled() =>
-            {
-                self.open_workspace_panel();
-            }
-            KeyCode::Char('p')
-                if key.modifiers == KeyModifiers::NONE && self.workspace_panel_enabled() =>
-            {
-                self.open_workspace_presets();
-            }
-            KeyCode::Char('r') => self.reload(RefreshScope::ALL),
-            KeyCode::Char('o') => self.open_explorer(),
-            KeyCode::Char('W') => self.open_worktree_manager(),
-            KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => self.mode = Mode::Settings,
-            KeyCode::Char('b') => self.open_repository_browser(),
-            KeyCode::Char('x') => self.open_actions(),
-            KeyCode::Char('G')
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                self.open_git_command();
-            }
-            KeyCode::Char('?') => self.mode = Mode::Help,
-            KeyCode::Char('z')
-                if key.modifiers.is_empty()
-                    && (self.view == View::Changes || self.graph_commit_open) =>
-            {
-                let wrapped = self.changes.toggle_wrap();
-                let subject = if self.view == View::Changes && self.changes.pane == LeftPane::Files
-                {
-                    "Preview"
-                } else {
-                    "Diff"
-                };
-                self.notice = Some(if wrapped {
-                    format!("{subject} wrap enabled")
-                } else {
-                    format!("{subject} wrap disabled")
-                });
-            }
-            KeyCode::Char('m') => self.toggle_markdown_preview(),
-            KeyCode::F(2) if self.changes.pane == LeftPane::Files => {
-                self.open_rename_dialog();
-            }
-            KeyCode::Delete
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.changes.pane == LeftPane::Files =>
-            {
-                self.open_delete_dialog();
-            }
-            KeyCode::Char('e') => self.open_selected_file(false),
-            KeyCode::Char('E') => self.open_selected_file(true),
-            KeyCode::Char('c') => {
-                self.show_left_pane(LeftPane::Worktree);
-                self.focus_commit();
-            }
-            KeyCode::Char('a') if key.modifiers == KeyModifiers::NONE => {
-                self.agents_visible = !self.agents_visible;
-                self.dragging_agents = false;
-                self.notice = Some(if self.agents_visible {
-                    "Agents shown"
-                } else {
-                    "Agents hidden"
-                }
-                .to_owned());
-            }
-            KeyCode::Char('u') if self.changes.pane == LeftPane::Worktree => {
-                self.unstage_all();
-            }
-            KeyCode::Char(' ')
-                if self.changes.pane == LeftPane::Worktree =>
-            {
-                self.toggle_stage()
-            }
             KeyCode::Enter if self.view == View::Graph && !self.graph_commit_open => {
                 self.open_selected_graph_commit();
             }
@@ -1449,9 +1422,100 @@ impl App {
         }
     }
 
+    fn handle_normal_shortcut(&mut self, key: KeyEvent) -> bool {
+        let Some(action) = self.settings.shortcuts.main_action(key) else {
+            return false;
+        };
+        match action {
+            ShortcutAction::TogglePane | ShortcutAction::ToggleGraph | ShortcutAction::FindFile => {
+                return false;
+            }
+            ShortcutAction::Quit if self.format_running() => {
+                self.notice = Some("A formatter is still running".to_owned());
+            }
+            ShortcutAction::Quit if self.commit_running() || self.session.command_running() => {
+                self.notice = Some("A Git operation is still running".to_owned());
+            }
+            ShortcutAction::Quit => self.should_quit = true,
+            ShortcutAction::OpenHerdr => self.open_herdr_prompt(),
+            ShortcutAction::ToggleWorkspace if self.workspace_panel_enabled() => {
+                self.open_workspace_panel();
+            }
+            ShortcutAction::OpenPresets if self.workspace_panel_enabled() => {
+                self.open_workspace_presets();
+            }
+            ShortcutAction::Refresh => self.reload(RefreshScope::ALL),
+            ShortcutAction::OpenExplorer => self.open_explorer(),
+            ShortcutAction::OpenWorktrees => self.open_worktree_manager(),
+            ShortcutAction::OpenSettings => {
+                self.mode = Mode::Settings;
+                self.settings_page = SettingsPage::General;
+            }
+            ShortcutAction::OpenRepositoryBrowser => self.open_repository_browser(),
+            ShortcutAction::OpenActions => self.open_actions(),
+            ShortcutAction::OpenGitCommand => self.open_git_command(),
+            ShortcutAction::OpenHelp => self.mode = Mode::Help,
+            ShortcutAction::ToggleWrap if self.view == View::Changes || self.graph_commit_open => {
+                let wrapped = self.changes.toggle_wrap();
+                let subject = if self.view == View::Changes && self.changes.pane == LeftPane::Files
+                {
+                    "Preview"
+                } else {
+                    "Diff"
+                };
+                self.notice = Some(if wrapped {
+                    format!("{subject} wrap enabled")
+                } else {
+                    format!("{subject} wrap disabled")
+                });
+            }
+            ShortcutAction::ToggleMarkdown => self.toggle_markdown_preview(),
+            ShortcutAction::RenameFile if self.changes.pane == LeftPane::Files => {
+                self.open_rename_dialog();
+            }
+            ShortcutAction::DeleteFile if self.changes.pane == LeftPane::Files => {
+                self.open_delete_dialog();
+            }
+            ShortcutAction::EditFile => self.open_selected_file(false),
+            ShortcutAction::ConfigureEditor => self.open_selected_file(true),
+            ShortcutAction::FocusCommit => {
+                self.show_left_pane(LeftPane::Worktree);
+                self.focus_commit();
+            }
+            ShortcutAction::ToggleAgents => {
+                self.agents_visible = !self.agents_visible;
+                self.dragging_agents = false;
+                self.notice = Some(
+                    if self.agents_visible {
+                        "Agents shown"
+                    } else {
+                        "Agents hidden"
+                    }
+                    .to_owned(),
+                );
+            }
+            ShortcutAction::UnstageAll if self.changes.pane == LeftPane::Worktree => {
+                self.unstage_all();
+            }
+            ShortcutAction::StageSelection if self.changes.pane == LeftPane::Worktree => {
+                self.toggle_stage();
+            }
+            ShortcutAction::SaveOrFormat if self.changes.pane == LeftPane::Files => {
+                self.format_selected_file();
+            }
+            ShortcutAction::DiscardChanges => return false,
+            _ => {}
+        }
+        true
+    }
+
     fn handle_file_editor(&mut self, key: KeyEvent) {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        if control && key.code == KeyCode::Char('s') {
+        if self
+            .settings
+            .shortcuts
+            .matches(ShortcutAction::SaveOrFormat, key)
+        {
             self.save_file_editor();
             return;
         }
@@ -1704,6 +1768,14 @@ impl App {
     fn handle_commit_input(&mut self, key: KeyEvent) {
         self.commit_input.focus();
         self.commit_scroll = None;
+        if self
+            .settings
+            .shortcuts
+            .matches(ShortcutAction::SubmitCommit, key)
+        {
+            self.start_commit();
+            return;
+        }
         let previous = self.commit_input.text().to_owned();
         let input_width = self
             .regions
@@ -1713,12 +1785,6 @@ impl App {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.flush_commit_draft();
-            }
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.start_commit();
-            }
-            KeyCode::Char('j' | 'm') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.start_commit();
             }
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.commit_input.select_all();
@@ -1754,6 +1820,12 @@ impl App {
     }
 
     fn handle_explorer(&mut self, key: KeyEvent) {
+        let key = if self.workspace_explorer.editing_path || self.workspace_explorer.naming_favorite
+        {
+            key
+        } else {
+            self.settings.shortcuts.remap_explorer(key)
+        };
         let command = self
             .workspace_explorer
             .handle_key(key, self.repository().is_some());
@@ -1761,8 +1833,16 @@ impl App {
     }
 
     fn handle_file_search(&mut self, key: KeyEvent) {
+        if self
+            .settings
+            .shortcuts
+            .matches(ShortcutAction::FindFile, key)
+        {
+            self.mode = Mode::Normal;
+            return;
+        }
         match key.code {
-            KeyCode::Esc | KeyCode::F(3) => self.mode = Mode::Normal,
+            KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Enter => self.activate_file_search_result(),
             KeyCode::Down | KeyCode::Tab => self.file_search.move_selection(1),
             KeyCode::Up | KeyCode::BackTab => self.file_search.move_selection(-1),
@@ -1790,12 +1870,52 @@ impl App {
     }
 
     fn handle_settings(&mut self, key: KeyEvent) {
+        if self.shortcut_capture {
+            if key.code == KeyCode::Esc {
+                self.shortcut_capture = false;
+                self.shortcut_error = None;
+                return;
+            }
+            let action = Shortcuts::definitions()[self.shortcut_selection].action;
+            match self
+                .settings
+                .shortcuts
+                .set(action, KeyChord::from_event(key))
+            {
+                Ok(()) => {
+                    self.shortcut_capture = false;
+                    self.shortcut_error = None;
+                    self.settings_changed();
+                }
+                Err(error) => self.shortcut_error = Some(error),
+            }
+            return;
+        }
+        if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
+            self.settings_page = match self.settings_page {
+                SettingsPage::General => SettingsPage::Shortcuts,
+                SettingsPage::Shortcuts => SettingsPage::General,
+            };
+            self.shortcut_error = None;
+            return;
+        }
+        if self.settings_page == SettingsPage::Shortcuts {
+            self.handle_shortcut_settings(key);
+            return;
+        }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('s') => self.mode = Mode::Normal,
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            _ if self
+                .settings
+                .shortcuts
+                .matches(ShortcutAction::OpenSettings, key) =>
+            {
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
                 self.settings_selection = (self.settings_selection + 1) % SETTINGS_ROW_COUNT;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 self.settings_selection =
                     (self.settings_selection + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
             }
@@ -1832,6 +1952,50 @@ impl App {
                 self.open_editor_setting();
             }
             _ => {}
+        }
+    }
+
+    fn handle_shortcut_settings(&mut self, key: KeyEvent) {
+        let count = Shortcuts::definitions().len();
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.shortcut_selection = (self.shortcut_selection + 1) % count;
+                self.keep_shortcut_selection_visible();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.shortcut_selection = (self.shortcut_selection + count - 1) % count;
+                self.keep_shortcut_selection_visible();
+            }
+            KeyCode::Home => {
+                self.shortcut_selection = 0;
+                self.keep_shortcut_selection_visible();
+            }
+            KeyCode::End => {
+                self.shortcut_selection = count.saturating_sub(1);
+                self.keep_shortcut_selection_visible();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.shortcut_capture = true;
+                self.shortcut_error = None;
+            }
+            KeyCode::Delete => {
+                let action = Shortcuts::definitions()[self.shortcut_selection].action;
+                if self.settings.shortcuts.reset(action) {
+                    self.settings_changed();
+                }
+                self.shortcut_error = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn keep_shortcut_selection_visible(&mut self) {
+        let viewport = self.regions.shortcut_rows.len().max(1);
+        if self.shortcut_selection < self.shortcut_scroll {
+            self.shortcut_scroll = self.shortcut_selection;
+        } else if self.shortcut_selection >= self.shortcut_scroll + viewport {
+            self.shortcut_scroll = self.shortcut_selection + 1 - viewport;
         }
     }
 
@@ -1922,7 +2086,12 @@ impl App {
     }
 
     fn handle_herdr_prompt(&mut self, key: KeyEvent) {
-        if matches!(key.code, KeyCode::Esc | KeyCode::F(1)) {
+        if key.code == KeyCode::Esc
+            || self
+                .settings
+                .shortcuts
+                .matches(ShortcutAction::OpenHerdr, key)
+        {
             self.mode = Mode::Normal;
             return;
         }
@@ -2240,6 +2409,11 @@ impl App {
     }
 
     fn handle_repository_browser(&mut self, key: KeyEvent) {
+        let key = if self.repository_browser.branch_delete_open() {
+            key
+        } else {
+            self.settings.shortcuts.remap_repository_browser(key)
+        };
         let effect = self.repository_browser.handle_key(key);
         self.apply_repository_browser_effect_option(effect);
     }
@@ -2276,6 +2450,11 @@ impl App {
     }
 
     fn handle_worktree_manager(&mut self, key: KeyEvent) {
+        let key = if self.worktree_manager.dialog_open() {
+            key
+        } else {
+            self.settings.shortcuts.remap_worktrees(key)
+        };
         let effect = self.worktree_manager.handle_key(key);
         self.apply_worktree_manager_effect_option(effect);
     }
@@ -2406,18 +2585,32 @@ impl App {
     }
 
     fn handle_workspace_panel(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Char('p')
-            && key.modifiers.is_empty()
-            && self.workspace_panel.rename_dialog.is_none()
+        let captures_input = self.workspace_panel.group_editing
+            || self.workspace_panel.snapshot_editing
+            || self.workspace_panel.create_menu_open
+            || self.workspace_panel.snapshot_menu_open
+            || self.workspace_panel.rename_dialog.is_some()
+            || self.workspace_panel.delete_dialog.is_some()
+            || self.workspace_panel.snapshot_load_dialog.is_some();
+        if self
+            .settings
+            .shortcuts
+            .matches(ShortcutAction::OpenPresets, key)
+            && !captures_input
         {
             self.open_workspace_presets();
             return;
         }
-        let effect = self.workspace_panel.handle_key(key);
+        let panel_key = if captures_input {
+            key
+        } else {
+            self.settings.shortcuts.remap_workspace(key)
+        };
+        let effect = self.workspace_panel.handle_key(panel_key);
         if effect == WorkspacePanelEffect::Unhandled {
-            if is_workspace_passthrough_shortcut(key) {
+            if self.settings.shortcuts.matches_main(key) {
                 self.mode = Mode::Normal;
-                self.handle_normal(key);
+                self.handle_key(key);
             }
         } else {
             self.apply_workspace_panel_effect(effect);
@@ -2433,6 +2626,13 @@ impl App {
     }
 
     fn handle_workspace_presets(&mut self, key: KeyEvent) {
+        let key = if self.workspace_panel.snapshot_editing
+            || self.workspace_panel.snapshot_load_dialog.is_some()
+        {
+            key
+        } else {
+            self.settings.shortcuts.remap_presets(key)
+        };
         let effect = self.workspace_panel.handle_workspace_presets(key);
         self.apply_workspace_panel_effect(effect);
     }
@@ -2549,6 +2749,7 @@ impl App {
     }
 
     fn handle_author_filter(&mut self, key: KeyEvent) {
+        let key = self.settings.shortcuts.remap_author_filter(key);
         match self.author_filter.handle_key(key) {
             Some(AuthorFilterEffect::Close) => self.mode = Mode::Normal,
             Some(AuthorFilterEffect::Changed) => self.reconcile_graph_selection(),
@@ -3118,11 +3319,9 @@ impl App {
     }
 
     fn handle_main_navigation(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Tab if key.modifiers.is_empty() => self.toggle_left_pane(),
-            KeyCode::Char('g') if key.modifiers.is_empty() => {
-                self.toggle_graph();
-            }
+        match self.settings.shortcuts.main_action(key) {
+            Some(ShortcutAction::TogglePane) => self.toggle_left_pane(),
+            Some(ShortcutAction::ToggleGraph) => self.toggle_graph(),
             _ => return false,
         }
         true
@@ -3239,24 +3438,6 @@ fn is_markdown_path(path: &RepoPath) -> bool {
                 .iter()
                 .any(|candidate| extension.eq_ignore_ascii_case(candidate))
         })
-}
-
-fn is_workspace_passthrough_shortcut(key: KeyEvent) -> bool {
-    match key.code {
-        KeyCode::F(1)
-        | KeyCode::F(2)
-        | KeyCode::F(3)
-        | KeyCode::Tab
-        | KeyCode::PageUp
-        | KeyCode::PageDown => true,
-        KeyCode::Delete => key.modifiers.contains(KeyModifiers::CONTROL),
-        KeyCode::Char('z') => key.modifiers.is_empty(),
-        KeyCode::Char(
-            'q' | '1' | '2' | 'o' | 's' | 'b' | 'x' | '?' | 'e' | 'E' | 'f' | 'm' | 'c' | 'a' | 'u'
-            | ' ',
-        ) => true,
-        _ => false,
-    }
 }
 
 fn move_table(state: &mut TableState, len: usize, delta: isize) {
@@ -3967,6 +4148,7 @@ mod tests {
                 explorer_left_pane_width: None,
                 editor_command: None,
                 media_preview_protocol: MediaPreviewProtocol::Auto,
+                shortcuts: Shortcuts::default(),
             }
         );
         assert_eq!(app.settings_store.load(), app.settings);
@@ -4019,6 +4201,44 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
         assert!(app.changes.diff_wrap);
         assert_eq!(app.changes.diff_scroll, 37);
+    }
+
+    #[test]
+    fn shortcut_settings_rebind_reset_and_persist_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config");
+        let mut app = App::new(directory.path().to_path_buf());
+        app.settings = Settings::default();
+        app.settings_store = SettingsStore::at(path);
+        app.mode = Mode::Settings;
+        app.settings_page = SettingsPage::Shortcuts;
+        app.shortcut_selection = Shortcuts::definitions()
+            .iter()
+            .position(|definition| definition.action == ShortcutAction::OpenExplorer)
+            .unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        assert_eq!(
+            app.settings.shortcuts.label(ShortcutAction::OpenExplorer),
+            "Alt+v"
+        );
+        assert_eq!(app.settings_store.load(), app.settings);
+
+        app.mode = Mode::Normal;
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        assert_eq!(app.mode, Mode::Explorer);
+
+        app.mode = Mode::Settings;
+        app.settings_page = SettingsPage::Shortcuts;
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(
+            app.settings.shortcuts.label(ShortcutAction::OpenExplorer),
+            "o"
+        );
+        assert_eq!(app.settings_store.load(), app.settings);
     }
 
     #[test]
@@ -4252,8 +4472,23 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert_eq!(app.changes.hunk_selection, Some(0));
+        app.settings
+            .shortcuts
+            .set(
+                ShortcutAction::StageSelection,
+                KeyChord::new(KeyCode::Char('v'), KeyModifiers::ALT),
+            )
+            .unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert_eq!(app.changes.hunk_selection, Some(0));
+        assert!(
+            !app.repository()
+                .unwrap()
+                .changes
+                .iter()
+                .any(|change| change.staged)
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
 
         for _ in 0..200 {
             let _ = app.poll_worker();

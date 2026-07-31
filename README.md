@@ -24,6 +24,8 @@ hunkle opens exactly the current or requested directory. When that directory is 
 
 ## Keys
 
+These are the default bindings. Open Settings and select **Shortcuts** to reassign named commands; structural editing/navigation keys, `Esc`, and emergency `Ctrl+C` remain fixed.
+
 | Key | Action |
 |---|---|
 | `Tab` | Switch between Changes and Files, closing Graph if necessary |
@@ -104,7 +106,7 @@ Click `+ New` in the manager to create a Herdr workspace at Hunkle's current pat
 
 ## Settings
 
-Settings are saved as `key=value` pairs in `$XDG_CONFIG_HOME/hunkle/config`, or `~/.config/hunkle/config` when `XDG_CONFIG_HOME` is unset. On Windows, hunkle uses `%APPDATA%\hunkle\config`. Existing settings are loaded from the old `gitui` location when no hunkle config exists. The first `e` press asks for an editor command such as `nvim`, `micro`, or `code --wait`; hunkle saves it, suspends the TUI, and runs the editor interactively. Press `E` to change it later. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Changes width, Explorer left-pane width, and Agents height are stored as exact terminal-cell counts.
+Settings are saved as `key=value` pairs in `$XDG_CONFIG_HOME/hunkle/config`, or `~/.config/hunkle/config` when `XDG_CONFIG_HOME` is unset. On Windows, hunkle uses `%APPDATA%\hunkle\config`. Existing settings are loaded from the old `gitui` location when no hunkle config exists. The **Shortcuts** page captures a replacement key with `Enter` or a mouse click, resets an override with `Delete`, rejects conflicts in overlapping contexts, and stores only overrides as `shortcut.<command>=<key>`. The first `e` press asks for an editor command such as `nvim`, `micro`, or `code --wait`; hunkle saves it, suspends the TUI, and runs the editor interactively. Press `E` to change it later. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Changes width, Explorer left-pane width, and Agents height are stored as exact terminal-cell counts.
 
 ## Theme
 
@@ -131,6 +133,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `app::explorer` | Workspace discovery, navigation, fuzzy search, and semantic interaction targets |
 | `app::repository_browser` | Branch, pull-request, and issue interaction plus cached remote data |
 | `app::settings` | Settings discovery, legacy fallback, validation, and persistence |
+| `app::shortcuts` | Named command registry, contextual conflict checks, key normalization, overrides, and labels |
 | `app::worktree_manager` | Known-repository inventory and linked-worktree interaction, creation, filtering, opening, and safe removal |
 | `app::workspace_panel` | Workspace Panel interaction, focus transitions, groups, presets, and background refresh |
 | `app::workspace_panel::herdr` | Typed Herdr environment, command, restore, and session-snapshot adapter |
