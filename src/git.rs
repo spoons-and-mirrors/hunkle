@@ -175,6 +175,16 @@ pub struct Branch {
     pub default: bool,
 }
 
+impl Branch {
+    pub(crate) fn revision(&self) -> String {
+        if self.remote {
+            format!("refs/remotes/{}", self.name)
+        } else {
+            format!("refs/heads/{}", self.name)
+        }
+    }
+}
+
 pub(crate) fn branch_delete_protection(branch: &Branch) -> Option<String> {
     if branch.current {
         return Some("Cannot delete the checked-out branch".to_owned());
@@ -1369,6 +1379,25 @@ pub fn commit_diff(root: &Path, oid: &str) -> Result<String> {
     Ok(preview_text(output.stdout, output.stdout_truncated))
 }
 
+pub fn branch_diff(root: &Path, target: &str, current: &str) -> Result<String> {
+    let comparison = format!("{target}...{current}");
+    let output = run_limited(
+        root,
+        &["diff", "--no-ext-diff", "--unified=3", &comparison, "--"],
+        Limits::new(DIFF_PREVIEW_LIMIT, GIT_STDERR_LIMIT, SECTION_DIFF_TIMEOUT),
+    )?;
+    if output.timed_out {
+        bail!("Git branch diff timed out");
+    }
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    if output.stdout.is_empty() {
+        return Ok("No branch differences".to_owned());
+    }
+    Ok(preview_text(output.stdout, output.stdout_truncated))
+}
+
 pub fn commit_summaries(root: &Path, oids: &[String]) -> Result<HashMap<String, DiffSummary>> {
     if oids.is_empty() {
         return Ok(HashMap::new());
@@ -2076,6 +2105,35 @@ mod tests {
         assert!(unstaged.contains("diff --git a/unstaged.txt b/unstaged.txt"));
         assert!(unstaged.contains("untracked.txt"));
         assert_eq!(unstaged.matches("diff --git").count(), 2);
+    }
+
+    #[test]
+    fn branch_diffs_show_changes_unique_to_the_current_branch() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Branch Diff Test"]);
+        git(root, &["config", "user.email", "branch-diff@example.com"]);
+        fs::write(root.join("shared.txt"), "base\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "base"]);
+        git(root, &["switch", "-c", "feature"]);
+        fs::write(root.join("feature.txt"), "feature only\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "feature"]);
+        git(root, &["switch", "main"]);
+        fs::write(root.join("target.txt"), "target only\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "target"]);
+        git(root, &["switch", "feature"]);
+        git(root, &["tag", "main", "feature"]);
+
+        let preview = branch_diff(root, "refs/heads/main", "refs/heads/feature").unwrap();
+
+        assert!(preview.contains("diff --git a/feature.txt b/feature.txt"));
+        assert!(preview.contains("+feature only"));
+        assert!(!preview.contains("target.txt"));
+        assert_eq!(branch_name(root).unwrap(), "feature");
     }
 
     #[cfg(unix)]

@@ -110,6 +110,10 @@ impl App {
                     self.toggle_header_picker(HeaderPickerKind::Branches);
                     return;
                 }
+                Some(HitTarget::HeaderDiff) => {
+                    self.toggle_header_picker(HeaderPickerKind::DiffTargets);
+                    return;
+                }
                 _ => {}
             }
         }
@@ -1062,6 +1066,7 @@ impl App {
                     HitTarget::HeaderRepository
                     | HitTarget::HeaderWorktrees
                     | HitTarget::HeaderBranch
+                    | HitTarget::HeaderDiff
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerItem(_),
                 ) => {}
@@ -1119,6 +1124,7 @@ impl App {
                     HitTarget::HeaderRepository
                     | HitTarget::HeaderWorktrees
                     | HitTarget::HeaderBranch
+                    | HitTarget::HeaderDiff
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerItem(_),
                 ) => {}

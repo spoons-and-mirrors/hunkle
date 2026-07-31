@@ -673,15 +673,29 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let dirty_marker = if dirty { "*" } else { "" };
     let branch_badge = format!(" {branch}{dirty_marker} ");
     let branch_width = UnicodeWidthStr::width(branch_badge.as_str()) as u16;
+    let diff_badge = " DIFF ";
+    let diff_width = UnicodeWidthStr::width(diff_badge) as u16;
     let available = usize::from(area.width);
-    let repository_width = UnicodeWidthStr::width(repository.as_str()).saturating_add(2).min(20);
-    let worktree_width = UnicodeWidthStr::width(worktree.as_str()).saturating_add(2).min(18);
+    let repository_width = UnicodeWidthStr::width(repository.as_str())
+        .saturating_add(2)
+        .min(20);
+    let worktree_width = UnicodeWidthStr::width(worktree.as_str())
+        .saturating_add(2)
+        .min(18);
     let badge_width = if is_local {
         1 + repository_width + 1 + "LOCAL".len()
     } else {
-        1 + repository_width + 1 + worktree_width + 1 + usize::from(branch_width)
+        1 + repository_width
+            + 1
+            + worktree_width
+            + 1
+            + usize::from(branch_width)
+            + 1
+            + usize::from(diff_width)
     };
-    let notice_budget = available.saturating_sub(badge_width.saturating_add(4)).min(30);
+    let notice_budget = available
+        .saturating_sub(badge_width.saturating_add(4))
+        .min(30);
     let notice = (available >= 100 && notice_budget > 0)
         .then(|| app.notice.as_deref())
         .flatten()
@@ -714,7 +728,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         room.saturating_sub(if is_local {
             0
         } else {
-            branch_width.saturating_add(5)
+            branch_width.saturating_add(diff_width).saturating_add(6)
         })
         .min(20),
     );
@@ -741,8 +755,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             &mut x,
             format!(" {worktree} "),
             header_badge_style(palette().orange),
-            room
-                .saturating_sub(branch_width.saturating_add(1))
+            room.saturating_sub(branch_width.saturating_add(diff_width).saturating_add(2))
                 .min(18),
         );
         if let Some(rect) = worktree_rect {
@@ -750,24 +763,31 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .register_hit_target(HitTarget::HeaderWorktrees, rect);
         }
         let room = content_right.saturating_sub(x);
-        let _ = render(
-            frame,
-            &mut x,
-            " ".to_owned(),
-            Style::default(),
-            room,
-        );
+        let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
         let room = content_right.saturating_sub(x);
         let branch_rect = render(
             frame,
             &mut x,
             branch_badge,
             header_badge_style(palette().accent),
-            room,
+            room.saturating_sub(diff_width.saturating_add(1)),
         );
         if let Some(rect) = branch_rect {
             app.regions
                 .register_hit_target(HitTarget::HeaderBranch, rect);
+        }
+        let room = content_right.saturating_sub(x);
+        let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+        let room = content_right.saturating_sub(x);
+        let diff_rect = render(
+            frame,
+            &mut x,
+            diff_badge.to_owned(),
+            header_badge_style(palette().purple),
+            room,
+        );
+        if let Some(rect) = diff_rect {
+            app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
         }
     }
 
@@ -848,6 +868,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         HeaderPickerKind::Repositories => HitTarget::HeaderRepository,
         HeaderPickerKind::Worktrees => HitTarget::HeaderWorktrees,
         HeaderPickerKind::Branches => HitTarget::HeaderBranch,
+        HeaderPickerKind::DiffTargets => HitTarget::HeaderDiff,
     };
     let anchor = app.regions.hit_target_rect(target).unwrap_or(Rect::new(
         frame.area().x,
@@ -882,6 +903,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         HeaderPickerKind::Repositories => " RECENT REPOSITORIES",
         HeaderPickerKind::Worktrees => " WORKTREES",
         HeaderPickerKind::Branches => " BRANCHES",
+        HeaderPickerKind::DiffTargets => " DIFF AGAINST",
     };
     frame.render_widget(
         Paragraph::new(title).style(Style::default().fg(palette().muted)),
@@ -955,6 +977,18 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     }
                     .to_owned(),
                     branch.current,
+                ),
+                HeaderPickerItem::DiffTarget(branch) => (
+                    branch.name.clone(),
+                    if branch.default {
+                        "default target"
+                    } else if branch.remote {
+                        "remote target"
+                    } else {
+                        "local target"
+                    }
+                    .to_owned(),
+                    branch.default,
                 ),
             };
             (index, label, detail, current)

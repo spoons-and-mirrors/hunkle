@@ -75,7 +75,7 @@ use crate::{
     diagnostics,
     filesystem::{atomic_write, same_path},
     formatter,
-    git::{self, RefreshScope, RepositoryData},
+    git::{self, Branch, RefreshScope, RepositoryData},
     repo_path::RepoPath,
     repository_session::{LoadKind, Mutation, RepositorySession, WorkerOutcome},
     selection::SelectionState,
@@ -168,6 +168,7 @@ pub(crate) enum HitTarget {
     HeaderRepository,
     HeaderWorktrees,
     HeaderBranch,
+    HeaderDiff,
     HeaderPickerOverlay,
     HeaderPickerItem(usize),
     Changes(ChangesHitTarget),
@@ -629,6 +630,7 @@ impl App {
             || self.graph_commit_open
             || (self.view == View::Changes
                 && self.changes.pane == LeftPane::Worktree
+                && self.changes.branch_comparison().is_none()
                 && self.repository().is_some_and(|repo| {
                     repo.details_ready && !repo.is_local() && repo.changes.is_empty()
                 }))
@@ -2728,6 +2730,7 @@ impl App {
             HeaderPickerKind::Repositories => self.open_header_repositories(),
             HeaderPickerKind::Worktrees => self.open_header_worktrees(),
             HeaderPickerKind::Branches => self.open_header_branches(),
+            HeaderPickerKind::DiffTargets => self.open_header_diff_targets(),
         }
     }
 
@@ -2833,6 +2836,50 @@ impl App {
             .open(HeaderPickerKind::Branches, items, selected);
     }
 
+    fn open_header_diff_targets(&mut self) {
+        if !self.session.can_start_mutation() {
+            self.header_picker.open_message(
+                HeaderPickerKind::DiffTargets,
+                "Wait for the current Git operation".to_owned(),
+            );
+            return;
+        }
+        let Some(repository) = self.git_repository() else {
+            self.header_picker.open_message(
+                HeaderPickerKind::DiffTargets,
+                "Not a Git repository".to_owned(),
+            );
+            return;
+        };
+        if !repository.details_ready {
+            self.header_picker.open_message(
+                HeaderPickerKind::DiffTargets,
+                "Repository details are still loading".to_owned(),
+            );
+            return;
+        }
+        let items = repository
+            .branches
+            .iter()
+            .filter(|branch| !branch.current)
+            .cloned()
+            .map(HeaderPickerItem::DiffTarget)
+            .collect::<Vec<_>>();
+        let selected = items
+            .iter()
+            .position(|item| matches!(item, HeaderPickerItem::DiffTarget(branch) if branch.default))
+            .unwrap_or(0);
+        if items.is_empty() {
+            self.header_picker.open_message(
+                HeaderPickerKind::DiffTargets,
+                "No target branches".to_owned(),
+            );
+        } else {
+            self.header_picker
+                .open(HeaderPickerKind::DiffTargets, items, selected);
+        }
+    }
+
     fn handle_header_picker(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.header_picker.close(),
@@ -2881,6 +2928,29 @@ impl App {
                     branch: branch.name,
                     remote: branch.remote,
                 });
+            }
+            HeaderPickerItem::DiffTarget(branch) => {
+                let Some(repository) = self.git_repository() else {
+                    return;
+                };
+                let root = repository.root.clone();
+                let current = repository.branch.clone();
+                let current_revision = repository
+                    .branches
+                    .iter()
+                    .find(|branch| branch.current)
+                    .map(Branch::revision)
+                    .or_else(|| repository.history.first().map(|commit| commit.oid.clone()))
+                    .unwrap_or_else(|| "HEAD".to_owned());
+                let target_revision = branch.revision();
+                self.show_left_pane(LeftPane::Worktree);
+                self.changes.preview_branch_diff(
+                    &root,
+                    current,
+                    branch.name,
+                    current_revision,
+                    target_revision,
+                );
             }
         }
     }

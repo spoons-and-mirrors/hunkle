@@ -83,6 +83,11 @@ impl PreviewLoader {
                             .map(LoadedPreview::Text)
                             .unwrap_or_else(|error| LoadedPreview::Error(error.to_string()))
                     }
+                    Task::BranchDiff { target, current } => {
+                        git::branch_diff(&request.root, target, current)
+                            .map(LoadedPreview::Text)
+                            .unwrap_or_else(|error| LoadedPreview::Error(error.to_string()))
+                    }
                     Task::SqlitePage { path, key } => LoadedPreview::DatabasePage {
                         path: path.clone(),
                         key: key.clone(),
@@ -128,6 +133,10 @@ impl PreviewLoader {
 
     pub(super) fn request_section_diff(&mut self, root: &Path, changes: Vec<Change>, staged: bool) {
         self.request(root, Task::SectionDiff { changes, staged });
+    }
+
+    pub(super) fn request_branch_diff(&mut self, root: &Path, target: String, current: String) {
+        self.request(root, Task::BranchDiff { target, current });
     }
 
     pub(super) fn request_sqlite_page(&mut self, root: &Path, path: RepoPath, key: SqlitePageKey) {
@@ -189,6 +198,7 @@ enum Task {
     Commit(String),
     Diff(Change),
     SectionDiff { changes: Vec<Change>, staged: bool },
+    BranchDiff { target: String, current: String },
     SqlitePage { path: RepoPath, key: SqlitePageKey },
 }
 

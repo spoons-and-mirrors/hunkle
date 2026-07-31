@@ -12,7 +12,7 @@ use image::DynamicImage;
 use ratatui::widgets::ListState;
 
 use crate::{
-    git::{Change, Commit, RepositoryData},
+    git::{Branch, Change, Commit, RepositoryData},
     repo_path::RepoPath,
     tree::{ExplorerRow, FileTree, PreparedFileTree, WorktreeRow, WorktreeSection, WorktreeTree},
     ui::preview::PreviewPresentation,
@@ -98,6 +98,15 @@ pub struct ChangesState {
     pub(crate) sqlite_browser: Option<SqliteBrowser>,
     pub(crate) preview_presentation: PreviewPresentation,
     preview_loader: PreviewLoader,
+    branch_comparison: Option<BranchComparison>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BranchComparison {
+    pub(crate) current: String,
+    pub(crate) target: String,
+    target_revision: String,
+    current_revision: String,
 }
 
 struct PendingHunkSelection {
@@ -160,6 +169,7 @@ impl ChangesState {
             sqlite_browser: None,
             preview_presentation: PreviewPresentation::default(),
             preview_loader: PreviewLoader::new(),
+            branch_comparison: None,
         };
         state.rebuild_worktree_rows(repo);
         state.rebuild_explorer_rows(repo);
@@ -192,6 +202,7 @@ impl ChangesState {
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
+        self.branch_comparison = None;
         self.collapsed_directories.clear();
         self.expanded_explorer_directories.clear();
         self.directory_generation = self.directory_generation.wrapping_add(1);
@@ -237,6 +248,7 @@ impl ChangesState {
     }
 
     pub(super) fn restore_selection(&mut self, repo: &RepositoryData, selection: ChangesSelection) {
+        let branch_comparison = self.branch_comparison.clone();
         self.rebuild_worktree_rows(Some(repo));
         self.refresh_explorer_directories(repo);
         self.rebuild_explorer_rows(Some(repo));
@@ -281,6 +293,28 @@ impl ChangesState {
             .or_else(|| self.initial_explorer_row());
         self.explorer_state.select(explorer_row);
         self.refresh_diff(Some(repo));
+        if let Some(comparison) = branch_comparison
+            && repo.branch == comparison.current
+            && repo
+                .branches
+                .iter()
+                .any(|branch| branch.revision() == comparison.target_revision)
+        {
+            let current_revision = repo
+                .branches
+                .iter()
+                .find(|branch| branch.current)
+                .map(Branch::revision)
+                .or_else(|| repo.history.first().map(|commit| commit.oid.clone()))
+                .unwrap_or(comparison.current_revision);
+            self.preview_branch_diff(
+                &repo.root,
+                comparison.current,
+                comparison.target,
+                current_revision,
+                comparison.target_revision,
+            );
+        }
     }
 
     pub(crate) fn worktree_rows(&self, _repo: &RepositoryData) -> &[WorktreeRow] {
@@ -934,6 +968,7 @@ impl ChangesState {
     }
 
     pub(super) fn preview_commit(&mut self, repo: &RepositoryData, commit: &Commit) {
+        self.branch_comparison = None;
         self.diff_scroll = 0;
         self.markdown_alternate_scroll = None;
         self.hunk_selection = None;
@@ -942,6 +977,35 @@ impl ChangesState {
         self.set_diff("Loading preview…".to_owned());
         self.preview_loader
             .request_commit(&repo.root, commit.oid.clone());
+    }
+
+    pub(crate) fn branch_comparison(&self) -> Option<&BranchComparison> {
+        self.branch_comparison.as_ref()
+    }
+
+    pub(super) fn preview_branch_diff(
+        &mut self,
+        root: &Path,
+        current: String,
+        target: String,
+        current_revision: String,
+        target_revision: String,
+    ) {
+        self.diff_scroll = 0;
+        self.markdown_alternate_scroll = None;
+        self.hunk_selection = None;
+        self.hunk_pin_pending = false;
+        self.pending_hunk_selection = None;
+        self.pending_explorer_selection = None;
+        self.branch_comparison = Some(BranchComparison {
+            current,
+            target: target.clone(),
+            target_revision: target_revision.clone(),
+            current_revision: current_revision.clone(),
+        });
+        self.set_diff("Loading preview…".to_owned());
+        self.preview_loader
+            .request_branch_diff(root, target_revision, current_revision);
     }
 
     pub(super) fn enter_hunk_selection(&mut self, repo: &RepositoryData) -> bool {
@@ -1164,6 +1228,7 @@ impl ChangesState {
     }
 
     pub(super) fn refresh_diff(&mut self, repo: Option<&RepositoryData>) {
+        self.branch_comparison = None;
         self.markdown_alternate_scroll = None;
         let preserve_hunk = self.pending_hunk_selection.as_ref().is_some_and(|pending| {
             repo.and_then(|repo| {
@@ -1299,7 +1364,9 @@ impl ChangesState {
                     if blocks_pending {
                         self.pending_explorer_selection = None;
                     }
-                    if completion.directory.is_empty() || blocks_pending || selected_directory {
+                    if self.branch_comparison.is_none()
+                        && (completion.directory.is_empty() || blocks_pending || selected_directory)
+                    {
                         self.preview_loader.invalidate();
                         self.set_diff(error);
                         changed = true;
@@ -1332,6 +1399,9 @@ impl ChangesState {
             }
             changed = true;
             directories_changed = true;
+        }
+        if directories_changed && self.branch_comparison.is_some() {
+            return changed;
         }
         if directories_changed
             && let Some((path, viewport)) = self.pending_explorer_selection.clone()
@@ -1818,6 +1888,56 @@ mod tests {
         state.select_last(Some(&repo), 10, 10);
         state.move_selection(Some(&repo), 1, 10, 10);
         assert_eq!(state.preview_content_generation, last_generation);
+    }
+
+    #[test]
+    fn repository_refresh_preserves_an_active_branch_comparison() {
+        let mut repo = repository_data();
+        repo.branches = vec![
+            Branch {
+                name: "main".to_owned(),
+                upstream: String::new(),
+                oid: "1111111".to_owned(),
+                date: String::new(),
+                subject: String::new(),
+                remote: false,
+                current: true,
+                default: true,
+            },
+            Branch {
+                name: "topic".to_owned(),
+                upstream: String::new(),
+                oid: "2222222".to_owned(),
+                date: String::new(),
+                subject: String::new(),
+                remote: false,
+                current: false,
+                default: false,
+            },
+        ];
+        let mut state = ChangesState::new(Some(&repo));
+        state.preview_branch_diff(
+            &repo.root,
+            "main".to_owned(),
+            "topic".to_owned(),
+            "refs/heads/main".to_owned(),
+            "refs/heads/topic".to_owned(),
+        );
+
+        let selection = state.capture_selection(&repo);
+        state.restore_selection(&repo, selection);
+
+        assert_eq!(
+            state
+                .branch_comparison()
+                .map(|comparison| (comparison.current.as_str(), comparison.target.as_str())),
+            Some(("main", "topic"))
+        );
+
+        let stale_selection = state.capture_selection(&repo);
+        state.refresh_diff(Some(&repo));
+        state.restore_selection(&repo, stale_selection);
+        assert!(state.branch_comparison().is_none());
     }
 
     #[test]
