@@ -24,7 +24,7 @@ pub(crate) use commit_message::CommitMessageGenerator;
 pub(crate) use commit_summary::CommitSummaryCache;
 pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use explorer::{ExplorerHitTarget, SurroundingEntry};
-pub(crate) use file_editor::FileEditor;
+pub(crate) use file_editor::{FileEditor, TAB_WIDTH};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use herdr_prompt::HerdrPrompt;
@@ -206,6 +206,11 @@ pub struct Regions {
     pub agents_bounds: Option<Rect>,
     pub diff: Option<Rect>,
     pub preview_body: Option<Rect>,
+    pub preview_path: Option<RepoPath>,
+    pub preview_untracked: bool,
+    pub preview_generation: u64,
+    pub preview_scroll: usize,
+    pub preview_wrap: bool,
     pub diff_scrollbar: Option<Rect>,
     pub diff_scroll_thumb: Option<Rect>,
     pub diff_scroll_max: usize,
@@ -579,6 +584,11 @@ impl App {
         self.session.can_restart()
             && !self.commit_message_running()
             && !self.worktree_removal_running()
+            && !self.file_editor.as_ref().is_some_and(FileEditor::dirty)
+    }
+
+    pub(crate) fn dirty_file_edit(&self) -> bool {
+        self.file_editor.as_ref().is_some_and(FileEditor::dirty)
     }
 
     pub(crate) fn shutdown(&mut self) {
@@ -656,8 +666,12 @@ impl App {
         }
         match self.mode {
             Mode::FileEdit => {
-                if let Some(editor) = &mut self.file_editor {
-                    editor.insert(text);
+                if self.file_editor_viewport_too_small() {
+                    self.notice = Some("Resize the terminal before editing".to_owned());
+                } else if let Some(editor) = &mut self.file_editor
+                    && let Err(error) = editor.insert(text)
+                {
+                    self.notice = Some(format!("Could not insert text: {error}"));
                 }
             }
             Mode::Commit => {
@@ -1451,6 +1465,10 @@ impl App {
             self.notice = None;
             return;
         }
+        if self.file_editor_viewport_too_small() {
+            self.notice = Some("Resize the terminal before editing".to_owned());
+            return;
+        }
 
         let viewport = self
             .regions
@@ -1461,6 +1479,22 @@ impl App {
             return;
         };
         editor.discard_armed = false;
+        let insertion_error = match key.code {
+            KeyCode::Enter => editor.insert_newline().err(),
+            KeyCode::Tab => editor.insert("\t").err(),
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                editor.insert_char(character).err()
+            }
+            _ => None,
+        };
+        if let Some(error) = insertion_error {
+            self.notice = Some(format!("Could not insert text: {error}"));
+            return;
+        }
         match key.code {
             KeyCode::Left if control => editor.move_home(),
             KeyCode::Right if control => editor.move_end(),
@@ -1476,20 +1510,22 @@ impl App {
             KeyCode::PageDown => editor.move_vertical(viewport as isize),
             KeyCode::Backspace => editor.backspace(),
             KeyCode::Delete => editor.delete(),
-            KeyCode::Enter => editor.insert_newline(),
-            KeyCode::Tab => editor.insert("\t"),
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                editor.insert_char(character);
-            }
+            KeyCode::Enter | KeyCode::Tab | KeyCode::Char(_) => {}
             _ => {}
         }
     }
 
+    fn file_editor_viewport_too_small(&self) -> bool {
+        self.regions
+            .screen
+            .is_some_and(|screen| screen.width < 60 || screen.height < 16)
+    }
+
     fn start_file_editor(&mut self, path: RepoPath, line: usize, column: usize) {
+        if self.session.open_running() {
+            self.notice = Some("Wait for the workspace to finish opening".to_owned());
+            return;
+        }
         if self.format_running() {
             self.notice = Some("Wait for the formatter to finish".to_owned());
             return;
@@ -2627,6 +2663,10 @@ impl App {
         ));
         if self.worktree_removal_running() {
             self.notice = Some("Wait for the worktree removal to finish".to_owned());
+            return false;
+        }
+        if self.file_editor.is_some() {
+            self.notice = Some("Save or close the editor before opening a workspace".to_owned());
             return false;
         }
         self.flush_commit_draft();
@@ -4307,7 +4347,7 @@ mod tests {
         let mut app = App::new(root.to_path_buf());
         app.settings.format_on_save = false;
         let mut editor = FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap();
-        editor.insert("edited ");
+        editor.insert("edited ").unwrap();
         app.file_editor = Some(editor);
         app.mode = Mode::FileEdit;
 
@@ -4319,6 +4359,57 @@ mod tests {
         );
         assert_eq!(app.notice.as_deref(), Some("Saved notes.txt"));
         assert!(!app.format_running());
+    }
+
+    #[test]
+    fn dirty_inline_editor_blocks_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("notes.txt"), "notes\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+        let mut editor = FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap();
+        assert!(app.can_restart());
+
+        editor.insert("edited ").unwrap();
+        app.file_editor = Some(editor);
+
+        assert!(!app.can_restart());
+        assert!(app.dirty_file_edit());
+    }
+
+    #[test]
+    fn undersized_inline_editor_rejects_text_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("notes.txt"), "notes\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+        app.file_editor = Some(FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap());
+        app.mode = Mode::FileEdit;
+        app.regions.screen = Some(Rect::new(0, 0, 50, 12));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert_eq!(app.file_editor.as_ref().unwrap().text(), "notes\n");
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Resize the terminal before editing")
+        );
+    }
+
+    #[test]
+    fn workspace_open_is_blocked_while_inline_editor_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("notes.txt"), "notes\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+        app.file_editor = Some(FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap());
+
+        assert!(!app.start_repository_open(root.join("other"), false));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Save or close the editor before opening a workspace")
+        );
+        assert!(!app.session.open_running());
     }
 
     #[test]

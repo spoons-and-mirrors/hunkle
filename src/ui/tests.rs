@@ -3229,6 +3229,127 @@ fn inline_editor_keeps_line_numbers_in_a_fixed_gutter() {
     assert_eq!(second_gutter, "    2  ");
 }
 
+#[test]
+fn inline_editor_expands_tabs_and_maps_clicks_to_the_same_columns() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("notes.txt"), "\tvalue\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor =
+        Some(crate::app::FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap());
+    app.mode = Mode::FileEdit;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let body = app.regions.preview_body.unwrap();
+    let rendered = (body.x..body.x + 9)
+        .map(|x| terminal.backend().buffer()[(x, body.y)].symbol())
+        .collect::<String>();
+    assert_eq!(rendered, "    value");
+
+    click(&mut app, body.x + 4, body.y);
+    app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+    assert_eq!(app.file_editor.as_ref().unwrap().text(), "\tXvalue\n");
+}
+
+#[test]
+fn inline_editor_scrolls_past_u16_columns_without_clipping() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let content = format!("{}X\n", "a".repeat(70_000));
+    fs::write(root.join("long.txt"), &content).unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor =
+        Some(crate::app::FileEditor::open(root, RepoPath::from("long.txt"), 1, 70_001).unwrap());
+    app.mode = Mode::FileEdit;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let body = app.regions.preview_body.unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(body.x + body.width - 2, body.y)].symbol(),
+        "X"
+    );
+}
+
+#[test]
+fn untracked_preview_source_lines_open_in_the_inline_editor() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    fs::write(root.join("notes.txt"), "first\nsecond\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    wait_for(&mut app, |app| app.changes.diff.contains("Untracked file:"));
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let body = app.regions.preview_body.unwrap();
+    assert!(app.regions.preview_untracked);
+
+    click(&mut app, body.x, body.y + 3);
+
+    assert_eq!(app.mode, Mode::FileEdit);
+    let editor = app.file_editor.as_ref().unwrap();
+    assert_eq!(editor.path(), &RepoPath::from("notes.txt"));
+    assert_eq!(editor.cursor_position().0, 1);
+}
+
+#[test]
+fn preview_click_uses_the_scroll_state_from_the_rendered_frame() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    fs::write(root.join("notes.txt"), "first\nsecond\n").unwrap();
+    run_git(root, &["add", "notes.txt"]);
+    run_git(
+        root,
+        &[
+            "-c",
+            "user.name=Render Test",
+            "-c",
+            "user.email=render@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+    );
+    let mut app = App::new(root.to_path_buf());
+    app.changes.pane = LeftPane::Files;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.explorer_list.unwrap();
+    let row = app
+        .changes
+        .explorer_rows()
+        .iter()
+        .position(|row| {
+            row.file_path
+                .as_ref()
+                .is_some_and(|path| path == "notes.txt")
+        })
+        .unwrap();
+    click(&mut app, list.x + 2, list.y + row as u16);
+    wait_for(&mut app, |app| app.changes.diff == "first\nsecond\n");
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let body = app.regions.preview_body.unwrap();
+
+    app.changes.set_diff("first\nsecond\n".to_owned());
+    click(&mut app, body.x, body.y);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Preview changed; click again to edit")
+    );
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let body = app.regions.preview_body.unwrap();
+    app.changes.diff_scroll = 1;
+    click(&mut app, body.x, body.y);
+
+    assert_eq!(app.mode, Mode::FileEdit);
+    assert_eq!(app.file_editor.as_ref().unwrap().cursor_position().0, 0);
+}
+
 fn wait_for_halfblock_render(terminal: &mut Terminal<TestBackend>, app: &mut App) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {

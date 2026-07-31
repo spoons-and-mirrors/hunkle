@@ -549,15 +549,19 @@ impl App {
         let Some(body) = self.regions.preview_body else {
             return;
         };
+        if self.regions.preview_generation != self.changes.preview_content_generation {
+            self.notice = Some("Preview changed; click again to edit".to_owned());
+            return;
+        }
         let rendered_row = self
-            .changes
-            .diff_scroll
+            .regions
+            .preview_scroll
             .saturating_add(usize::from(point.y.saturating_sub(body.y)));
-        let wrapped = self.changes.diff_wrap;
+        let wrapped = self.regions.preview_wrap;
         let width = usize::from(body.width);
 
         if self.changes.pane == LeftPane::Files {
-            let Some(path) = self.selected_explorer_file_path().cloned() else {
+            let Some(path) = self.regions.preview_path.clone() else {
                 return;
             };
             let Some(line) = self
@@ -577,18 +581,40 @@ impl App {
             return;
         }
 
-        let change = self.session.data().and_then(|repo| {
-            self.changes
-                .selected_change_index(repo)
-                .and_then(|index| repo.changes.get(index))
-                .cloned()
-        });
-        let Some(change) = change else {
+        let Some(path) = self.regions.preview_path.clone() else {
             return;
         };
-        if change.staged {
-            self.notice =
-                Some("Staged diffs are read-only; edit the working file instead".to_owned());
+        if self.regions.preview_untracked {
+            let Some(display_line) = self
+                .changes
+                .preview_presentation
+                .source_line_at_rendered_row(rendered_row)
+            else {
+                return;
+            };
+            let Some(source_line) = display_line.checked_sub(2) else {
+                self.notice = Some("Click a source line to edit this file".to_owned());
+                return;
+            };
+            let displayed = self
+                .changes
+                .diff
+                .lines()
+                .nth(display_line.saturating_sub(1));
+            let next = self.changes.diff.lines().nth(display_line);
+            if displayed.is_some_and(|line| line.starts_with("[Preview truncated"))
+                || displayed.is_some_and(str::is_empty)
+                    && next.is_some_and(|line| line.starts_with("[Preview truncated"))
+            {
+                self.notice = Some("Click a source line to edit this file".to_owned());
+                return;
+            }
+            let column = if wrapped {
+                0
+            } else {
+                usize::from(point.x.saturating_sub(body.x))
+            };
+            self.start_file_editor(path, source_line, column);
             return;
         }
         let Some(line) = self
@@ -605,7 +631,7 @@ impl App {
         } else {
             usize::from(point.x.saturating_sub(body.x)).saturating_sub(gutter)
         };
-        self.start_file_editor(change.path, line, column);
+        self.start_file_editor(path, line, column);
     }
 
     fn place_file_editor_cursor(&mut self, point: Position) {

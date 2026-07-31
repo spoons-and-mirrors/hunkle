@@ -101,7 +101,11 @@ fn main() -> Result<()> {
                 restarting = true;
                 break;
             }
-            let notice = "Update ready; restarting after the current operation…";
+            let notice = if app.dirty_file_edit() {
+                "Update ready; save or discard editor changes to restart"
+            } else {
+                "Update ready; restarting after the current operation…"
+            };
             if app.notice.as_deref() != Some(notice) {
                 app.notice = Some(notice.to_owned());
                 dirty = true;

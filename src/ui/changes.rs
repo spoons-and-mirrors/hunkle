@@ -512,7 +512,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     }
     let show_hunk_actions =
         !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
-    let editable_diff = selected_change.is_some_and(|change| !change.staged);
+    let editable_diff = selected_change
+        .filter(|change| !change.staged)
+        .map(|change| (change.path.clone(), change.code == '?'));
     let mut preview = prepare_preview_lines(
         app,
         diff_body,
@@ -522,8 +524,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         false,
         scrollable_metadata_height,
     );
-    if editable_diff {
+    if let Some((path, untracked)) = editable_diff {
         app.regions.preview_body = Some(diff_body);
+        app.regions.preview_path = Some(path);
+        app.regions.preview_untracked = untracked;
+        app.regions.preview_generation = app.changes.preview_content_generation;
+        app.regions.preview_scroll = app.changes.diff_scroll;
+        app.regions.preview_wrap = app.changes.diff_wrap;
     }
     let (hunk_rows, rendered_height) = if show_hunk_actions {
         app.changes
@@ -1105,13 +1112,18 @@ fn draw_explorer_changes(
         super::sqlite::draw(frame, app, preview_body);
     } else {
         app.changes.preview_presentation.hide_media();
-        let path = app
-            .selected_explorer_file_path()
+        let editable_path = app.selected_explorer_file_path().cloned();
+        let path = editable_path
+            .as_ref()
             .map_or_else(String::new, RepoPath::display);
         let preview =
             prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered, 0);
         if !markdown_rendered {
             app.regions.preview_body = Some(preview_body);
+            app.regions.preview_path = editable_path;
+            app.regions.preview_generation = app.changes.preview_content_generation;
+            app.regions.preview_scroll = app.changes.diff_scroll;
+            app.regions.preview_wrap = app.changes.diff_wrap;
         }
         render_scrollable_content(frame, app, columns[1], preview_body, preview, 0);
     }

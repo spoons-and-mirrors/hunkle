@@ -61,6 +61,7 @@ pub(crate) fn atomic_write_if_unchanged(
     content: &[u8],
 ) -> Result<()> {
     let path = safe_regular_file(root, relative)?;
+    ensure_writable(&path, relative)?;
     let current = fs::read(&path)
         .with_context(|| format!("could not read {} before saving", path.display()))?;
     if current != expected {
@@ -76,6 +77,7 @@ pub(crate) fn atomic_write_if_unchanged(
         .with_context(|| format!("could not write {}", path.display()))?;
 
     let checked_path = safe_regular_file(root, relative)?;
+    ensure_writable(&checked_path, relative)?;
     let current = fs::read(&checked_path)
         .with_context(|| format!("could not verify {} before saving", path.display()))?;
     if current != expected {
@@ -86,6 +88,18 @@ pub(crate) fn atomic_write_if_unchanged(
     }
     file.commit()
         .with_context(|| format!("could not save {}", path.display()))
+}
+
+fn ensure_writable(path: &Path, relative: &RepoPath) -> Result<()> {
+    if path
+        .metadata()
+        .with_context(|| format!("could not inspect {}", path.display()))?
+        .permissions()
+        .readonly()
+    {
+        bail!("{} is read-only", relative.display());
+    }
+    Ok(())
 }
 
 pub(crate) fn same_path(left: &Path, right: &Path) -> bool {

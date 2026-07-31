@@ -21,8 +21,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        App, ExplorerTab, FileDialogKind, GraphHitTarget, HitTarget, LeftPane, Mode, Regions, View,
-        WorkspacePanelHitTarget,
+        App, ExplorerTab, FileDialogKind, GraphHitTarget, HitTarget, LeftPane, Mode, Regions,
+        TAB_WIDTH, View, WorkspacePanelHitTarget,
     },
     theme::{Palette, load_theme},
 };
@@ -42,8 +42,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     if frame.area().width < 60 || frame.area().height < 16 {
         app.reset_media_presentation();
+        let message = if app.mode == Mode::FileEdit {
+            "hunkle editor needs at least 60 columns and 16 rows\n\nctrl+s  save + close    esc  close"
+        } else {
+            "hunkle needs at least 60 columns and 16 rows\n\nq  quit"
+        };
         frame.render_widget(
-            Paragraph::new("hunkle needs at least 60 columns and 16 rows\n\nq  quit")
+            Paragraph::new(message)
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(palette().ink)),
             frame.area(),
@@ -319,7 +324,7 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     let path = editor.path().display();
     let dirty = if editor.dirty() { "modified" } else { "saved" };
     let title = format!(
-        "EDIT  {path}  {dirty}  Ln {}, Col {}  ctrl+s save  esc close",
+        "EDIT  {path}  {dirty}  Ln {}, Col {}  ctrl+s save + close  esc close",
         cursor_line.saturating_add(1),
         cursor_column.saturating_add(1)
     );
@@ -332,13 +337,15 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         header,
     );
 
-    let mut lines = text::styled_source_window(
+    let lines = text::styled_source_window(
         editor.text(),
         &path,
         0,
         editor.scroll_line,
         usize::from(editor_body.height),
     );
+    let mut lines =
+        editor_visible_lines(lines, editor.scroll_column, usize::from(editor_body.width));
     while lines.len() <= cursor_line.saturating_sub(editor.scroll_line) {
         lines.push(Line::default().style(Style::default().bg(palette().panel)));
     }
@@ -358,9 +365,7 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(line_numbers), gutter);
     frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(palette().panel))
-            .scroll((0, u16::try_from(editor.scroll_column).unwrap_or(u16::MAX))),
+        Paragraph::new(lines).style(Style::default().bg(palette().panel)),
         editor_body,
     );
     let cursor_x = editor_body.x.saturating_add(
@@ -372,6 +377,56 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     if cursor_x < editor_body.right() && cursor_y < editor_body.bottom() {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+fn editor_visible_lines(
+    mut lines: Vec<Line<'static>>,
+    start: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let end = start.saturating_add(width);
+    for line in &mut lines {
+        let mut column = 0usize;
+        let mut visible_spans = Vec::new();
+        for span in std::mem::take(&mut line.spans) {
+            let mut visible = String::new();
+            for grapheme in span.content.graphemes(true) {
+                let grapheme_width = if grapheme == "\t" {
+                    TAB_WIDTH - column % TAB_WIDTH
+                } else {
+                    UnicodeWidthStr::width(grapheme)
+                };
+                let grapheme_end = column.saturating_add(grapheme_width);
+                if grapheme_width == 0 {
+                    if column >= start && column < end {
+                        visible.push_str(grapheme);
+                    }
+                } else if column >= start && grapheme_end <= end {
+                    if grapheme == "\t" {
+                        visible.push_str(&" ".repeat(grapheme_width));
+                    } else {
+                        visible.push_str(grapheme);
+                    }
+                } else {
+                    let overlap_start = column.max(start);
+                    let overlap_end = grapheme_end.min(end);
+                    visible.push_str(&" ".repeat(overlap_end.saturating_sub(overlap_start)));
+                }
+                column = grapheme_end;
+                if column >= end {
+                    break;
+                }
+            }
+            if !visible.is_empty() {
+                visible_spans.push(Span::styled(visible, span.style));
+            }
+            if column >= end {
+                break;
+            }
+        }
+        line.spans = visible_spans;
+    }
+    lines
 }
 
 fn finish_selection(frame: &mut Frame<'_>, app: &mut App) {
