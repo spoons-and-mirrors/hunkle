@@ -1380,10 +1380,26 @@ pub fn commit_diff(root: &Path, oid: &str) -> Result<String> {
 }
 
 pub fn branch_diff(root: &Path, target: &str, current: &str) -> Result<String> {
-    let comparison = format!("{target}...{current}");
+    let merge_base = run_limited(
+        root,
+        &["merge-base", target, current],
+        Limits::new(1024, GIT_STDERR_LIMIT, SECTION_DIFF_TIMEOUT),
+    )?;
+    if merge_base.timed_out {
+        bail!("Git merge-base timed out");
+    }
+    if !merge_base.status.success() {
+        bail!("{}", clean_stderr(&merge_base));
+    }
+    let merge_base = String::from_utf8_lossy(&merge_base.stdout)
+        .trim()
+        .to_owned();
+    if merge_base.is_empty() {
+        bail!("Git did not find a merge base");
+    }
     let output = run_limited(
         root,
-        &["diff", "--no-ext-diff", "--unified=3", &comparison, "--"],
+        &["diff", "--no-ext-diff", "--unified=3", &merge_base, "--"],
         Limits::new(DIFF_PREVIEW_LIMIT, GIT_STDERR_LIMIT, SECTION_DIFF_TIMEOUT),
     )?;
     if output.timed_out {
@@ -1392,10 +1408,29 @@ pub fn branch_diff(root: &Path, target: &str, current: &str) -> Result<String> {
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    if output.stdout.is_empty() {
+    let mut bytes = output.stdout;
+    let mut truncated = output.stdout_truncated;
+    if !truncated {
+        let (changes, _) = status(root)?;
+        let untracked = changes
+            .into_iter()
+            .filter(|change| !change.staged && change.code == '?')
+            .collect::<Vec<_>>();
+        if !untracked.is_empty() {
+            let content = section_diff(root, &untracked, false)?;
+            if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+                bytes.push(b'\n');
+            }
+            let remaining = DIFF_PREVIEW_LIMIT.saturating_sub(bytes.len());
+            let retained = content.len().min(remaining);
+            bytes.extend_from_slice(&content.as_bytes()[..retained]);
+            truncated = retained < content.len();
+        }
+    }
+    if bytes.is_empty() {
         return Ok("No branch differences".to_owned());
     }
-    Ok(preview_text(output.stdout, output.stdout_truncated))
+    Ok(preview_text(bytes, truncated))
 }
 
 pub fn commit_summaries(root: &Path, oids: &[String]) -> Result<HashMap<String, DiffSummary>> {
@@ -2127,11 +2162,20 @@ mod tests {
         git(root, &["commit", "-m", "target"]);
         git(root, &["switch", "feature"]);
         git(root, &["tag", "main", "feature"]);
+        fs::write(root.join("feature.txt"), "feature only\nunstaged\n").unwrap();
+        fs::write(root.join("staged.txt"), "staged\n").unwrap();
+        fs::write(root.join("untracked.txt"), "untracked\n").unwrap();
+        git(root, &["add", "staged.txt"]);
 
         let preview = branch_diff(root, "refs/heads/main", "refs/heads/feature").unwrap();
 
         assert!(preview.contains("diff --git a/feature.txt b/feature.txt"));
         assert!(preview.contains("+feature only"));
+        assert!(preview.contains("+unstaged"));
+        assert!(preview.contains("diff --git a/staged.txt b/staged.txt"));
+        assert!(preview.contains("+staged"));
+        assert!(preview.contains("diff --git \"a/untracked.txt\" \"b/untracked.txt\""));
+        assert!(preview.contains("+untracked"));
         assert!(!preview.contains("target.txt"));
         assert_eq!(branch_name(root).unwrap(), "feature");
     }
