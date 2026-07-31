@@ -373,6 +373,13 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     let Some(editor) = &mut app.file_editor else {
         return;
     };
+    if let Some(anchor) = app.file_editor_anchor.take() {
+        let row = usize::from(anchor.y.saturating_sub(editor_body.y))
+            .min(usize::from(editor_body.height.saturating_sub(1)));
+        let column = usize::from(anchor.x.saturating_sub(editor_body.x))
+            .min(usize::from(editor_body.width.saturating_sub(1)));
+        editor.anchor_cursor_at(row, column);
+    }
     editor.ensure_cursor_visible(
         usize::from(editor_body.height),
         usize::from(editor_body.width),

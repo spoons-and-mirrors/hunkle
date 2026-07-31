@@ -277,7 +277,6 @@ pub struct Regions {
     pub preview_untracked: bool,
     pub preview_generation: u64,
     pub preview_scroll: usize,
-    pub preview_wrap: bool,
     pub diff_scrollbar: Option<Rect>,
     pub diff_scroll_thumb: Option<Rect>,
     pub diff_scroll_max: usize,
@@ -351,6 +350,12 @@ impl Regions {
     }
 }
 
+struct FileEditorReturn {
+    path: RepoPath,
+    pane: LeftPane,
+    scroll: usize,
+}
+
 pub struct App {
     pub(crate) session: RepositorySession,
     pub view: View,
@@ -402,6 +407,8 @@ pub struct App {
     reload_queued: Option<RefreshScope>,
     pub(crate) editor_input: String,
     pub(crate) file_editor: Option<FileEditor>,
+    pub(crate) file_editor_anchor: Option<Position>,
+    file_editor_return: Option<FileEditorReturn>,
     pub(crate) editor_error: Option<String>,
     pub(crate) editor_configure_only: bool,
     editor_request: Option<EditorRequest>,
@@ -552,6 +559,8 @@ impl App {
             reload_queued: None,
             editor_input: String::new(),
             file_editor: None,
+            file_editor_anchor: None,
+            file_editor_return: None,
             editor_error: None,
             editor_configure_only: false,
             editor_request: None,
@@ -1323,9 +1332,13 @@ impl App {
         self.try_start_workspace_restore();
         self.maybe_start_workspace_fetch();
         changed |= self.changes.poll_directories(self.session.data());
-        changed |= self
+        let preview_changed = self
             .changes
             .poll_preview(self.session.data().map(|repo| repo.root.as_path()));
+        changed |= preview_changed;
+        if preview_changed {
+            self.restore_file_editor_scroll(true);
+        }
         changed |= self.changes.preview_presentation.poll_media();
         changed
     }
@@ -1630,7 +1643,9 @@ impl App {
                 return;
             }
             self.file_editor = None;
+            self.file_editor_anchor = None;
             self.mode = Mode::Normal;
+            self.restore_file_editor_scroll(true);
             self.notice = None;
             return;
         }
@@ -1690,7 +1705,13 @@ impl App {
             .is_some_and(|screen| screen.width < 60 || screen.height < 16)
     }
 
-    fn start_file_editor(&mut self, path: RepoPath, line: usize, column: usize) {
+    fn start_file_editor(
+        &mut self,
+        path: RepoPath,
+        line: usize,
+        column: usize,
+        anchor: Position,
+    ) {
         if self.session.open_running() {
             self.notice = Some("Wait for the workspace to finish opening".to_owned());
             return;
@@ -1705,6 +1726,12 @@ impl App {
         };
         match FileEditor::open(&root, path, line, column) {
             Ok(editor) => {
+                self.file_editor_anchor = Some(anchor);
+                self.file_editor_return = Some(FileEditorReturn {
+                    path: editor.path().clone(),
+                    pane: self.changes.pane,
+                    scroll: self.changes.diff_scroll,
+                });
                 self.file_editor = Some(editor);
                 self.mode = Mode::FileEdit;
                 self.notice = None;
@@ -1725,6 +1752,7 @@ impl App {
         let root = editor.root().to_owned();
         let path = editor.path().clone();
         self.file_editor = None;
+        self.file_editor_anchor = None;
         self.mode = Mode::Normal;
 
         if !self.settings.format_on_save {
@@ -1747,6 +1775,30 @@ impl App {
                 self.reload(RefreshScope::WORKTREE);
                 self.notice = Some(format!("Saved {path}; {error}"));
             }
+        }
+    }
+
+    fn restore_file_editor_scroll(&mut self, clear_if_not_matching: bool) {
+        let Some((return_path, return_pane, return_scroll)) = self
+            .file_editor_return
+            .as_ref()
+            .map(|state| (state.path.clone(), state.pane, state.scroll))
+        else {
+            return;
+        };
+        let selected_path = self.repository().and_then(|repo| match self.changes.pane {
+            LeftPane::Worktree => self
+                .changes
+                .selected_change_index(repo)
+                .and_then(|index| repo.changes.get(index))
+                .map(|change| &change.path),
+            LeftPane::Files => self.changes.selected_explorer_file_path(repo),
+        });
+        if return_pane == self.changes.pane && selected_path == Some(&return_path) {
+            self.changes.diff_scroll = return_scroll;
+            self.file_editor_return = None;
+        } else if clear_if_not_matching {
+            self.file_editor_return = None;
         }
     }
 

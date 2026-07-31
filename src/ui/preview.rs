@@ -215,30 +215,68 @@ impl PreviewPresentation {
         self.hide_media();
     }
 
-    pub(crate) fn source_line_at_rendered_row(&self, row: usize) -> Option<usize> {
+    pub(crate) fn source_position_at_rendered_position(
+        &self,
+        content: &str,
+        row: usize,
+        column: usize,
+        gutter: usize,
+    ) -> Option<(usize, usize)> {
         let cache = self.cache.as_ref()?;
         if cache.display_count == 0 && !cache.is_diff && !cache.markdown && row == 0 {
-            Some(1)
-        } else {
-            self.display_line_at_rendered_row(row)
-                .map(|line| line.saturating_add(1))
+            return Some((1, 0));
         }
+        let (display_line, wrapped_row) = self.display_position_at_rendered_row(row)?;
+        let line = content.lines().nth(display_line).unwrap_or_default();
+        let column = column.saturating_sub(gutter);
+        let source_column = if cache.wrapped_line_starts.is_some() {
+            super::text::word_wrapped_column_at(
+                line,
+                cache.width.saturating_sub(gutter).max(1),
+                wrapped_row,
+                column,
+            )?
+        } else {
+            column
+        };
+        Some((display_line.saturating_add(1), source_column))
     }
 
-    pub(crate) fn diff_new_line_at_rendered_row(&self, diff: &str, row: usize) -> Option<usize> {
-        let display_row = self.display_line_at_rendered_row(row)?;
-        super::text::diff_new_line_at_display_row(diff, display_row, false)
+    pub(crate) fn diff_position_at_rendered_position(
+        &self,
+        diff: &str,
+        row: usize,
+        column: usize,
+        gutter: usize,
+    ) -> Option<(usize, usize)> {
+        let cache = self.cache.as_ref()?;
+        let (display_line, wrapped_row) = self.display_position_at_rendered_row(row)?;
+        let (source_line, payload) =
+            super::text::diff_new_line_and_payload_at_display_row(diff, display_line, false)?;
+        let column = column.saturating_sub(gutter);
+        let source_column = if cache.wrapped_line_starts.is_some() {
+            super::text::word_wrapped_column_at(
+                payload,
+                cache.width.saturating_sub(gutter).max(1),
+                wrapped_row,
+                column,
+            )?
+        } else {
+            column
+        };
+        Some((source_line, source_column))
     }
 
-    fn display_line_at_rendered_row(&self, row: usize) -> Option<usize> {
+    fn display_position_at_rendered_row(&self, row: usize) -> Option<(usize, usize)> {
         let cache = self.cache.as_ref()?;
         if let Some(starts) = &cache.wrapped_line_starts {
-            starts
+            let line = starts
                 .partition_point(|start| *start <= row)
                 .checked_sub(1)
-                .filter(|line| *line < cache.display_count)
+                .filter(|line| *line < cache.display_count)?;
+            Some((line, row.saturating_sub(starts[line])))
         } else {
-            (row < cache.display_count).then_some(row)
+            (row < cache.display_count).then_some((row, 0))
         }
     }
 
@@ -1431,6 +1469,53 @@ mod tests {
         assert!(preview.wrapped);
         assert!(preview.rendered_height > 3);
         assert!(!preview.lines.is_empty());
+    }
+
+    #[test]
+    fn maps_wrapped_preview_cells_to_exact_source_positions() {
+        let mut presentation = PreviewPresentation::default();
+        let mut scroll = 0;
+        presentation.prepare(
+            PreviewInput {
+                content: "alpha beta gamma",
+                generation: 1,
+                path: "notes.txt",
+                is_diff: false,
+                markdown: false,
+                show_initial_diff_header: false,
+                width: 10,
+                viewport_height: 4,
+                wrapped: true,
+                hunk_selected: false,
+            },
+            &mut scroll,
+        );
+
+        assert_eq!(
+            presentation.source_position_at_rendered_position("alpha beta gamma", 1, 3, 0,),
+            Some((1, 14))
+        );
+
+        let diff = "@@ -1 +1 @@\n+alpha beta gamma";
+        presentation.prepare(
+            PreviewInput {
+                content: diff,
+                generation: 2,
+                path: "notes.txt",
+                is_diff: true,
+                markdown: false,
+                show_initial_diff_header: false,
+                width: 11,
+                viewport_height: 4,
+                wrapped: true,
+                hunk_selected: false,
+            },
+            &mut scroll,
+        );
+        assert_eq!(
+            presentation.diff_position_at_rendered_position(diff, 2, 4, 1),
+            Some((1, 14))
+        );
     }
 
     #[test]

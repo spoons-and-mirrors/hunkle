@@ -126,6 +126,12 @@ impl FileEditor {
         }
     }
 
+    pub(crate) fn anchor_cursor_at(&mut self, row: usize, column: usize) {
+        let (cursor_line, cursor_column) = self.cursor_position();
+        self.scroll_line = cursor_line.saturating_sub(row);
+        self.scroll_column = cursor_column.saturating_sub(column);
+    }
+
     pub(crate) fn insert(&mut self, value: &str) -> Result<()> {
         let value = normalize_newlines(value, self.line_ending);
         self.validate_insertion(&value)?;

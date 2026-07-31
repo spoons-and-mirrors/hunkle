@@ -3512,6 +3512,74 @@ fn inline_editor_expands_tabs_and_maps_clicks_to_the_same_columns() {
 }
 
 #[test]
+fn preview_click_preserves_wrapped_position_and_scroll_through_editing() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let content = (0..400)
+        .map(|index| format!("word{index:02}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    fs::write(root.join("notes.txt"), format!("{content}\n")).unwrap();
+    let mut app = App::new(root.to_path_buf());
+    wait_for(&mut app, |app| app.changes.diff == format!("{content}\n"));
+    app.changes.diff_scroll = 2;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let preview_body = app.regions.preview_body.unwrap();
+    assert_eq!(app.regions.preview_scroll, 2);
+    let click_column = usize::from(preview_body.width.saturating_sub(1).min(12));
+    let gutter = usize::from(preview_body.width >= 72) * 7;
+    let expected_column = super::text::word_wrapped_column_at(
+        &content,
+        usize::from(preview_body.width).saturating_sub(gutter),
+        2,
+        click_column.saturating_sub(gutter),
+    )
+    .unwrap();
+    let click_position = Position::new(preview_body.x + click_column as u16, preview_body.y);
+    click(&mut app, click_position.x, click_position.y);
+
+    assert_eq!(app.mode, Mode::FileEdit);
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().cursor_position(),
+        (0, expected_column)
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let editor_body = app.regions.preview_body.unwrap();
+    let editor = app.file_editor.as_ref().unwrap();
+    let (line, column) = editor.cursor_position();
+    assert_eq!(line - editor.scroll_line, 0);
+    assert_eq!(editor_body.y, click_position.y);
+    assert_eq!(
+        column - editor.scroll_column,
+        usize::from(click_position.x.saturating_sub(editor_body.x))
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.changes.diff_scroll, 2);
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let preview_body = app.regions.preview_body.unwrap();
+    click(
+        &mut app,
+        preview_body.x + click_column as u16,
+        preview_body.y,
+    );
+    app.settings.format_on_save = false;
+    app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(
+        KeyCode::Char('s'),
+        KeyModifiers::CONTROL,
+    ));
+    wait_for(&mut app, |app| {
+        app.mode == Mode::Normal && app.changes.diff.contains('X')
+    });
+    assert_eq!(app.changes.diff_scroll, 2);
+}
+
+#[test]
 fn inline_editor_scrolls_past_u16_columns_without_clipping() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

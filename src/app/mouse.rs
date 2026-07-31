@@ -581,27 +581,27 @@ impl App {
             .regions
             .preview_scroll
             .saturating_add(usize::from(point.y.saturating_sub(body.y)));
-        let wrapped = self.regions.preview_wrap;
         let width = usize::from(body.width);
+        let rendered_column = usize::from(point.x.saturating_sub(body.x));
 
         if self.changes.pane == LeftPane::Files {
             let Some(path) = self.regions.preview_path.clone() else {
                 return;
             };
-            let Some(line) = self
+            let gutter = usize::from(width >= 72) * 7;
+            let Some((line, column)) = self
                 .changes
                 .preview_presentation
-                .source_line_at_rendered_row(rendered_row)
+                .source_position_at_rendered_position(
+                    &self.changes.diff,
+                    rendered_row,
+                    rendered_column,
+                    gutter,
+                )
             else {
                 return;
             };
-            let gutter = usize::from(width >= 72) * 7;
-            let column = if wrapped {
-                0
-            } else {
-                usize::from(point.x.saturating_sub(body.x)).saturating_sub(gutter)
-            };
-            self.start_file_editor(path, line, column);
+            self.start_file_editor(path, line, column, point);
             return;
         }
 
@@ -609,10 +609,15 @@ impl App {
             return;
         };
         if self.regions.preview_untracked {
-            let Some(display_line) = self
+            let Some((display_line, column)) = self
                 .changes
                 .preview_presentation
-                .source_line_at_rendered_row(rendered_row)
+                .source_position_at_rendered_position(
+                    &self.changes.diff,
+                    rendered_row,
+                    rendered_column,
+                    0,
+                )
             else {
                 return;
             };
@@ -633,29 +638,24 @@ impl App {
                 self.notice = Some("Click a source line to edit this file".to_owned());
                 return;
             }
-            let column = if wrapped {
-                0
-            } else {
-                usize::from(point.x.saturating_sub(body.x))
-            };
-            self.start_file_editor(path, source_line, column);
+            self.start_file_editor(path, source_line, column, point);
             return;
         }
-        let Some(line) = self
+        let gutter = if width >= 72 { 6 } else { 1 };
+        let Some((line, column)) = self
             .changes
             .preview_presentation
-            .diff_new_line_at_rendered_row(&self.changes.diff, rendered_row)
+            .diff_position_at_rendered_position(
+                &self.changes.diff,
+                rendered_row,
+                rendered_column,
+                gutter,
+            )
         else {
             self.notice = Some("Click an added or context line to edit this file".to_owned());
             return;
         };
-        let gutter = if width >= 72 { 6 } else { 1 };
-        let column = if wrapped {
-            0
-        } else {
-            usize::from(point.x.saturating_sub(body.x)).saturating_sub(gutter)
-        };
-        self.start_file_editor(path, line, column);
+        self.start_file_editor(path, line, column, point);
     }
 
     fn place_file_editor_cursor(&mut self, point: Position) {

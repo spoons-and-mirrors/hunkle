@@ -480,7 +480,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         app.regions.preview_untracked = untracked;
         app.regions.preview_generation = app.changes.preview_content_generation;
         app.regions.preview_scroll = app.changes.diff_scroll;
-        app.regions.preview_wrap = app.changes.diff_wrap;
     }
     let (hunk_rows, rendered_height) = if show_hunk_actions {
         app.changes
@@ -1077,7 +1076,6 @@ fn draw_explorer_changes(
             app.regions.preview_path = editable_path;
             app.regions.preview_generation = app.changes.preview_content_generation;
             app.regions.preview_scroll = app.changes.diff_scroll;
-            app.regions.preview_wrap = app.changes.diff_wrap;
         }
         render_scrollable_content(frame, app, columns[1], preview_body, preview, 0);
     }

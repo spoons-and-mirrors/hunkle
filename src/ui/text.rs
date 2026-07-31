@@ -38,9 +38,7 @@ pub(super) fn styled_source_window(
             } else {
                 Vec::new()
             };
-            for span in syntax_spans_for_language(line, language) {
-                push_merged_span(&mut spans, span);
-            }
+            push_syntax_spans(&mut spans, line, language);
             finish_line(spans, width, palette().panel)
         })
         .collect()
@@ -149,62 +147,135 @@ pub(super) fn wrapped_preview_line_starts(
     starts
 }
 
+#[derive(Clone)]
+struct WrappedGrapheme {
+    source_start: usize,
+    source_end: usize,
+    width: usize,
+}
+
+struct WrappedCursorRow {
+    boundaries: Vec<(usize, usize)>,
+}
+
+impl WrappedCursorRow {
+    fn new(source_column: usize) -> Self {
+        Self {
+            boundaries: vec![(0, source_column)],
+        }
+    }
+
+    fn width(&self) -> usize {
+        self.boundaries.last().map_or(0, |boundary| boundary.0)
+    }
+
+    fn push(&mut self, grapheme: &WrappedGrapheme) {
+        self.boundaries.push((
+            self.width().saturating_add(grapheme.width),
+            grapheme.source_end,
+        ));
+    }
+
+    fn source_column_at(&self, column: usize) -> usize {
+        self.boundaries
+            .iter()
+            .min_by_key(|(rendered, _)| rendered.abs_diff(column))
+            .map_or(0, |(_, source)| *source)
+    }
+}
+
 pub(super) fn word_wrapped_height(content: &str, width: usize) -> usize {
+    word_wrapped_rows(content, width).len()
+}
+
+pub(super) fn word_wrapped_column_at(
+    content: &str,
+    width: usize,
+    row: usize,
+    column: usize,
+) -> Option<usize> {
+    word_wrapped_rows(content, width)
+        .get(row)
+        .map(|row| row.source_column_at(column))
+}
+
+fn word_wrapped_rows(content: &str, width: usize) -> Vec<WrappedCursorRow> {
     let width = width.max(1);
-    let mut rows = 1_usize;
-    let mut row_width = 0_usize;
+    let mut source_column = 0usize;
+    let mut tokens: Vec<(bool, Vec<WrappedGrapheme>)> = Vec::new();
+    for grapheme in content.graphemes(true) {
+        let whitespace = grapheme.chars().all(char::is_whitespace);
+        if tokens.last().is_none_or(|token| token.0 != whitespace) {
+            tokens.push((whitespace, Vec::new()));
+        }
+        let grapheme_width = if grapheme == "\t" {
+            crate::app::TAB_WIDTH - source_column % crate::app::TAB_WIDTH
+        } else {
+            UnicodeWidthStr::width(grapheme)
+        };
+        tokens
+            .last_mut()
+            .expect("wrap token was inserted")
+            .1
+            .push(WrappedGrapheme {
+                source_start: source_column,
+                source_end: source_column.saturating_add(grapheme_width),
+                width: grapheme_width,
+            });
+        source_column = source_column.saturating_add(grapheme_width);
+    }
+
+    let mut rows = Vec::new();
+    let mut current = WrappedCursorRow::new(0);
     let mut has_word = false;
-    let mut pending_whitespace: Option<&str> = None;
-    let mut start = 0;
-    while let Some((whitespace, end)) = next_wrap_token(content, start) {
-        let token = &content[start..end];
-        start = end;
+    let mut pending_whitespace: Option<Vec<WrappedGrapheme>> = None;
+    for (whitespace, token) in tokens {
         if whitespace && has_word {
             pending_whitespace = Some(token);
             continue;
         }
-        let token_width = UnicodeWidthStr::width(token);
-        let whitespace_width = pending_whitespace.map_or(0, UnicodeWidthStr::width);
+        let token_width = token.iter().map(|grapheme| grapheme.width).sum::<usize>();
+        let whitespace_width = pending_whitespace
+            .as_ref()
+            .map_or(0, |token| token.iter().map(|grapheme| grapheme.width).sum());
         if !whitespace
             && has_word
             && token_width <= width
-            && row_width
+            && current
+                .width()
                 .saturating_add(whitespace_width)
                 .saturating_add(token_width)
                 > width
         {
-            rows = rows.saturating_add(1);
-            row_width = 0;
+            rows.push(current);
+            current = WrappedCursorRow::new(
+                token
+                    .first()
+                    .map_or(source_column, |grapheme| grapheme.source_start),
+            );
             pending_whitespace = None;
         } else if let Some(spaces) = pending_whitespace.take() {
-            add_wrapped_content(spaces, width, &mut rows, &mut row_width);
+            append_wrapped_graphemes(spaces, width, &mut rows, &mut current);
         }
-        add_wrapped_content(token, width, &mut rows, &mut row_width);
+        append_wrapped_graphemes(token, width, &mut rows, &mut current);
         has_word |= !whitespace;
     }
+    rows.push(current);
     rows
 }
 
-fn next_wrap_token(content: &str, start: usize) -> Option<(bool, usize)> {
-    let mut graphemes = content[start..].grapheme_indices(true);
-    let (_, first) = graphemes.next()?;
-    let whitespace = first.chars().all(char::is_whitespace);
-    let end = graphemes
-        .find_map(|(offset, grapheme)| {
-            (grapheme.chars().all(char::is_whitespace) != whitespace).then_some(start + offset)
-        })
-        .unwrap_or(content.len());
-    Some((whitespace, end))
-}
-
-fn add_wrapped_content(content: &str, width: usize, rows: &mut usize, row_width: &mut usize) {
-    for grapheme in content.graphemes(true) {
-        let grapheme_width = UnicodeWidthStr::width(grapheme);
-        if *row_width > 0 && row_width.saturating_add(grapheme_width) > width {
-            *rows = rows.saturating_add(1);
-            *row_width = 0;
+fn append_wrapped_graphemes(
+    graphemes: Vec<WrappedGrapheme>,
+    width: usize,
+    rows: &mut Vec<WrappedCursorRow>,
+    current: &mut WrappedCursorRow,
+) {
+    for grapheme in graphemes {
+        if current.width() > 0 && current.width().saturating_add(grapheme.width) > width {
+            let next = WrappedCursorRow::new(grapheme.source_start);
+            rows.push(std::mem::replace(current, next));
         }
-        *row_width = row_width.saturating_add(grapheme_width);
+        current.push(&grapheme);
     }
 }
 
@@ -220,10 +291,24 @@ fn push_merged_span(spans: &mut Vec<Span<'static>>, span: Span<'_>) {
 
 fn owned_syntax_spans(code: &str, language: Language) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    for span in syntax_spans_for_language(code, language) {
-        push_merged_span(&mut spans, span);
-    }
+    push_syntax_spans(&mut spans, code, language);
     spans
+}
+
+fn push_syntax_spans(spans: &mut Vec<Span<'static>>, code: &str, language: Language) {
+    let mut column = 0usize;
+    for span in syntax_spans_for_language(code, language) {
+        for grapheme in span.content.graphemes(true) {
+            if grapheme == "\t" {
+                let width = crate::app::TAB_WIDTH - column % crate::app::TAB_WIDTH;
+                push_merged_span(spans, Span::styled(" ".repeat(width), span.style));
+                column = column.saturating_add(width);
+            } else {
+                push_merged_span(spans, Span::styled(grapheme.to_owned(), span.style));
+                column = column.saturating_add(UnicodeWidthStr::width(grapheme));
+            }
+        }
+    }
 }
 
 pub(super) fn styled_diff_window(
@@ -416,9 +501,7 @@ fn styled_diff_line(
             })
             .add_modifier(Modifier::BOLD),
     ));
-    for span in syntax_spans_for_language(payload, language) {
-        push_merged_span(&mut spans, span);
-    }
+    push_syntax_spans(&mut spans, payload, language);
     finish_line(spans, width, background)
 }
 
@@ -459,11 +542,11 @@ fn parse_hunk_lines(line: &str) -> Option<(u32, u32)> {
     Some((old, new))
 }
 
-pub(super) fn diff_new_line_at_display_row(
+pub(super) fn diff_new_line_and_payload_at_display_row(
     diff: &str,
     target: usize,
     show_initial_header: bool,
-) -> Option<usize> {
+) -> Option<(usize, &str)> {
     let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
     let mut in_hunk = false;
     let mut seen_header = false;
@@ -508,7 +591,7 @@ pub(super) fn diff_new_line_at_display_row(
         }
         if display_index == target {
             return if in_hunk && (line.starts_with('+') || line.starts_with(' ')) {
-                new_line.map(|line| line.max(1) as usize)
+                new_line.map(|number| (number.max(1) as usize, &line[1..]))
             } else {
                 None
             };
@@ -542,11 +625,28 @@ mod tests {
         let diff =
             "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -2,2 +2,3 @@\n context\n-old\n+new\n+more\n";
 
-        assert_eq!(diff_new_line_at_display_row(diff, 0, false), None);
-        assert_eq!(diff_new_line_at_display_row(diff, 1, false), Some(2));
-        assert_eq!(diff_new_line_at_display_row(diff, 2, false), None);
-        assert_eq!(diff_new_line_at_display_row(diff, 3, false), Some(3));
-        assert_eq!(diff_new_line_at_display_row(diff, 4, false), Some(4));
+        let mapped_line =
+            |row| diff_new_line_and_payload_at_display_row(diff, row, false).map(|(line, _)| line);
+        assert_eq!(mapped_line(0), None);
+        assert_eq!(mapped_line(1), Some(2));
+        assert_eq!(mapped_line(2), None);
+        assert_eq!(mapped_line(3), Some(3));
+        assert_eq!(mapped_line(4), Some(4));
+    }
+
+    #[test]
+    fn maps_wrapped_clicks_to_source_columns() {
+        let content = "alpha beta gamma";
+
+        assert_eq!(word_wrapped_column_at(content, 10, 0, 6), Some(6));
+        assert_eq!(word_wrapped_column_at(content, 10, 1, 0), Some(11));
+        assert_eq!(word_wrapped_column_at(content, 10, 1, 3), Some(14));
+    }
+
+    #[test]
+    fn maps_tabs_and_wide_graphemes_by_terminal_cells() {
+        assert_eq!(word_wrapped_column_at("\tvalue", 4, 1, 2), Some(6));
+        assert_eq!(word_wrapped_column_at("界x", 8, 0, 2), Some(2));
     }
 
     #[test]
