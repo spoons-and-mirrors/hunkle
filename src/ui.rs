@@ -100,14 +100,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.regions.clear_hit_targets_in(graph_area);
         let graph_regions = history::draw_graph(
             frame,
-            app.session.data(),
-            &app.commit_summaries,
-            &app.author_filter,
-            &mut app.graph_state,
-            &mut app.graph_scroll_to_selection,
             graph_area,
+            history::GraphView {
+                repo: app.session.data(),
+                summaries: &app.commit_summaries,
+                author_filter: &app.author_filter,
+                state: &mut app.graph_state,
+                scroll_to_selection: &mut app.graph_scroll_to_selection,
+                settings: &app.settings,
+                dragging_column: app.dragging_graph_column.map(|drag| drag.column),
+            },
         );
         app.regions.graph_table = graph_regions.table;
+        app.regions.graph_columns = graph_regions.columns;
         for (target, rect) in graph_regions.targets {
             app.regions.register_hit_target(target, rect);
         }

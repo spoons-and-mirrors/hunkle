@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphHitTarget, HitTarget, LeftPane, Mode,
-    RepositoryBrowserEffect, RepositoryBrowserHitTarget, SettingsPage, Shortcuts, View,
-    WorkspaceDropTarget, WorkspacePanelHitTarget, WorktreeManagerEffect, WorktreeManagerHitTarget,
-    changes::ChangesEffect, scroll_table,
+    ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphColumnDrag, GraphHitTarget, HitTarget,
+    LeftPane, Mode, RepositoryBrowserEffect, RepositoryBrowserHitTarget, SettingsPage, Shortcuts,
+    View, WorkspaceDropTarget, WorkspacePanelHitTarget, WorktreeManagerEffect,
+    WorktreeManagerHitTarget, changes::ChangesEffect, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -37,6 +37,20 @@ impl App {
                 MouseEventKind::Up(MouseButton::Left) => {
                     self.resize_agents(mouse.row);
                     self.dragging_agents = false;
+                    self.persist_settings();
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Some(drag) = self.dragging_graph_column {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.resize_graph_column(drag, mouse.column);
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.resize_graph_column(drag, mouse.column);
+                    self.dragging_graph_column = None;
                     self.persist_settings();
                 }
                 _ => {}
@@ -313,6 +327,22 @@ impl App {
         }
         if !matches!(self.mode, Mode::Normal | Mode::Commit) {
             return false;
+        }
+        if let Some(column) = self
+            .regions
+            .graph_columns
+            .iter()
+            .find(|column| column.splitter.contains(point))
+            .copied()
+        {
+            let drag = GraphColumnDrag {
+                column: column.column,
+                start_x: column.start_x,
+                end_x: column.end_x,
+            };
+            self.dragging_graph_column = Some(drag);
+            self.resize_graph_column(drag, point.x);
+            return true;
         }
         if self
             .regions
@@ -1427,5 +1457,14 @@ impl App {
         };
         let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(3));
         self.settings.agents_height = bounds.bottom().saturating_sub(top).max(3);
+    }
+
+    fn resize_graph_column(&mut self, drag: GraphColumnDrag, column: u16) {
+        let width = if drag.column == super::GraphColumn::Commit {
+            drag.end_x.saturating_sub(column)
+        } else {
+            column.saturating_sub(drag.start_x)
+        };
+        self.settings.set_graph_column_width(drag.column, width);
     }
 }

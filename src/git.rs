@@ -1601,13 +1601,42 @@ fn parse_log(bytes: &[u8]) -> Vec<Commit> {
                     .map(str::to_owned)
                     .collect(),
                 author: text(fields[3]),
-                date: text(fields[4]),
+                date: compact_commit_date(text(fields[4])),
                 subject: text(fields[5]),
                 message: text(fields[6]),
                 graph: Vec::new(),
             }
         })
         .collect()
+}
+
+fn compact_commit_date(date: String) -> String {
+    let bytes = date.as_bytes();
+    if !date.is_ascii()
+        || bytes.len() != 16
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b' '
+        || bytes[13] != b':'
+    {
+        return date;
+    }
+    let month = match &date[5..7] {
+        "01" => "Jan",
+        "02" => "Feb",
+        "03" => "Mar",
+        "04" => "Apr",
+        "05" => "May",
+        "06" => "Jun",
+        "07" => "Jul",
+        "08" => "Aug",
+        "09" => "Sep",
+        "10" => "Oct",
+        "11" => "Nov",
+        "12" => "Dec",
+        _ => return date,
+    };
+    format!("{}{month} {}", &date[8..10], &date[11..16])
 }
 
 fn run(root: &Path, args: &[&str]) -> Result<Output> {
@@ -2075,10 +2104,11 @@ mod tests {
     #[test]
     fn parses_complete_multiline_commit_messages() {
         let commits = parse_log(
-            b"abc\0parent\0HEAD -> main\0Ada\x002026-01-01\0Subject\0Subject\n\nBody \x1f line\n\nFinal \x1e note\0",
+            b"abc\0parent\0HEAD -> main\0Ada\x002026-08-07 18:29\0Subject\0Subject\n\nBody \x1f line\n\nFinal \x1e note\0",
         );
 
         assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].date, "07Aug 18:29");
         assert_eq!(commits[0].subject, "Subject");
         assert_eq!(
             commits[0].message,
@@ -2124,9 +2154,9 @@ mod tests {
         );
         assert_eq!(repo.commits.len(), 4);
         assert_eq!(repo.history.len(), 4);
-        assert_eq!(repo.commits[0].date.len(), 16);
-        assert_eq!(repo.commits[0].date.as_bytes().get(10), Some(&b' '));
-        assert_eq!(repo.commits[0].date.as_bytes().get(13), Some(&b':'));
+        assert_eq!(repo.commits[0].date.len(), 11);
+        assert_eq!(repo.commits[0].date.as_bytes().get(5), Some(&b' '));
+        assert_eq!(repo.commits[0].date.as_bytes().get(8), Some(&b':'));
         assert!(
             repo.history[0]
                 .refs

@@ -8,7 +8,10 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{AuthorFilter, CommitSummaryCache, GraphHitTarget, HitTarget, ShortcutAction, Shortcuts},
+    app::{
+        AuthorFilter, CommitSummaryCache, GraphColumn, GraphColumnRegion, GraphHitTarget,
+        HitTarget, Settings, ShortcutAction, Shortcuts,
+    },
     git::{Commit, RepositoryData},
 };
 
@@ -17,22 +20,35 @@ use super::{draw_empty, fill, palette, truncate_width};
 pub(super) struct GraphRegions {
     pub table: Option<Rect>,
     pub targets: Vec<(HitTarget, Rect)>,
+    pub columns: Vec<GraphColumnRegion>,
 }
 
-pub(super) fn draw_graph(
-    frame: &mut Frame<'_>,
-    repo: Option<&RepositoryData>,
-    summaries: &CommitSummaryCache,
-    author_filter: &AuthorFilter,
-    state: &mut TableState,
-    scroll_to_selection: &mut bool,
-    area: Rect,
-) -> GraphRegions {
+pub(super) struct GraphView<'a> {
+    pub repo: Option<&'a RepositoryData>,
+    pub summaries: &'a CommitSummaryCache,
+    pub author_filter: &'a AuthorFilter,
+    pub state: &'a mut TableState,
+    pub scroll_to_selection: &'a mut bool,
+    pub settings: &'a Settings,
+    pub dragging_column: Option<GraphColumn>,
+}
+
+pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>) -> GraphRegions {
+    let GraphView {
+        repo,
+        summaries,
+        author_filter,
+        state,
+        scroll_to_selection,
+        settings,
+        dragging_column,
+    } = view;
     let Some(repo) = repo else {
         draw_empty(frame, area, "Open a repository to inspect its graph");
         return GraphRegions {
             table: None,
             targets: Vec::new(),
+            columns: Vec::new(),
         };
     };
     if !repo.is_local() && !repo.details_ready {
@@ -40,6 +56,7 @@ pub(super) fn draw_graph(
         return GraphRegions {
             table: None,
             targets: Vec::new(),
+            columns: Vec::new(),
         };
     }
     if repo.commits.is_empty() {
@@ -47,6 +64,7 @@ pub(super) fn draw_graph(
         return GraphRegions {
             table: None,
             targets: Vec::new(),
+            columns: Vec::new(),
         };
     }
     fill(frame, area, palette().panel);
@@ -86,27 +104,8 @@ pub(super) fn draw_graph(
         table_area.height.saturating_sub(2),
     );
 
-    let maximum_graph_width = table_area.width.saturating_sub(42).clamp(8, 40);
-    let graph_width = repo.graph_width.clamp(8, maximum_graph_width as usize) as u16;
-    let compact = table_area.width < 110;
-    let widths = if compact {
-        vec![
-            Constraint::Length(graph_width),
-            Constraint::Min(8),
-            Constraint::Length(11),
-            Constraint::Length(12),
-            Constraint::Length(7),
-        ]
-    } else {
-        vec![
-            Constraint::Length(graph_width),
-            Constraint::Min(24),
-            Constraint::Length(11),
-            Constraint::Length(16),
-            Constraint::Length(16),
-            Constraint::Length(7),
-        ]
-    };
+    let column_widths = graph_column_widths(table_area.width, repo.graph_width, settings);
+    let widths = column_widths.map(Constraint::Length);
 
     let visible = author_filter.visible_indices();
     let viewport = usize::from(graph_region.height);
@@ -123,7 +122,7 @@ pub(super) fn draw_graph(
     *state.offset_mut() = offset;
     let rows = visible.iter().skip(offset).take(viewport).map(|index| {
         let commit = &repo.commits[*index];
-        graph_row(commit, summaries.get(&commit.oid), compact)
+        graph_row(commit, summaries.get(&commit.oid))
     });
     let author_label = if author_filter.active_count() == author_filter.entries().len() {
         "AUTHOR ▾".to_owned()
@@ -134,24 +133,14 @@ pub(super) fn draw_graph(
             author_filter.entries().len()
         )
     };
-    let headers = if compact {
-        Row::new([
-            "GRAPH".to_owned(),
-            "DESCRIPTION".to_owned(),
-            "CHANGES".to_owned(),
-            author_label,
-            "COMMIT".to_owned(),
-        ])
-    } else {
-        Row::new([
-            "GRAPH".to_owned(),
-            "DESCRIPTION".to_owned(),
-            "CHANGES".to_owned(),
-            "DATE".to_owned(),
-            author_label,
-            "COMMIT".to_owned(),
-        ])
-    }
+    let headers = Row::new([
+        "GRAPH".to_owned(),
+        "DESCRIPTION".to_owned(),
+        "CHANGES".to_owned(),
+        "DATE".to_owned(),
+        author_label,
+        " COMMIT".to_owned(),
+    ])
     .style(
         Style::default()
             .fg(palette().muted)
@@ -167,6 +156,42 @@ pub(super) fn draw_graph(
     let mut visible_state = TableState::default();
     visible_state.select(selected.and_then(|selected| selected.checked_sub(offset)));
     frame.render_stateful_widget(table, table_area, &mut visible_state);
+    let column_starts = graph_column_starts(table_area.x, column_widths);
+    let columns = [
+        (GraphColumn::Changes, 2),
+        (GraphColumn::Date, 3),
+        (GraphColumn::Author, 4),
+        (GraphColumn::Commit, 5),
+    ]
+    .into_iter()
+    .map(|(column, index)| {
+        let splitter_x = if column == GraphColumn::Commit {
+            column_starts[index]
+        } else {
+            column_starts[index].saturating_add(column_widths[index])
+        };
+        let splitter = Rect::new(splitter_x, table_area.y, 1, 1);
+        frame.render_widget(
+            Paragraph::new(if column == GraphColumn::Commit {
+                "↔"
+            } else {
+                "│"
+            })
+            .style(Style::default().fg(if dragging_column == Some(column) {
+                palette().accent
+            } else {
+                palette().faint
+            })),
+            splitter,
+        );
+        GraphColumnRegion {
+            column,
+            start_x: column_starts[index],
+            end_x: column_starts[index].saturating_add(column_widths[index]),
+            splitter,
+        }
+    })
+    .collect::<Vec<_>>();
     if visible.is_empty() {
         frame.render_widget(
             Paragraph::new("No commits match the author filter")
@@ -174,8 +199,8 @@ pub(super) fn draw_graph(
             graph_region,
         );
     }
-    let author_width = if compact { 12 } else { 16 };
-    let author_x = table_area.right().saturating_sub(7 + 1 + author_width);
+    let author_width = column_widths[4];
+    let author_x = column_starts[4];
     let author_header = Rect::new(author_x, table_area.y, author_width, 1);
     GraphRegions {
         table: Some(graph_region),
@@ -183,7 +208,69 @@ pub(super) fn draw_graph(
             HitTarget::Graph(GraphHitTarget::AuthorHeader),
             author_header,
         )],
+        columns,
     }
+}
+
+fn graph_column_widths(width: u16, graph_width: usize, settings: &Settings) -> [u16; 6] {
+    const COLUMN_SPACING: u16 = 5;
+    const PREFERRED_MINIMUMS: [u16; 6] = [5, 1, 7, 9, 12, 7];
+    const ABSOLUTE_MINIMUMS: [u16; 6] = [2, 1, 3, 4, 3, 3];
+    let available = width.saturating_sub(COLUMN_SPACING).max(1);
+    let mut widths = [
+        graph_width.clamp(8, 40) as u16,
+        1,
+        settings
+            .graph_column_width(GraphColumn::Changes)
+            .clamp(3, 80),
+        settings.graph_column_width(GraphColumn::Date).clamp(4, 80),
+        settings
+            .graph_column_width(GraphColumn::Author)
+            .clamp(3, 80),
+        settings
+            .graph_column_width(GraphColumn::Commit)
+            .clamp(3, 80),
+    ];
+    let fixed = widths[0] + widths[2] + widths[3] + widths[4] + widths[5];
+    let fixed_minimum = PREFERRED_MINIMUMS[0]
+        + PREFERRED_MINIMUMS[2]
+        + PREFERRED_MINIMUMS[3]
+        + PREFERRED_MINIMUMS[4]
+        + PREFERRED_MINIMUMS[5];
+    let description_minimum = available
+        .saturating_sub(fixed_minimum)
+        .clamp(PREFERRED_MINIMUMS[1], 8);
+    let mut overflow = fixed
+        .saturating_add(description_minimum)
+        .saturating_sub(available);
+    for index in [4, 2, 5, 0, 3] {
+        let reduction = widths[index]
+            .saturating_sub(PREFERRED_MINIMUMS[index])
+            .min(overflow);
+        widths[index] = widths[index].saturating_sub(reduction);
+        overflow = overflow.saturating_sub(reduction);
+    }
+    for index in [4, 2, 5, 0, 3] {
+        let reduction = widths[index]
+            .saturating_sub(ABSOLUTE_MINIMUMS[index])
+            .min(overflow);
+        widths[index] = widths[index].saturating_sub(reduction);
+        overflow = overflow.saturating_sub(reduction);
+    }
+    widths[1] = available
+        .saturating_sub(widths[0] + widths[2] + widths[3] + widths[4] + widths[5])
+        .max(ABSOLUTE_MINIMUMS[1]);
+    widths
+}
+
+fn graph_column_starts(x: u16, widths: [u16; 6]) -> [u16; 6] {
+    let mut starts = [x; 6];
+    for index in 1..starts.len() {
+        starts[index] = starts[index - 1]
+            .saturating_add(widths[index - 1])
+            .saturating_add(1);
+    }
+    starts
 }
 
 pub(super) fn draw_author_filter(
@@ -285,11 +372,7 @@ pub(super) fn draw_author_filter(
     targets
 }
 
-fn graph_row(
-    commit: &Commit,
-    summary: Option<&crate::git::DiffSummary>,
-    compact: bool,
-) -> Row<'static> {
+fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<'static> {
     let graph = Line::from(
         commit
             .graph
@@ -334,24 +417,14 @@ fn graph_row(
 
     let short_oid: String = commit.oid.chars().take(7).collect();
     let changes = commit_changes(summary);
-    if compact {
-        Row::new([
-            Cell::from(graph),
-            Cell::from(Line::from(description)),
-            changes,
-            Cell::from(commit.author.clone()).style(Style::default().fg(palette().muted)),
-            Cell::from(short_oid).style(Style::default().fg(palette().muted)),
-        ])
-    } else {
-        Row::new([
-            Cell::from(graph),
-            Cell::from(Line::from(description)),
-            changes,
-            Cell::from(commit.date.clone()).style(Style::default().fg(palette().muted)),
-            Cell::from(commit.author.clone()).style(Style::default().fg(palette().muted)),
-            Cell::from(short_oid).style(Style::default().fg(palette().muted)),
-        ])
-    }
+    Row::new([
+        Cell::from(graph),
+        Cell::from(Line::from(description)),
+        changes,
+        Cell::from(commit.date.clone()).style(Style::default().fg(palette().muted)),
+        Cell::from(commit.author.clone()).style(Style::default().fg(palette().muted)),
+        Cell::from(short_oid).style(Style::default().fg(palette().muted)),
+    ])
 }
 
 fn commit_graph_color(commit: &Commit) -> Color {
@@ -426,5 +499,18 @@ mod tests {
             }),
             palette().accent
         );
+    }
+
+    #[test]
+    fn graph_columns_keep_date_visible_at_every_supported_width() {
+        let settings = Settings::default();
+        for width in 24..160 {
+            let widths = graph_column_widths(width, 20, &settings);
+            assert!(widths[3] >= 4, "date disappeared at width {width}");
+            assert!(
+                widths.iter().sum::<u16>() + 5 <= width,
+                "columns overflowed width {width}: {widths:?}"
+            );
+        }
     }
 }

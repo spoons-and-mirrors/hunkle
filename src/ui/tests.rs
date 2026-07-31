@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, ExplorerTab,
-    GraphHitTarget, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
+    GraphColumn, GraphHitTarget, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
     RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus,
     View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget, WorktreeManagerHitTarget,
     WorktreeManagerRow,
@@ -131,6 +131,10 @@ fn renders_every_primary_surface() {
     fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
+    app.settings.graph_changes_width = 11;
+    app.settings.graph_date_width = 11;
+    app.settings.graph_author_width = 16;
+    app.settings.graph_commit_width = 7;
     app.commit_message_generator = CommitMessageGenerator::ready_for_test();
     let settings_path = root.join(".git/hunkle-test-config");
     app.settings_store = SettingsStore::at(settings_path.clone());
@@ -956,6 +960,7 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(screen.contains("AUTHOR"));
     assert!(screen.contains("CHANGES"));
+    assert!(screen.contains("DATE"));
     assert!(screen.contains(&format!(
         "+{} -{}",
         visible_summary.additions, visible_summary.deletions
@@ -966,6 +971,71 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("CHANGES"));
     assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
+
+    let date_column = app
+        .regions
+        .graph_columns
+        .iter()
+        .find(|column| column.column == GraphColumn::Date)
+        .copied()
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        date_column.splitter.x,
+        date_column.splitter.y,
+    ));
+    let resized_date_end = date_column.start_x + 12;
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        resized_date_end,
+        date_column.splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        resized_date_end,
+        date_column.splitter.y,
+    ));
+    assert_eq!(app.settings.graph_date_width, 12);
+    assert!(
+        fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("graph_date_width=12")
+    );
+    assert!(app.dragging_graph_column.is_none());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let commit_column = app
+        .regions
+        .graph_columns
+        .iter()
+        .find(|column| column.column == GraphColumn::Commit)
+        .copied()
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        commit_column.splitter.x,
+        commit_column.splitter.y,
+    ));
+    let wider_commit_start = commit_column.start_x.saturating_sub(3);
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        wider_commit_start,
+        commit_column.splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        wider_commit_start,
+        commit_column.splitter.y,
+    ));
+    assert_eq!(app.settings.graph_commit_width, 10);
+    assert!(
+        fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("graph_commit_width=10")
+    );
+    assert!(app.dragging_graph_column.is_none());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
     let worktree = app.regions.worktree.unwrap();
     let graph = app.regions.graph_table.unwrap();
     assert!(graph.x >= worktree.right());

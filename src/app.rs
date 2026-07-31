@@ -179,6 +179,29 @@ pub(crate) enum GraphHitTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GraphColumn {
+    Changes,
+    Date,
+    Author,
+    Commit,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GraphColumnRegion {
+    pub column: GraphColumn,
+    pub start_x: u16,
+    pub end_x: u16,
+    pub splitter: Rect,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GraphColumnDrag {
+    pub column: GraphColumn,
+    pub start_x: u16,
+    pub end_x: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RepositoryBrowserHitTarget {
     Overlay,
     List,
@@ -230,6 +253,7 @@ pub struct Regions {
     pub commit_scroll: usize,
     pub commit_scroll_max: usize,
     pub graph_table: Option<Rect>,
+    pub(crate) graph_columns: Vec<GraphColumnRegion>,
     pub settings_overlay: Option<Rect>,
     pub settings_general_tab: Option<Rect>,
     pub settings_shortcuts_tab: Option<Rect>,
@@ -307,6 +331,7 @@ pub struct App {
     pub dragging_splitter: bool,
     pub dragging_agents: bool,
     pub dragging_diff_scrollbar: bool,
+    pub(crate) dragging_graph_column: Option<GraphColumnDrag>,
     diff_scroll_drag_offset: u16,
     pub workspace_explorer: Explorer,
     pub(crate) explorer_tab: ExplorerTab,
@@ -450,6 +475,7 @@ impl App {
             dragging_splitter: false,
             dragging_agents: false,
             dragging_diff_scrollbar: false,
+            dragging_graph_column: None,
             diff_scroll_drag_offset: 0,
             workspace_explorer,
             explorer_tab: ExplorerTab::Explorer,
@@ -1316,10 +1342,7 @@ impl App {
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc
-            && self.visible_view() == View::Graph
-            && self.graph_commit_open
-        {
+        if key.code == KeyCode::Esc && self.visible_view() == View::Graph && self.graph_commit_open {
             self.graph_commit_open = false;
             return;
         }
@@ -4165,6 +4188,10 @@ mod tests {
                 show_agent_harness: false,
                 agent_time_display: settings::AgentTimeDisplay::LatestLoop,
                 agents_height: 7,
+                graph_changes_width: 11,
+                graph_date_width: 11,
+                graph_author_width: 16,
+                graph_commit_width: 7,
                 explorer_left_pane_width: None,
                 editor_command: None,
                 media_preview_protocol: MediaPreviewProtocol::Auto,
