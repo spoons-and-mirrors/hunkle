@@ -378,7 +378,7 @@ impl App {
         } else {
             RepositorySession::new(&path, interval)
         };
-        let mode = if session.data().is_some() {
+        let mode = if open_in_background || session.data().is_some() {
             Mode::Normal
         } else {
             Mode::Explorer
@@ -479,6 +479,10 @@ impl App {
 
     pub(crate) fn repository(&self) -> Option<&RepositoryData> {
         self.session.data()
+    }
+
+    pub(crate) fn workspace_loading_initial_state(&self) -> bool {
+        self.initial_pane_pending && self.mode == Mode::Normal
     }
 
     pub(crate) fn diagnostic_context(&self) -> String {
@@ -1069,6 +1073,9 @@ impl App {
                         .is_some_and(|repository| !repository.details_ready)
                     {
                         self.reload(RefreshScope::ALL);
+                    } else if self.session.data().is_none() {
+                        self.initial_pane_pending = false;
+                        self.mode = Mode::Explorer;
                     }
                     self.notice = Some(message.clone());
                     self.workspace_explorer.error = Some(message);
@@ -1154,6 +1161,7 @@ impl App {
                         self.reload(scope);
                         self.notice = Some(format!("{error} (retrying queued refresh…)"));
                     } else {
+                        self.initial_pane_pending = false;
                         self.notice = Some(match self.session.data() {
                             Some(repository) if !repository.details_ready => {
                                 if repository.is_local() {
@@ -3823,18 +3831,24 @@ mod tests {
         let clean_directory = tempfile::tempdir().unwrap();
         initialize_repository(clean_directory.path());
         let mut clean_app = App::opening(clean_directory.path().to_path_buf());
+        assert_eq!(clean_app.mode, Mode::Normal);
+        assert!(clean_app.workspace_loading_initial_state());
         wait_for_state(&mut clean_app, |app| {
             app.repository().is_some_and(|repo| repo.details_ready)
         });
+        assert!(!clean_app.workspace_loading_initial_state());
         assert_eq!(clean_app.changes.pane, LeftPane::Files);
 
         let dirty_directory = tempfile::tempdir().unwrap();
         initialize_repository(dirty_directory.path());
         fs::write(dirty_directory.path().join("tracked.txt"), "edited\n").unwrap();
         let mut dirty_app = App::opening(dirty_directory.path().to_path_buf());
+        assert_eq!(dirty_app.mode, Mode::Normal);
+        assert!(dirty_app.workspace_loading_initial_state());
         wait_for_state(&mut dirty_app, |app| {
             app.repository().is_some_and(|repo| repo.details_ready)
         });
+        assert!(!dirty_app.workspace_loading_initial_state());
         assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
     }
 

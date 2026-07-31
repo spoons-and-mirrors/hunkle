@@ -69,6 +69,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.workspace_panel
         .set_visible(app.mode == Mode::WorkspacePanel);
     let main_content = content;
+    if app.workspace_loading_initial_state() {
+        app.reset_media_presentation();
+        draw_empty(frame, main_content, "Loading workspace…");
+        draw_navigation(frame, app, layout[2]);
+        finish_selection(frame, app);
+        return;
+    }
     changes::draw(
         frame,
         app,

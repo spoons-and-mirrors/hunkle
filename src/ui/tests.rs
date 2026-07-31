@@ -26,6 +26,28 @@ fn assert_black_underlay(terminal: &Terminal<TestBackend>) {
 }
 
 #[test]
+fn background_startup_renders_one_stable_loading_surface() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let mut app = App::opening(directory.path().to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(screen.contains("Loading workspace…"));
+    assert!(app.regions.worktree.is_none());
+    assert!(app.regions.explorer_list.is_none());
+}
+
+#[test]
 fn renders_every_primary_surface() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
