@@ -1236,6 +1236,8 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("AUTHOR"));
     assert!(screen.contains("CHANGES"));
     assert!(screen.contains("DATE"));
+    assert!(!screen.contains("ALL BRANCHES"));
+    assert!(!screen.contains("date order"));
     assert!(screen.contains(&format!(
         "+{} -{}",
         visible_summary.additions, visible_summary.deletions
@@ -1343,6 +1345,7 @@ fn renders_every_primary_surface() {
         .regions
         .hit_target_rect(HitTarget::Graph(GraphHitTarget::AuthorHeader))
         .unwrap();
+    assert_eq!(author_header.y, worktree.y + 1);
     click(&mut app, author_header.x, author_header.y);
     assert_eq!(app.mode, Mode::AuthorFilter);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

@@ -68,34 +68,11 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         };
     }
     fill(frame, area, palette().panel);
-    let graph_header = Rect::new(
+    let table_area = Rect::new(
         area.x.saturating_add(1),
         area.y.saturating_add(1),
         area.width.saturating_sub(2),
-        1,
-    );
-    let mut graph_title = vec![
-        Span::styled(
-            "ALL BRANCHES",
-            Style::default()
-                .fg(palette().muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  date order", Style::default().fg(palette().faint)),
-    ];
-    if repo.graph_truncated {
-        graph_title.push(Span::styled(
-            format!("  graph limited ({} commits)", repo.commits.len()),
-            Style::default().fg(palette().yellow),
-        ));
-    }
-    frame.render_widget(Paragraph::new(Line::from(graph_title)), graph_header);
-    let table_area = Rect::new(
-        graph_header.x,
-        graph_header.y.saturating_add(2),
-        graph_header.width,
-        area.bottom()
-            .saturating_sub(graph_header.y.saturating_add(3)),
+        area.height.saturating_sub(2),
     );
     let graph_region = Rect::new(
         table_area.x,
@@ -134,7 +111,11 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         )
     };
     let headers = Row::new([
-        "GRAPH".to_owned(),
+        if repo.graph_truncated {
+            "GRAPH*".to_owned()
+        } else {
+            "GRAPH".to_owned()
+        },
         "DESCRIPTION".to_owned(),
         "CHANGES".to_owned(),
         "DATE".to_owned(),
