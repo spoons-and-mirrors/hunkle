@@ -811,6 +811,7 @@ pub(super) fn draw_agents_pane(
         );
         let agent = &panel.agents[index];
         let state = panel.agent_entry_state(index, false);
+        let in_active_workspace = panel.agent_is_in_active_workspace(index);
         let workspace = panel
             .workspaces
             .iter()
@@ -830,6 +831,7 @@ pub(super) fn draw_agents_pane(
             elapsed.as_deref(),
             agent.status,
             state,
+            in_active_workspace,
             hovered == Some(index),
         );
         targets.push((
@@ -849,6 +851,7 @@ fn draw_agents_pane_row(
     elapsed: Option<&str>,
     status: AgentStatus,
     state: WorkspacePanelEntryState,
+    in_active_workspace: bool,
     hovered: bool,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -888,7 +891,11 @@ fn draw_agents_pane_row(
         badge_area.x.saturating_sub(area.x.saturating_add(1)),
         1,
     );
-    let name_color = if state.active { palette().yellow } else { palette().ink };
+    let name_color = if in_active_workspace {
+        palette().yellow
+    } else {
+        palette().ink
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("●", Style::default().fg(status_color(status))),

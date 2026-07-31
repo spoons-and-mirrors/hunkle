@@ -1826,6 +1826,12 @@ impl WorkspacePanel {
         }
     }
 
+    pub(crate) fn agent_is_in_active_workspace(&self, index: usize) -> bool {
+        self.agents.get(index).is_some_and(|agent| {
+            self.focus.active_workspace_id() == Some(agent.workspace_id.as_str())
+        })
+    }
+
     pub(crate) fn highlighted_agent_index(&self, panel_focused: bool) -> Option<usize> {
         self.agents
             .iter()

@@ -1714,6 +1714,78 @@ fn clicking_an_agent_focuses_it_without_opening_the_workspace_manager() {
 }
 
 #[test]
+fn colors_every_agent_in_the_active_workspace_yellow() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
+        "result": {
+            "snapshot": {
+                "workspaces": [
+                    { "workspace_id": "active", "label": "ACTIVE", "focused": true },
+                    { "workspace_id": "other", "label": "OTHER", "focused": false }
+                ],
+                "agents": [
+                    {
+                        "agent": "opencode",
+                        "agent_status": "working",
+                        "focused": true,
+                        "pane_id": "active:p1",
+                        "tab_id": "active:t1",
+                        "workspace_id": "active"
+                    },
+                    {
+                        "agent": "opencode",
+                        "agent_status": "idle",
+                        "focused": false,
+                        "pane_id": "active:p2",
+                        "tab_id": "active:t1",
+                        "workspace_id": "active"
+                    },
+                    {
+                        "agent": "opencode",
+                        "agent_status": "idle",
+                        "focused": false,
+                        "pane_id": "other:p1",
+                        "tab_id": "other:t1",
+                        "workspace_id": "other"
+                    }
+                ]
+            }
+        }
+    }));
+    app.settings.agents_height = 9;
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    for index in [0, 1] {
+        let row = app
+            .regions
+            .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(
+                index,
+            )))
+            .unwrap();
+        assert_eq!(buffer[(row.x + 2, row.y)].fg, super::palette().yellow);
+        assert_eq!(
+            buffer[(row.x + 2, row.y)].bg,
+            if index == 0 {
+                super::palette().selected
+            } else {
+                super::palette().surface_alt
+            }
+        );
+    }
+    let other = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(2)))
+        .unwrap();
+    assert_eq!(buffer[(other.x + 2, other.y)].fg, super::palette().ink);
+}
+
+#[test]
 fn right_clicking_worktree_rows_toggles_staging() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
