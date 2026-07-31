@@ -3727,10 +3727,10 @@ pub(super) fn draw_settings(
     let (workspace_switch, workspace_switch_color) =
         settings_toggle(settings.workspace_panel_enabled);
     let workspace_padding = usize::from(workspace_panel_row.width)
-        .saturating_sub(15 + UnicodeWidthStr::width(workspace_switch));
+        .saturating_sub(18 + UnicodeWidthStr::width(workspace_switch));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Workspace pane", Style::default().fg(palette().ink)),
+            Span::styled("Workspace manager", Style::default().fg(palette().ink)),
             Span::raw(" ".repeat(workspace_padding)),
             Span::styled(
                 workspace_switch,
@@ -4009,7 +4009,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("o", "Explorer"),
         help_line("W", "Linked worktrees"),
         help_line("b", "Branches / PRs / issues"),
-        help_line("w", "Cycle Herdr rail left/right/off"),
+        help_line("w", "Open workspace manager"),
         help_line("p", "Workspace presets"),
         help_line("s", "Settings"),
         help_line("x", "Git actions"),

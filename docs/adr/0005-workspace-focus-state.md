@@ -1,11 +1,11 @@
-# ADR 0005: Separate Workspace Focus from Panel Selection
+# ADR 0005: Separate Workspace Focus from Manager Selection
 
 - Status: Accepted
 - Date: 2026-07-21
 
 ## Context
 
-The Workspace rail displays both a navigation cursor and the active Herdr workspace. They look related but have different owners: the cursor is local interaction state, while active focus comes from the containing Hunkle process, Herdr snapshots, and asynchronous focus requests.
+The Workspace Manager displays both a navigation cursor and the active Herdr workspace. They look related but have different owners: the cursor is local interaction state, while active focus comes from the containing Hunkle process, Herdr snapshots, and asynchronous focus requests.
 
 Representing those sources independently in `WorkspacePanel` allowed stale snapshots, request completions, and a hidden process's cursor to disagree during workspace transitions.
 

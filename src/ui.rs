@@ -21,9 +21,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        App, ExplorerTab, FileDialogKind, GraphHitTarget, HitTarget, LeftPane,
-        MINIMUM_WORKSPACE_PANEL_WIDTH, Mode, Regions, View, WorkspacePanelHitTarget,
-        WorkspacePanelPlacement,
+        App, ExplorerTab, FileDialogKind, GraphHitTarget, HitTarget, LeftPane, Mode, Regions, View,
+        WorkspacePanelHitTarget,
     },
     theme::{Palette, load_theme},
 };
@@ -62,75 +61,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     draw_header(frame, app, layout[0]);
     let content = layout[1];
-    const MINIMUM_MAIN_WIDTH: u16 = 60;
-    let panel_available = app.workspace_panel_enabled()
-        && content.width
-            >= MINIMUM_WORKSPACE_PANEL_WIDTH
-                .saturating_add(1)
-                .saturating_add(MINIMUM_MAIN_WIDTH);
-    app.workspace_panel.set_layout_available(panel_available);
-    if !panel_available && app.mode == Mode::WorkspacePanel {
-        app.mode = Mode::Normal;
-    }
-    let main_content = if app.workspace_panel.is_visible() && panel_available {
-        let panel_width = app.settings.workspace_panel_width.clamp(
-            MINIMUM_WORKSPACE_PANEL_WIDTH,
-            content
-                .width
-                .saturating_sub(1)
-                .saturating_sub(MINIMUM_MAIN_WIDTH),
-        );
-        let main_width = content.width.saturating_sub(panel_width).saturating_sub(1);
-        let (panel_area, divider, main) = match app.workspace_panel.placement {
-            WorkspacePanelPlacement::Left => {
-                let panel = Rect::new(content.x, content.y, panel_width, content.height);
-                let divider = Rect::new(panel.right(), content.y, 1, content.height);
-                let main = Rect::new(divider.right(), content.y, main_width, content.height);
-                (panel, divider, main)
-            }
-            WorkspacePanelPlacement::Right => {
-                let main = Rect::new(content.x, content.y, main_width, content.height);
-                let divider = Rect::new(main.right(), content.y, 1, content.height);
-                let panel = Rect::new(divider.right(), content.y, panel_width, content.height);
-                (panel, divider, main)
-            }
-            WorkspacePanelPlacement::Off => unreachable!(),
-        };
-        app.regions.workspace_panel = Some(panel_area);
-        let (workspace_section, agent_section) = workspace_panel::section_areas(panel_area);
-        app.regions.workspace_panel_workspaces = Some(workspace_section);
-        app.regions.workspace_panel_agents = Some(agent_section);
-        app.regions.workspace_panel_splitter = Some(divider);
-        app.regions.workspace_panel_bounds = Some(content);
-        let workspace_panel_hover = match app.hovered_hit_target {
-            Some(HitTarget::WorkspacePanel(target)) => Some(target),
-            _ => None,
-        };
-        let loaded_workspace_path = app.repository().map(|repository| repository.root.clone());
-        for (target, rect) in workspace_panel::draw(
-            frame,
-            &mut app.workspace_panel,
-            panel_area,
-            app.mode == Mode::WorkspacePanel,
-            workspace_panel_hover,
-            &app.settings,
-            loaded_workspace_path.as_deref(),
-        ) {
-            app.regions.register_hit_target(target, rect);
-        }
-        fill(
-            frame,
-            divider,
-            if app.dragging_workspace_panel_splitter {
-                palette().accent
-            } else {
-                palette().canvas
-            },
-        );
-        main
-    } else {
-        content
-    };
+    app.workspace_panel
+        .set_visible(app.mode == Mode::WorkspacePanel);
+    let main_content = content;
     changes::draw(
         frame,
         app,
@@ -288,6 +221,27 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             overlays::draw_help(frame);
         }
         Mode::WorkspacePanel => {
+            dim(frame);
+            let panel_area = workspace_panel::modal_area(frame.area());
+            app.regions.workspace_panel = Some(panel_area);
+            let (workspace_section, agent_section) = workspace_panel::section_areas(panel_area);
+            app.regions.workspace_panel_workspaces = Some(workspace_section);
+            app.regions.workspace_panel_agents = Some(agent_section);
+            let workspace_panel_hover = match app.hovered_hit_target {
+                Some(HitTarget::WorkspacePanel(target)) => Some(target),
+                _ => None,
+            };
+            let loaded_workspace_path = app.repository().map(|repository| repository.root.clone());
+            for (target, rect) in workspace_panel::draw(
+                frame,
+                &mut app.workspace_panel,
+                panel_area,
+                workspace_panel_hover,
+                &app.settings,
+                loaded_workspace_path.as_deref(),
+            ) {
+                app.regions.register_hit_target(target, rect);
+            }
             if let Some(dialog) = &app.workspace_panel.rename_dialog {
                 dim(frame);
                 overlays::draw_workspace_rename_dialog(frame, dialog);

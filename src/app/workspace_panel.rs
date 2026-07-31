@@ -40,9 +40,6 @@ pub(crate) fn create_managed_worktree(
     })
 }
 
-pub(crate) const DEFAULT_WIDTH: u16 = 26;
-pub(crate) const MINIMUM_WIDTH: u16 = 18;
-
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -72,13 +69,6 @@ impl AgentStatus {
     fn should_track_timing(self) -> bool {
         matches!(self, Self::Working | Self::Blocked)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkspacePanelPlacement {
-    Off,
-    Left,
-    Right,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,14 +355,15 @@ enum Completion {
 
 pub(crate) struct WorkspacePanel {
     enabled: bool,
-    layout_available: bool,
-    pub(crate) placement: WorkspacePanelPlacement,
+    visible: bool,
     pub(crate) workspaces: Vec<HerdrWorkspace>,
     pub(crate) agents: Vec<HerdrAgent>,
     pub(crate) groups: Vec<WorkspaceGroup>,
     pub(crate) selected: Option<usize>,
     pub(crate) workspace_scroll: usize,
     pub(crate) agent_scroll: usize,
+    pub(crate) workspace_scroll_follows_selection: bool,
+    pub(crate) agent_scroll_follows_selection: bool,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
     inventory_verified: bool,
@@ -449,18 +440,15 @@ impl WorkspacePanel {
         presets::sort_groups(&mut groups);
         Self {
             enabled,
-            layout_available: false,
-            placement: if enabled {
-                WorkspacePanelPlacement::Left
-            } else {
-                WorkspacePanelPlacement::Off
-            },
+            visible: false,
             workspaces: Vec::new(),
             agents: Vec::new(),
             groups,
             selected: None,
             workspace_scroll: 0,
             agent_scroll: 0,
+            workspace_scroll_follows_selection: true,
+            agent_scroll_follows_selection: true,
             loading: false,
             error: preset_error,
             inventory_verified: !enabled,
@@ -499,7 +487,7 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn is_available(&self) -> bool {
-        self.enabled && self.layout_available
+        self.enabled
     }
 
     pub(crate) fn worktree_candidates(&self) -> Vec<WorktreeCandidate> {
@@ -573,38 +561,11 @@ impl WorkspacePanel {
         self.inventory_verified
     }
 
-    pub(crate) fn set_layout_available(&mut self, available: bool) {
-        if available && !self.layout_available && self.is_visible() {
+    pub(crate) fn set_visible(&mut self, visible: bool) {
+        if visible && !self.visible {
             self.next_refresh = Instant::now();
         }
-        self.layout_available = available;
-    }
-
-    pub(crate) fn is_visible(&self) -> bool {
-        self.placement != WorkspacePanelPlacement::Off
-    }
-
-    pub(crate) fn show_left(&mut self) {
-        if !self.is_visible() && self.layout_available {
-            self.next_refresh = Instant::now();
-        }
-        self.placement = WorkspacePanelPlacement::Left;
-    }
-
-    pub(crate) fn hide(&mut self) {
-        self.placement = WorkspacePanelPlacement::Off;
-    }
-
-    pub(crate) fn cycle_placement(&mut self) {
-        let was_visible = self.is_visible();
-        self.placement = match self.placement {
-            WorkspacePanelPlacement::Off => WorkspacePanelPlacement::Left,
-            WorkspacePanelPlacement::Left => WorkspacePanelPlacement::Right,
-            WorkspacePanelPlacement::Right => WorkspacePanelPlacement::Off,
-        };
-        if !was_visible && self.is_visible() && self.layout_available {
-            self.next_refresh = Instant::now();
-        }
+        self.visible = visible;
     }
 
     pub(crate) fn entry_count(&self) -> usize {
@@ -850,13 +811,8 @@ impl WorkspacePanel {
         }
     }
 
-    pub(crate) fn spinner_frame(&self) -> usize {
-        self.spinner_frame
-    }
-
     fn poll_spinner(&mut self, now: Instant) -> bool {
-        let working = self.is_visible()
-            && self.layout_available
+        let working = self.visible
             && (self
                 .workspaces
                 .iter()
@@ -912,7 +868,7 @@ impl WorkspacePanel {
         }
         match key.code {
             KeyCode::Esc => WorkspacePanelEffect::Close,
-            KeyCode::Char('w') if key.modifiers.is_empty() => WorkspacePanelEffect::Cycle,
+            KeyCode::Char('w') if key.modifiers.is_empty() => WorkspacePanelEffect::Close,
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_selection(1);
                 WorkspacePanelEffect::None
@@ -923,10 +879,12 @@ impl WorkspacePanel {
             }
             KeyCode::Home => {
                 self.selected = self.visible_selections().first().copied();
+                self.follow_selected_section();
                 WorkspacePanelEffect::None
             }
             KeyCode::End => {
                 self.selected = self.visible_selections().last().copied();
+                self.follow_selected_section();
                 WorkspacePanelEffect::None
             }
             KeyCode::Enter => {
@@ -1602,6 +1560,7 @@ impl WorkspacePanel {
             return false;
         }
         self.selected = Some(index);
+        self.workspace_scroll_follows_selection = true;
         true
     }
 
@@ -1610,6 +1569,7 @@ impl WorkspacePanel {
             return false;
         }
         self.selected = Some(self.workspaces.len().saturating_add(index));
+        self.agent_scroll_follows_selection = true;
         true
     }
 
@@ -2072,32 +2032,29 @@ impl WorkspacePanel {
             return;
         }
         self.move_selection_within(&selections, delta);
+        self.follow_selected_section();
     }
 
-    pub(crate) fn move_workspace_selection(&mut self, delta: isize) {
-        let selections = self
-            .workspace_rows()
-            .into_iter()
-            .filter_map(|row| match row {
-                WorkspacePanelRow::Workspace(index) => Some(index),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        self.move_selection_within(&selections, delta);
+    pub(crate) fn scroll_workspace(&mut self, delta: isize) {
+        self.workspace_scroll_follows_selection = false;
+        self.workspace_scroll = self.workspace_scroll.saturating_add_signed(delta);
     }
 
-    pub(crate) fn move_agent_selection(&mut self, delta: isize) {
-        let selections = self
-            .agent_rows()
-            .into_iter()
-            .filter_map(|row| match row {
-                WorkspacePanelRow::Agent(index) => {
-                    Some(self.workspaces.len().saturating_add(index))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        self.move_selection_within(&selections, delta);
+    pub(crate) fn scroll_agents(&mut self, delta: isize) {
+        self.agent_scroll_follows_selection = false;
+        self.agent_scroll = self.agent_scroll.saturating_add_signed(delta);
+    }
+
+    fn follow_selected_section(&mut self) {
+        match self.selected {
+            Some(selected) if selected < self.workspaces.len() => {
+                self.workspace_scroll_follows_selection = true;
+            }
+            Some(_) => {
+                self.agent_scroll_follows_selection = true;
+            }
+            None => {}
+        }
     }
 
     fn move_selection_within(&mut self, selections: &[usize], delta: isize) {
@@ -2239,7 +2196,6 @@ impl WorkspacePanel {
     #[cfg(test)]
     pub(crate) fn ready_for_test(value: &Value) -> Self {
         let mut panel = Self::new(true, None, None);
-        panel.placement = WorkspacePanelPlacement::Left;
         let (workspaces, agents) = herdr::parse_snapshot(value).unwrap();
         panel.focus.apply_snapshot(&workspaces);
         panel.workspaces = workspaces;
@@ -2255,7 +2211,6 @@ pub(crate) enum WorkspacePanelEffect {
     None,
     Unhandled,
     Close,
-    Cycle,
     CreateWorkspace,
     CreateWorktree(String),
     RenameWorkspace {
@@ -2444,12 +2399,12 @@ mod tests {
         panel.next_refresh = now;
 
         assert!(panel.should_start_snapshot(now));
-        panel.set_layout_available(true);
+        panel.set_visible(true);
         assert!(panel.should_start_snapshot(Instant::now()));
 
-        panel.hide();
+        panel.set_visible(false);
         assert!(panel.should_start_snapshot(Instant::now()));
-        panel.show_left();
+        panel.set_visible(true);
         assert!(panel.should_start_snapshot(Instant::now()));
 
         panel.loading = true;
@@ -2807,6 +2762,27 @@ mod tests {
             WorkspacePanelEffect::OpenWorkspace(PathBuf::from("/home/spoon/code/gitui"))
         );
         assert_eq!(panel.selected, Some(0));
+    }
+
+    #[test]
+    fn panel_scrolling_does_not_change_selection_and_can_reverse() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        let selected = panel.selected;
+
+        panel.scroll_workspace(3);
+        assert_eq!(panel.selected, selected);
+        assert_eq!(panel.workspace_scroll, 3);
+        panel.scroll_workspace(-1);
+        assert_eq!(panel.workspace_scroll, 2);
+        panel.scroll_workspace(-10);
+        assert_eq!(panel.workspace_scroll, 0);
+
+        assert!(panel.select_agent(0));
+        let selected_agent = panel.selected;
+        panel.scroll_agents(2);
+        assert_eq!(panel.selected, selected_agent);
+        panel.scroll_agents(-1);
+        assert_eq!(panel.agent_scroll, 1);
     }
 
     #[test]
@@ -3302,13 +3278,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("workspace-groups.json");
         let mut panel = WorkspacePanel::new(true, Some(path.clone()), None);
-        assert_eq!(panel.placement, WorkspacePanelPlacement::Left);
-        panel.cycle_placement();
-        assert_eq!(panel.placement, WorkspacePanelPlacement::Right);
-        panel.cycle_placement();
-        assert_eq!(panel.placement, WorkspacePanelPlacement::Off);
-        panel.cycle_placement();
-        assert_eq!(panel.placement, WorkspacePanelPlacement::Left);
         let (workspaces, agents) = herdr::parse_snapshot(&snapshot()).unwrap();
         panel.workspaces = workspaces;
         panel.agents = agents;
@@ -3589,7 +3558,7 @@ mod tests {
     #[test]
     fn animates_the_status_marker_while_an_agent_is_working() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
-        panel.set_layout_available(true);
+        panel.set_visible(true);
         let now = Instant::now();
         panel.next_spinner = now;
 

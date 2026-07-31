@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphHitTarget, HitTarget, LeftPane,
-    MINIMUM_WORKSPACE_PANEL_WIDTH, Mode, RepositoryBrowserEffect, RepositoryBrowserHitTarget, View,
-    WorkspaceDropTarget, WorkspacePanelHitTarget, WorkspacePanelPlacement, WorktreeManagerEffect,
-    WorktreeManagerHitTarget, changes::ChangesEffect, scroll_table,
+    ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphHitTarget, HitTarget, LeftPane, Mode,
+    RepositoryBrowserEffect, RepositoryBrowserHitTarget, View, WorkspaceDropTarget,
+    WorkspacePanelHitTarget, WorktreeManagerEffect, WorktreeManagerHitTarget,
+    changes::ChangesEffect, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -25,20 +25,6 @@ impl App {
                 MouseEventKind::Up(MouseButton::Left) => {
                     self.resize_worktree(mouse.column);
                     self.dragging_splitter = false;
-                    self.persist_settings();
-                }
-                _ => {}
-            }
-            return;
-        }
-        if self.dragging_workspace_panel_splitter {
-            match mouse.kind {
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    self.resize_workspace_panel(mouse.column);
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    self.resize_workspace_panel(mouse.column);
-                    self.dragging_workspace_panel_splitter = false;
                     self.persist_settings();
                 }
                 _ => {}
@@ -289,18 +275,6 @@ impl App {
         {
             self.workspace_explorer.dragging_splitter = true;
             self.resize_explorer_panes(point.x);
-            return true;
-        }
-        if matches!(
-            self.mode,
-            Mode::Normal | Mode::Commit | Mode::WorkspacePanel
-        ) && self
-            .regions
-            .workspace_panel_splitter
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.dragging_workspace_panel_splitter = true;
-            self.resize_workspace_panel(point.x);
             return true;
         }
         if !matches!(self.mode, Mode::Normal | Mode::Commit) {
@@ -634,7 +608,6 @@ impl App {
         match target {
             WorkspacePanelHitTarget::Focus => self.open_workspace_panel(),
             WorkspacePanelHitTarget::Collapse => {
-                self.workspace_panel.hide();
                 self.mode = Mode::Normal;
             }
             WorkspacePanelHitTarget::CreateMenu => {
@@ -1120,26 +1093,13 @@ impl App {
             .workspace_panel_workspaces
             .is_some_and(|rect| rect.contains(point))
         {
-            self.workspace_panel.move_workspace_selection(delta);
+            self.workspace_panel.scroll_workspace(delta);
         } else if self
             .regions
             .workspace_panel_agents
             .is_some_and(|rect| rect.contains(point))
         {
-            self.workspace_panel.move_agent_selection(delta);
-        } else if self
-            .regions
-            .workspace_panel
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.workspace_panel.handle_key(KeyEvent::new(
-                if delta > 0 {
-                    KeyCode::Down
-                } else {
-                    KeyCode::Up
-                },
-                KeyModifiers::NONE,
-            ));
+            self.workspace_panel.scroll_agents(delta);
         } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
             let amount = delta.saturating_mul(2);
             let current = self.regions.commit_scroll;
@@ -1276,37 +1236,6 @@ impl App {
             bounds.width.saturating_sub(4),
         );
         self.settings.explorer_left_pane_width = self.workspace_explorer.left_pane_width;
-    }
-
-    fn resize_workspace_panel(&mut self, column: u16) {
-        const MINIMUM_MAIN_WIDTH: u16 = 60;
-        let Some(bounds) = self.regions.workspace_panel_bounds else {
-            return;
-        };
-        self.settings.workspace_panel_width = match self.workspace_panel.placement {
-            WorkspacePanelPlacement::Left => {
-                let minimum = bounds.x.saturating_add(MINIMUM_WORKSPACE_PANEL_WIDTH);
-                let maximum = bounds
-                    .right()
-                    .saturating_sub(MINIMUM_MAIN_WIDTH)
-                    .saturating_sub(1)
-                    .max(minimum);
-                column.clamp(minimum, maximum).saturating_sub(bounds.x)
-            }
-            WorkspacePanelPlacement::Right => {
-                let minimum = bounds.x.saturating_add(MINIMUM_MAIN_WIDTH);
-                let maximum = bounds
-                    .right()
-                    .saturating_sub(MINIMUM_WORKSPACE_PANEL_WIDTH)
-                    .saturating_sub(1)
-                    .max(minimum);
-                bounds
-                    .right()
-                    .saturating_sub(column.clamp(minimum, maximum))
-                    .saturating_sub(1)
-            }
-            WorkspacePanelPlacement::Off => return,
-        };
     }
 
     fn resize_history(&mut self, row: u16) {

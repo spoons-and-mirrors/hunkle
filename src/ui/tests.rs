@@ -1326,7 +1326,7 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(settings_screen.contains("Auto-fetch remotes"));
     assert!(settings_screen.contains("Fetch interval"));
-    assert!(settings_screen.contains("Workspace pane"));
+    assert!(settings_screen.contains("Workspace manager"));
     assert!(settings_screen.contains("Agent harness"));
     assert!(settings_screen.contains("Agent time"));
     assert!(settings_screen.contains("Latest loop"));
@@ -1416,12 +1416,9 @@ fn renders_every_primary_surface() {
 }
 
 #[test]
-fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
+fn renders_the_workspace_manager_as_a_centered_modal() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
-    let settings_path = directory.path().join("config");
-    app.settings_store = SettingsStore::at(settings_path.clone());
-    app.settings.workspace_panel_width = 26;
     app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
         "result": {
             "snapshot": {
@@ -1433,435 +1430,102 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
                     "focused": true,
                     "agent_status": "working"
                 }],
-                "agents": [
-                    {
-                        "agent": "opencode",
-                        "agent_status": "working",
-                        "focused": true,
-                        "pane_id": "w1:p1",
-                        "tab_id": "w1:t1",
-                        "terminal_title_stripped": "OC | Refine workspace timers",
-                        "workspace_id": "w1"
-                    },
-                    {
-                        "agent": "opencode",
-                        "agent_status": "idle",
-                        "focused": false,
-                        "pane_id": "w1:p2",
-                        "tab_id": "w1:t1",
-                        "terminal_title_stripped": "OC | Review panel spacing",
-                        "workspace_id": "w1"
-                    }
-                ]
+                "agents": [{
+                    "agent": "opencode",
+                    "agent_status": "working",
+                    "focused": true,
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "terminal_title_stripped": "OC | Refine workspace timers",
+                    "workspace_id": "w1"
+                }]
             }
         }
     }));
     app.workspace_panel.workspaces[0].path = Some(directory.path().to_path_buf());
     app.workspace_panel.workspaces[0].branch = Some("topic".to_owned());
-    app.workspace_panel.loading = true;
     app.mode = Mode::WorkspacePanel;
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert_eq!(app.regions.workspace_panel.unwrap().width, 26);
-    assert_eq!(app.regions.worktree.unwrap().x, 27);
-    let panel_area = app.regions.workspace_panel.unwrap();
-    let workspace_section = app.regions.workspace_panel_workspaces.unwrap();
-    let agent_section = app.regions.workspace_panel_agents.unwrap();
-    assert_eq!(agent_section.y, panel_area.y + panel_area.height / 2);
-    assert_eq!(workspace_section.height, agent_section.height);
-    assert_eq!(
-        app.regions
-            .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Collapse,))
-            .unwrap()
-            .y,
-        app.regions.worktree.unwrap().y + 1
-    );
+    let modal = app.regions.workspace_panel.unwrap();
+    assert_eq!(modal.width, 105);
+    assert_eq!(modal.height, 27);
+    assert_eq!(modal.x, 7);
+    assert_eq!(app.regions.worktree.unwrap().x, 0);
+    assert!(app.regions.workspace_panel_workspaces.unwrap().x > modal.x);
+    assert!(app.regions.workspace_panel_agents.unwrap().x > modal.x);
     assert!(
-        app.regions
-            .hit_target_rect(HitTarget::WorkspacePanel(
-                WorkspacePanelHitTarget::Workspace(0)
-            ))
-            .is_some()
+        app.regions.workspace_panel_agents.unwrap().x
+            > app.regions.workspace_panel_workspaces.unwrap().right()
     );
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)))
-            .is_some()
-    );
-    let rendered: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(rendered.contains("WORKSPACES  +"));
-    assert!(rendered.contains("Load"));
-    assert!(rendered.contains("HUNKLE"));
-    assert!(rendered.contains("topic"));
-    assert!(rendered.contains("AGENTS"));
-    assert!(!rendered.contains("opencode"));
-    assert!(!rendered.contains('↻'));
-    app.settings.show_agent_harness = true;
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered_with_harness: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(rendered_with_harness.contains("0:00 opencode /"));
-    assert!(rendered_with_harness.contains("Refine workspace"));
-    assert!(rendered_with_harness.contains("Review panel spacing"));
-    let workspace_row = app
-        .regions
-        .hit_target_rect(HitTarget::WorkspacePanel(
-            WorkspacePanelHitTarget::Workspace(0),
-        ))
-        .unwrap();
-    let workspace_status =
-        &terminal.backend().buffer()[(workspace_row.right() - 1, workspace_row.y)];
-    assert_eq!(workspace_status.symbol(), "⠋");
-    assert_eq!(workspace_status.fg, super::palette().yellow);
-    let agent_row = app
-        .regions
-        .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)))
-        .unwrap();
-    assert_eq!(agent_row.height, 2);
-    assert!(
-        (agent_row.x..agent_row.right())
-            .all(|x| terminal.backend().buffer()[(x, agent_row.y - 1)].symbol() == " ")
-    );
-    let agent_timer = &terminal.backend().buffer()[(agent_row.x + 2, agent_row.y)];
-    assert_eq!(agent_timer.symbol(), "0");
-    assert_eq!(agent_timer.bg, super::palette().inactive_selected);
-    let agent_status = &terminal.backend().buffer()[(agent_row.right() - 1, agent_row.y)];
-    assert_eq!(agent_status.symbol(), "⠋");
-    assert_eq!(agent_status.fg, super::palette().yellow);
-    let agent_session = &terminal.backend().buffer()[(agent_row.x + 2, agent_row.y + 1)];
-    assert_eq!(agent_session.symbol(), "R");
-    assert_eq!(agent_session.fg, super::palette().yellow);
-    assert_eq!(agent_session.bg, super::palette().inactive_selected);
-    let second_agent_row = app
-        .regions
-        .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(1)))
-        .unwrap();
-    assert_eq!(second_agent_row.y, agent_row.bottom() + 1);
-    let branch_cell = &terminal.backend().buffer()[(workspace_row.right() - 7, workspace_row.y)];
-    assert_eq!(branch_cell.symbol(), "t");
-    assert_eq!(branch_cell.fg, super::palette().accent);
-    assert_eq!(branch_cell.bg, super::palette().selected);
-    let workspace_marker = &terminal.backend().buffer()[(workspace_row.x, workspace_row.y)];
-    assert_eq!(workspace_marker.symbol(), "•");
-    assert_eq!(workspace_marker.fg, super::palette().yellow);
-    let workspace_label = &terminal.backend().buffer()[(workspace_row.x + 2, workspace_row.y)];
-    assert_eq!(workspace_label.symbol(), "H");
-    assert_eq!(workspace_label.fg, super::palette().yellow);
-    assert!(workspace_label.modifier.contains(Modifier::BOLD));
-    let create_button = app
-        .regions
-        .hit_target_rect(HitTarget::WorkspacePanel(
-            WorkspacePanelHitTarget::CreateMenu,
-        ))
-        .unwrap();
-    assert_eq!(create_button.width, 3);
-    assert_eq!(create_button.x, app.regions.workspace_panel.unwrap().x + 12);
-    let load_button = app
-        .regions
-        .hit_target_rect(HitTarget::WorkspacePanel(
-            WorkspacePanelHitTarget::SnapshotMenu,
-        ))
-        .unwrap();
-    assert_eq!(load_button.width, 6);
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        load_button.x + 1,
-        load_button.y,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Up(MouseButton::Left),
-        load_button.x + 1,
-        load_button.y,
-    ));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.mode, Mode::WorkspacePresets);
-    let preset_overlay = app.regions.workspace_presets_overlay.unwrap();
-    assert_eq!(preset_overlay.height, 8);
-    assert_eq!(preset_overlay.width, 50);
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::WorkspacePanel(
-                WorkspacePanelHitTarget::SaveSnapshot,
-            ))
-            .is_some()
-    );
-    let rendered: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(rendered.contains("WORKSPACE PRESETS"));
-    assert!(rendered.contains("Create preset from current setup"));
-    let footer_start = 29 * 120;
-    let footer: String = terminal.backend().buffer().content[footer_start..]
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    for shortcut in ["f Changes", "w Workspaces", "o Explorer"] {
-        let offset = footer
-            .find(shortcut)
-            .unwrap_or_else(|| panic!("missing {shortcut:?} in footer {footer:?}"));
-        assert_eq!(
-            terminal.backend().buffer().content[footer_start + offset].fg,
-            super::palette().orange
+    for target in [
+        WorkspacePanelHitTarget::Collapse,
+        WorkspacePanelHitTarget::CreateMenu,
+        WorkspacePanelHitTarget::SnapshotMenu,
+        WorkspacePanelHitTarget::Workspace(0),
+        WorkspacePanelHitTarget::Agent(0),
+    ] {
+        assert!(
+            app.regions
+                .hit_target_rect(HitTarget::WorkspacePanel(target))
+                .is_some()
         );
     }
-    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-    app.handle_paste("Daily setup");
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.workspace_panel.snapshots.len(), 1);
-    assert_eq!(app.notice.as_deref(), Some("Preset saved: Daily setup"));
-    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
-    assert_eq!(app.notice.as_deref(), Some("Preset updated: Daily setup"));
-    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-    assert!(app.workspace_panel.snapshots.is_empty());
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("WORKSPACE MANAGER"));
+    assert!(rendered.contains("WORKSPACES"));
+    assert!(rendered.contains("AGENT ACTIVITY"));
+    assert!(rendered.contains("HUNKLE"));
+    assert!(rendered.contains("ACTIVE"));
+    assert!(rendered.contains("WORKING"));
+    let agent_section = app.regions.workspace_panel_agents.unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut agent_rendered = String::new();
+    for y in agent_section.y..agent_section.bottom() {
+        for x in agent_section.x..agent_section.right() {
+            agent_rendered.push_str(buffer[(x, y)].symbol());
+        }
+    }
+    assert!(agent_rendered.contains("HUNKLE"));
+    assert!(agent_rendered.contains("Refine workspace timers"));
+    assert!(!agent_rendered.contains("opencode"));
+    assert_black_underlay(&terminal);
+
+    let mut tall = Terminal::new(TestBackend::new(120, 50)).unwrap();
+    tall.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.workspace_panel.unwrap().height, 45);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
-    app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::WorkspacePresets);
-    assert!(app.workspace_panel.snapshot_load_dialog.is_none());
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::WorkspacePanel);
+
     let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
     narrow.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.mode, Mode::WorkspacePresets);
-    assert!(app.regions.workspace_presets_overlay.is_some());
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    app.mode = Mode::WorkspacePanel;
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(
-        terminal.backend().buffer()[(create_button.x + 1, create_button.y)].bg,
-        super::palette().raised
-    );
-    app.handle_mouse(mouse(
-        MouseEventKind::Moved,
-        create_button.x + 1,
-        create_button.y,
-    ));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(
-        terminal.backend().buffer()[(create_button.x + 1, create_button.y)].bg,
-        super::palette().accent
-    );
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        create_button.x + 1,
-        create_button.y,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Up(MouseButton::Left),
-        create_button.x + 1,
-        create_button.y,
-    ));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.workspace_panel.create_menu_open);
-    let new_workspace = app
-        .regions
-        .hit_target_rect(HitTarget::WorkspacePanel(
-            WorkspacePanelHitTarget::CreateWorkspace,
-        ))
-        .unwrap();
-    let new_worktree = app
-        .regions
-        .hit_target_rect(HitTarget::WorkspacePanel(
-            WorkspacePanelHitTarget::CreateWorktree,
-        ))
-        .unwrap();
-    let rendered: String = terminal
+    let narrow_modal = app.regions.workspace_panel.unwrap();
+    assert_eq!(narrow_modal.width, 56);
+    assert_eq!(narrow_modal.x, 2);
+    let workspace_section = app.regions.workspace_panel_workspaces.unwrap();
+    let agent_section = app.regions.workspace_panel_agents.unwrap();
+    assert_eq!(workspace_section.x, agent_section.x);
+    assert!(agent_section.y >= workspace_section.bottom());
+    let narrow_rendered: String = narrow
         .backend()
         .buffer()
         .content
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(rendered.contains("New workspace"));
-    assert!(rendered.contains("New worktree"));
-    assert_eq!(
-        terminal.backend().buffer()[(new_workspace.x + 2, new_workspace.y)].bg,
-        super::palette().selected
-    );
-    assert_eq!(
-        terminal.backend().buffer()[(new_worktree.x + 2, new_worktree.y)].fg,
-        super::palette().ink
-    );
-    assert!(app.workspace_panel.select_agent(0));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(
-        terminal.backend().buffer()[(new_worktree.x + 2, new_worktree.y)].fg,
-        super::palette().faint
-    );
-    app.workspace_panel.close_create_menu();
-    assert!(app.workspace_panel.select_workspace(0));
-    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let delete_screen: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(delete_screen.contains("CLOSE WORKSPACE"));
-    assert!(delete_screen.contains("Close workspace HUNKLE?"));
-    assert!(delete_screen.contains("all 2 panes"));
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(app.workspace_panel.delete_dialog.is_none());
-
-    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rename_screen: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(rename_screen.contains("RENAME WORKSPACE"));
-    assert!(rename_screen.contains("Rename HUNKLE"));
-    app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::WorkspacePanel);
-    assert_eq!(
-        app.workspace_panel
-            .rename_dialog
-            .as_ref()
-            .map(|dialog| dialog.input.text()),
-        Some("p")
-    );
-    let agent_row = app
-        .regions
-        .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)))
-        .unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        agent_row.x,
-        agent_row.y,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Up(MouseButton::Left),
-        agent_row.x,
-        agent_row.y,
-    ));
-    assert_eq!(app.workspace_panel.selected, Some(0));
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(app.workspace_panel.rename_dialog.is_none());
-    app.mode = Mode::Normal;
-
-    let divider = app.regions.workspace_panel_splitter.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        divider.x,
-        divider.y + 2,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Drag(MouseButton::Left),
-        35,
-        divider.y + 2,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Up(MouseButton::Left),
-        35,
-        divider.y + 2,
-    ));
-    assert_eq!(app.settings.workspace_panel_width, 35);
-    assert!(!app.dragging_workspace_panel_splitter);
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.workspace_panel.unwrap().width, 35);
-    assert_eq!(app.regions.worktree.unwrap().x, 36);
-
-    app.workspace_panel.begin_group();
-    app.workspace_panel.paste("Current work");
-    app.workspace_panel
-        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.workspace_panel.begin_workspace_drag(0));
-    app.workspace_panel
-        .update_workspace_drag(Some(WorkspaceDropTarget::Group(0)));
-    app.workspace_panel.finish_workspace_drag();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Group(0)))
-            .is_some()
-    );
-    let rendered: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert_eq!(rendered.matches("Current work").count(), 1);
-
-    app.workspace_panel.cycle_placement();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.workspace_panel.unwrap().x, 85);
-    assert_eq!(app.regions.worktree.unwrap().x, 0);
-
-    let divider = app.regions.workspace_panel_splitter.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        divider.x,
-        divider.y + 2,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Drag(MouseButton::Left),
-        78,
-        divider.y + 2,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Up(MouseButton::Left),
-        78,
-        divider.y + 2,
-    ));
-    assert_eq!(app.settings.workspace_panel_width, 41);
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.workspace_panel.unwrap().x, 79);
-    assert_eq!(app.regions.workspace_panel.unwrap().width, 41);
-    assert!(
-        fs::read_to_string(&settings_path)
-            .unwrap()
-            .contains("workspace_panel_width=41")
-    );
-
-    app.workspace_panel.cycle_placement();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.workspace_panel.is_none());
-    assert_eq!(app.regions.worktree.unwrap().x, 0);
-
-    app.workspace_panel.show_left();
-
-    let mut narrow = Terminal::new(TestBackend::new(78, 24)).unwrap();
-    narrow.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.workspace_panel.is_none());
-    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(
-        app.notice.as_deref(),
-        Some("Workspaces need a wider terminal")
-    );
-
-    app.settings.workspace_panel_enabled = false;
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.workspace_panel.is_none());
-    let placement = app.workspace_panel.placement;
-    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
-    assert_eq!(app.workspace_panel.placement, placement);
-
-    app.settings.workspace_panel_enabled = true;
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.workspace_panel.is_some());
+    assert!(narrow_rendered.contains("WORKSPACE MANAGER"));
+    assert!(narrow_rendered.contains("AGENT ACTIVITY"));
 }
 
 #[test]
@@ -1869,7 +1533,6 @@ fn distinguishes_the_active_herdr_workspace_from_the_loaded_workspace() {
     let loaded = tempfile::tempdir().unwrap();
     let active = tempfile::tempdir().unwrap();
     let mut app = App::new(loaded.path().to_path_buf());
-    app.settings.workspace_panel_width = 26;
     app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
         "result": {
             "snapshot": {
@@ -1891,6 +1554,7 @@ fn distinguishes_the_active_herdr_workspace_from_the_loaded_workspace() {
     }));
     app.workspace_panel.workspaces[0].path = Some(active.path().to_path_buf());
     app.workspace_panel.workspaces[1].path = Some(loaded.path().to_path_buf());
+    app.mode = Mode::WorkspacePanel;
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1908,18 +1572,16 @@ fn distinguishes_the_active_herdr_workspace_from_the_loaded_workspace() {
         ))
         .unwrap();
     let buffer = terminal.backend().buffer();
-    let active_marker = &buffer[(active_row.x, active_row.y)];
     let active_label = &buffer[(active_row.x + 2, active_row.y)];
-    let loaded_marker = &buffer[(loaded_row.x, loaded_row.y)];
     let loaded_label = &buffer[(loaded_row.x + 2, loaded_row.y)];
 
-    assert_eq!(active_marker.symbol(), " ");
     assert_eq!(active_label.fg, super::palette().yellow);
     assert!(active_label.modifier.contains(Modifier::BOLD));
-    assert_eq!(loaded_marker.symbol(), "•");
-    assert_eq!(loaded_marker.fg, super::palette().yellow);
-    assert_eq!(loaded_label.fg, super::palette().muted);
+    assert_eq!(loaded_label.fg, super::palette().ink);
     assert!(!loaded_label.modifier.contains(Modifier::BOLD));
+    let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+    assert!(rendered.contains("ACTIVE"));
+    assert!(rendered.contains("OPEN"));
 }
 
 #[test]

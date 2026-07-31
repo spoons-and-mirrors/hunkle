@@ -418,15 +418,16 @@ fn graph_row(
         description.push(ref_badge("HEAD", palette().green));
         description.push(Span::raw(" "));
     }
+    let branch_color = commit_graph_color(commit);
     for reference in &commit.refs {
         let (label, color) = if let Some(tag) = reference.strip_prefix("tag: ") {
             (tag, palette().yellow)
         } else if let Some(branch) = reference.strip_prefix("HEAD -> ") {
-            (branch, palette().accent)
+            (branch, branch_color)
         } else if reference == "HEAD" {
             continue;
         } else {
-            (reference.as_str(), palette().accent)
+            (reference.as_str(), branch_color)
         };
         description.push(ref_badge(label, color));
         description.push(Span::raw(" "));
@@ -456,6 +457,16 @@ fn graph_row(
             Cell::from(short_oid).style(Style::default().fg(palette().muted)),
         ])
     }
+}
+
+fn commit_graph_color(commit: &Commit) -> Color {
+    commit
+        .graph
+        .iter()
+        .find(|cell| cell.symbol == '●')
+        .map_or(palette().accent, |cell| {
+            palette().graph_colors[cell.color % palette().graph_colors.len()]
+        })
 }
 
 fn commit_changes(summary: Option<&crate::git::DiffSummary>) -> Cell<'static> {
@@ -523,4 +534,42 @@ fn ref_badge(label: &str, color: Color) -> Span<'static> {
             .bg(palette().raised)
             .add_modifier(Modifier::BOLD),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::GraphCell;
+
+    #[test]
+    fn branch_badges_use_the_commit_graph_node_color() {
+        let commit = Commit {
+            oid: "abc".to_owned(),
+            parents: Vec::new(),
+            refs: vec!["feature/colors".to_owned()],
+            author: "Ada".to_owned(),
+            date: "today".to_owned(),
+            subject: "Color branches".to_owned(),
+            message: String::new(),
+            graph: vec![
+                GraphCell {
+                    symbol: '│',
+                    color: 0,
+                },
+                GraphCell {
+                    symbol: '●',
+                    color: 3,
+                },
+            ],
+        };
+
+        assert_eq!(commit_graph_color(&commit), palette().graph_colors[3]);
+        assert_eq!(
+            commit_graph_color(&Commit {
+                graph: Vec::new(),
+                ..commit
+            }),
+            palette().accent
+        );
+    }
 }

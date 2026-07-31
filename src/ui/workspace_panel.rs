@@ -1,389 +1,124 @@
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Clear, Paragraph},
 };
 use std::{path::Path, time::Duration};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AgentStatus, HitTarget, SPINNER_FRAMES, Settings, WorkspaceDropTarget, WorkspacePanel,
-    WorkspacePanelHitTarget, WorkspacePanelPlacement, WorkspacePanelRow,
+    AgentStatus, HitTarget, Settings, WorkspaceDropTarget, WorkspacePanel,
+    WorkspacePanelEntryState, WorkspacePanelHitTarget, WorkspacePanelRow,
 };
 
+#[cfg(test)]
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 use super::{fill, palette, truncate_width};
+
+const MODAL_MAX_WIDTH: u16 = 112;
+const HEADER_HEIGHT: u16 = 4;
+const FOOTER_HEIGHT: u16 = 3;
+
+fn chrome_heights(area: Rect) -> (u16, u16) {
+    if area.width < 82 || area.height < 18 {
+        (2, 2)
+    } else {
+        (HEADER_HEIGHT, FOOTER_HEIGHT)
+    }
+}
+
+pub(super) fn modal_area(screen: Rect) -> Rect {
+    let width = if screen.width >= 84 {
+        screen.width.saturating_mul(88) / 100
+    } else {
+        screen.width.saturating_sub(4)
+    }
+    .clamp(1, MODAL_MAX_WIDTH)
+    .min(screen.width);
+    let height = if screen.height >= 18 {
+        screen.height.saturating_mul(90) / 100
+    } else {
+        screen.height.saturating_sub(2)
+    }
+    .max(1)
+    .min(screen.height);
+    Rect::new(
+        screen
+            .x
+            .saturating_add(screen.width.saturating_sub(width) / 2),
+        screen
+            .y
+            .saturating_add(screen.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
+}
 
 pub(super) fn draw(
     frame: &mut Frame<'_>,
     panel: &mut WorkspacePanel,
     area: Rect,
-    focused: bool,
     hovered: Option<WorkspacePanelHitTarget>,
     settings: &Settings,
     loaded_workspace_path: Option<&Path>,
 ) -> Vec<(HitTarget, Rect)> {
-    fill(frame, area, palette().surface_alt);
     let mut targets = Vec::new();
     if area.width < 4 || area.height == 0 {
         return targets;
     }
 
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    let (header_height, footer_height) = chrome_heights(area);
+    fill(
+        frame,
+        Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            header_height.min(area.height.saturating_sub(2)),
+        ),
+        palette().surface_alt,
+    );
+    fill(
+        frame,
+        Rect::new(
+            area.x.saturating_add(1),
+            area.bottom().saturating_sub(footer_height + 1),
+            area.width.saturating_sub(2),
+            footer_height.min(area.height.saturating_sub(header_height + 2)),
+        ),
+        palette().surface_alt,
+    );
+
+    draw_header(frame, panel, area, &mut targets, hovered);
+
     let (workspace_section, agent_section) = section_areas(area);
-    let body = Rect::new(
-        workspace_section.x,
-        workspace_section.y,
-        workspace_section.width,
-        workspace_section
-            .height
-            .saturating_add(agent_section.height),
+    draw_workspace_section(
+        frame,
+        panel,
+        workspace_section,
+        hovered,
+        loaded_workspace_path,
+        &mut targets,
     );
-    let footer = Rect::new(
-        area.x.saturating_add(1),
-        area.bottom().saturating_sub(1),
-        area.width.saturating_sub(2),
-        1,
-    );
+    draw_agent_section(frame, panel, agent_section, settings, hovered, &mut targets);
 
-    let spinner_frame = panel.spinner_frame();
-    let mut create_button = None;
-    let mut snapshot_button = None;
+    draw_footer(frame, panel, area);
 
-    if workspace_section.height > 0 {
-        let row_area = Rect::new(
-            workspace_section.x,
-            workspace_section.y,
-            workspace_section.width,
-            1,
-        );
-        let (create, load) = draw_workspace_header(
-            frame,
-            row_area,
-            panel.create_menu_open || hovered == Some(WorkspacePanelHitTarget::CreateMenu),
-            panel.snapshot_menu_open || hovered == Some(WorkspacePanelHitTarget::SnapshotMenu),
-        );
-        create_button = Some(create);
-        targets.push((
-            HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateMenu),
-            create,
-        ));
-        if let Some(load) = load {
-            snapshot_button = Some(load);
-            targets.push((
-                HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SnapshotMenu),
-                load,
-            ));
-        }
-        let collapse = Rect::new(row_area.right().saturating_sub(1), row_area.y, 1, 1);
-        let collapse_marker = match panel.placement {
-            WorkspacePanelPlacement::Right => "›",
-            WorkspacePanelPlacement::Off | WorkspacePanelPlacement::Left => "‹",
-        };
-        frame.render_widget(
-            Paragraph::new(collapse_marker).style(Style::default().fg(palette().faint)),
-            collapse,
-        );
-        targets.push((
-            HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Collapse),
-            collapse,
-        ));
-    }
-
-    let workspace_list = Rect::new(
-        workspace_section.x,
-        workspace_section.y.saturating_add(1),
-        workspace_section.width,
-        workspace_section.height.saturating_sub(1),
-    );
-    let workspace_rows = panel.workspace_rows();
-    let selected_workspace_row = panel.selected.and_then(|selected| {
-        workspace_rows.iter().position(
-            |row| matches!(row, WorkspacePanelRow::Workspace(index) if *index == selected),
-        )
-    });
-    let workspace_groups = (0..panel.workspaces.len())
-        .map(|index| panel.group_for_workspace(index))
-        .collect::<Vec<_>>();
-    let mut workspace_group_counts = vec![0usize; panel.groups.len()];
-    for group in workspace_groups.iter().flatten() {
-        workspace_group_counts[*group] += 1;
-    }
-    keep_section_visible(
-        &mut panel.workspace_scroll,
-        selected_workspace_row,
-        workspace_rows.len(),
-        usize::from(workspace_list.height),
-    );
-    for (visual_row, row) in workspace_rows
-        .iter()
-        .copied()
-        .enumerate()
-        .skip(panel.workspace_scroll)
-    {
-        let screen_row = visual_row.saturating_sub(panel.workspace_scroll);
-        if screen_row >= usize::from(workspace_list.height) {
-            break;
-        }
-        let row_area = Rect::new(
-            workspace_list.x,
-            workspace_list.y + screen_row as u16,
-            workspace_list.width,
-            1,
-        );
-        match row {
-            WorkspacePanelRow::Group(index) => {
-                let group = &panel.groups[index];
-                let count = workspace_group_counts[index];
-                let marker = if group.expanded { "▾" } else { "▸" };
-                let drop_target =
-                    panel.workspace_drag_target() == Some(WorkspaceDropTarget::Group(index));
-                draw_group(frame, row_area, marker, &group.name, count, drop_target);
-                targets.push((
-                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Group(index)),
-                    row_area,
-                ));
-            }
-            WorkspacePanelRow::Workspace(index) => {
-                let state = panel.workspace_entry_state(index, focused, loaded_workspace_path);
-                let workspace = &panel.workspaces[index];
-                let indent = match (
-                    workspace_groups[index].is_some(),
-                    panel.workspace_is_linked_worktree(index),
-                ) {
-                    (true, true) => "  ",
-                    (true, false) | (false, true) => " ",
-                    (false, false) => "",
-                };
-                let label = format!("{indent}{}", workspace.label);
-                let ungrouped_drop = panel.workspace_drag_target()
-                    == Some(WorkspaceDropTarget::Ungrouped)
-                    && workspace_groups[index].is_none();
-                draw_entry(
-                    frame,
-                    row_area,
-                    &label,
-                    workspace.branch.as_deref(),
-                    EntryPresentation {
-                        status: workspace.status,
-                        marker_active: state.loaded,
-                        label_active: state.active,
-                        selected: state.selected || ungrouped_drop,
-                        selected_background: palette().selected,
-                        active_marker: "• ",
-                        active_marker_color: palette().yellow,
-                        active_label_color: palette().yellow,
-                        spinner_frame,
-                    },
-                );
-                targets.push((
-                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Workspace(index)),
-                    row_area,
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    if panel.workspaces.is_empty() && workspace_list.height > 0 {
-        let state = panel.error.as_deref().unwrap_or(if panel.loading {
-            "Loading Herdr…"
-        } else {
-            "No workspaces"
-        });
-        frame.render_widget(
-            Paragraph::new(truncate_width(state, usize::from(workspace_list.width))).style(
-                Style::default().fg(if panel.error.is_some() {
-                    palette().red
-                } else {
-                    palette().faint
-                }),
-            ),
-            Rect::new(workspace_list.x, workspace_list.y, workspace_list.width, 1),
-        );
-    }
-
-    if agent_section.height > 0 {
-        draw_header(
-            frame,
-            Rect::new(agent_section.x, agent_section.y, agent_section.width, 1),
-            "AGENTS",
-            panel.agents.len(),
-        );
-    }
-    let agent_list = Rect::new(
-        agent_section.x,
-        agent_section.y.saturating_add(1),
-        agent_section.width,
-        agent_section.height.saturating_sub(1),
-    );
-    let agent_rows = panel.agent_rows();
-    let highlighted_agent_row = panel
-        .highlighted_agent_index(focused)
-        .and_then(|highlighted| {
-            agent_rows.iter().position(|row| {
-            matches!(row, WorkspacePanelRow::AgentSession(index) if *index == highlighted)
-        })
-        });
-    keep_section_visible(
-        &mut panel.agent_scroll,
-        highlighted_agent_row,
-        agent_rows.len(),
-        usize::from(agent_list.height),
-    );
-    for (visual_row, row) in agent_rows
-        .iter()
-        .copied()
-        .enumerate()
-        .skip(panel.agent_scroll)
-    {
-        let screen_row = visual_row.saturating_sub(panel.agent_scroll);
-        if screen_row >= usize::from(agent_list.height) {
-            break;
-        }
-        let row_area = Rect::new(
-            agent_list.x,
-            agent_list.y + screen_row as u16,
-            agent_list.width,
-            1,
-        );
-        match row {
-            WorkspacePanelRow::EmptyAgents => {
-                frame.render_widget(
-                    Paragraph::new("No agents detected")
-                        .style(Style::default().fg(palette().faint)),
-                    row_area,
-                );
-            }
-            WorkspacePanelRow::Agent(index) => {
-                let state = panel.agent_entry_state(index, focused);
-                let elapsed = panel
-                    .agent_elapsed(index, settings.agent_time_display)
-                    .map(format_duration);
-                let agent = &panel.agents[index];
-                let workspace = panel
-                    .workspaces
-                    .iter()
-                    .find(|workspace| workspace.id == agent.workspace_id)
-                    .map_or("", |workspace| workspace.label.as_str());
-                let label = if workspace.is_empty() {
-                    agent.name.clone()
-                } else if settings.show_agent_harness {
-                    format!("{} / {workspace}", agent.name)
-                } else {
-                    workspace.to_owned()
-                };
-                let label = elapsed.map_or(label.clone(), |elapsed| format!("{elapsed} {label}"));
-                draw_entry(
-                    frame,
-                    row_area,
-                    &label,
-                    None,
-                    EntryPresentation {
-                        status: agent.status,
-                        marker_active: state.active,
-                        label_active: state.active,
-                        selected: state.selected,
-                        selected_background: palette().inactive_selected,
-                        active_marker: "› ",
-                        active_marker_color: palette().accent,
-                        active_label_color: palette().ink,
-                        spinner_frame,
-                    },
-                );
-                let target_height = agent_list.bottom().saturating_sub(row_area.y).min(2);
-                targets.push((
-                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index)),
-                    Rect::new(row_area.x, row_area.y, row_area.width, target_height),
-                ));
-            }
-            WorkspacePanelRow::AgentSession(index) => {
-                let state = panel.agent_entry_state(index, focused);
-                let base = state
-                    .selected
-                    .then_some(palette().inactive_selected)
-                    .map_or_else(Style::default, |color| Style::default().bg(color));
-                frame.render_widget(Block::default().style(base), row_area);
-                if let Some(session_name) = panel.agents[index].session_name.as_deref() {
-                    let session_area = Rect::new(
-                        row_area.x.saturating_add(2),
-                        row_area.y,
-                        row_area.width.saturating_sub(2),
-                        1,
-                    );
-                    frame.render_widget(
-                        Paragraph::new(truncate_width(
-                            session_name,
-                            usize::from(session_area.width),
-                        ))
-                        .style(base.fg(if state.selected {
-                            palette().yellow
-                        } else {
-                            palette().faint
-                        })),
-                        session_area,
-                    );
-                }
-                let target = HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index));
-                if !targets.iter().any(|(existing, _)| *existing == target) {
-                    targets.push((target, row_area));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    frame.render_widget(
-        Paragraph::new(if panel.snapshot_editing {
-            if let Some(error) = panel.snapshot_error.as_deref() {
-                error
-            } else {
-                panel.snapshot_input.text()
-            }
-        } else if panel.group_editing {
-            if let Some(error) = panel.group_error.as_deref() {
-                error
-            } else {
-                panel.group_input.text()
-            }
-        } else if panel.snapshot_menu_open {
-            panel
-                .snapshot_error
-                .as_deref()
-                .unwrap_or("Enter load  Del remove")
-        } else if focused {
-            "Enter open  g group  Del"
-        } else {
-            "w move/off"
-        })
-        .style(Style::default().fg(if focused {
-            palette().accent
-        } else {
-            palette().faint
-        })),
-        footer,
-    );
-    if panel.group_editing && panel.group_error.is_none() {
-        frame.render_widget(
-            Paragraph::new(format!("Group: {}", panel.group_input.text()))
-                .style(Style::default().fg(palette().accent)),
-            footer,
-        );
-    }
-    if panel.snapshot_editing && panel.snapshot_error.is_none() {
-        frame.render_widget(
-            Paragraph::new(format!("Preset: {}", panel.snapshot_input.text()))
-                .style(Style::default().fg(palette().accent)),
-            footer,
-        );
-    }
     if panel.create_menu_open
-        && let Some(anchor) = create_button
+        && let Some(anchor) = targets.iter().find_map(|(target, rect)| {
+            (*target == HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateMenu))
+                .then_some(*rect)
+        })
     {
         let worktree_enabled = panel.selected_workspace_id().is_some();
         let (workspace, worktree) = draw_create_popover(
             frame,
-            body,
+            area,
             anchor,
             panel.create_menu_choice,
             worktree_enabled,
@@ -399,37 +134,839 @@ pub(super) fn draw(
         ));
     }
     if panel.snapshot_menu_open
-        && let Some(anchor) = snapshot_button
+        && let Some(anchor) = targets.iter().find_map(|(target, rect)| {
+            (*target == HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SnapshotMenu))
+                .then_some(*rect)
+        })
     {
-        for (index, area) in draw_snapshot_popover(frame, panel, body, anchor, hovered) {
+        for (index, popup_area) in draw_snapshot_popover(frame, panel, area, anchor, hovered) {
             let target = if index == 0 {
                 WorkspacePanelHitTarget::SaveSnapshot
             } else {
                 WorkspacePanelHitTarget::Snapshot(index - 1)
             };
-            targets.push((HitTarget::WorkspacePanel(target), area));
+            targets.push((HitTarget::WorkspacePanel(target), popup_area));
         }
     }
     targets
 }
 
 pub(super) fn section_areas(area: Rect) -> (Rect, Rect) {
+    let (header_height, footer_height) = chrome_heights(area);
     let body = Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
+        area.x.saturating_add(2),
+        area.y.saturating_add(header_height + 1),
+        area.width.saturating_sub(4),
+        area.height
+            .saturating_sub(header_height + footer_height + 2),
     );
-    let workspace_height = body.height.saturating_add(1) / 2;
-    (
-        Rect::new(body.x, body.y, body.width, workspace_height),
-        Rect::new(
-            body.x,
-            body.y.saturating_add(workspace_height),
-            body.width,
-            body.height.saturating_sub(workspace_height),
+    if area.width >= 82 {
+        let columns = Layout::horizontal([
+            Constraint::Percentage(56),
+            Constraint::Length(2),
+            Constraint::Min(22),
+        ])
+        .split(body);
+        (columns[0], columns[2])
+    } else {
+        let workspace_height = body.height.saturating_add(1) / 2;
+        (
+            Rect::new(body.x, body.y, body.width, workspace_height),
+            Rect::new(
+                body.x,
+                body.y.saturating_add(workspace_height),
+                body.width,
+                body.height.saturating_sub(workspace_height),
+            ),
+        )
+    }
+}
+
+fn draw_header(
+    frame: &mut Frame<'_>,
+    panel: &WorkspacePanel,
+    area: Rect,
+    targets: &mut Vec<(HitTarget, Rect)>,
+    hovered: Option<WorkspacePanelHitTarget>,
+) {
+    let inner = Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(4),
+        chrome_heights(area).0.min(area.height.saturating_sub(2)),
+    );
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let title_row = Rect::new(inner.x, inner.y, inner.width, 1);
+    let close_button = Rect::new(
+        title_row.right().saturating_sub(8),
+        title_row.y,
+        8.min(title_row.width),
+        1,
+    );
+    let title = Line::from(vec![
+        Span::styled(
+            "WORKSPACE MANAGER",
+            Style::default()
+                .fg(palette().ink)
+                .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(
+            "  HERDR / CONTROL CENTER",
+            Style::default().fg(palette().faint),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(title),
+        Rect::new(
+            title_row.x,
+            title_row.y,
+            title_row.width.saturating_sub(close_button.width + 1),
+            1,
+        ),
+    );
+
+    let workspace_count = panel.workspaces.len();
+    let agent_count = panel.agents.len();
+    let active = panel
+        .workspaces
+        .iter()
+        .filter(|workspace| workspace.focused)
+        .count();
+    let working = panel
+        .agents
+        .iter()
+        .filter(|agent| agent.status == AgentStatus::Working)
+        .count();
+    draw_button(
+        frame,
+        close_button,
+        "× Close",
+        hovered == Some(WorkspacePanelHitTarget::Collapse),
+    );
+
+    let metrics = if inner.width < 70 {
+        vec![
+            (format!("{workspace_count} WS"), palette().orange),
+            (format!("{agent_count} AG"), palette().cyan),
+            (format!("{working} WORKING"), palette().yellow),
+        ]
+    } else {
+        vec![
+            (format!("{workspace_count} WORKSPACES"), palette().orange),
+            (format!("{agent_count} AGENTS"), palette().cyan),
+            (format!("{active} ACTIVE"), palette().yellow),
+            (format!("{working} WORKING"), palette().green),
+        ]
+    };
+    let compact = inner.height < HEADER_HEIGHT;
+    if !compact {
+        let metric_row = Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1);
+        let mut metric_x = metric_row.x;
+        for (label, color) in metrics {
+            let width = badge_width(&label);
+            if metric_x.saturating_add(width) > metric_row.right() {
+                break;
+            }
+            draw_badge(
+                frame,
+                Rect::new(metric_x, metric_row.y, width, 1),
+                &label,
+                color,
+                palette().raised,
+            );
+            metric_x = metric_x.saturating_add(width + 1);
+        }
+    }
+
+    let row = Rect::new(
+        inner.x,
+        inner.y.saturating_add(if compact { 1 } else { 3 }),
+        inner.width,
+        1,
+    );
+    let new_button = button_area(row, 0, 7);
+    let presets_button = button_area(row, 8, 10);
+    draw_button(
+        frame,
+        new_button,
+        "+ New",
+        hovered == Some(WorkspacePanelHitTarget::CreateMenu) || panel.create_menu_open,
+    );
+    draw_button(
+        frame,
+        presets_button,
+        "Presets",
+        hovered == Some(WorkspacePanelHitTarget::SnapshotMenu) || panel.snapshot_menu_open,
+    );
+    frame.render_widget(
+        Paragraph::new("r Refresh").style(Style::default().fg(palette().muted)),
+        Rect::new(
+            row.x.saturating_add(20),
+            row.y,
+            row.width.saturating_sub(20),
+            1,
+        ),
+    );
+    targets.push((
+        HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateMenu),
+        new_button,
+    ));
+    targets.push((
+        HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SnapshotMenu),
+        presets_button,
+    ));
+    targets.push((
+        HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Collapse),
+        close_button,
+    ));
+}
+
+fn draw_workspace_section(
+    frame: &mut Frame<'_>,
+    panel: &mut WorkspacePanel,
+    section: Rect,
+    hovered: Option<WorkspacePanelHitTarget>,
+    loaded_workspace_path: Option<&Path>,
+    targets: &mut Vec<(HitTarget, Rect)>,
+) {
+    if section.width == 0 || section.height == 0 {
+        return;
+    }
+    let list = draw_section_frame(
+        frame,
+        section,
+        "WORKSPACES",
+        panel.workspaces.len(),
+        palette().orange,
+    );
+    let rows = panel
+        .workspace_rows()
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row,
+                WorkspacePanelRow::Group(_) | WorkspacePanelRow::Workspace(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    let selected_row = panel.selected.and_then(|selected| {
+        rows.iter().position(
+            |row| matches!(row, WorkspacePanelRow::Workspace(index) if *index == selected),
+        )
+    });
+    let groups = (0..panel.workspaces.len())
+        .map(|index| panel.group_for_workspace(index))
+        .collect::<Vec<_>>();
+    let mut group_counts = vec![0usize; panel.groups.len()];
+    for group in groups.iter().flatten() {
+        group_counts[*group] += 1;
+    }
+    let card_height = if list.height >= 8 { 2 } else { 1 };
+    let card_gap = u16::from(card_height > 1);
+    let item_step = card_height + card_gap;
+    let viewport = usize::from((list.height + card_gap) / item_step).max(1);
+    keep_section_visible(
+        &mut panel.workspace_scroll,
+        panel
+            .workspace_scroll_follows_selection
+            .then_some(selected_row)
+            .flatten(),
+        rows.len(),
+        viewport,
+    );
+    for (visual_row, row) in rows
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(panel.workspace_scroll)
+    {
+        let screen_row = visual_row.saturating_sub(panel.workspace_scroll);
+        if screen_row >= viewport {
+            break;
+        }
+        let row_area = Rect::new(
+            list.x,
+            list.y + u16::try_from(screen_row).unwrap_or(0) * item_step,
+            list.width,
+            card_height.min(
+                list.height
+                    .saturating_sub(u16::try_from(screen_row).unwrap_or(0) * item_step),
+            ),
+        );
+        match row {
+            WorkspacePanelRow::Group(index) => {
+                let group = &panel.groups[index];
+                let target = WorkspacePanelHitTarget::Group(index);
+                draw_group(
+                    frame,
+                    row_area,
+                    if group.expanded { "▾" } else { "▸" },
+                    &group.name,
+                    group_counts[index],
+                    hovered == Some(target)
+                        || panel.workspace_drag_target() == Some(WorkspaceDropTarget::Group(index)),
+                );
+                targets.push((HitTarget::WorkspacePanel(target), row_area));
+            }
+            WorkspacePanelRow::Workspace(index) => {
+                let state = panel.workspace_entry_state(index, true, loaded_workspace_path);
+                let workspace = &panel.workspaces[index];
+                let indent = match (
+                    groups[index].is_some(),
+                    panel.workspace_is_linked_worktree(index),
+                ) {
+                    (true, true) => "  └ ",
+                    (true, false) => "  ",
+                    (false, true) => "└ ",
+                    (false, false) => "",
+                };
+                let target = WorkspacePanelHitTarget::Workspace(index);
+                let metadata = format_workspace_metadata(
+                    workspace.branch.as_deref(),
+                    workspace.pane_count,
+                    panel.workspace_is_linked_worktree(index),
+                );
+                draw_workspace_card(
+                    frame,
+                    row_area,
+                    &format!("{indent}{}", workspace.label),
+                    &metadata,
+                    workspace.status,
+                    state,
+                    hovered == Some(target)
+                        || (panel.workspace_drag_target() == Some(WorkspaceDropTarget::Ungrouped)
+                            && groups[index].is_none()),
+                );
+                targets.push((HitTarget::WorkspacePanel(target), row_area));
+            }
+            _ => {}
+        }
+    }
+    if panel.workspaces.is_empty() && list.height > 0 {
+        let message = panel.error.as_deref().unwrap_or(if panel.loading {
+            "Loading Herdr workspaces…"
+        } else {
+            "No workspaces detected"
+        });
+        frame.render_widget(
+            Paragraph::new(format!(
+                "  {}",
+                truncate_width(message, usize::from(list.width).saturating_sub(2))
+            ))
+            .style(
+                Style::default()
+                    .fg(if panel.error.is_some() {
+                        palette().red
+                    } else {
+                        palette().faint
+                    })
+                    .bg(palette().surface_alt),
+            ),
+            list,
+        );
+    }
+}
+
+fn draw_agent_section(
+    frame: &mut Frame<'_>,
+    panel: &mut WorkspacePanel,
+    section: Rect,
+    settings: &Settings,
+    hovered: Option<WorkspacePanelHitTarget>,
+    targets: &mut Vec<(HitTarget, Rect)>,
+) {
+    if section.width == 0 || section.height == 0 {
+        return;
+    }
+    let list = draw_section_frame(
+        frame,
+        section,
+        "AGENT ACTIVITY",
+        panel.agents.len(),
+        palette().cyan,
+    );
+    let rows = panel
+        .agent_rows()
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row,
+                WorkspacePanelRow::Agent(_) | WorkspacePanelRow::EmptyAgents
+            )
+        })
+        .collect::<Vec<_>>();
+    let selected_row = panel
+        .selected
+        .and_then(|selected| selected.checked_sub(panel.workspaces.len()))
+        .and_then(|selected| {
+            rows.iter().position(
+                |row| matches!(row, WorkspacePanelRow::Agent(index) if *index == selected),
+            )
+        });
+    let card_height = if list.height >= 8 { 2 } else { 1 };
+    let card_gap = u16::from(card_height > 1);
+    let item_step = card_height + card_gap;
+    let viewport = usize::from((list.height + card_gap) / item_step).max(1);
+    keep_section_visible(
+        &mut panel.agent_scroll,
+        panel
+            .agent_scroll_follows_selection
+            .then_some(selected_row)
+            .flatten(),
+        rows.len(),
+        viewport,
+    );
+    for (visual_row, row) in rows.iter().copied().enumerate().skip(panel.agent_scroll) {
+        let screen_row = visual_row.saturating_sub(panel.agent_scroll);
+        if screen_row >= viewport {
+            break;
+        }
+        let row_area = Rect::new(
+            list.x,
+            list.y + u16::try_from(screen_row).unwrap_or(0) * item_step,
+            list.width,
+            card_height.min(
+                list.height
+                    .saturating_sub(u16::try_from(screen_row).unwrap_or(0) * item_step),
+            ),
+        );
+        match row {
+            WorkspacePanelRow::Agent(index) => {
+                let state = panel.agent_entry_state(index, true);
+                let agent = &panel.agents[index];
+                let workspace = panel
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == agent.workspace_id)
+                    .map_or("unassigned", |workspace| workspace.label.as_str());
+                let elapsed = panel
+                    .agent_elapsed(index, settings.agent_time_display)
+                    .map(format_duration);
+                let session = agent.session_name.as_deref().unwrap_or("terminal session");
+                let target = WorkspacePanelHitTarget::Agent(index);
+                draw_agent_card(
+                    frame,
+                    row_area,
+                    workspace,
+                    session,
+                    elapsed.as_deref(),
+                    agent.status,
+                    state,
+                    hovered == Some(target),
+                );
+                targets.push((HitTarget::WorkspacePanel(target), row_area));
+            }
+            WorkspacePanelRow::EmptyAgents => {
+                let message = panel.error.as_deref().unwrap_or(if panel.loading {
+                    "Loading agent activity…"
+                } else {
+                    "No agents detected"
+                });
+                frame.render_widget(
+                    Paragraph::new(format!(
+                        "  {}",
+                        truncate_width(message, usize::from(list.width).saturating_sub(2))
+                    ))
+                    .style(
+                        Style::default()
+                            .fg(if panel.error.is_some() {
+                                palette().red
+                            } else {
+                                palette().faint
+                            })
+                            .bg(palette().surface_alt),
+                    ),
+                    list,
+                );
+            }
+            _ => {}
+        }
+    }
+    if panel.agents.is_empty() && list.height > 0 && !panel.loading && panel.error.is_none() {
+        frame.render_widget(
+            Paragraph::new("  No agents detected").style(
+                Style::default()
+                    .fg(palette().faint)
+                    .bg(palette().surface_alt),
+            ),
+            list,
+        );
+    }
+}
+
+fn draw_footer(frame: &mut Frame<'_>, panel: &WorkspacePanel, area: Rect) {
+    let (header_height, footer_height) = chrome_heights(area);
+    let inner = Rect::new(
+        area.x.saturating_add(2),
+        area.bottom().saturating_sub(footer_height + 1),
+        area.width.saturating_sub(4),
+        footer_height.min(area.height.saturating_sub(header_height + 2)),
+    );
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let message = if panel.group_editing {
+        format!("Group: {}", panel.group_input.text())
+    } else if panel.snapshot_editing {
+        format!("Preset: {}", panel.snapshot_input.text())
+    } else if panel.snapshot_menu_open {
+        panel
+            .snapshot_error
+            .as_deref()
+            .unwrap_or("Enter load  Del remove")
+            .to_owned()
+    } else if panel.create_menu_open {
+        "↑/↓ choose  Enter create  Esc cancel".to_owned()
+    } else {
+        "Enter focus Herdr  Click open in Hunkle  g group  F2 rename  Del remove".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(message).style(Style::default().fg(
+            if panel.group_editing || panel.snapshot_editing {
+                palette().accent
+            } else {
+                palette().muted
+            },
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("j/k navigate  r refresh  p presets  w / Esc close")
+            .alignment(ratatui::layout::Alignment::Right)
+            .style(Style::default().fg(palette().faint)),
+        Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
+    );
+    if inner.height > 2 {
+        frame.render_widget(
+            Paragraph::new(if panel.error.is_some() {
+                "Inventory unavailable; r retries the Herdr snapshot"
+            } else {
+                "Click a card to open it in Hunkle"
+            })
+            .style(Style::default().fg(if panel.error.is_some() {
+                palette().red
+            } else {
+                palette().faint
+            })),
+            Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1),
+        );
+    }
+}
+
+fn draw_section_frame(
+    frame: &mut Frame<'_>,
+    section: Rect,
+    label: &str,
+    count: usize,
+    accent: Color,
+) -> Rect {
+    fill(frame, section, palette().panel);
+    let header = Rect::new(
+        section.x.saturating_add(1),
+        section.y.saturating_add(1),
+        section.width.saturating_sub(2),
+        1.min(section.height.saturating_sub(2)),
+    );
+    if header.width > 0 && header.height > 0 {
+        let count_label = count.to_string();
+        let count_area = Rect::new(
+            header.right().saturating_sub(badge_width(&count_label)),
+            header.y,
+            badge_width(&count_label).min(header.width),
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+            Rect::new(
+                header.x,
+                header.y,
+                count_area.x.saturating_sub(header.x.saturating_add(1)),
+                1,
+            ),
+        );
+        draw_badge(frame, count_area, &count_label, accent, palette().raised);
+    }
+    Rect::new(
+        section.x.saturating_add(1),
+        section.y.saturating_add(2),
+        section.width.saturating_sub(2),
+        section.height.saturating_sub(3),
     )
+}
+
+fn draw_workspace_card(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    metadata: &str,
+    status: AgentStatus,
+    state: WorkspacePanelEntryState,
+    hovered: bool,
+) {
+    let highlighted = state.selected || hovered;
+    let background = if highlighted {
+        palette().selected
+    } else {
+        palette().surface_alt
+    };
+    fill(frame, area, background);
+    let rail = if highlighted {
+        palette().accent
+    } else if state.active {
+        palette().yellow
+    } else if state.loaded {
+        palette().green
+    } else {
+        palette().raised
+    };
+    fill(frame, Rect::new(area.x, area.y, 1, area.height), rail);
+
+    let state_label = if state.active && state.loaded {
+        "ACTIVE · OPEN"
+    } else if state.active {
+        "ACTIVE"
+    } else if state.loaded {
+        "OPEN"
+    } else {
+        status_label(status)
+    };
+    let state_color = if state.active {
+        palette().yellow
+    } else if state.loaded {
+        palette().green
+    } else {
+        status_color(status)
+    };
+    let badge = badge_width(state_label);
+    let content = Rect::new(
+        area.x.saturating_add(2),
+        area.y,
+        area.width.saturating_sub(3),
+        area.height,
+    );
+    let badge_area = Rect::new(
+        content.right().saturating_sub(badge),
+        content.y,
+        badge.min(content.width),
+        1,
+    );
+    draw_badge(
+        frame,
+        badge_area,
+        state_label,
+        state_color,
+        palette().raised,
+    );
+    let label_area = Rect::new(
+        content.x,
+        content.y,
+        badge_area.x.saturating_sub(content.x.saturating_add(1)),
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(truncate_width(label, usize::from(label_area.width))).style(
+            Style::default()
+                .fg(if state.active {
+                    palette().yellow
+                } else {
+                    palette().ink
+                })
+                .bg(background)
+                .add_modifier(if highlighted {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+        label_area,
+    );
+    if area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "  {}",
+                truncate_width(metadata, usize::from(content.width).saturating_sub(2))
+            ))
+            .style(Style::default().fg(palette().muted).bg(background)),
+            Rect::new(content.x, content.y.saturating_add(1), content.width, 1),
+        );
+    }
+}
+
+fn format_workspace_metadata(
+    branch: Option<&str>,
+    pane_count: usize,
+    linked_worktree: bool,
+) -> String {
+    let branch = branch.unwrap_or("detached");
+    let panes = if pane_count == 1 { "pane" } else { "panes" };
+    if linked_worktree {
+        format!("{branch}  ·  linked worktree  ·  {pane_count} {panes}")
+    } else {
+        format!("{branch}  ·  {pane_count} {panes}")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_agent_card(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    repository: &str,
+    session: &str,
+    elapsed: Option<&str>,
+    status: AgentStatus,
+    state: WorkspacePanelEntryState,
+    hovered: bool,
+) {
+    let highlighted = state.selected || hovered;
+    let background = if highlighted {
+        palette().inactive_selected
+    } else {
+        palette().surface_alt
+    };
+    fill(frame, area, background);
+    let rail = if highlighted {
+        palette().accent
+    } else if state.active {
+        palette().cyan
+    } else {
+        status_color(status)
+    };
+    fill(frame, Rect::new(area.x, area.y, 1, area.height), rail);
+    let content = Rect::new(
+        area.x.saturating_add(2),
+        area.y,
+        area.width.saturating_sub(3),
+        area.height,
+    );
+    let status_text = status_label(status);
+    let badge = badge_width(status_text);
+    let badge_area = Rect::new(
+        content.right().saturating_sub(badge),
+        content.y,
+        badge.min(content.width),
+        1,
+    );
+    draw_badge(
+        frame,
+        badge_area,
+        status_text,
+        status_color(status),
+        palette().raised,
+    );
+    let name_area = Rect::new(
+        content.x,
+        content.y,
+        badge_area.x.saturating_sub(content.x.saturating_add(1)),
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(truncate_width(repository, usize::from(name_area.width))).style(
+            Style::default()
+                .fg(if state.active {
+                    palette().accent
+                } else {
+                    palette().ink
+                })
+                .bg(background)
+                .add_modifier(if highlighted || state.active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+        name_area,
+    );
+    if area.height > 1 {
+        let time_width = elapsed
+            .map(|time| u16::try_from(UnicodeWidthStr::width(time)).unwrap_or(u16::MAX))
+            .unwrap_or(0)
+            .min(content.width);
+        let session_width = content
+            .width
+            .saturating_sub(time_width.saturating_add(u16::from(time_width > 0)));
+        frame.render_widget(
+            Paragraph::new(truncate_width(session, usize::from(session_width)))
+                .style(Style::default().fg(palette().muted).bg(background)),
+            Rect::new(content.x, content.y.saturating_add(1), session_width, 1),
+        );
+        if let Some(elapsed) = elapsed {
+            frame.render_widget(
+                Paragraph::new(elapsed)
+                    .alignment(ratatui::layout::Alignment::Right)
+                    .style(Style::default().fg(palette().soft).bg(background)),
+                Rect::new(
+                    content.right().saturating_sub(time_width),
+                    content.y.saturating_add(1),
+                    time_width,
+                    1,
+                ),
+            );
+        }
+    }
+}
+
+fn badge_width(label: &str) -> u16 {
+    u16::try_from(UnicodeWidthStr::width(label).saturating_add(2)).unwrap_or(u16::MAX)
+}
+
+fn draw_badge(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    foreground: Color,
+    background: Color,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(format!(
+            " {} ",
+            truncate_width(label, usize::from(area.width).saturating_sub(2))
+        ))
+        .style(
+            Style::default()
+                .fg(foreground)
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
+fn button_area(row: Rect, offset: u16, width: u16) -> Rect {
+    Rect::new(
+        row.x.saturating_add(offset),
+        row.y,
+        width.min(row.width.saturating_sub(offset)),
+        1,
+    )
+}
+
+fn draw_button(frame: &mut Frame<'_>, area: Rect, label: &str, active: bool) {
+    frame.render_widget(
+        Paragraph::new(format!(
+            " {} ",
+            truncate_width(label, usize::from(area.width).saturating_sub(2))
+        ))
+        .style(
+            Style::default()
+                .fg(if active {
+                    palette().canvas
+                } else {
+                    palette().accent
+                })
+                .bg(if active {
+                    palette().accent
+                } else {
+                    palette().raised
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
 }
 
 fn draw_snapshot_popover(
@@ -442,20 +979,21 @@ fn draw_snapshot_popover(
     let item_count = panel.snapshots.len() + 1;
     let height = u16::try_from(item_count)
         .unwrap_or(u16::MAX)
-        .min(bounds.height.saturating_sub(1));
+        .min(bounds.height.saturating_sub(2));
     if height == 0 {
         return Vec::new();
     }
-    let width = 23.min(bounds.width);
-    let x = anchor
-        .right()
-        .saturating_sub(width)
-        .clamp(bounds.x, bounds.right().saturating_sub(width));
-    let y = anchor.bottom();
+    let width = 28.min(bounds.width.saturating_sub(2));
+    let x = anchor.x.clamp(
+        bounds.x.saturating_add(1),
+        bounds.right().saturating_sub(width).saturating_sub(1),
+    );
+    let y = anchor
+        .bottom()
+        .min(bounds.bottom().saturating_sub(height).saturating_sub(1));
     let overlay = Rect::new(x, y, width, height);
-    frame.render_widget(ratatui::widgets::Clear, overlay);
+    frame.render_widget(Clear, overlay);
     fill(frame, overlay, palette().raised);
-
     let visible = usize::from(height);
     let start = panel
         .snapshot_menu_choice
@@ -464,19 +1002,22 @@ fn draw_snapshot_popover(
         .min(item_count.saturating_sub(visible));
     let mut areas = Vec::with_capacity(visible);
     for index in start..start + visible {
-        let area = Rect::new(x, y + u16::try_from(index - start).unwrap_or(0), width, 1);
+        let row = Rect::new(x, y + u16::try_from(index - start).unwrap_or(0), width, 1);
         let target = if index == 0 {
             WorkspacePanelHitTarget::SaveSnapshot
         } else {
             WorkspacePanelHitTarget::Snapshot(index - 1)
         };
-        let hovered = hovered == Some(target);
-        let selected = panel.snapshot_menu_choice == index;
+        let selected = panel.snapshot_menu_choice == index || hovered == Some(target);
         let label = if index == 0 {
-            "Save current...".to_owned()
+            "Save current preset…".to_owned()
         } else {
             let snapshot = &panel.snapshots[index - 1];
-            format!("{}  {}", snapshot.name, snapshot.workspace_count())
+            format!(
+                "{}  {} workspaces",
+                snapshot.name,
+                snapshot.workspace_count()
+            )
         };
         frame.render_widget(
             Paragraph::new(format!(
@@ -485,16 +1026,20 @@ fn draw_snapshot_popover(
             ))
             .style(
                 Style::default()
-                    .fg(palette().ink)
-                    .bg(if selected || hovered {
+                    .fg(if selected {
+                        palette().ink
+                    } else {
+                        palette().muted
+                    })
+                    .bg(if selected {
                         palette().selected
                     } else {
                         palette().raised
                     }),
             ),
-            area,
+            row,
         );
-        areas.push((index, area));
+        areas.push((index, row));
     }
     areas
 }
@@ -507,18 +1052,18 @@ fn draw_create_popover(
     worktree_enabled: bool,
     hovered: Option<WorkspacePanelHitTarget>,
 ) -> (Rect, Rect) {
-    let width = 18.min(bounds.width);
-    let x = anchor
-        .right()
-        .saturating_sub(width)
-        .clamp(bounds.x, bounds.right().saturating_sub(width));
-    let y = anchor.bottom();
+    let width = 24.min(bounds.width.saturating_sub(2));
+    let x = anchor.x.clamp(
+        bounds.x.saturating_add(1),
+        bounds.right().saturating_sub(width).saturating_sub(1),
+    );
+    let y = anchor.bottom().min(bounds.bottom().saturating_sub(3));
     let workspace = Rect::new(x, y, width, 1);
     let worktree = Rect::new(x, y.saturating_add(1), width, 1);
     let overlay = Rect::new(x, y, width, 2);
-    frame.render_widget(ratatui::widgets::Clear, overlay);
+    frame.render_widget(Clear, overlay);
     fill(frame, overlay, palette().raised);
-    for (index, (label, area, enabled, target)) in [
+    for (index, (label, row, enabled, target)) in [
         (
             "New workspace",
             workspace,
@@ -526,7 +1071,7 @@ fn draw_create_popover(
             WorkspacePanelHitTarget::CreateWorkspace,
         ),
         (
-            "New worktree",
+            "New linked worktree",
             worktree,
             worktree_enabled,
             WorkspacePanelHitTarget::CreateWorktree,
@@ -550,7 +1095,7 @@ fn draw_create_popover(
                         palette().raised
                     }),
             ),
-            area,
+            row,
         );
     }
     (workspace, worktree)
@@ -562,189 +1107,84 @@ fn draw_group(
     marker: &str,
     name: &str,
     count: usize,
-    drop_target: bool,
+    highlighted: bool,
 ) {
-    let style = if drop_target {
-        Style::default().bg(palette().selected).fg(palette().ink)
+    let background = if highlighted {
+        palette().selected
     } else {
-        Style::default().fg(palette().muted)
+        palette().surface_alt
     };
+    fill(frame, area, background);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, 1, area.height),
+        if highlighted {
+            palette().accent
+        } else {
+            palette().orange
+        },
+    );
     frame.render_widget(
         Paragraph::new(format!(
-            "{marker} {}  {count}",
-            truncate_width(name, usize::from(area.width).saturating_sub(6))
+            "  {marker} {}",
+            truncate_width(name, usize::from(area.width).saturating_sub(8))
         ))
-        .style(style.add_modifier(Modifier::BOLD)),
-        area,
-    );
-}
-
-fn draw_header(frame: &mut Frame<'_>, area: Rect, label: &str, count: usize) {
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                label,
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {count}"), Style::default().fg(palette().faint)),
-        ])),
-        area,
-    );
-}
-
-fn draw_workspace_header(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    create_hovered: bool,
-    snapshot_hovered: bool,
-) -> (Rect, Option<Rect>) {
-    let compact = area.width < 22;
-    let title = if compact { "WS" } else { "WORKSPACES" };
-    let title_width = if compact { 2 } else { 10 };
-    frame.render_widget(
-        Paragraph::new(title).style(
+        .style(
             Style::default()
-                .fg(palette().muted)
+                .fg(if highlighted {
+                    palette().ink
+                } else {
+                    palette().orange
+                })
+                .bg(background)
                 .add_modifier(Modifier::BOLD),
         ),
-        Rect::new(area.x, area.y, title_width.min(area.width), 1),
+        Rect::new(area.x, area.y, area.width, 1),
     );
-    let button_x = area.x.saturating_add(title_width + 1);
-    let button = Rect::new(
-        button_x,
-        area.y,
-        3.min(area.right().saturating_sub(button_x)),
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(" + ").style(
-            Style::default()
-                .fg(if create_hovered {
-                    palette().canvas
-                } else {
-                    palette().accent
-                })
-                .bg(if create_hovered {
-                    palette().accent
-                } else {
-                    palette().raised
-                })
-                .add_modifier(Modifier::BOLD),
-        ),
-        button,
-    );
-    let load_x = button.right().saturating_add(1);
-    let available = area.right().saturating_sub(1).saturating_sub(load_x);
-    let load = (available >= 6).then(|| Rect::new(load_x, area.y, 6, 1));
-    if let Some(load) = load {
+    if area.height > 1 {
         frame.render_widget(
-            Paragraph::new(" Load ").style(
-                Style::default()
-                    .fg(if snapshot_hovered {
-                        palette().canvas
-                    } else {
-                        palette().accent
-                    })
-                    .bg(if snapshot_hovered {
-                        palette().accent
-                    } else {
-                        palette().raised
-                    }),
-            ),
-            load,
+            Paragraph::new(format!(
+                "    {count} workspace{}  ·  click to {}",
+                if count == 1 { "" } else { "s" },
+                if marker == "▾" {
+                    "collapse"
+                } else {
+                    "expand"
+                },
+            ))
+            .style(Style::default().fg(palette().muted).bg(background)),
+            Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
         );
     }
-    (button, load)
-}
-
-struct EntryPresentation {
-    status: AgentStatus,
-    marker_active: bool,
-    label_active: bool,
-    selected: bool,
-    selected_background: Color,
-    active_marker: &'static str,
-    active_marker_color: Color,
-    active_label_color: Color,
-    spinner_frame: usize,
-}
-
-fn draw_entry(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    label: &str,
-    detail: Option<&str>,
-    presentation: EntryPresentation,
-) {
-    let EntryPresentation {
-        status,
-        marker_active,
-        label_active,
-        selected,
-        selected_background,
-        active_marker,
-        active_marker_color,
-        active_label_color,
-        spinner_frame,
-    } = presentation;
-    let marker = if marker_active { active_marker } else { "  " };
-    let status_marker = status_marker(status, spinner_frame);
-    let available = usize::from(area.width).saturating_sub(4);
-    let detail = detail
-        .filter(|detail| !detail.is_empty())
-        .map(|detail| truncate_width(detail, available.saturating_sub(5).min(available / 2)));
-    let detail_width = detail
-        .as_deref()
-        .map(UnicodeWidthStr::width)
-        .unwrap_or_default();
-    let label = truncate_width(
-        label,
-        available.saturating_sub(detail_width + usize::from(detail.is_some()) * 2),
-    );
-    let label_width = UnicodeWidthStr::width(label.as_str());
-    let padding = available.saturating_sub(label_width + detail_width);
-    let background = selected.then_some(selected_background);
-    let base = background.map_or_else(Style::default, |color| Style::default().bg(color));
-    frame.render_widget(Block::default().style(base), area);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                marker,
-                base.fg(if marker_active {
-                    active_marker_color
-                } else {
-                    palette().faint
-                }),
-            ),
-            Span::styled(
-                label,
-                if label_active {
-                    base.fg(active_label_color).add_modifier(Modifier::BOLD)
-                } else {
-                    base.fg(palette().muted)
-                },
-            ),
-            Span::styled(" ".repeat(padding), base),
-            Span::styled(detail.unwrap_or_default(), base.fg(palette().accent)),
-            Span::styled(" ", base),
-            Span::styled(status_marker, base.fg(status_color(status))),
-        ])),
-        area,
-    );
 }
 
 fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs();
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        format!("{minutes}:{:02}", seconds % 60)
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!("{}m", seconds / 60);
+    }
+    if seconds < 86_400 {
+        return format_tenths(seconds, 3_600, 'h');
+    }
+    if seconds < 604_800 {
+        return format_tenths(seconds, 86_400, 'd');
+    }
+    format_tenths(seconds, 604_800, 'w')
+}
+
+fn format_tenths(seconds: u64, unit: u64, suffix: char) -> String {
+    let tenths = seconds.saturating_mul(10).saturating_add(unit / 2) / unit;
+    if tenths.is_multiple_of(10) {
+        format!("{}{suffix}", tenths / 10)
     } else {
-        format!("{}:{:02}:{:02}", minutes / 60, minutes % 60, seconds % 60)
+        format!("{}.{}{}", tenths / 10, tenths % 10, suffix)
     }
 }
 
+#[cfg(test)]
 fn status_marker(status: AgentStatus, spinner_frame: usize) -> &'static str {
     match status {
         AgentStatus::Idle => "●",
@@ -755,7 +1195,17 @@ fn status_marker(status: AgentStatus, spinner_frame: usize) -> &'static str {
     }
 }
 
-fn status_color(status: AgentStatus) -> ratatui::style::Color {
+fn status_label(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Idle => "IDLE",
+        AgentStatus::Working => "WORKING",
+        AgentStatus::Blocked => "BLOCKED",
+        AgentStatus::Done => "DONE",
+        AgentStatus::Unknown => "UNKNOWN",
+    }
+}
+
+fn status_color(status: AgentStatus) -> Color {
     match status {
         AgentStatus::Idle => palette().cyan,
         AgentStatus::Working => palette().yellow,
@@ -791,10 +1241,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_agent_durations_as_compact_clocks() {
-        assert_eq!(format_duration(Duration::ZERO), "0:00");
-        assert_eq!(format_duration(Duration::from_secs(62)), "1:02");
-        assert_eq!(format_duration(Duration::from_secs(3_661)), "1:01:01");
+    fn formats_agent_durations_as_compact_units() {
+        assert_eq!(format_duration(Duration::ZERO), "0s");
+        assert_eq!(format_duration(Duration::from_secs(23)), "23s");
+        assert_eq!(format_duration(Duration::from_secs(240)), "4m");
+        assert_eq!(format_duration(Duration::from_secs(18_360)), "5.1h");
+        assert_eq!(format_duration(Duration::from_secs(276_480)), "3.2d");
+        assert_eq!(format_duration(Duration::from_secs(665_280)), "1.1w");
     }
 
     #[test]

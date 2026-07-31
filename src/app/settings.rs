@@ -6,10 +6,7 @@ use std::{
 
 use crate::{filesystem::atomic_write, media::MediaPreviewProtocol};
 
-use super::{
-    DEFAULT_WORKSPACE_PANEL_WIDTH, MINIMUM_WORKSPACE_PANEL_WIDTH,
-    explorer::MINIMUM_EXPLORER_PANE_WIDTH,
-};
+use super::explorer::MINIMUM_EXPLORER_PANE_WIDTH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTimeDisplay {
@@ -48,7 +45,6 @@ pub struct Settings {
     pub workspace_panel_enabled: bool,
     pub show_agent_harness: bool,
     pub agent_time_display: AgentTimeDisplay,
-    pub workspace_panel_width: u16,
     pub history_height: u16,
     pub explorer_left_pane_width: Option<u16>,
     pub editor_command: Option<String>,
@@ -70,7 +66,6 @@ impl Default for Settings {
             workspace_panel_enabled: true,
             show_agent_harness: false,
             agent_time_display: AgentTimeDisplay::LatestLoop,
-            workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
             history_height: 7,
             explorer_left_pane_width: None,
             editor_command: None,
@@ -131,14 +126,13 @@ impl SettingsStore {
         atomic_write(
             path,
             format!(
-                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nworkspace_panel_width={}\nhistory_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
+                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nhistory_height={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\n",
                 settings.auto_fetch,
                 settings.fetch_interval_minutes,
                 settings.worktree_width,
                 settings.workspace_panel_enabled,
                 settings.show_agent_harness,
                 settings.agent_time_display.as_str(),
-                settings.workspace_panel_width,
                 settings.history_height,
                 settings
                     .explorer_left_pane_width
@@ -201,12 +195,6 @@ fn load(path: &Path) -> Settings {
                     _ => AgentTimeDisplay::LatestLoop,
                 };
             }
-            "workspace_panel_width" => {
-                if let Ok(width) = value.trim().parse::<u16>() {
-                    settings.workspace_panel_width =
-                        width.clamp(MINIMUM_WORKSPACE_PANEL_WIDTH, 4096);
-                }
-            }
             "history_height" => {
                 if let Ok(height) = value.trim().parse::<u16>() {
                     settings.history_height = height.clamp(3, 256);
@@ -254,7 +242,6 @@ mod tests {
             workspace_panel_enabled: false,
             show_agent_harness: true,
             agent_time_display: AgentTimeDisplay::AgentTotal,
-            workspace_panel_width: 33,
             history_height: 9,
             explorer_left_pane_width: Some(47),
             editor_command: Some("code --wait".to_owned()),
@@ -278,13 +265,12 @@ mod tests {
 
         fs::write(
             path,
-            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nworkspace_panel_width=2\nhistory_height=1\nexplorer_left_pane_width=2\nmedia_preview_protocol=unknown\n",
+            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nhistory_height=1\nexplorer_left_pane_width=2\nmedia_preview_protocol=unknown\n",
         )
         .unwrap();
         let loaded = store.load();
         assert_eq!(loaded.fetch_interval_minutes, 1);
         assert_eq!(loaded.worktree_width, 24);
-        assert_eq!(loaded.workspace_panel_width, MINIMUM_WORKSPACE_PANEL_WIDTH);
         assert_eq!(loaded.history_height, 3);
         assert_eq!(
             loaded.explorer_left_pane_width,

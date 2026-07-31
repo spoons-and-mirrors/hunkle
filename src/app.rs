@@ -33,10 +33,9 @@ pub(crate) use repository_browser::{
 pub use settings::Settings;
 pub(crate) use settings::SettingsStore;
 pub(crate) use workspace_panel::{
-    AgentStatus, DEFAULT_WIDTH as DEFAULT_WORKSPACE_PANEL_WIDTH,
-    MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, SPINNER_FRAMES, SnapshotLoadDialog,
-    WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspaceDropTarget, WorkspacePanel,
-    WorkspacePanelEffect, WorkspacePanelPlacement, WorkspacePanelRow, WorkspaceRenameDialog,
+    AgentStatus, SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
+    WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect, WorkspacePanelEntryState,
+    WorkspacePanelRow, WorkspaceRenameDialog,
 };
 pub(crate) use worktree_manager::{
     WorktreeCandidate, WorktreeCreateDialog, WorktreeCreateField, WorktreeManager,
@@ -194,8 +193,6 @@ pub struct Regions {
     pub workspace_panel: Option<Rect>,
     pub workspace_panel_workspaces: Option<Rect>,
     pub workspace_panel_agents: Option<Rect>,
-    pub workspace_panel_splitter: Option<Rect>,
-    pub workspace_panel_bounds: Option<Rect>,
     pub workspace_presets_overlay: Option<Rect>,
     pub actions: Option<Rect>,
     pub worktree: Option<Rect>,
@@ -287,7 +284,6 @@ pub struct App {
     commit_draft_due: Option<Instant>,
     commit_draft_rx: Option<Receiver<CommitDraftResult>>,
     pub dragging_splitter: bool,
-    pub dragging_workspace_panel_splitter: bool,
     pub dragging_history: bool,
     pub dragging_diff_scrollbar: bool,
     diff_scroll_drag_offset: u16,
@@ -422,7 +418,6 @@ impl App {
             commit_draft_due: None,
             commit_draft_rx: None,
             dragging_splitter: false,
-            dragging_workspace_panel_splitter: false,
             dragging_history: false,
             dragging_diff_scrollbar: false,
             diff_scroll_drag_offset: 0,
@@ -1266,7 +1261,7 @@ impl App {
             KeyCode::Char('w')
                 if key.modifiers == KeyModifiers::NONE && self.workspace_panel_enabled() =>
             {
-                self.cycle_workspace_panel();
+                self.open_workspace_panel();
             }
             KeyCode::Char('p')
                 if key.modifiers == KeyModifiers::NONE && self.workspace_panel_enabled() =>
@@ -2226,29 +2221,11 @@ impl App {
     }
 
     fn open_workspace_panel(&mut self) {
-        if !self.workspace_panel_available() {
-            if self.workspace_panel_enabled() {
-                self.notice = Some("Workspaces need a wider terminal".to_owned());
-            }
+        if !self.workspace_panel_enabled() {
             return;
         }
-        if !self.workspace_panel.is_visible() {
-            self.workspace_panel.show_left();
-        }
+        self.workspace_panel.refresh();
         self.mode = Mode::WorkspacePanel;
-    }
-
-    fn cycle_workspace_panel(&mut self) {
-        if !self.workspace_panel_available() {
-            self.open_workspace_panel();
-        } else {
-            self.workspace_panel.cycle_placement();
-            self.mode = if self.workspace_panel.is_visible() {
-                Mode::WorkspacePanel
-            } else {
-                Mode::Normal
-            };
-        }
     }
 
     fn handle_workspace_panel(&mut self, key: KeyEvent) {
@@ -2287,7 +2264,6 @@ impl App {
         match effect {
             WorkspacePanelEffect::None | WorkspacePanelEffect::Unhandled => {}
             WorkspacePanelEffect::Close => self.mode = Mode::Normal,
-            WorkspacePanelEffect::Cycle => self.cycle_workspace_panel(),
             WorkspacePanelEffect::CreateWorkspace => {
                 let path = self
                     .session
@@ -2630,7 +2606,6 @@ impl App {
 
     fn toggle_workspace_panel_enabled(&mut self) {
         self.settings.workspace_panel_enabled = !self.settings.workspace_panel_enabled;
-        self.dragging_workspace_panel_splitter = false;
         self.settings_changed();
     }
 
@@ -3746,7 +3721,6 @@ mod tests {
                 workspace_panel_enabled: true,
                 show_agent_harness: false,
                 agent_time_display: settings::AgentTimeDisplay::LatestLoop,
-                workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
                 history_height: 7,
                 explorer_left_pane_width: None,
                 editor_command: None,
