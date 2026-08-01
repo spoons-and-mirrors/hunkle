@@ -239,13 +239,14 @@ where
     let host = export_layout(&mut api, &request.host_tab_id)?;
     let selected = export_layout(&mut api, &request.tab_id)?;
     validate_layouts(&request, &host, &selected)?;
-    let (host_ratio, outgoing) = host_agent_layout(&host.root, &request.host_pane_id)?;
+    let (host_ratio, host_frame, outgoing) = host_agent_layout(&host.root, &request.host_pane_id)?;
     let outgoing = outgoing.ok_or_else(|| {
         "Hunkle needs a pane layout on its right before another layout can be exchanged".to_owned()
     })?;
 
     let mut panes = HashMap::new();
     for (tree, tab_id) in [
+        (&host_frame, host.tab_id.as_str()),
         (&outgoing, host.tab_id.as_str()),
         (&selected.root, selected.tab_id.as_str()),
     ] {
@@ -266,14 +267,6 @@ where
             }
         }
     }
-    panes.insert(
-        request.host_pane_id.clone(),
-        LivePaneLocation {
-            pane_id: request.host_pane_id.clone(),
-            tab_id: host.tab_id.clone(),
-        },
-    );
-
     let outgoing_root = outgoing.first_pane().to_owned();
     let selected_root = selected.root.first_pane().to_owned();
     move_layout_pane(
@@ -288,6 +281,14 @@ where
 
     let exchange = (|| {
         rebuild_layout(&mut runner, &outgoing, &selected.tab_id, &mut panes)?;
+        stage_host_frame(
+            &mut runner,
+            &host_frame,
+            &request.host_pane_id,
+            &host.workspace_id,
+            &host.tab_id,
+            &mut panes,
+        )?;
         move_layout_pane(
             &mut runner,
             &mut panes,
@@ -298,13 +299,10 @@ where
             host_ratio,
         )?;
         rebuild_layout(&mut runner, &selected.root, &host.tab_id, &mut panes)?;
+        rebuild_layout(&mut runner, &host_frame, &host.tab_id, &mut panes)?;
 
         let final_host = export_layout(&mut api, &host.tab_id)?;
-        let expected_host = host_with_layout(
-            request.host_pane_id.clone(),
-            host_ratio,
-            selected.root.clone(),
-        );
+        let expected_host = host_with_layout(host_frame.clone(), host_ratio, selected.root.clone());
         verify_layout(&final_host, &expected_host, &panes, "displayed")?;
         if final_host.focused_pane_id != request.host_pane_id {
             return Err("Herdr did not preserve focus in Hunkle".to_owned());
@@ -319,6 +317,7 @@ where
             &request,
             &host,
             &selected,
+            &host_frame,
             &outgoing,
             host_ratio,
             &mut panes,
@@ -331,11 +330,15 @@ where
     Ok(())
 }
 
-fn host_with_layout(host_pane_id: String, ratio: f32, layout: LiveLayoutNode) -> LiveLayoutNode {
+fn host_with_layout(
+    host_frame: LiveLayoutNode,
+    ratio: f32,
+    layout: LiveLayoutNode,
+) -> LiveLayoutNode {
     LiveLayoutNode::Split {
         direction: LayoutDirection::Right,
         ratio,
-        first: Box::new(LiveLayoutNode::Pane(host_pane_id)),
+        first: Box::new(host_frame),
         second: Box::new(layout),
     }
 }
@@ -347,6 +350,7 @@ fn restore_layouts<F, A>(
     request: &DisplayAgentRequest,
     host: &LiveLayout,
     selected: &LiveLayout,
+    host_frame: &LiveLayoutNode,
     outgoing: &LiveLayoutNode,
     host_ratio: f32,
     panes: &mut HashMap<String, LivePaneLocation>,
@@ -355,6 +359,14 @@ where
     F: FnMut(&[String]) -> Result<Value, String>,
     A: FnMut(&str, &Value) -> Result<Value, String>,
 {
+    stage_host_frame(
+        runner,
+        host_frame,
+        &request.host_pane_id,
+        &host.workspace_id,
+        &host.tab_id,
+        panes,
+    )?;
     let outgoing_root = outgoing.first_pane().to_owned();
     normalize_layout(runner, outgoing, &selected.tab_id, &outgoing_root, panes)?;
     normalize_layout(
@@ -386,16 +398,84 @@ where
         host_ratio,
     )?;
     rebuild_layout(runner, outgoing, &host.tab_id, panes)?;
+    rebuild_layout(runner, host_frame, &host.tab_id, panes)?;
 
     let restored_host = export_layout(api, &host.tab_id)?;
-    let expected_host =
-        host_with_layout(request.host_pane_id.clone(), host_ratio, outgoing.clone());
+    let expected_host = host_with_layout(host_frame.clone(), host_ratio, outgoing.clone());
     verify_layout(&restored_host, &expected_host, panes, "previous displayed")?;
     if restored_host.focused_pane_id != request.host_pane_id {
         return Err("Herdr did not restore focus in Hunkle".to_owned());
     }
     let restored_selected = export_layout(api, &selected.tab_id)?;
     verify_layout(&restored_selected, &selected.root, panes, "previous parked")
+}
+
+fn stage_host_frame<F>(
+    runner: &mut F,
+    host_frame: &LiveLayoutNode,
+    host_pane_id: &str,
+    workspace_id: &str,
+    host_tab_id: &str,
+    panes: &mut HashMap<String, LivePaneLocation>,
+) -> Result<Option<String>, String>
+where
+    F: FnMut(&[String]) -> Result<Value, String>,
+{
+    let mut frame_panes = Vec::new();
+    host_frame.collect_panes(&mut frame_panes);
+    let frame_panes = frame_panes
+        .into_iter()
+        .filter(|pane_id| *pane_id != host_pane_id)
+        .collect::<Vec<_>>();
+    let Some(anchor) = frame_panes.first().copied() else {
+        return Ok(None);
+    };
+
+    let mut staging_tabs = frame_panes
+        .iter()
+        .filter_map(|pane_id| panes.get(*pane_id))
+        .filter(|location| location.tab_id != host_tab_id)
+        .map(|location| location.tab_id.clone())
+        .collect::<Vec<_>>();
+    staging_tabs.sort_unstable();
+    staging_tabs.dedup();
+    if staging_tabs.len() > 1 {
+        return Err("Hunkle's frame panes are spread across multiple staging tabs".to_owned());
+    }
+
+    let staging_tab_id = if let Some(tab_id) = staging_tabs.first() {
+        tab_id.clone()
+    } else {
+        move_layout_pane_to_new_tab(runner, panes, anchor, workspace_id)?
+    };
+    let staging_anchor = frame_panes
+        .iter()
+        .copied()
+        .find(|pane_id| {
+            panes
+                .get(*pane_id)
+                .is_some_and(|location| location.tab_id == staging_tab_id)
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| "Hunkle's frame staging tab has no anchor pane".to_owned())?;
+    for pane_id in frame_panes {
+        if panes
+            .get(pane_id)
+            .is_some_and(|location| location.tab_id == staging_tab_id)
+        {
+            continue;
+        }
+        move_layout_pane(
+            runner,
+            panes,
+            pane_id,
+            &staging_tab_id,
+            &staging_anchor,
+            LayoutDirection::Right,
+            0.5,
+        )?;
+    }
+    Ok(Some(staging_tab_id))
 }
 
 fn normalize_layout<F>(
@@ -526,18 +606,21 @@ fn validate_layouts(
 fn host_agent_layout(
     root: &LiveLayoutNode,
     host_pane_id: &str,
-) -> Result<(f32, Option<LiveLayoutNode>), String> {
+) -> Result<(f32, LiveLayoutNode, Option<LiveLayoutNode>), String> {
     match root {
-        LiveLayoutNode::Pane(pane_id) if pane_id == host_pane_id => Ok((0.6, None)),
+        LiveLayoutNode::Pane(pane_id) if pane_id == host_pane_id => Ok((0.6, root.clone(), None)),
         LiveLayoutNode::Split {
             direction: LayoutDirection::Right,
             ratio,
             first,
             second,
-        } if matches!(first.as_ref(), LiveLayoutNode::Pane(pane_id) if pane_id == host_pane_id) => {
-            Ok((*ratio, Some((**second).clone())))
+        } if first.contains(host_pane_id) && first.first_pane() == host_pane_id => {
+            Ok((*ratio, (**first).clone(), Some((**second).clone())))
         }
-        _ => Err("Hunkle must be the left root pane with the agent layout on its right".to_owned()),
+        _ => Err(
+            "Hunkle must be the first pane in the left frame, with the agent layout on the right"
+                .to_owned(),
+        ),
     }
 }
 
@@ -630,6 +713,68 @@ where
         },
     );
     Ok(moved)
+}
+
+fn move_layout_pane_to_new_tab<F>(
+    runner: &mut F,
+    panes: &mut HashMap<String, LivePaneLocation>,
+    pane: &str,
+    workspace_id: &str,
+) -> Result<String, String>
+where
+    F: FnMut(&[String]) -> Result<Value, String>,
+{
+    let location = panes
+        .get(pane)
+        .ok_or_else(|| format!("Saved layout pane {pane} is unavailable"))?
+        .clone();
+    let value = runner(&[
+        "pane".to_owned(),
+        "move".to_owned(),
+        location.pane_id,
+        "--new-tab".to_owned(),
+        "--workspace".to_owned(),
+        workspace_id.to_owned(),
+        "--label".to_owned(),
+        "hunkle-layout-staging".to_owned(),
+        "--no-focus".to_owned(),
+    ])?;
+    let result = require_changed(&value, "/result/move_result", "pane move")?;
+    let moved = result
+        .pointer("/pane/pane_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Herdr returned an invalid pane move result".to_owned())?;
+    let tab_id = result
+        .pointer("/created_tab/tab_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Herdr did not identify the staging tab".to_owned())?;
+    if result
+        .pointer("/created_tab/workspace_id")
+        .and_then(Value::as_str)
+        != Some(workspace_id)
+        || result.pointer("/pane/workspace_id").and_then(Value::as_str) != Some(workspace_id)
+    {
+        return Err("Herdr created the frame staging tab in an unexpected workspace".to_owned());
+    }
+    if result.pointer("/pane/tab_id").and_then(Value::as_str) != Some(tab_id.as_str()) {
+        return Err("Herdr moved a frame pane to an unexpected tab".to_owned());
+    }
+    if result
+        .get("closed_tab_id")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err("Herdr unexpectedly closed a tab while staging Hunkle's frame".to_owned());
+    }
+    panes.insert(
+        pane.to_owned(),
+        LivePaneLocation {
+            pane_id: moved,
+            tab_id: tab_id.clone(),
+        },
+    );
+    Ok(tab_id)
 }
 
 fn require_changed<'a>(
@@ -1529,6 +1674,22 @@ mod tests {
         })
     }
 
+    fn moved_to_new_tab(pane_id: &str, tab_id: &str) -> Value {
+        serde_json::json!({
+            "result": {
+                "move_result": {
+                    "changed": true,
+                    "pane": {
+                        "pane_id": pane_id,
+                        "workspace_id": "w1",
+                        "tab_id": tab_id
+                    },
+                    "created_tab": { "workspace_id": "w1", "tab_id": tab_id }
+                }
+            }
+        })
+    }
+
     #[test]
     fn parses_agent_status_events() {
         assert_eq!(
@@ -1833,6 +1994,185 @@ mod tests {
                 .all(|args| args.last().unwrap() == "--no-focus")
         );
         assert_eq!(exports, 4);
+    }
+
+    #[test]
+    fn preserves_a_pane_below_hunkle_while_exchanging_layouts() {
+        let host_frame = split("down", 0.4, pane("w1:p1"), pane("w1:p8"));
+        let outgoing = pane("w1:p2");
+        let selected = pane("w1:p3");
+        let mut commands = Vec::new();
+        let mut exports = 0;
+
+        display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |args| {
+                commands.push(args.to_vec());
+                Ok(if args.get(3).is_some_and(|arg| arg == "--new-tab") {
+                    moved_to_new_tab(&args[2], "w1:t9")
+                } else {
+                    moved(&args[2], &args[4])
+                })
+            },
+            |_, _| {
+                exports += 1;
+                Ok(match exports {
+                    1 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, host_frame.clone(), outgoing.clone()),
+                    ),
+                    2 => layout("w1", "w1:t2", "w1:p3", selected.clone()),
+                    3 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, host_frame.clone(), selected.clone()),
+                    ),
+                    4 => layout("w1", "w1:t2", "w1:p2", outgoing.clone()),
+                    _ => panic!("unexpected layout export"),
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            commands,
+            vec![
+                [
+                    "pane",
+                    "move",
+                    "w1:p2",
+                    "--tab",
+                    "w1:t2",
+                    "--target-pane",
+                    "w1:p3",
+                    "--split",
+                    "right",
+                    "--ratio",
+                    "0.5",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                [
+                    "pane",
+                    "move",
+                    "w1:p8",
+                    "--new-tab",
+                    "--workspace",
+                    "w1",
+                    "--label",
+                    "hunkle-layout-staging",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                [
+                    "pane",
+                    "move",
+                    "w1:p3",
+                    "--tab",
+                    "w1:t1",
+                    "--target-pane",
+                    "w1:p1",
+                    "--split",
+                    "right",
+                    "--ratio",
+                    "0.6",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                [
+                    "pane",
+                    "move",
+                    "w1:p8",
+                    "--tab",
+                    "w1:t1",
+                    "--target-pane",
+                    "w1:p1",
+                    "--split",
+                    "down",
+                    "--ratio",
+                    "0.4",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn restores_a_staged_host_frame_when_its_rebuild_fails() {
+        let host_frame = split("down", 0.4, pane("w1:p1"), pane("w1:p8"));
+        let outgoing = pane("w1:p2");
+        let selected = pane("w1:p3");
+        let mut commands = 0;
+        let mut exports = 0;
+        let mut tabs = HashMap::from([
+            ("w1:p1".to_owned(), "w1:t1".to_owned()),
+            ("w1:p2".to_owned(), "w1:t1".to_owned()),
+            ("w1:p3".to_owned(), "w1:t2".to_owned()),
+            ("w1:p8".to_owned(), "w1:t1".to_owned()),
+        ]);
+
+        let result = display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |args| {
+                commands += 1;
+                if commands == 4 {
+                    return Err("frame rebuild interrupted".to_owned());
+                }
+                if args.get(3).is_some_and(|arg| arg == "--new-tab") {
+                    assert_eq!(tabs.get(&args[2]).map(String::as_str), Some("w1:t1"));
+                    tabs.insert(args[2].clone(), "w1:t9".to_owned());
+                    return Ok(moved_to_new_tab(&args[2], "w1:t9"));
+                }
+                assert_ne!(tabs.get(&args[2]), Some(&args[4]));
+                tabs.insert(args[2].clone(), args[4].clone());
+                Ok(moved(&args[2], &args[4]))
+            },
+            |_, _| {
+                exports += 1;
+                Ok(match exports {
+                    1 | 3 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, host_frame.clone(), outgoing.clone()),
+                    ),
+                    2 | 4 => layout("w1", "w1:t2", "w1:p3", selected.clone()),
+                    _ => panic!("unexpected layout export"),
+                })
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "frame rebuild interrupted; restored the previous layouts"
+        );
+        assert_eq!(commands, 7);
+        assert_eq!(exports, 4);
+        assert_eq!(tabs.get("w1:p8").map(String::as_str), Some("w1:t1"));
     }
 
     #[test]

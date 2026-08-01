@@ -143,7 +143,8 @@ agent layout, shared by every agent in that tab. Clicking an agent restores its
 complete pane layout immediately to Hunkle's right, keeps keyboard focus in
 Hunkle, and opens the selected agent's working directory. The currently visible
 layout is parked in the selected layout's former tab. Existing terminals move
-between tabs without restarting their processes or losing scrollback. By
+between tabs without restarting their processes or losing scrollback. Additional
+panes in Hunkle's left frame, including panes below Hunkle, remain in place. By
 default, the section lists and operates on agents in Hunkle's Herdr workspace
 only; enable **Cross-workspace agents** in Settings to include agents from other
 Herdr workspaces. Zoomed tabs must be unzoomed before their layouts can be
