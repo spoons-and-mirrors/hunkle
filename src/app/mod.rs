@@ -766,11 +766,18 @@ impl App {
         changed |= herdr_changed;
         if let Some(completion) = completion {
             match completion {
-                Ok(message) => {
+                Ok(completion) => {
                     if self.mode == Mode::HerdrPrompt {
                         self.mode = Mode::Normal;
                     }
-                    self.notice = Some(message);
+                    if let Some(path) = completion.reopen_path {
+                        diagnostics::event(format!(
+                            "opening repository for new agent path={}",
+                            path.display()
+                        ));
+                        self.queue_workspace_restore(path);
+                    }
+                    self.notice = Some(completion.message);
                 }
                 Err(error) if self.mode == Mode::HerdrPrompt => {
                     self.herdr_prompt.error = Some(error);

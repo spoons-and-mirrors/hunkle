@@ -136,7 +136,8 @@ worktrees are protected, and Herdr-owned worktrees are removed through Herdr.
 When Hunkle runs inside Herdr, click the green **AGENT** header card to choose a
 Git-inventoried repository or linked worktree, then choose which non-Hunkle pane
 in the active Herdr tab to replace with an OpenCode agent. The destination
-picker can be filtered by repository, branch, or path.
+picker can be filtered by repository, branch, or path. After the agent starts,
+Hunkle opens that destination as its active repository.
 
 The Agents section acts as a live layout switcher. Each Herdr tab is a saved
 agent layout, shared by every agent in that tab. Clicking an agent restores its

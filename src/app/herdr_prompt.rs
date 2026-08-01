@@ -9,15 +9,20 @@ use super::{AgentPaneDirection, HerdrPaneLayout, TextInput, workspace_panel};
 
 pub(crate) struct HerdrPromptPoll {
     pub(crate) changed: bool,
-    pub(crate) completion: Option<Result<String, String>>,
+    pub(crate) completion: Option<Result<HerdrPromptCompletion, String>>,
+}
+
+pub(crate) struct HerdrPromptCompletion {
+    pub(crate) message: String,
+    pub(crate) reopen_path: Option<PathBuf>,
 }
 
 pub(crate) struct HerdrPrompt {
     pub(crate) input: TextInput,
     pub(crate) error: Option<String>,
     pub(crate) sending: bool,
-    sender: Sender<Result<String, String>>,
-    receiver: Receiver<Result<String, String>>,
+    sender: Sender<Result<HerdrPromptCompletion, String>>,
+    receiver: Receiver<Result<HerdrPromptCompletion, String>>,
     layout_sender: Sender<(u64, Result<HerdrPaneLayout, String>)>,
     layout_receiver: Receiver<(u64, Result<HerdrPaneLayout, String>)>,
     next_agent_request_id: u64,
@@ -51,6 +56,20 @@ impl Default for HerdrPrompt {
 }
 
 impl HerdrPrompt {
+    #[cfg(test)]
+    pub(crate) fn complete_for_test(
+        &self,
+        message: impl Into<String>,
+        reopen_path: Option<PathBuf>,
+    ) {
+        self.sender
+            .send(Ok(HerdrPromptCompletion {
+                message: message.into(),
+                reopen_path,
+            }))
+            .unwrap();
+    }
+
     #[cfg(test)]
     pub(crate) fn show_agent_pane_picker(
         &mut self,
@@ -93,8 +112,11 @@ impl HerdrPrompt {
         self.error = None;
         self.sending = true;
         thread::spawn(move || {
-            let result = workspace_panel::send_command_below(command)
-                .map(|pane_id| format!("Sent to Herdr pane {pane_id}"));
+            let result =
+                workspace_panel::send_command_below(command).map(|pane_id| HerdrPromptCompletion {
+                    message: format!("Sent to Herdr pane {pane_id}"),
+                    reopen_path: None,
+                });
             let _ = sender.send(result);
         });
     }
@@ -178,9 +200,14 @@ impl HerdrPrompt {
         self.error = None;
         self.sending = true;
         thread::spawn(move || {
+            let reopen_path = pending.path.clone();
             let result =
-                workspace_panel::replace_pane_with_agent(pending.path, workspace_id, pane_id)
-                    .map(|pane_id| format!("Started agent in Herdr pane {pane_id}"));
+                workspace_panel::replace_pane_with_agent(pending.path, workspace_id, pane_id).map(
+                    |pane_id| HerdrPromptCompletion {
+                        message: format!("Started agent in Herdr pane {pane_id}"),
+                        reopen_path: Some(reopen_path),
+                    },
+                );
             let _ = sender.send(result);
         });
         Ok(())
@@ -209,8 +236,12 @@ impl HerdrPrompt {
         self.error = None;
         self.sending = true;
         thread::spawn(move || {
+            let reopen_path = pending.path.clone();
             let result = workspace_panel::split_pane_with_agent(pending.path, pane_id, direction)
-                .map(|pane_id| format!("Started agent in new Herdr pane {pane_id}"));
+                .map(|pane_id| HerdrPromptCompletion {
+                    message: format!("Started agent in new Herdr pane {pane_id}"),
+                    reopen_path: Some(reopen_path),
+                });
             let _ = sender.send(result);
         });
         Ok(())

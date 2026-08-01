@@ -193,6 +193,31 @@ fn speculative_workspace_open_restores_after_focus_succeeds() {
 }
 
 #[test]
+fn successful_agent_creation_opens_its_destination() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    fs::write(first.path().join("first.txt"), "first\n").unwrap();
+    fs::write(second.path().join("second.txt"), "second\n").unwrap();
+    let second_path = fs::canonicalize(second.path()).unwrap();
+    let mut app = App::new(first.path().to_path_buf());
+    app.mode = Mode::HerdrPrompt;
+    app.herdr_prompt.complete_for_test(
+        "Started agent in Herdr pane test-pane",
+        Some(second.path().to_path_buf()),
+    );
+
+    app.poll_worker();
+    wait_for_state(&mut app, |app| {
+        !app.session.open_running()
+            && app
+                .repository()
+                .is_some_and(|repository| repository.root == second_path)
+    });
+
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
 fn workspace_open_errors_remain_visible_after_explorer_closes() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
