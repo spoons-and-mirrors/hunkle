@@ -2376,6 +2376,7 @@ mod tests {
 
     #[test]
     fn rejects_an_unchanged_layout_move() {
+        let mut commands = Vec::new();
         let mut exports = 0;
         let result = display_agent_with(
             DisplayAgentRequest {
@@ -2387,24 +2388,26 @@ mod tests {
                 host_tab_id: "w1:t1".to_owned(),
                 allow_cross_workspace: false,
             },
-            |_| {
+            |args| {
+                commands.push(args.to_vec());
                 Ok(serde_json::json!({
                     "result": {
                         "move_result": { "changed": false, "reason": "not_found" }
                     }
                 }))
             },
-            |_, _| {
+            |method, params| {
+                assert_eq!(method, "layout.export");
                 exports += 1;
-                Ok(if exports == 1 {
-                    layout(
+                Ok(match exports {
+                    1 => layout(
                         "w1",
                         "w1:t1",
                         "w1:p1",
                         split("right", 0.6, pane("w1:p1"), pane("w1:p2")),
-                    )
-                } else {
-                    layout("w1", "w1:t2", "w1:p3", pane("w1:p3"))
+                    ),
+                    2 => layout("w1", "w1:t2", "w1:p3", pane("w1:p3")),
+                    count => panic!("unexpected layout export {count}: {params}"),
                 })
             },
         );
@@ -2414,6 +2417,7 @@ mod tests {
             "Herdr did not change the layout: not_found"
         );
         assert_eq!(exports, 2);
+        assert_eq!(commands.len(), 1);
     }
 
     #[test]
