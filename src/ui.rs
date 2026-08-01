@@ -1143,7 +1143,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         .skip(start)
         .take(row_count)
         .map(|(index, item)| {
-            let (label, detail, current, branch_columns) = match item {
+            let (label, detail, current, minimum_label_width) = match item {
                 HeaderPickerItem::Repository { common_dir, path } => (
                     path.file_name()
                         .and_then(|name| name.to_str())
@@ -1151,7 +1151,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                         .to_owned(),
                     path.display().to_string(),
                     current_common_dir.is_some_and(|current| current == common_dir),
-                    false,
+                    Some(12),
                 ),
                 HeaderPickerItem::Worktree(worktree) => (
                     if worktree.is_main {
@@ -1171,7 +1171,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                         .unwrap_or(if worktree.is_detached { "detached" } else { "" })
                         .to_owned(),
                     current_root.is_some_and(|current| current == worktree.path),
-                    false,
+                    None,
                 ),
                 HeaderPickerItem::Branch(branch) => (
                     branch.name.clone(),
@@ -1184,7 +1184,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     }
                     .to_owned(),
                     branch.current,
-                    true,
+                    Some(4),
                 ),
                 HeaderPickerItem::BranchBase(branch) => (
                     branch.name.clone(),
@@ -1197,19 +1197,21 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     }
                     .to_owned(),
                     branch.current,
-                    true,
+                    Some(4),
                 ),
                 HeaderPickerItem::DiffTarget(branch) => (
                     branch.name.clone(),
                     if branch.remote { "remote" } else { "local" }.to_owned(),
                     branch.default,
-                    true,
+                    Some(4),
                 ),
             };
-            (index, label, detail, current, branch_columns)
+            (index, label, detail, current, minimum_label_width)
         })
         .collect::<Vec<_>>();
-    for (row, (index, label, detail, current, branch_columns)) in rows.into_iter().enumerate() {
+    for (row, (index, label, detail, current, minimum_label_width)) in
+        rows.into_iter().enumerate()
+    {
         let rect = Rect::new(
             area.x,
             area.y
@@ -1225,11 +1227,15 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             palette().raised
         };
-        if branch_columns {
+        if let Some(minimum_label_width) = minimum_label_width {
             fill(frame, rect, background);
             let detail_width = u16::try_from(UnicodeWidthStr::width(detail.as_str()))
                 .unwrap_or(u16::MAX)
-                .min(rect.width.saturating_sub(4));
+                .min(
+                    rect.width
+                        .saturating_sub(minimum_label_width)
+                        .saturating_sub(1),
+                );
             let detail_rect = Rect::new(
                 rect.right().saturating_sub(detail_width).saturating_sub(1),
                 rect.y,
@@ -1259,7 +1265,10 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                 label_rect,
             );
             frame.render_widget(
-                Paragraph::new(detail)
+                Paragraph::new(truncate_start_width(
+                    &detail,
+                    usize::from(detail_rect.width),
+                ))
                     .alignment(Alignment::Right)
                     .style(Style::default().fg(palette().muted).bg(background)),
                 detail_rect,

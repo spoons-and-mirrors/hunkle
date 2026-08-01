@@ -201,11 +201,15 @@ fn header_cards_open_pickers_and_checkout_branches() {
         (picker.x, picker.y),
         (repository.x, repository.bottom())
     );
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::HeaderPickerItem(0))
-            .is_some()
-    );
+    let repository_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(0))
+        .unwrap();
+    let repository_text = (repository_row.x..repository_row.right())
+        .map(|x| terminal.backend().buffer()[(x, repository_row.y)].symbol())
+        .collect::<String>();
+    assert!(repository_text.contains("repository"));
+    assert!(repository_text.trim_end().ends_with(&root.display().to_string()));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
