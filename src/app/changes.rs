@@ -983,6 +983,10 @@ impl ChangesState {
         self.branch_comparison.as_ref()
     }
 
+    pub(super) fn clear_branch_comparison(&mut self) {
+        self.branch_comparison = None;
+    }
+
     pub(super) fn preview_branch_diff(
         &mut self,
         root: &Path,

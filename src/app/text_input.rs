@@ -4,6 +4,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
+#[derive(Debug)]
 pub(crate) struct TextInput {
     text: String,
     cursor: usize,

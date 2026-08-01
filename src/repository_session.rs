@@ -35,6 +35,7 @@ pub(crate) enum WorkerOutcome {
     Format(FormatCompletion),
     BranchDelete(BranchDeleteCompletion),
     BranchCheckout(BranchCheckoutCompletion),
+    BranchCreate(BranchCreateCompletion),
 }
 
 pub(crate) struct WorkerCompletion {
@@ -66,6 +67,7 @@ impl WorkerCompletion {
             WorkerOutcome::BranchDelete(_) => Some(RefreshScope::HISTORY_AND_REFS),
             // A failed switch can still update the index or working tree.
             WorkerOutcome::BranchCheckout(_) => Some(RefreshScope::ALL),
+            WorkerOutcome::BranchCreate(_) => Some(RefreshScope::ALL),
             WorkerOutcome::Commit(_)
             | WorkerOutcome::Fetch(_)
             | WorkerOutcome::Command(_)
@@ -91,6 +93,11 @@ pub(crate) struct BranchDeleteCompletion {
 }
 
 pub(crate) struct BranchCheckoutCompletion {
+    pub(crate) branch: String,
+    pub(crate) result: Result<CommandOutput, String>,
+}
+
+pub(crate) struct BranchCreateCompletion {
     pub(crate) branch: String,
     pub(crate) result: Result<CommandOutput, String>,
 }
@@ -198,6 +205,9 @@ enum WorkerKind {
         force: bool,
     },
     BranchCheckout {
+        branch: String,
+    },
+    BranchCreate {
         branch: String,
     },
 }
@@ -566,6 +576,29 @@ impl RepositorySession {
         true
     }
 
+    pub(crate) fn start_branch_create(&mut self, branch: String, base: String) -> bool {
+        if !self.operations.can_start(Operation::Mutation) {
+            return false;
+        }
+        let Some(root) = self.git_root() else {
+            return false;
+        };
+
+        self.operations.start(Operation::Mutation);
+        let sender = self.worker_tx.clone();
+        let worker_branch = branch.clone();
+        thread::spawn(move || {
+            let result =
+                git::create_branch(&root, &worker_branch, &base).map_err(|error| error.to_string());
+            let _ = sender.send(WorkerResult {
+                kind: WorkerKind::BranchCreate { branch },
+                root,
+                result,
+            });
+        });
+        true
+    }
+
     pub(crate) fn start_format(&mut self, path: RepoPath, command: FormatCommand) -> bool {
         if !self.operations.can_start(Operation::Format) {
             return false;
@@ -750,6 +783,17 @@ impl RepositorySession {
                     if active {
                         return Some(WorkerCompletion::new(WorkerOutcome::BranchCheckout(
                             BranchCheckoutCompletion {
+                                branch,
+                                result: done.result,
+                            },
+                        )));
+                    }
+                }
+                WorkerKind::BranchCreate { branch } => {
+                    self.operations.finish(Operation::Mutation);
+                    if active {
+                        return Some(WorkerCompletion::new(WorkerOutcome::BranchCreate(
+                            BranchCreateCompletion {
                                 branch,
                                 result: done.result,
                             },

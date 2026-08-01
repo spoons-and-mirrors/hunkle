@@ -29,7 +29,9 @@ pub(crate) use explorer::{ExplorerHitTarget, SurroundingEntry};
 pub(crate) use file_editor::{FileEditor, TAB_WIDTH};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
-pub(crate) use header_picker::{HeaderPicker, HeaderPickerItem, HeaderPickerKind};
+pub(crate) use header_picker::{
+    BranchPickerStep, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
+};
 pub(crate) use herdr_prompt::HerdrPrompt;
 pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, Issue, PullRequest, RemoteItems, RepositoryBrowser,
@@ -170,6 +172,7 @@ pub(crate) enum HitTarget {
     HeaderBranch,
     HeaderDiff,
     HeaderPickerOverlay,
+    HeaderPickerNewBranch,
     HeaderPickerItem(usize),
     Changes(ChangesHitTarget),
     CommitMessageGenerate,
@@ -863,6 +866,25 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
+        if self.header_picker.naming_branch() {
+            let text = text
+                .chars()
+                .filter(|character| !matches!(character, '\r' | '\n'))
+                .collect::<String>();
+            self.header_picker.branch_name.insert(&text);
+            self.header_picker.message = None;
+            return;
+        }
+        if self.header_picker.filtering() {
+            let text = text
+                .chars()
+                .filter(|character| !matches!(character, '\r' | '\n'))
+                .collect::<String>();
+            self.header_picker.query.insert(&text);
+            self.header_picker.message = None;
+            self.header_picker.apply_filter();
+            return;
+        }
         if self.mode == Mode::Normal && self.paste_clipboard_files(text) {
             return;
         }
@@ -980,6 +1002,10 @@ impl App {
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        let naming_branch = self.header_picker.naming_branch();
+        changed |= self.header_picker.branch_name.poll_blink(naming_branch);
+        let filtering_header_picker = self.header_picker.filtering();
+        changed |= self.header_picker.query.poll_blink(filtering_header_picker);
         if let Some(done) = self
             .commit_draft_rx
             .as_ref()
@@ -1188,6 +1214,15 @@ impl App {
                     }
                     Ok(output) => {
                         self.notice = Some(first_error(&output.stderr, "Branch checkout failed"));
+                    }
+                    Err(error) => self.notice = Some(error),
+                },
+                WorkerOutcome::BranchCreate(done) => match done.result {
+                    Ok(output) if output.success => {
+                        self.notice = Some(format!("Created and checked out {}", done.branch));
+                    }
+                    Ok(output) => {
+                        self.notice = Some(first_error(&output.stderr, "Branch creation failed"));
                     }
                     Err(error) => self.notice = Some(error),
                 },
@@ -2554,6 +2589,7 @@ impl App {
             RepositoryBrowserEffect::OpenBranch(oid) => self.open_browser_branch(&oid),
             RepositoryBrowserEffect::CheckoutBranch { branch, remote } => {
                 if self.session.start_branch_checkout(branch.clone(), remote) {
+                    self.changes.clear_branch_comparison();
                     self.mode = Mode::Normal;
                     self.notice = Some(format!("Checking out {branch}…"));
                 } else {
@@ -2836,6 +2872,25 @@ impl App {
             .open(HeaderPickerKind::Branches, items, selected);
     }
 
+    fn open_header_branch_bases(&mut self) {
+        let Some(repository) = self.git_repository() else {
+            self.header_picker.close();
+            return;
+        };
+        let selected = repository
+            .branches
+            .iter()
+            .position(|branch| branch.current)
+            .unwrap_or(0);
+        let items = repository
+            .branches
+            .iter()
+            .cloned()
+            .map(HeaderPickerItem::BranchBase)
+            .collect();
+        self.header_picker.open_branch_bases(items, selected);
+    }
+
     fn open_header_diff_targets(&mut self) {
         if !self.session.can_start_mutation() {
             self.header_picker.open_message(
@@ -2881,16 +2936,124 @@ impl App {
     }
 
     fn handle_header_picker(&mut self, key: KeyEvent) {
+        if self.header_picker.naming_branch() {
+            self.handle_new_branch_name(key);
+            return;
+        }
         match key.code {
+            KeyCode::Esc if self.header_picker.branch_step == BranchPickerStep::Base => {
+                self.open_header_branches();
+            }
             KeyCode::Esc => self.header_picker.close(),
-            KeyCode::Up | KeyCode::Char('k') => self.header_picker.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.header_picker.move_selection(1),
-            KeyCode::Home => self.header_picker.select(0),
-            KeyCode::End => self
-                .header_picker
-                .select(self.header_picker.items.len().saturating_sub(1)),
+            KeyCode::Char('n')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.header_picker.kind == Some(HeaderPickerKind::Branches)
+                    && self.header_picker.branch_step == BranchPickerStep::Branches =>
+            {
+                self.begin_header_branch_creation();
+            }
+            KeyCode::Up => self.header_picker.move_selection(-1),
+            KeyCode::Down => self.header_picker.move_selection(1),
             KeyCode::Enter => self.activate_header_picker(self.header_picker.selected),
+            KeyCode::Backspace => self.edit_header_picker_query(TextInput::backspace),
+            KeyCode::Delete => self.edit_header_picker_query(TextInput::delete),
+            KeyCode::Left => self.header_picker.query.move_left(),
+            KeyCode::Right => self.header_picker.query.move_right(),
+            KeyCode::Home => self.header_picker.query.move_home(),
+            KeyCode::End => self.header_picker.query.move_end(),
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.header_picker.query.select_all();
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.header_picker.query.move_end();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.edit_header_picker_query(TextInput::clear);
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.edit_header_picker_query(TextInput::delete_word);
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.edit_header_picker_query(|input| input.insert_char(character));
+            }
             _ => {}
+        }
+    }
+
+    fn edit_header_picker_query(&mut self, edit: impl FnOnce(&mut TextInput)) {
+        edit(&mut self.header_picker.query);
+        self.header_picker.message = None;
+        self.header_picker.apply_filter();
+    }
+
+    pub(crate) fn begin_header_branch_creation(&mut self) {
+        if self.session.can_start_mutation() {
+            self.open_header_branch_bases();
+        } else {
+            self.header_picker.message = Some("Wait for the current Git operation".to_owned());
+        }
+    }
+
+    fn handle_new_branch_name(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.open_header_branch_bases(),
+            KeyCode::Enter => {
+                let name = self.header_picker.branch_name.text().trim().to_owned();
+                if name.is_empty() {
+                    self.header_picker.message = Some("Branch name is required".to_owned());
+                    return;
+                }
+                let Some(base) = self
+                    .header_picker
+                    .branch_base
+                    .as_ref()
+                    .map(Branch::revision)
+                else {
+                    self.open_header_branch_bases();
+                    return;
+                };
+                if self.session.start_branch_create(name.clone(), base) {
+                    self.changes.clear_branch_comparison();
+                    self.header_picker.close();
+                    self.notice = Some(format!("Creating {name}…"));
+                } else {
+                    self.header_picker.message =
+                        Some("Wait for the current Git operation".to_owned());
+                }
+            }
+            KeyCode::Backspace => self.header_picker.branch_name.backspace(),
+            KeyCode::Delete => self.header_picker.branch_name.delete(),
+            KeyCode::Left => self.header_picker.branch_name.move_left(),
+            KeyCode::Right => self.header_picker.branch_name.move_right(),
+            KeyCode::Home => self.header_picker.branch_name.move_home(),
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.header_picker.branch_name.select_all();
+            }
+            KeyCode::End => self.header_picker.branch_name.move_end(),
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.header_picker.branch_name.move_end();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.header_picker.branch_name.clear();
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.header_picker.branch_name.delete_word();
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.header_picker.branch_name.insert_char(character);
+            }
+            _ => {}
+        }
+        if !matches!(key.code, KeyCode::Enter) {
+            self.header_picker.message = None;
         }
     }
 
@@ -2898,8 +3061,16 @@ impl App {
         let Some(item) = self.header_picker.items.get(index).cloned() else {
             return;
         };
+        match item {
+            HeaderPickerItem::BranchBase(branch) => {
+                self.header_picker.open_branch_name(branch);
+                return;
+            }
+            _ => {}
+        }
         self.header_picker.close();
         match item {
+            HeaderPickerItem::BranchBase(_) => unreachable!(),
             HeaderPickerItem::Repository { common_dir, path } => {
                 if self
                     .git_repository()

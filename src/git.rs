@@ -588,6 +588,11 @@ pub(crate) fn checkout_branch(root: &Path, branch: &str, remote: bool) -> Result
     Ok(command_output(output))
 }
 
+pub(crate) fn create_branch(root: &Path, branch: &str, base: &str) -> Result<CommandOutput> {
+    let output = run(root, &["switch", "--no-guess", "--create", branch, base])?;
+    Ok(command_output(output))
+}
+
 #[cfg(test)]
 pub fn load(path: &Path) -> Result<RepositoryData> {
     load_git_root(discover(path)?)

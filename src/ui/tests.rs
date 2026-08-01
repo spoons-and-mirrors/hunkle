@@ -136,7 +136,19 @@ fn header_cards_open_pickers_and_checkout_branches() {
     click(&mut app, diff.x, diff.y);
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::DiffTargets));
+    for character in "topic".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(app.header_picker.items.len(), 1);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOverlay)
+        .unwrap();
+    assert_eq!(
+        (picker.x, picker.y),
+        (repository.x, repository.bottom())
+    );
     let topic_index = app
         .header_picker
         .items
@@ -176,7 +188,19 @@ fn header_cards_open_pickers_and_checkout_branches() {
     click(&mut app, repository.x, repository.y);
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::Repositories));
+    for character in "repository".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(app.header_picker.items.len(), 1);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOverlay)
+        .unwrap();
+    assert_eq!(
+        (picker.x, picker.y),
+        (repository.x, repository.bottom())
+    );
     assert!(
         app.regions
             .hit_target_rect(HitTarget::HeaderPickerItem(0))
@@ -193,7 +217,19 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::Worktrees));
     assert_eq!(app.header_picker.items.len(), 2);
+    for character in "linked".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(app.header_picker.items.len(), 1);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOverlay)
+        .unwrap();
+    assert_eq!(
+        (picker.x, picker.y),
+        (repository.x, repository.bottom())
+    );
     assert!(
         app.regions
             .hit_target_rect(HitTarget::HeaderPickerItem(0))
@@ -209,7 +245,19 @@ fn header_cards_open_pickers_and_checkout_branches() {
     click(&mut app, branch.x, branch.y);
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::Branches));
+    for character in "topic".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(app.header_picker.items.len(), 1);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOverlay)
+        .unwrap();
+    assert_eq!(
+        (picker.x, picker.y),
+        (repository.x, repository.bottom())
+    );
     let topic_index = app
         .header_picker
         .items
@@ -227,6 +275,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         app.repository()
             .is_some_and(|repo| repo.details_ready && repo.branch == "topic")
     });
+    assert!(app.changes.branch_comparison().is_none());
     assert_eq!(
         String::from_utf8_lossy(
             &Command::new("git")
@@ -240,6 +289,108 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .trim(),
         "topic"
     );
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let branch = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderBranch)
+        .unwrap();
+    click(&mut app, branch.x, branch.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOverlay)
+        .unwrap();
+    let picker_search = (picker.x..picker.right())
+        .map(|x| terminal.backend().buffer()[(x, picker.y + 1)].symbol())
+        .collect::<String>();
+    assert!(picker_search.contains("▌Search branch..."));
+    let footer_y = terminal.backend().buffer().area.height - 1;
+    let background = &terminal.backend().buffer()[(0, footer_y)];
+    assert_eq!(background.bg, super::palette().canvas);
+    assert!(background.modifier.contains(Modifier::DIM));
+    for target in [
+        HitTarget::HeaderRepository,
+        HitTarget::HeaderWorktrees,
+        HitTarget::HeaderBranch,
+        HitTarget::HeaderDiff,
+    ] {
+        let control = app.regions.hit_target_rect(target).unwrap();
+        assert!(
+            !terminal.backend().buffer()[(control.x, control.y)]
+                .modifier
+                .contains(Modifier::DIM)
+        );
+    }
+    let search_top = &terminal.backend().buffer()[(picker.x, picker.y)];
+    assert_eq!(search_top.symbol(), "▄");
+    assert_eq!(search_top.fg, super::palette().surface_alt);
+    assert_eq!(search_top.bg, super::palette().canvas);
+    let search_bottom = &terminal.backend().buffer()[(picker.x, picker.y + 2)];
+    assert_eq!(search_bottom.symbol(), "▀");
+    assert_eq!(search_bottom.fg, super::palette().surface_alt);
+    assert_eq!(search_bottom.bg, super::palette().raised);
+    let list_bottom = &terminal.backend().buffer()[(picker.x, picker.bottom() - 1)];
+    assert_eq!(list_bottom.symbol(), "▀");
+    assert_eq!(list_bottom.fg, super::palette().raised);
+    assert_eq!(list_bottom.bg, super::palette().canvas);
+    let current_index = app
+        .header_picker
+        .items
+        .iter()
+        .position(|item| matches!(item, HeaderPickerItem::Branch(branch) if branch.current))
+        .unwrap();
+    let current_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(current_index))
+        .unwrap();
+    let current_text = (current_row.x..current_row.right())
+        .map(|x| terminal.backend().buffer()[(x, current_row.y)].symbol())
+        .collect::<String>();
+    assert!(current_text.trim_end().ends_with("current"));
+    let new_branch = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerNewBranch)
+        .unwrap();
+    assert_eq!(new_branch.right(), picker.right());
+    assert_eq!(
+        terminal.backend().buffer()[(new_branch.x, new_branch.y)].bg,
+        super::palette().green
+    );
+    assert_eq!(new_branch.height, 1);
+    click(&mut app, new_branch.x, new_branch.y);
+    assert_eq!(app.header_picker.branch_step, super::BranchPickerStep::Base);
+    for character in "header-branch".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(app.header_picker.items.len(), 1);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let base_index = app
+        .header_picker
+        .items
+        .iter()
+        .position(|item| {
+            matches!(item, HeaderPickerItem::BranchBase(branch) if branch.name == long_branch)
+        })
+        .unwrap();
+    let base = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(base_index))
+        .unwrap();
+    click(&mut app, base.x, base.y);
+    assert!(app.header_picker.naming_branch());
+    let created_branch = "feature/new-from-header";
+    for character in created_branch.chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for(&mut app, |app| {
+        app.repository()
+            .is_some_and(|repo| repo.details_ready && repo.branch == created_branch)
+    });
+    let created_head = run_git_output(root, &["rev-parse", created_branch]);
+    let base_head = run_git_output(root, &["rev-parse", long_branch]);
+    assert_eq!(created_head, base_head);
 
     drop(app);
     let mut linked_app = App::new(linked);
@@ -4100,4 +4251,19 @@ fn run_git(root: &std::path::Path, args: &[&str]) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn run_git_output(root: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }

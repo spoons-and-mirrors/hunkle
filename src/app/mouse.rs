@@ -133,6 +133,9 @@ impl App {
                         Some(HitTarget::HeaderPickerItem(index)) => {
                             self.activate_header_picker(index)
                         }
+                        Some(HitTarget::HeaderPickerNewBranch) => {
+                            self.begin_header_branch_creation()
+                        }
                         Some(HitTarget::HeaderPickerOverlay) => {}
                         _ => self.header_picker.close(),
                     }
@@ -1080,6 +1083,7 @@ impl App {
                     | HitTarget::HeaderBranch
                     | HitTarget::HeaderDiff
                     | HitTarget::HeaderPickerOverlay
+                    | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),
                 ) => {}
             },
@@ -1138,6 +1142,7 @@ impl App {
                     | HitTarget::HeaderBranch
                     | HitTarget::HeaderDiff
                     | HitTarget::HeaderPickerOverlay
+                    | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),
                 ) => {}
             },
