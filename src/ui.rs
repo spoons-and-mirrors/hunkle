@@ -11,6 +11,7 @@ mod tests;
 
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -45,7 +46,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.reset_media_presentation();
         let message = if app.mode == Mode::FileEdit {
             format!(
-                "hunkle editor needs at least 60 columns and 16 rows\n\n{}  save + close    esc  close",
+                "hunkle editor needs at least 60 columns and 16 rows\n\n{}  save    ctrl+enter  save + close    esc  close",
                 app.settings.shortcuts.label(ShortcutAction::SaveOrFormat)
             )
         } else {
@@ -381,14 +382,21 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
 
     let save_label = app.settings.shortcuts.label(ShortcutAction::SaveOrFormat);
     let wrapped = app.changes.diff_wrap;
+    let formatting = app.format_running();
     let Some(editor) = &mut app.file_editor else {
         return;
     };
     let (cursor_line, cursor_column) = editor.cursor_position();
     let path = editor.path().display();
-    let dirty = if editor.dirty() { "modified" } else { "saved" };
+    let dirty = if formatting {
+        "formatting"
+    } else if editor.dirty() {
+        "modified"
+    } else {
+        "saved"
+    };
     let title = format!(
-        "EDIT  {path}  {dirty}  Ln {}, Col {}  {save_label} save + close  esc close",
+        "EDIT  {path}  {dirty}  Ln {}, Col {}  {save_label} save  ctrl+enter save + close  esc close",
         cursor_line.saturating_add(1),
         cursor_column.saturating_add(1)
     );
@@ -465,6 +473,16 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         Paragraph::new(lines).style(Style::default().bg(palette().panel)),
         editor_body,
     );
+    render_file_editor_selection(
+        frame.buffer_mut(),
+        editor.text(),
+        editor.selected_range(),
+        editor_body,
+        wrapped,
+        &app.regions.editor_rows,
+        editor.scroll_line,
+        editor.scroll_column,
+    );
     let cursor_x = editor_body
         .x
         .saturating_add(u16::try_from(rendered_cursor_column).unwrap_or(u16::MAX));
@@ -474,6 +492,122 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     if cursor_x < editor_body.right() && cursor_y < editor_body.bottom() {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+fn render_file_editor_selection(
+    buffer: &mut Buffer,
+    source: &str,
+    selection: Option<(usize, usize)>,
+    body: Rect,
+    wrapped: bool,
+    rows: &[crate::app::EditorRenderedRow],
+    scroll_line: usize,
+    scroll_column: usize,
+) {
+    let Some(selection) = selection else {
+        return;
+    };
+    let selected_style = Style::default()
+        .fg(palette().canvas)
+        .bg(palette().accent);
+    if wrapped {
+        for (row_index, row) in rows.iter().enumerate() {
+            let Some((start, end)) = selected_display_range(source, row.line, selection) else {
+                continue;
+            };
+            for pair in row.columns.windows(2) {
+                let (rendered_start, source_start) = pair[0];
+                let (rendered_end, source_end) = pair[1];
+                if source_start < end && source_end > start {
+                    style_editor_cells(
+                        buffer,
+                        body,
+                        body.y.saturating_add(u16::try_from(row_index).unwrap_or(u16::MAX)),
+                        rendered_start,
+                        rendered_end,
+                        selected_style,
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    for row in 0..usize::from(body.height) {
+        let line = scroll_line.saturating_add(row);
+        let Some((start, end)) = selected_display_range(source, line, selection) else {
+            continue;
+        };
+        style_editor_cells(
+            buffer,
+            body,
+            body.y.saturating_add(u16::try_from(row).unwrap_or(u16::MAX)),
+            start.saturating_sub(scroll_column),
+            end.saturating_sub(scroll_column),
+            selected_style,
+        );
+    }
+}
+
+fn style_editor_cells(
+    buffer: &mut Buffer,
+    body: Rect,
+    y: u16,
+    start: usize,
+    end: usize,
+    style: Style,
+) {
+    let left = body.x.saturating_add(u16::try_from(start).unwrap_or(u16::MAX));
+    let right = body.x.saturating_add(u16::try_from(end).unwrap_or(u16::MAX));
+    if y >= body.bottom() || left >= body.right() || right <= left {
+        return;
+    }
+    for x in left..right.min(body.right()) {
+        if let Some(cell) = buffer.cell_mut((x, y)) {
+            cell.set_style(style);
+        }
+    }
+}
+
+fn selected_display_range(
+    source: &str,
+    line_number: usize,
+    selection: (usize, usize),
+) -> Option<(usize, usize)> {
+    let mut line_start = 0usize;
+    for (index, raw_line) in source.split('\n').enumerate() {
+        let raw_end = line_start.saturating_add(raw_line.len());
+        let line_end = raw_end.saturating_add(usize::from(raw_end < source.len()));
+        if index == line_number {
+            if selection.0 >= line_end || selection.1 <= line_start {
+                return None;
+            }
+            let content = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            let content_end = line_start.saturating_add(content.len());
+            let start = selection.0.clamp(line_start, content_end);
+            let end = selection.1.clamp(line_start, content_end);
+            let start_column = editor_display_width(&source[line_start..start]);
+            let mut end_column = editor_display_width(&source[line_start..end]);
+            if start == end && selection.1 > content_end {
+                end_column = start_column.saturating_add(1);
+            }
+            return Some((start_column, end_column.max(start_column.saturating_add(1))));
+        }
+        line_start = line_end;
+    }
+    None
+}
+
+fn editor_display_width(value: &str) -> usize {
+    let mut column = 0;
+    for grapheme in value.graphemes(true) {
+        if grapheme == "\t" {
+            column += TAB_WIDTH - (column % TAB_WIDTH);
+        } else {
+            column += UnicodeWidthStr::width(grapheme);
+        }
+    }
+    column
 }
 
 fn editor_line_number(line: Option<usize>) -> Line<'static> {

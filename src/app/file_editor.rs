@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use unicode_segmentation::UnicodeSegmentation;
@@ -7,7 +10,22 @@ use unicode_width::UnicodeWidthStr;
 use crate::{filesystem, repo_path::RepoPath};
 
 const MAX_EDITABLE_BYTES: usize = 1024 * 1024;
+const MAX_HISTORY_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const TAB_WIDTH: usize = 4;
+
+#[derive(Clone)]
+struct Snapshot {
+    text: String,
+    cursor: usize,
+    selection_anchor: Option<usize>,
+    preferred_column: Option<usize>,
+}
+
+impl Snapshot {
+    fn memory_size(&self) -> usize {
+        self.text.len()
+    }
+}
 
 pub(crate) struct FileEditor {
     root: PathBuf,
@@ -16,7 +34,11 @@ pub(crate) struct FileEditor {
     text: String,
     line_ending: &'static str,
     cursor: usize,
+    selection_anchor: Option<usize>,
     preferred_column: Option<usize>,
+    undo: VecDeque<Snapshot>,
+    redo: VecDeque<Snapshot>,
+    history_bytes: usize,
     pub(crate) scroll_line: usize,
     pub(crate) scroll_column: usize,
     pub(crate) wrap_scroll_row: usize,
@@ -53,7 +75,11 @@ impl FileEditor {
             text,
             line_ending,
             cursor: 0,
+            selection_anchor: None,
             preferred_column: None,
+            undo: VecDeque::new(),
+            redo: VecDeque::new(),
+            history_bytes: 0,
             scroll_line: 0,
             scroll_column: 0,
             wrap_scroll_row: 0,
@@ -79,6 +105,75 @@ impl FileEditor {
         self.text.as_bytes() != self.original
     }
 
+    pub(crate) fn has_selection(&self) -> bool {
+        self.selection_range().is_some()
+    }
+
+    pub(crate) fn selected_range(&self) -> Option<(usize, usize)> {
+        self.selection_range()
+    }
+
+    pub(crate) fn selected_text(&self) -> Option<&str> {
+        let (start, end) = self.selection_range()?;
+        Some(&self.text[start..end])
+    }
+
+    pub(crate) fn selected_line_range(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.selection_range()?;
+        Some((
+            line_number_at(&self.text, start),
+            line_number_at(&self.text, end),
+        ))
+    }
+
+    pub(crate) fn select_all(&mut self) {
+        self.selection_anchor = Some(0);
+        self.cursor = self.text.len();
+        self.preferred_column = None;
+        self.discard_armed = false;
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+    }
+
+    pub(crate) fn begin_selection(&mut self) {
+        self.selection_anchor = Some(self.cursor);
+        self.preferred_column = None;
+        self.discard_armed = false;
+    }
+
+    pub(crate) fn select_word_at_cursor(&mut self) -> bool {
+        let index = if is_word_at(&self.text, self.cursor) {
+            self.cursor
+        } else if self.cursor > 0 {
+            previous_cursor(&self.text, self.cursor)
+        } else {
+            return false;
+        };
+        if !is_word_at(&self.text, index) {
+            return false;
+        }
+
+        let mut start = index;
+        while start > 0 {
+            let previous = previous_cursor(&self.text, start);
+            if !is_word_at(&self.text, previous) {
+                break;
+            }
+            start = previous;
+        }
+        let mut end = next_cursor(&self.text, index);
+        while end < self.text.len() && is_word_at(&self.text, end) {
+            end = next_cursor(&self.text, end);
+        }
+        self.selection_anchor = Some(start);
+        self.cursor = end;
+        self.preferred_column = None;
+        self.discard_armed = false;
+        true
+    }
+
     pub(crate) fn save(&self) -> Result<()> {
         validate_text(&self.text)?;
         filesystem::atomic_write_if_unchanged(
@@ -87,6 +182,35 @@ impl FileEditor {
             &self.original,
             self.text.as_bytes(),
         )
+    }
+
+    pub(crate) fn mark_saved(&mut self) {
+        self.original = self.text.as_bytes().to_vec();
+        self.discard_armed = false;
+    }
+
+    pub(crate) fn refresh_from_disk(&mut self) -> Result<()> {
+        let file = filesystem::safe_regular_file(&self.root, &self.path)?;
+        let bytes =
+            std::fs::read(&file).with_context(|| format!("could not read {}", file.display()))?;
+        if bytes.len() > MAX_EDITABLE_BYTES {
+            bail!("{} is too large for inline editing", self.path.display());
+        }
+        if bytes.contains(&0) {
+            bail!("{} is a binary file", self.path.display());
+        }
+        let text = String::from_utf8(bytes.clone())
+            .with_context(|| format!("{} is not valid UTF-8", self.path.display()))?;
+        let (line, column) = self.cursor_position();
+        self.original = bytes;
+        self.text = text;
+        self.line_ending = preferred_line_ending(&self.text);
+        self.set_cursor(line, column);
+        self.history_bytes = self
+            .history_bytes
+            .saturating_sub(self.redo.iter().map(Snapshot::memory_size).sum());
+        self.redo.clear();
+        Ok(())
     }
 
     pub(crate) fn cursor_position(&self) -> (usize, usize) {
@@ -105,6 +229,18 @@ impl FileEditor {
     }
 
     pub(crate) fn set_cursor(&mut self, line: usize, column: usize) {
+        let start = line_start_at(&self.text, line);
+        let end = line_content_end(&self.text, start);
+        self.cursor = closest_column(&self.text, start, end, column);
+        self.selection_anchor = None;
+        self.preferred_column = None;
+        self.discard_armed = false;
+    }
+
+    pub(crate) fn extend_cursor(&mut self, line: usize, column: usize) {
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor);
+        }
         let start = line_start_at(&self.text, line);
         let end = line_content_end(&self.text, start);
         self.cursor = closest_column(&self.text, start, end, column);
@@ -151,52 +287,43 @@ impl FileEditor {
 
     pub(crate) fn insert(&mut self, value: &str) -> Result<()> {
         let value = normalize_newlines(value, self.line_ending);
-        self.validate_insertion(&value)?;
-        self.text.insert_str(self.cursor, &value);
-        self.cursor += value.len();
-        self.changed();
-        Ok(())
+        self.replace_selection(&value)
     }
 
     pub(crate) fn insert_char(&mut self, character: char) -> Result<()> {
         if character == '\0' {
             bail!("NUL bytes cannot be inserted into a text file");
         }
-        if self.text.len().saturating_add(character.len_utf8()) > MAX_EDITABLE_BYTES {
-            bail!("file would exceed the 1 MiB inline editing limit");
-        }
-        self.text.insert(self.cursor, character);
-        self.cursor += character.len_utf8();
-        self.changed();
-        Ok(())
+        self.replace_selection(&character.to_string())
     }
 
     pub(crate) fn insert_newline(&mut self) -> Result<()> {
         let ending = self.line_ending;
-        self.validate_insertion(ending)?;
-        self.text.insert_str(self.cursor, ending);
-        self.cursor += ending.len();
-        self.changed();
-        Ok(())
+        self.replace_selection(ending)
     }
 
     pub(crate) fn backspace(&mut self) {
+        if self.has_selection() {
+            let _ = self.replace_selection("");
+            return;
+        }
         if self.cursor == 0 {
             return;
         }
         let start = previous_cursor(&self.text, self.cursor);
-        self.text.drain(start..self.cursor);
-        self.cursor = start;
-        self.changed();
+        self.replace_range(start, self.cursor, "");
     }
 
     pub(crate) fn delete(&mut self) {
+        if self.has_selection() {
+            let _ = self.replace_selection("");
+            return;
+        }
         if self.cursor == self.text.len() {
             return;
         }
         let end = next_cursor(&self.text, self.cursor);
-        self.text.drain(self.cursor..end);
-        self.changed();
+        self.replace_range(self.cursor, end, "");
     }
 
     pub(crate) fn toggle_line_comments(
@@ -234,6 +361,7 @@ impl FileEditor {
         if !uncomment {
             self.validate_insertion(&insertion.repeat(lines.len()))?;
         }
+        self.record_edit();
         for (start, end) in lines.into_iter().rev() {
             if uncomment {
                 let marker_end = start + marker.len();
@@ -250,41 +378,60 @@ impl FileEditor {
                 }
             }
         }
+        self.selection_anchor = None;
         self.changed();
         Ok(())
     }
 
-    pub(crate) fn move_left(&mut self) {
-        self.cursor = previous_cursor(&self.text, self.cursor);
+    pub(crate) fn move_left_with_selection(&mut self, extend: bool) {
+        if !extend && let Some((start, _)) = self.selection_range() {
+            self.cursor = start;
+            self.selection_anchor = None;
+        } else {
+            let target = previous_cursor(&self.text, self.cursor);
+            self.move_to(target, extend);
+        }
         self.moved_horizontally();
     }
 
-    pub(crate) fn move_right(&mut self) {
-        self.cursor = next_cursor(&self.text, self.cursor);
+    pub(crate) fn move_right_with_selection(&mut self, extend: bool) {
+        if !extend && let Some((_, end)) = self.selection_range() {
+            self.cursor = end;
+            self.selection_anchor = None;
+        } else {
+            let target = next_cursor(&self.text, self.cursor);
+            self.move_to(target, extend);
+        }
         self.moved_horizontally();
     }
 
-    pub(crate) fn move_home(&mut self) {
-        self.cursor = line_start(&self.text, self.cursor);
+    pub(crate) fn move_home_with_selection(&mut self, extend: bool) {
+        let target = line_start(&self.text, self.cursor);
+        self.move_to(target, extend);
         self.moved_horizontally();
     }
 
-    pub(crate) fn move_end(&mut self) {
-        self.cursor = line_content_end(&self.text, line_start(&self.text, self.cursor));
+    pub(crate) fn move_end_with_selection(&mut self, extend: bool) {
+        let target = line_content_end(&self.text, line_start(&self.text, self.cursor));
+        self.move_to(target, extend);
         self.moved_horizontally();
     }
 
-    pub(crate) fn move_document_start(&mut self) {
-        self.cursor = 0;
+    pub(crate) fn move_document_start_with_selection(&mut self, extend: bool) {
+        self.move_to(0, extend);
         self.moved_horizontally();
     }
 
-    pub(crate) fn move_document_end(&mut self) {
-        self.cursor = self.text.len();
+    pub(crate) fn move_document_end_with_selection(&mut self, extend: bool) {
+        self.move_to(self.text.len(), extend);
         self.moved_horizontally();
     }
 
     pub(crate) fn move_vertical(&mut self, delta: isize) {
+        self.move_vertical_with_selection(delta, false);
+    }
+
+    pub(crate) fn move_vertical_with_selection(&mut self, delta: isize, extend: bool) {
         let (line, column) = self.cursor_position();
         let column = *self.preferred_column.get_or_insert(column);
         let target = if delta < 0 {
@@ -293,14 +440,47 @@ impl FileEditor {
             line.saturating_add(delta as usize)
         }
         .min(self.visible_line_count().saturating_sub(1));
+        if extend && self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor);
+        } else if !extend {
+            self.selection_anchor = None;
+        }
         self.set_cursor_preserving_column(target, column);
         self.discard_armed = false;
+    }
+
+    pub(crate) fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.undo.pop_back() else {
+            return false;
+        };
+        self.history_bytes = self.history_bytes.saturating_sub(snapshot.memory_size());
+        let current = self.snapshot();
+        self.history_bytes = self.history_bytes.saturating_add(current.memory_size());
+        self.redo.push_back(current);
+        self.restore_snapshot(snapshot);
+        self.trim_history();
+        true
+    }
+
+    pub(crate) fn redo(&mut self) -> bool {
+        let Some(snapshot) = self.redo.pop_back() else {
+            return false;
+        };
+        self.history_bytes = self.history_bytes.saturating_sub(snapshot.memory_size());
+        let current = self.snapshot();
+        self.history_bytes = self.history_bytes.saturating_add(current.memory_size());
+        self.undo.push_back(current);
+        self.restore_snapshot(snapshot);
+        self.trim_history();
+        true
     }
 
     fn set_cursor_preserving_column(&mut self, line: usize, column: usize) {
         let start = line_start_at(&self.text, line);
         let end = line_content_end(&self.text, start);
         self.cursor = closest_column(&self.text, start, end, column);
+        self.preferred_column = None;
+        self.discard_armed = false;
     }
 
     fn validate_insertion(&self, value: &str) -> Result<()> {
@@ -313,6 +493,96 @@ impl FileEditor {
         Ok(())
     }
 
+    fn replace_selection(&mut self, value: &str) -> Result<()> {
+        let (start, end) = self.selection_range().unwrap_or((self.cursor, self.cursor));
+        self.validate_replacement(start, end, value)?;
+        if start == end && value.is_empty() {
+            return Ok(());
+        }
+        self.replace_range(start, end, value);
+        Ok(())
+    }
+
+    fn replace_range(&mut self, start: usize, end: usize, value: &str) {
+        self.record_edit();
+        self.text.replace_range(start..end, value);
+        self.cursor = start.saturating_add(value.len());
+        self.selection_anchor = None;
+        self.changed();
+    }
+
+    fn validate_replacement(&self, start: usize, end: usize, value: &str) -> Result<()> {
+        if value.contains('\0') {
+            bail!("NUL bytes cannot be inserted into a text file");
+        }
+        if self
+            .text
+            .len()
+            .saturating_sub(end.saturating_sub(start))
+            .saturating_add(value.len())
+            > MAX_EDITABLE_BYTES
+        {
+            bail!("file would exceed the 1 MiB inline editing limit");
+        }
+        Ok(())
+    }
+
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.selection_anchor?;
+        (anchor != self.cursor).then_some((anchor.min(self.cursor), anchor.max(self.cursor)))
+    }
+
+    fn move_to(&mut self, target: usize, extend: bool) {
+        if extend {
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = Some(self.cursor);
+            }
+        } else {
+            self.selection_anchor = None;
+        }
+        self.cursor = target;
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            selection_anchor: self.selection_anchor,
+            preferred_column: self.preferred_column,
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: Snapshot) {
+        self.text = snapshot.text;
+        self.cursor = snapshot.cursor.min(self.text.len());
+        self.selection_anchor = snapshot
+            .selection_anchor
+            .filter(|anchor| *anchor <= self.text.len());
+        self.preferred_column = snapshot.preferred_column;
+        self.discard_armed = false;
+    }
+
+    fn record_edit(&mut self) {
+        let snapshot = self.snapshot();
+        self.history_bytes = self.history_bytes.saturating_add(snapshot.memory_size());
+        self.undo.push_back(snapshot);
+        self.history_bytes = self
+            .history_bytes
+            .saturating_sub(self.redo.iter().map(Snapshot::memory_size).sum());
+        self.redo.clear();
+        self.trim_history();
+    }
+
+    fn trim_history(&mut self) {
+        while self.history_bytes > MAX_HISTORY_BYTES {
+            let snapshot = self.undo.pop_front().or_else(|| self.redo.pop_front());
+            let Some(snapshot) = snapshot else {
+                break;
+            };
+            self.history_bytes = self.history_bytes.saturating_sub(snapshot.memory_size());
+        }
+    }
+
     fn changed(&mut self) {
         self.preferred_column = None;
         self.discard_armed = false;
@@ -322,6 +592,12 @@ impl FileEditor {
         self.preferred_column = None;
         self.discard_armed = false;
     }
+}
+
+fn is_word_at(text: &str, index: usize) -> bool {
+    text.get(index..)
+        .and_then(|value| value.chars().next())
+        .is_some_and(|character| character == '_' || character.is_alphanumeric())
 }
 
 fn line_comment_marker(path: &Path) -> Option<&'static str> {
@@ -351,6 +627,10 @@ fn line_comment_marker(path: &Path) -> Option<&'static str> {
 
 fn line_start(text: &str, cursor: usize) -> usize {
     text[..cursor].rfind('\n').map_or(0, |index| index + 1)
+}
+
+fn line_number_at(text: &str, cursor: usize) -> usize {
+    text[..cursor].bytes().filter(|byte| *byte == b'\n').count()
 }
 
 fn line_start_at(text: &str, line: usize) -> usize {
@@ -493,6 +773,53 @@ mod tests {
     }
 
     #[test]
+    fn selection_replaces_logical_source_text() {
+        let (_directory, mut editor) = editor("first\nsecond\n");
+        editor.set_cursor(0, 0);
+        editor.begin_selection();
+        editor.extend_cursor(1, 3);
+
+        assert_eq!(editor.selected_text(), Some("first\nsec"));
+        editor.insert("replacement").unwrap();
+        assert_eq!(editor.text(), "replacementond\n");
+        assert!(!editor.has_selection());
+    }
+
+    #[test]
+    fn undo_and_redo_are_kept_for_each_editor() {
+        let (_directory, mut first) = editor("text\n");
+        let (_other_directory, mut second) = editor("other\n");
+
+        first.insert("one ").unwrap();
+        first.insert("two ").unwrap();
+        second.insert("changed ").unwrap();
+
+        assert!(first.undo());
+        assert_eq!(first.text(), "one text\n");
+        assert!(first.undo());
+        assert_eq!(first.text(), "text\n");
+        assert_eq!(second.text(), "changed other\n");
+        assert!(first.redo());
+        assert_eq!(first.text(), "one text\n");
+    }
+
+    #[test]
+    fn refresh_keeps_undo_history_and_clears_redo() {
+        let (directory, mut editor) = editor("original\n");
+        editor.insert("edited ").unwrap();
+        assert!(editor.undo());
+        assert!(editor.redo());
+        fs::write(directory.path().join("file.txt"), "formatted\n").unwrap();
+
+        editor.refresh_from_disk().unwrap();
+
+        assert_eq!(editor.text(), "formatted\n");
+        assert!(!editor.redo());
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "original\n");
+    }
+
+    #[test]
     fn save_rejects_external_changes() {
         let (directory, mut editor) = editor("original\n");
         editor.insert("mine").unwrap();
@@ -508,7 +835,7 @@ mod tests {
     #[test]
     fn save_atomically_writes_the_edited_utf8() {
         let (directory, mut editor) = editor("first\n");
-        editor.move_document_end();
+        editor.move_document_end_with_selection(false);
         editor.insert("second\n").unwrap();
 
         editor.save().unwrap();
@@ -542,6 +869,19 @@ mod tests {
             "fn main() {\n    first();\n\n    second();\n}\n"
         );
         assert_eq!(editor.cursor_position(), (1, 4));
+    }
+
+    #[test]
+    fn toggling_comments_is_one_undoable_edit() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("code.rs"), "first();\nsecond();\n").unwrap();
+        let mut editor =
+            FileEditor::open(directory.path(), RepoPath::from("code.rs"), 0, 0).unwrap();
+
+        editor.toggle_line_comments(0, 1).unwrap();
+        assert_eq!(editor.text(), "// first();\n// second();\n");
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "first();\nsecond();\n");
     }
 
     #[test]

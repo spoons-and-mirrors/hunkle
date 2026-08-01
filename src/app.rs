@@ -445,6 +445,7 @@ pub struct App {
     pub(crate) editor_input: String,
     pub(crate) file_editor: Option<FileEditor>,
     pub(crate) file_editor_anchor: Option<Position>,
+    pub(crate) file_editor_dragging: bool,
     file_editor_return: Option<FileEditorReturn>,
     pub(crate) editor_error: Option<String>,
     pub(crate) editor_configure_only: bool,
@@ -603,6 +604,7 @@ impl App {
             editor_input: String::new(),
             file_editor: None,
             file_editor_anchor: None,
+            file_editor_dragging: false,
             file_editor_return: None,
             editor_error: None,
             editor_configure_only: false,
@@ -892,9 +894,10 @@ impl App {
         }
         match self.mode {
             Mode::FileEdit => {
-                self.selection.clear();
                 if self.file_editor_viewport_too_small() {
                     self.notice = Some("Resize the terminal before editing".to_owned());
+                } else if self.format_running() {
+                    self.notice = Some("Wait for the formatter to finish".to_owned());
                 } else if let Some(editor) = &mut self.file_editor
                     && let Err(error) = editor.insert(text)
                 {
@@ -1168,21 +1171,41 @@ impl App {
                         Err(error) => error,
                     });
                 }
-                WorkerOutcome::Format(done) => match done.result {
-                    Ok(output) if output.success => {
-                        self.notice =
-                            Some(format!("Formatted {} with {}", done.path, done.formatter));
+                WorkerOutcome::Format(done) => {
+                    let refresh_error = self
+                        .file_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.path() == &done.path)
+                        .then(|| {
+                            self.file_editor
+                                .as_mut()
+                                .and_then(|editor| editor.refresh_from_disk().err())
+                        })
+                        .flatten();
+                    if let Some(error) = refresh_error {
+                        self.notice = Some(format!(
+                            "Formatter completed for {}, but the editor could not refresh: {error}",
+                            done.path
+                        ));
+                        continue;
                     }
-                    Ok(output) => {
-                        let fallback = format!("{} could not format {}", done.formatter, done.path);
-                        self.notice = Some(if output.stderr.trim().is_empty() {
-                            first_error(&output.stdout, &fallback)
-                        } else {
-                            first_error(&output.stderr, &fallback)
-                        });
+                    match done.result {
+                        Ok(output) if output.success => {
+                            self.notice =
+                                Some(format!("Formatted {} with {}", done.path, done.formatter));
+                        }
+                        Ok(output) => {
+                            let fallback =
+                                format!("{} could not format {}", done.formatter, done.path);
+                            self.notice = Some(if output.stderr.trim().is_empty() {
+                                first_error(&output.stdout, &fallback)
+                            } else {
+                                first_error(&output.stderr, &fallback)
+                            });
+                        }
+                        Err(error) => self.notice = Some(error),
                     }
-                    Err(error) => self.notice = Some(error),
-                },
+                }
                 WorkerOutcome::BranchDelete(done) => {
                     self.notice = Some(match done.result {
                         Ok(()) => done.remote.map_or_else(
@@ -1710,19 +1733,106 @@ impl App {
 
     fn handle_file_editor(&mut self, key: KeyEvent) {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let extend = key.modifiers.contains(KeyModifiers::SHIFT);
         if self
             .settings
             .shortcuts
             .matches(ShortcutAction::SaveOrFormat, key)
         {
-            self.save_file_editor();
+            self.save_file_editor(false);
             return;
         }
-        if control && key.code == KeyCode::Char('c') {
-            if let Some(text) = self.selection.copy_text() {
-                self.copy_request = Some(text);
+        if control && key.code == KeyCode::Enter {
+            self.save_file_editor(true);
+            return;
+        }
+
+        if key.code == KeyCode::Esc {
+            if self
+                .file_editor
+                .as_ref()
+                .is_some_and(FileEditor::has_selection)
+            {
+                if let Some(editor) = &mut self.file_editor {
+                    editor.clear_selection();
+                }
+                return;
+            }
+            let Some(editor) = &mut self.file_editor else {
+                self.mode = Mode::Normal;
+                return;
+            };
+            if editor.dirty() && !editor.discard_armed {
+                editor.discard_armed = true;
+                self.notice = Some("Unsaved edits; press Esc again to discard".to_owned());
+                return;
+            }
+            self.file_editor = None;
+            self.file_editor_anchor = None;
+            self.file_editor_dragging = false;
+            self.mode = Mode::Normal;
+            self.restore_file_editor_scroll(true);
+            self.notice = None;
+            return;
+        }
+
+        if self.format_running() {
+            self.notice = Some("Wait for the formatter to finish".to_owned());
+            return;
+        }
+
+        if control && matches!(key.code, KeyCode::Char('c' | 'C')) {
+            if let Some(text) = self
+                .file_editor
+                .as_ref()
+                .and_then(FileEditor::selected_text)
+            {
+                self.copy_request = Some(text.to_owned());
             } else {
                 self.notice = Some("Select text to copy".to_owned());
+            }
+            return;
+        }
+        if control && matches!(key.code, KeyCode::Char('x' | 'X')) {
+            if let Some(text) = self
+                .file_editor
+                .as_ref()
+                .and_then(FileEditor::selected_text)
+            {
+                self.copy_request = Some(text.to_owned());
+                if let Some(editor) = &mut self.file_editor {
+                    editor.backspace();
+                }
+            } else {
+                self.notice = Some("Select text to cut".to_owned());
+            }
+            return;
+        }
+        if control && matches!(key.code, KeyCode::Char('a' | 'A')) {
+            if let Some(editor) = &mut self.file_editor {
+                editor.select_all();
+            }
+            return;
+        }
+        if control && matches!(key.code, KeyCode::Char('z' | 'Z')) {
+            let changed = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                self.file_editor.as_mut().is_some_and(FileEditor::redo)
+            } else {
+                self.file_editor.as_mut().is_some_and(FileEditor::undo)
+            };
+            if !changed {
+                self.notice = Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    "Nothing to redo"
+                } else {
+                    "Nothing to undo"
+                }
+                .to_owned());
+            }
+            return;
+        }
+        if control && matches!(key.code, KeyCode::Char('y' | 'Y')) {
+            if !self.file_editor.as_mut().is_some_and(FileEditor::redo) {
+                self.notice = Some("Nothing to redo".to_owned());
             }
             return;
         }
@@ -1741,36 +1851,15 @@ impl App {
             });
             if let (Some((first, last)), Some(editor)) = (lines, &mut self.file_editor) {
                 match editor.toggle_line_comments(first, last) {
-                    Ok(()) => self.notice = None,
+                    Ok(()) => {
+                        editor.clear_selection();
+                        self.notice = None;
+                    }
                     Err(error) => self.notice = Some(format!("Could not toggle comments: {error}")),
                 }
             }
-            self.selection.clear();
             return;
         }
-
-        if key.code == KeyCode::Esc {
-            if self.selection.has_selection() {
-                self.selection.clear();
-                return;
-            }
-            let Some(editor) = &mut self.file_editor else {
-                self.mode = Mode::Normal;
-                return;
-            };
-            if editor.dirty() && !editor.discard_armed {
-                editor.discard_armed = true;
-                self.notice = Some("Unsaved edits; press Esc again to discard".to_owned());
-                return;
-            }
-            self.file_editor = None;
-            self.file_editor_anchor = None;
-            self.mode = Mode::Normal;
-            self.restore_file_editor_scroll(true);
-            self.notice = None;
-            return;
-        }
-        self.selection.clear();
         if self.file_editor_viewport_too_small() {
             self.notice = Some("Resize the terminal before editing".to_owned());
             return;
@@ -1802,18 +1891,18 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Left if control => editor.move_home(),
-            KeyCode::Right if control => editor.move_end(),
-            KeyCode::Home if control => editor.move_document_start(),
-            KeyCode::End if control => editor.move_document_end(),
-            KeyCode::Left => editor.move_left(),
-            KeyCode::Right => editor.move_right(),
-            KeyCode::Up => editor.move_vertical(-1),
-            KeyCode::Down => editor.move_vertical(1),
-            KeyCode::Home => editor.move_home(),
-            KeyCode::End => editor.move_end(),
-            KeyCode::PageUp => editor.move_vertical(-(viewport as isize)),
-            KeyCode::PageDown => editor.move_vertical(viewport as isize),
+            KeyCode::Left if control => editor.move_home_with_selection(extend),
+            KeyCode::Right if control => editor.move_end_with_selection(extend),
+            KeyCode::Home if control => editor.move_document_start_with_selection(extend),
+            KeyCode::End if control => editor.move_document_end_with_selection(extend),
+            KeyCode::Left => editor.move_left_with_selection(extend),
+            KeyCode::Right => editor.move_right_with_selection(extend),
+            KeyCode::Up => editor.move_vertical_with_selection(-1, extend),
+            KeyCode::Down => editor.move_vertical_with_selection(1, extend),
+            KeyCode::Home => editor.move_home_with_selection(extend),
+            KeyCode::End => editor.move_end_with_selection(extend),
+            KeyCode::PageUp => editor.move_vertical_with_selection(-(viewport as isize), extend),
+            KeyCode::PageDown => editor.move_vertical_with_selection(viewport as isize, extend),
             KeyCode::Backspace => editor.backspace(),
             KeyCode::Delete => editor.delete(),
             KeyCode::Enter | KeyCode::Tab | KeyCode::Char(_) => {}
@@ -1828,29 +1917,9 @@ impl App {
     }
 
     fn selected_file_editor_lines(&self) -> Option<(usize, usize)> {
-        let body = self.regions.preview_body?;
-        if body.is_empty() {
-            return None;
-        }
-        let (first, last) = self.selection.selected_rows()?;
-        let source_line = |screen_row: u16| {
-            let rendered_row = usize::from(
-                screen_row
-                    .clamp(body.y, body.bottom().saturating_sub(1))
-                    .saturating_sub(body.y),
-            );
-            if self.changes.diff_wrap {
-                self.regions
-                    .editor_rows
-                    .get(rendered_row.min(self.regions.editor_rows.len().saturating_sub(1)))
-                    .map(|row| row.line)
-            } else {
-                self.file_editor
-                    .as_ref()
-                    .map(|editor| editor.scroll_line.saturating_add(rendered_row))
-            }
-        };
-        Some((source_line(first)?, source_line(last)?))
+        self.file_editor
+            .as_ref()
+            .and_then(FileEditor::selected_line_range)
     }
 
     fn start_file_editor(
@@ -1861,6 +1930,7 @@ impl App {
         anchor: Position,
     ) {
         self.last_file_editor_click = None;
+        self.file_editor_dragging = false;
         if self.session.open_running() {
             self.notice = Some("Wait for the workspace to finish opening".to_owned());
             return;
@@ -1875,6 +1945,7 @@ impl App {
         };
         match FileEditor::open(&root, path, line, column) {
             Ok(editor) => {
+                self.selection.clear();
                 self.file_editor_anchor = Some(anchor);
                 self.file_editor_return = Some(FileEditorReturn {
                     path: editor.path().clone(),
@@ -1889,7 +1960,7 @@ impl App {
         }
     }
 
-    fn save_file_editor(&mut self) {
+    fn save_file_editor(&mut self, close: bool) {
         let Some(editor) = &self.file_editor else {
             self.mode = Mode::Normal;
             return;
@@ -1900,10 +1971,17 @@ impl App {
         }
         let root = editor.root().to_owned();
         let path = editor.path().clone();
-        self.selection.clear();
-        self.file_editor = None;
-        self.file_editor_anchor = None;
-        self.mode = Mode::Normal;
+        if close {
+            self.selection.clear();
+            self.file_editor = None;
+            self.file_editor_anchor = None;
+            self.file_editor_dragging = false;
+            self.mode = Mode::Normal;
+        } else if let Some(editor) = &mut self.file_editor {
+            editor.mark_saved();
+            editor.clear_selection();
+            self.notice = Some(format!("Saved {path}"));
+        }
 
         if !self.settings.format_on_save {
             self.reload(RefreshScope::WORKTREE);
@@ -5560,14 +5638,18 @@ mod tests {
         app.file_editor = Some(editor);
         app.mode = Mode::FileEdit;
 
-        app.save_file_editor();
+        app.save_file_editor(false);
 
         assert_eq!(
             fs::read_to_string(root.join("notes.txt")).unwrap(),
             "edited notes\n"
         );
+        assert_eq!(app.mode, Mode::FileEdit);
         assert_eq!(app.notice.as_deref(), Some("Saved notes.txt"));
         assert!(!app.format_running());
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]

@@ -4015,6 +4015,10 @@ fn inline_editor_copies_and_comments_explicit_selections() {
         body.y + 1,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(body.x, body.y)].bg,
+        super::palette().accent
+    );
     app.handle_mouse(mouse(
         MouseEventKind::Up(MouseButton::Left),
         body.x + 6,
@@ -4025,7 +4029,11 @@ fn inline_editor_copies_and_comments_explicit_selections() {
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert_eq!(
         app.take_copy_request().as_deref(),
-        Some("first();\nsecond(")
+        Some("first();\nsecond")
+    );
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().selected_line_range(),
+        Some((0, 1))
     );
     assert!(!app.should_quit);
 
@@ -4040,7 +4048,7 @@ fn inline_editor_copies_and_comments_explicit_selections() {
     ));
     assert_eq!(
         app.file_editor.as_ref().unwrap().text(),
-        "first();\n// second();\n"
+        "// first();\nsecond();\n"
     );
     app.handle_key(KeyEvent::new(
         KeyCode::Char(':'),
@@ -4049,15 +4057,26 @@ fn inline_editor_copies_and_comments_explicit_selections() {
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
     assert_eq!(
         app.file_editor.as_ref().unwrap().text(),
-        "first();\n// second();\n"
+        "// first();\nsecond();\n"
     );
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.mode, Mode::FileEdit);
     assert_eq!(
         fs::read_to_string(root.join("code.rs")).unwrap(),
         "// first();\n// second();\n"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
+fn inline_editor_selection_width_accounts_for_tabs() {
+    assert_eq!(super::selected_display_range("\tvalue\n", 0, (0, 1)), Some((0, 4)));
+    assert_eq!(
+        super::selected_display_range("\tvalue\n", 0, (0, 2)),
+        Some((0, 5))
     );
 }
 
@@ -4183,9 +4202,11 @@ fn preview_click_preserves_wrapped_position_and_scroll_through_editing() {
         KeyModifiers::CONTROL,
     ));
     wait_for(&mut app, |app| {
-        app.mode == Mode::Normal && app.changes.diff.contains('X')
+        app.mode == Mode::FileEdit && app.changes.diff.contains('X')
     });
     assert_eq!(app.changes.diff_scroll, 2);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    assert_eq!(app.mode, Mode::Normal);
 }
 
 #[test]
