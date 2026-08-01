@@ -310,10 +310,10 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert_eq!(background.bg, Color::Rgb(0, 0, 0));
     assert!(background.modifier.contains(Modifier::DIM));
     for (target, undimmed) in [
-        (HitTarget::HeaderRepository, false),
-        (HitTarget::HeaderWorktrees, false),
+        (HitTarget::HeaderRepository, true),
+        (HitTarget::HeaderWorktrees, true),
         (HitTarget::HeaderBranch, true),
-        (HitTarget::HeaderDiff, false),
+        (HitTarget::HeaderDiff, true),
     ] {
         let control = app.regions.hit_target_rect(target).unwrap();
         assert_eq!(
@@ -353,7 +353,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .regions
         .hit_target_rect(HitTarget::HeaderPickerNewBranch)
         .unwrap();
-    assert_eq!(new_branch.right(), picker.right());
+    assert_eq!(new_branch.right() + 1, picker.right());
     assert_eq!(
         terminal.backend().buffer()[(new_branch.x, new_branch.y)].bg,
         super::palette().green
@@ -4002,6 +4002,24 @@ fn inline_editor_copies_and_comments_explicit_selections() {
         app.file_editor.as_ref().unwrap().text(),
         "// first();\n// second();\n"
     );
+    app.handle_key(KeyEvent::new(
+        KeyCode::Char(';'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().text(),
+        "first();\n// second();\n"
+    );
+    app.handle_key(KeyEvent::new(
+        KeyCode::Char(':'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().text(),
+        "first();\n// second();\n"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
     assert_eq!(app.mode, Mode::Normal);
@@ -4009,6 +4027,37 @@ fn inline_editor_copies_and_comments_explicit_selections() {
         fs::read_to_string(root.join("code.rs")).unwrap(),
         "// first();\n// second();\n"
     );
+}
+
+#[test]
+fn double_clicking_an_editor_word_selects_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("code.rs"), "alpha_beta gamma\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor =
+        Some(crate::app::FileEditor::open(root, RepoPath::from("code.rs"), 1, 0).unwrap());
+    app.mode = Mode::FileEdit;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let body = app.regions.preview_body.unwrap();
+    click(&mut app, body.x + 2, body.y);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        body.x + 2,
+        body.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        body.x + 2,
+        body.y,
+    ));
+    assert!(app.take_copy_request().is_none());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(app.take_copy_request().as_deref(), Some("alpha_beta"));
 }
 
 #[test]

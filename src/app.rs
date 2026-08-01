@@ -452,6 +452,7 @@ pub struct App {
     pub(crate) file_dialog: Option<FileDialog>,
     file_drag: Option<FileDrag>,
     last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
+    last_file_editor_click: Option<(Position, Instant)>,
     pending_file_selection: Option<RepoPath>,
     workspace_focus_restore_path: Option<PathBuf>,
     pending_workspace_restore: Option<PathBuf>,
@@ -609,6 +610,7 @@ impl App {
             file_dialog: None,
             file_drag: None,
             last_worktree_file_click: None,
+            last_file_editor_click: None,
             pending_file_selection: None,
             workspace_focus_restore_path: None,
             pending_workspace_restore: None,
@@ -1723,7 +1725,13 @@ impl App {
             }
             return;
         }
-        if control && key.code == KeyCode::Char('/') {
+        let toggle_comment = (control
+            && matches!(
+                key.code,
+                KeyCode::Char('/') | KeyCode::Char('_') | KeyCode::Char(':') | KeyCode::Char(';')
+            ))
+            || (key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('c'));
+        if toggle_comment {
             let lines = self.selected_file_editor_lines().or_else(|| {
                 self.file_editor
                     .as_ref()
@@ -1831,10 +1839,10 @@ impl App {
                     .saturating_sub(body.y),
             );
             if self.changes.diff_wrap {
-                self.regions.editor_rows.get(
-                    rendered_row.min(self.regions.editor_rows.len().saturating_sub(1)),
-                )
-                .map(|row| row.line)
+                self.regions
+                    .editor_rows
+                    .get(rendered_row.min(self.regions.editor_rows.len().saturating_sub(1)))
+                    .map(|row| row.line)
             } else {
                 self.file_editor
                     .as_ref()
@@ -1851,6 +1859,7 @@ impl App {
         column: usize,
         anchor: Position,
     ) {
+        self.last_file_editor_click = None;
         if self.session.open_running() {
             self.notice = Some("Wait for the workspace to finish opening".to_owned());
             return;

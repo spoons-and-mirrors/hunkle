@@ -647,14 +647,15 @@ fn dim(frame: &mut Frame<'_>) {
 
 fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
     let mut preserved = Vec::new();
-    let target = match app.header_picker.kind {
-        Some(HeaderPickerKind::Repositories) => HitTarget::HeaderRepository,
-        Some(HeaderPickerKind::Worktrees) => HitTarget::HeaderWorktrees,
-        Some(HeaderPickerKind::Branches) => HitTarget::HeaderBranch,
-        Some(HeaderPickerKind::DiffTargets) => HitTarget::HeaderDiff,
-        None => return,
-    };
-    if let Some(rect) = app.regions.hit_target_rect(target) {
+    for target in [
+        HitTarget::HeaderRepository,
+        HitTarget::HeaderWorktrees,
+        HitTarget::HeaderBranch,
+        HitTarget::HeaderDiff,
+    ] {
+        let Some(rect) = app.regions.hit_target_rect(target) else {
+            continue;
+        };
         for y in rect.y..rect.bottom() {
             for x in rect.x..rect.right() {
                 if let Some(cell) = frame.buffer_mut().cell((x, y)).cloned() {
@@ -772,7 +773,10 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         frame,
         &mut x,
         format!(" {repository} "),
-        header_badge_style(palette().yellow),
+        header_badge_style(
+            palette().yellow,
+            app.hovered_hit_target == Some(HitTarget::HeaderRepository),
+        ),
         room.saturating_sub(if is_local {
             0
         } else {
@@ -805,7 +809,10 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame,
             &mut x,
             format!(" {worktree} "),
-            header_badge_style(palette().orange),
+            header_badge_style(
+                palette().orange,
+                app.hovered_hit_target == Some(HitTarget::HeaderWorktrees),
+            ),
             room.saturating_sub(
                 branch_width
                     .saturating_add(diff_width)
@@ -825,7 +832,10 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame,
             &mut x,
             branch_badge,
-            header_badge_style(palette().accent),
+            header_badge_style(
+                palette().accent,
+                app.hovered_hit_target == Some(HitTarget::HeaderBranch),
+            ),
             room.saturating_sub(
                 diff_width
                     .saturating_add(comparison_width as u16)
@@ -843,7 +853,10 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame,
             &mut x,
             diff_badge.to_owned(),
-            header_badge_style(palette().purple),
+            header_badge_style(
+                palette().purple,
+                app.hovered_hit_target == Some(HitTarget::HeaderDiff),
+            ),
             room,
         );
         if let Some(rect) = diff_rect {
@@ -881,29 +894,29 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 fn draw_main_top_padding(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let transition = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(
-        Paragraph::new("▀".repeat(usize::from(transition.width)))
-            .style(Style::default().fg(palette().surface_alt).bg(palette().canvas)),
+        Paragraph::new("▀".repeat(usize::from(transition.width))).style(
+            Style::default()
+                .fg(palette().surface_alt)
+                .bg(palette().canvas),
+        ),
         transition,
     );
-    let (Some(bounds), Some(left)) = (app.regions.split_bounds, app.regions.worktree) else {
-        return;
-    };
-    let right_x = left.right().saturating_add(1);
-    let right = Rect::new(
-        right_x,
-        bounds.y,
-        bounds.right().saturating_sub(right_x),
-        1,
-    );
-    for pane in [Rect::new(left.x, left.y, left.width, 1), right] {
-        if pane.is_empty() {
-            continue;
+    if let (Some(bounds), Some(left)) = (app.regions.split_bounds, app.regions.worktree) {
+        let right_x = left.right().saturating_add(1);
+        let right = Rect::new(right_x, bounds.y, bounds.right().saturating_sub(right_x), 1);
+        for pane in [Rect::new(left.x, left.y, left.width, 1), right] {
+            if pane.is_empty() {
+                continue;
+            }
+            frame.render_widget(
+                Paragraph::new("▀".repeat(usize::from(pane.width))).style(
+                    Style::default()
+                        .fg(palette().surface_alt)
+                        .bg(palette().panel),
+                ),
+                pane,
+            );
         }
-        frame.render_widget(
-            Paragraph::new("▀".repeat(usize::from(pane.width)))
-                .style(Style::default().fg(palette().surface_alt).bg(palette().panel)),
-            pane,
-        );
     }
 }
 
@@ -925,11 +938,32 @@ fn repository_root(repo: &crate::git::RepositoryData) -> &std::path::Path {
     }
 }
 
-fn header_badge_style(background: Color) -> Style {
+fn header_badge_style(background: Color, hovered: bool) -> Style {
     Style::default()
         .fg(palette().canvas)
-        .bg(background)
+        .bg(if hovered {
+            lighter(background)
+        } else {
+            background
+        })
         .add_modifier(Modifier::BOLD)
+}
+
+fn lighter(color: Color) -> Color {
+    match color {
+        Color::Rgb(red, green, blue) => Color::Rgb(
+            red.saturating_add((u8::MAX - red) / 3),
+            green.saturating_add((u8::MAX - green) / 3),
+            blue.saturating_add((u8::MAX - blue) / 3),
+        ),
+        Color::Red => Color::LightRed,
+        Color::Green => Color::LightGreen,
+        Color::Yellow => Color::LightYellow,
+        Color::Blue => Color::LightBlue,
+        Color::Magenta => Color::LightMagenta,
+        Color::Cyan => Color::LightCyan,
+        _ => Color::White,
+    }
 }
 
 fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
@@ -989,9 +1023,10 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     };
     let new_branch_action = kind == HeaderPickerKind::Branches
         && app.header_picker.branch_step == BranchPickerStep::Branches;
-    let action_width = if new_branch_action { 12 } else { 0 };
+    let action_width = if new_branch_action { 11 } else { 0 };
+    let action_space = action_width + u16::from(new_branch_action);
     if filtering {
-        draw_header_picker_search(frame, app, area, action_width);
+        draw_header_picker_search(frame, app, area, action_space);
     } else {
         frame.render_widget(
             Paragraph::new(truncate_width(
@@ -1006,7 +1041,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         .register_hit_target(HitTarget::HeaderPickerOverlay, area);
     if new_branch_action {
         let action_row = Rect::new(
-            area.right().saturating_sub(action_width),
+            area.right().saturating_sub(action_space),
             area.y.saturating_add(1),
             action_width,
             1,
@@ -1018,13 +1053,17 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             palette().green
         };
         frame.render_widget(
-            Paragraph::new(" New branch ").style(
+            Paragraph::new(" New branch").style(
                 Style::default()
                     .fg(palette().canvas)
                     .bg(background)
                     .add_modifier(Modifier::BOLD),
             ),
             action_row,
+        );
+        frame.render_widget(
+            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
+            Rect::new(action_row.right(), action_row.y, 1, 1),
         );
         app.regions
             .register_hit_target(HitTarget::HeaderPickerNewBranch, action_row);

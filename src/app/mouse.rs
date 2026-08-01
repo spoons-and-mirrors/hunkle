@@ -335,12 +335,14 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
                 self.selection.clear();
+                self.last_file_editor_click = None;
                 if let Some(editor) = &mut self.file_editor {
                     editor.move_vertical(3);
                 }
             }
             MouseEventKind::ScrollUp => {
                 self.selection.clear();
+                self.last_file_editor_click = None;
                 if let Some(editor) = &mut self.file_editor {
                     editor.move_vertical(-3);
                 }
@@ -357,10 +359,29 @@ impl App {
                 self.selection.update(point);
             }
             MouseEventKind::Up(MouseButton::Left) if self.selection.is_active() => {
-                match self.selection.finish(point) {
-                    SelectionOutcome::Click => self.place_file_editor_cursor(point),
-                    SelectionOutcome::Selected(Some(_)) => {}
-                    SelectionOutcome::Selected(None) => {}
+                let in_editor = self
+                    .regions
+                    .preview_body
+                    .is_some_and(|body| body.contains(point));
+                let double_click = in_editor
+                    && !self.selection.has_selection()
+                    && self.last_file_editor_click.is_some_and(|(previous, at)| {
+                        previous == point && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+                    });
+                let outcome = if double_click {
+                    self.last_file_editor_click = None;
+                    self.selection.finish_word(point)
+                } else {
+                    self.selection.finish(point)
+                };
+                match outcome {
+                    SelectionOutcome::Click => {
+                        self.last_file_editor_click = in_editor.then(|| (point, Instant::now()));
+                        self.place_file_editor_cursor(point);
+                    }
+                    SelectionOutcome::Selected(Some(_)) | SelectionOutcome::Selected(None) => {
+                        self.last_file_editor_click = None;
+                    }
                 }
             }
             _ => {}

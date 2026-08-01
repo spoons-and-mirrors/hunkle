@@ -269,7 +269,11 @@ fn start_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
             EnterAlternateScreen,
             EnableMouseCapture,
             EnableBracketedPaste,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+            ),
             Clear(ClearType::All),
             MoveTo(0, 0)
         )?;
