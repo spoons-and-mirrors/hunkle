@@ -138,13 +138,16 @@ Git-inventoried repository or linked worktree, then choose which non-Hunkle pane
 in the active Herdr tab to replace with an OpenCode agent. The destination
 picker can be filtered by repository, branch, or path.
 
-The Agents section acts as a terminal switcher. Clicking an agent shows its
-running pane immediately to Hunkle's right, keeps keyboard focus in Hunkle, and
-opens the agent's working directory. Agents parked in another tab are exchanged
-with the current companion pane without restarting either terminal. By default,
-the section lists and operates on agents in Hunkle's Herdr workspace only;
-enable **Cross-workspace agents** in Settings to include agents from other Herdr
-workspaces.
+The Agents section acts as a live layout switcher. Each Herdr tab is a saved
+agent layout, shared by every agent in that tab. Clicking an agent restores its
+complete pane layout immediately to Hunkle's right, keeps keyboard focus in
+Hunkle, and opens the selected agent's working directory. The currently visible
+layout is parked in the selected layout's former tab. Existing terminals move
+between tabs without restarting their processes or losing scrollback. By
+default, the section lists and operates on agents in Hunkle's Herdr workspace
+only; enable **Cross-workspace agents** in Settings to include agents from other
+Herdr workspaces. Zoomed tabs must be unzoomed before their layouts can be
+exchanged.
 
 When hunkle runs inside Herdr, press `w` to open the Workspace Manager, a
 responsive modal backed by Herdr's session snapshot. It presents workspace
@@ -175,7 +178,8 @@ between groups independently. Inside the manager, press `g` to create a group.
 Click groups to fold or expand them, and drag parent workspaces onto a group or
 back into ungrouped space. A single workspace click opens it in Hunkle; press
 `Enter` or double-click to switch to its Herdr workspace. Agents are ordered by
-recent Herdr activity, and clicking one displays it beside Hunkle.
+recent Herdr activity, and clicking one restores its shared tab layout beside
+Hunkle.
 Agent timers accumulate across every session used by the same agent in a
 terminal, are shared between Hunkle processes, and persist across restarts in
 `agent-timings.json` beside Hunkle's config. Press `Delete` to confirm closing a

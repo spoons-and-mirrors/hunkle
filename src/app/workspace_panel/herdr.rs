@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -35,6 +36,75 @@ pub(super) struct DisplayAgentRequest {
     pub(super) host_workspace_id: String,
     pub(super) host_tab_id: String,
     pub(super) allow_cross_workspace: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayoutDirection {
+    Right,
+    Down,
+}
+
+impl LayoutDirection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Down => "down",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum LiveLayoutNode {
+    Pane(String),
+    Split {
+        direction: LayoutDirection,
+        ratio: f32,
+        first: Box<Self>,
+        second: Box<Self>,
+    },
+}
+
+impl LiveLayoutNode {
+    fn first_pane(&self) -> &str {
+        match self {
+            Self::Pane(pane_id) => pane_id,
+            Self::Split { first, .. } => first.first_pane(),
+        }
+    }
+
+    fn contains(&self, pane_id: &str) -> bool {
+        match self {
+            Self::Pane(candidate) => candidate == pane_id,
+            Self::Split { first, second, .. } => {
+                first.contains(pane_id) || second.contains(pane_id)
+            }
+        }
+    }
+
+    fn collect_panes<'a>(&'a self, panes: &mut Vec<&'a str>) {
+        match self {
+            Self::Pane(pane_id) => panes.push(pane_id),
+            Self::Split { first, second, .. } => {
+                first.collect_panes(panes);
+                second.collect_panes(panes);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LiveLayout {
+    workspace_id: String,
+    tab_id: String,
+    zoomed: bool,
+    focused_pane_id: String,
+    root: LiveLayoutNode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LivePaneLocation {
+    pane_id: String,
+    tab_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,139 +214,422 @@ pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>
 }
 
 pub(super) fn display_agent(request: DisplayAgentRequest) -> Result<(), String> {
-    display_agent_with(request, |args| run(args))
+    display_agent_with(request, run, api_request)
 }
 
-fn display_agent_with<F>(request: DisplayAgentRequest, mut runner: F) -> Result<(), String>
+fn display_agent_with<F, A>(
+    request: DisplayAgentRequest,
+    mut runner: F,
+    mut api: A,
+) -> Result<(), String>
 where
     F: FnMut(&[String]) -> Result<Value, String>,
+    A: FnMut(&str, &Value) -> Result<Value, String>,
 {
     if request.workspace_id != request.host_workspace_id && !request.allow_cross_workspace {
         return Err("Cross-workspace agents are disabled in Settings".to_owned());
     }
-
-    let neighbor = runner(&[
-        "pane".to_owned(),
-        "neighbor".to_owned(),
-        "--direction".to_owned(),
-        "right".to_owned(),
-        "--pane".to_owned(),
-        request.host_pane_id.clone(),
-    ])?;
-    let companion_pane_id = neighbor
-        .pointer("/result/neighbor/neighbor_pane_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-
-    if companion_pane_id.as_deref() == Some(request.pane_id.as_str()) {
-        return Ok(());
-    }
-
-    let ratio = companion_pane_id
-        .as_deref()
-        .and_then(|companion| companion_ratio(&neighbor, &request.host_pane_id, companion));
-    let Some(companion_pane_id) = companion_pane_id else {
-        if request.tab_id == request.host_tab_id {
-            return Err("The selected agent is not in Hunkle's companion pane".to_owned());
-        }
-        if request.workspace_id != request.host_workspace_id {
-            return Err(
-                "A companion pane is required to display an agent from another workspace"
-                    .to_owned(),
-            );
-        }
-        move_pane(
-            &mut runner,
-            &request.pane_id,
-            &request.host_tab_id,
-            &request.host_pane_id,
-            ratio,
-        )?;
-        return Ok(());
-    };
-
+    // Every agent in the host tab already shares the displayed layout.
     if request.tab_id == request.host_tab_id {
-        let result = runner(&[
-            "pane".to_owned(),
-            "swap".to_owned(),
-            "--source-pane".to_owned(),
-            request.pane_id.clone(),
-            "--target-pane".to_owned(),
-            companion_pane_id,
-        ])?;
-        require_changed(&result, "/result/swap", "pane swap")?;
-        runner(&[
-            "pane".to_owned(),
-            "focus".to_owned(),
-            "--direction".to_owned(),
-            "left".to_owned(),
-            "--pane".to_owned(),
-            request.pane_id,
-        ])?;
+        let host = export_layout(&mut api, &request.host_tab_id)?;
+        validate_layouts(&request, &host, &host)?;
         return Ok(());
     }
 
-    let moved_companion = move_pane(
+    let host = export_layout(&mut api, &request.host_tab_id)?;
+    let selected = export_layout(&mut api, &request.tab_id)?;
+    validate_layouts(&request, &host, &selected)?;
+    let (host_ratio, outgoing) = host_agent_layout(&host.root, &request.host_pane_id)?;
+    let outgoing = outgoing.ok_or_else(|| {
+        "Hunkle needs a pane layout on its right before another layout can be exchanged".to_owned()
+    })?;
+
+    let mut panes = HashMap::new();
+    for (tree, tab_id) in [
+        (&outgoing, host.tab_id.as_str()),
+        (&selected.root, selected.tab_id.as_str()),
+    ] {
+        let mut pane_ids = Vec::new();
+        tree.collect_panes(&mut pane_ids);
+        for pane_id in pane_ids {
+            if panes
+                .insert(
+                    pane_id.to_owned(),
+                    LivePaneLocation {
+                        pane_id: pane_id.to_owned(),
+                        tab_id: tab_id.to_owned(),
+                    },
+                )
+                .is_some()
+            {
+                return Err("Herdr returned duplicate panes in the saved layouts".to_owned());
+            }
+        }
+    }
+    panes.insert(
+        request.host_pane_id.clone(),
+        LivePaneLocation {
+            pane_id: request.host_pane_id.clone(),
+            tab_id: host.tab_id.clone(),
+        },
+    );
+
+    let outgoing_root = outgoing.first_pane().to_owned();
+    let selected_root = selected.root.first_pane().to_owned();
+    move_layout_pane(
         &mut runner,
-        &companion_pane_id,
-        &request.tab_id,
-        &request.pane_id,
-        None,
+        &mut panes,
+        &outgoing_root,
+        &selected.tab_id,
+        &selected_root,
+        LayoutDirection::Right,
+        0.5,
     )?;
-    if let Err(error) = move_pane(
-        &mut runner,
-        &request.pane_id,
-        &request.host_tab_id,
-        &request.host_pane_id,
-        ratio,
-    ) {
-        let rollback = move_pane(
+
+    let exchange = (|| {
+        rebuild_layout(&mut runner, &outgoing, &selected.tab_id, &mut panes)?;
+        move_layout_pane(
             &mut runner,
-            &moved_companion,
-            &request.host_tab_id,
+            &mut panes,
+            &selected_root,
+            &host.tab_id,
             &request.host_pane_id,
-            ratio,
+            LayoutDirection::Right,
+            host_ratio,
+        )?;
+        rebuild_layout(&mut runner, &selected.root, &host.tab_id, &mut panes)?;
+
+        let final_host = export_layout(&mut api, &host.tab_id)?;
+        let expected_host = host_with_layout(
+            request.host_pane_id.clone(),
+            host_ratio,
+            selected.root.clone(),
         );
-        return Err(match rollback {
-            Ok(_) => error,
-            Err(rollback) => format!("{error}; could not restore the companion pane: {rollback}"),
+        verify_layout(&final_host, &expected_host, &panes, "displayed")?;
+        if final_host.focused_pane_id != request.host_pane_id {
+            return Err("Herdr did not preserve focus in Hunkle".to_owned());
+        }
+        let parked = export_layout(&mut api, &selected.tab_id)?;
+        verify_layout(&parked, &outgoing, &panes, "parked")
+    })();
+    if let Err(error) = exchange {
+        let restore = restore_layouts(
+            &mut runner,
+            &mut api,
+            &request,
+            &host,
+            &selected,
+            &outgoing,
+            host_ratio,
+            &mut panes,
+        );
+        return Err(match restore {
+            Ok(()) => format!("{error}; restored the previous layouts"),
+            Err(restore) => format!("{error}; could not restore the previous layouts: {restore}"),
         });
     }
     Ok(())
 }
 
-fn move_pane<F>(
+fn host_with_layout(host_pane_id: String, ratio: f32, layout: LiveLayoutNode) -> LiveLayoutNode {
+    LiveLayoutNode::Split {
+        direction: LayoutDirection::Right,
+        ratio,
+        first: Box::new(LiveLayoutNode::Pane(host_pane_id)),
+        second: Box::new(layout),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_layouts<F, A>(
     runner: &mut F,
-    pane_id: &str,
+    api: &mut A,
+    request: &DisplayAgentRequest,
+    host: &LiveLayout,
+    selected: &LiveLayout,
+    outgoing: &LiveLayoutNode,
+    host_ratio: f32,
+    panes: &mut HashMap<String, LivePaneLocation>,
+) -> Result<(), String>
+where
+    F: FnMut(&[String]) -> Result<Value, String>,
+    A: FnMut(&str, &Value) -> Result<Value, String>,
+{
+    let outgoing_root = outgoing.first_pane().to_owned();
+    normalize_layout(runner, outgoing, &selected.tab_id, &outgoing_root, panes)?;
+    normalize_layout(
+        runner,
+        &selected.root,
+        &host.tab_id,
+        &request.host_pane_id,
+        panes,
+    )?;
+
+    let selected_root = selected.root.first_pane().to_owned();
+    move_layout_pane(
+        runner,
+        panes,
+        &selected_root,
+        &selected.tab_id,
+        &outgoing_root,
+        LayoutDirection::Right,
+        0.5,
+    )?;
+    rebuild_layout(runner, &selected.root, &selected.tab_id, panes)?;
+    move_layout_pane(
+        runner,
+        panes,
+        &outgoing_root,
+        &host.tab_id,
+        &request.host_pane_id,
+        LayoutDirection::Right,
+        host_ratio,
+    )?;
+    rebuild_layout(runner, outgoing, &host.tab_id, panes)?;
+
+    let restored_host = export_layout(api, &host.tab_id)?;
+    let expected_host =
+        host_with_layout(request.host_pane_id.clone(), host_ratio, outgoing.clone());
+    verify_layout(&restored_host, &expected_host, panes, "previous displayed")?;
+    if restored_host.focused_pane_id != request.host_pane_id {
+        return Err("Herdr did not restore focus in Hunkle".to_owned());
+    }
+    let restored_selected = export_layout(api, &selected.tab_id)?;
+    verify_layout(&restored_selected, &selected.root, panes, "previous parked")
+}
+
+fn normalize_layout<F>(
+    runner: &mut F,
+    tree: &LiveLayoutNode,
     tab_id: &str,
-    target_pane_id: &str,
-    ratio: Option<f32>,
+    target: &str,
+    panes: &mut HashMap<String, LivePaneLocation>,
+) -> Result<(), String>
+where
+    F: FnMut(&[String]) -> Result<Value, String>,
+{
+    let mut pane_ids = Vec::new();
+    tree.collect_panes(&mut pane_ids);
+    for pane_id in pane_ids {
+        if panes
+            .get(pane_id)
+            .is_some_and(|location| location.tab_id == tab_id)
+        {
+            continue;
+        }
+        move_layout_pane(
+            runner,
+            panes,
+            pane_id,
+            tab_id,
+            target,
+            LayoutDirection::Right,
+            0.5,
+        )?;
+    }
+    Ok(())
+}
+
+fn export_layout<A>(api: &mut A, tab_id: &str) -> Result<LiveLayout, String>
+where
+    A: FnMut(&str, &Value) -> Result<Value, String>,
+{
+    let value = api("layout.export", &serde_json::json!({ "tab_id": tab_id }))?;
+    parse_live_layout(
+        value
+            .pointer("/result/layout")
+            .ok_or_else(|| "Herdr returned an invalid layout export".to_owned())?,
+    )
+}
+
+fn parse_live_layout(value: &Value) -> Result<LiveLayout, String> {
+    fn text(value: &Value, field: &str) -> Result<String, String> {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Herdr layout is missing {field}"))
+    }
+    fn node(value: &Value) -> Result<LiveLayoutNode, String> {
+        match value.get("type").and_then(Value::as_str) {
+            Some("pane") => Ok(LiveLayoutNode::Pane(text(value, "pane_id")?)),
+            Some("split") => {
+                let direction = match value.get("direction").and_then(Value::as_str) {
+                    Some("right") => LayoutDirection::Right,
+                    Some("down") => LayoutDirection::Down,
+                    _ => return Err("Herdr layout has an invalid split direction".to_owned()),
+                };
+                let ratio = value
+                    .get("ratio")
+                    .and_then(Value::as_f64)
+                    .map(|ratio| ratio as f32)
+                    .filter(|ratio| ratio.is_finite())
+                    .ok_or_else(|| "Herdr layout has an invalid split ratio".to_owned())?;
+                Ok(LiveLayoutNode::Split {
+                    direction,
+                    ratio,
+                    first: Box::new(node(
+                        value
+                            .get("first")
+                            .ok_or_else(|| "Herdr layout is missing its first child".to_owned())?,
+                    )?),
+                    second: Box::new(node(
+                        value
+                            .get("second")
+                            .ok_or_else(|| "Herdr layout is missing its second child".to_owned())?,
+                    )?),
+                })
+            }
+            _ => Err("Herdr layout has an invalid node".to_owned()),
+        }
+    }
+
+    Ok(LiveLayout {
+        workspace_id: text(value, "workspace_id")?,
+        tab_id: text(value, "tab_id")?,
+        zoomed: value
+            .get("zoomed")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "Herdr layout is missing zoom state".to_owned())?,
+        focused_pane_id: text(value, "focused_pane_id")?,
+        root: node(
+            value
+                .get("root")
+                .ok_or_else(|| "Herdr layout is missing its root".to_owned())?,
+        )?,
+    })
+}
+
+fn validate_layouts(
+    request: &DisplayAgentRequest,
+    host: &LiveLayout,
+    selected: &LiveLayout,
+) -> Result<(), String> {
+    if host.workspace_id != request.host_workspace_id || host.tab_id != request.host_tab_id {
+        return Err("Hunkle's Herdr tab changed before the layout could be displayed".to_owned());
+    }
+    if selected.workspace_id != request.workspace_id || selected.tab_id != request.tab_id {
+        return Err("The selected agent moved before its layout could be displayed".to_owned());
+    }
+    if host.zoomed || selected.zoomed {
+        return Err("Agent layouts cannot be exchanged while either tab is zoomed".to_owned());
+    }
+    if host.focused_pane_id != request.host_pane_id {
+        return Err("Hunkle must be focused before displaying an agent layout".to_owned());
+    }
+    if !selected.root.contains(&request.pane_id) {
+        return Err("The selected agent moved before its layout could be displayed".to_owned());
+    }
+    Ok(())
+}
+
+fn host_agent_layout(
+    root: &LiveLayoutNode,
+    host_pane_id: &str,
+) -> Result<(f32, Option<LiveLayoutNode>), String> {
+    match root {
+        LiveLayoutNode::Pane(pane_id) if pane_id == host_pane_id => Ok((0.6, None)),
+        LiveLayoutNode::Split {
+            direction: LayoutDirection::Right,
+            ratio,
+            first,
+            second,
+        } if matches!(first.as_ref(), LiveLayoutNode::Pane(pane_id) if pane_id == host_pane_id) => {
+            Ok((*ratio, Some((**second).clone())))
+        }
+        _ => Err("Hunkle must be the left root pane with the agent layout on its right".to_owned()),
+    }
+}
+
+fn rebuild_layout<F>(
+    runner: &mut F,
+    tree: &LiveLayoutNode,
+    tab_id: &str,
+    panes: &mut HashMap<String, LivePaneLocation>,
+) -> Result<(), String>
+where
+    F: FnMut(&[String]) -> Result<Value, String>,
+{
+    let LiveLayoutNode::Split {
+        direction,
+        ratio,
+        first,
+        second,
+    } = tree
+    else {
+        return Ok(());
+    };
+    let target = first.first_pane().to_owned();
+    let moved = second.first_pane().to_owned();
+    move_layout_pane(runner, panes, &moved, tab_id, &target, *direction, *ratio)?;
+    rebuild_layout(runner, first, tab_id, panes)?;
+    rebuild_layout(runner, second, tab_id, panes)
+}
+
+fn move_layout_pane<F>(
+    runner: &mut F,
+    panes: &mut HashMap<String, LivePaneLocation>,
+    pane: &str,
+    tab_id: &str,
+    target: &str,
+    direction: LayoutDirection,
+    ratio: f32,
 ) -> Result<String, String>
 where
     F: FnMut(&[String]) -> Result<Value, String>,
 {
-    let mut args = vec![
+    let location = panes
+        .get(pane)
+        .ok_or_else(|| format!("Saved layout pane {pane} is unavailable"))?
+        .clone();
+    let target_location = panes
+        .get(target)
+        .ok_or_else(|| format!("Saved layout pane {target} is unavailable"))?
+        .clone();
+    if location.tab_id == tab_id {
+        return Err(format!(
+            "Saved layout pane {} is already in tab {tab_id}",
+            location.pane_id
+        ));
+    }
+    if target_location.tab_id != tab_id {
+        return Err(format!(
+            "Saved layout target {} is not in tab {tab_id}",
+            target_location.pane_id
+        ));
+    }
+    let args = vec![
         "pane".to_owned(),
         "move".to_owned(),
-        pane_id.to_owned(),
+        location.pane_id,
         "--tab".to_owned(),
         tab_id.to_owned(),
         "--target-pane".to_owned(),
-        target_pane_id.to_owned(),
+        target_location.pane_id,
         "--split".to_owned(),
-        "right".to_owned(),
+        direction.as_str().to_owned(),
+        "--ratio".to_owned(),
+        ratio.to_string(),
+        "--no-focus".to_owned(),
     ];
-    if let Some(ratio) = ratio {
-        args.extend(["--ratio".to_owned(), ratio.to_string()]);
-    }
-    args.push("--no-focus".to_owned());
     let value = runner(&args)?;
     let result = require_changed(&value, "/result/move_result", "pane move")?;
-    result
+    let moved = result
         .pointer("/pane/pane_id")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| "Herdr returned an invalid pane move result".to_owned())
+        .ok_or_else(|| "Herdr returned an invalid pane move result".to_owned())?;
+    if result.pointer("/pane/tab_id").and_then(Value::as_str) != Some(tab_id) {
+        return Err("Herdr moved a pane to an unexpected tab".to_owned());
+    }
+    panes.insert(
+        pane.to_owned(),
+        LivePaneLocation {
+            pane_id: moved.clone(),
+            tab_id: tab_id.to_owned(),
+        },
+    );
+    Ok(moved)
 }
 
 fn require_changed<'a>(
@@ -300,18 +653,49 @@ fn require_changed<'a>(
     }
 }
 
-fn companion_ratio(value: &Value, host_pane_id: &str, companion_pane_id: &str) -> Option<f32> {
-    let panes = value.pointer("/result/neighbor/layout/panes")?.as_array()?;
-    let width = |pane_id: &str| {
-        panes
-            .iter()
-            .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))?
-            .pointer("/rect/width")
-            .and_then(Value::as_u64)
-    };
-    let host = width(host_pane_id)? as f32;
-    let companion = width(companion_pane_id)? as f32;
-    (host + companion > 0.0).then_some(host / (host + companion))
+fn verify_layout(
+    actual: &LiveLayout,
+    expected: &LiveLayoutNode,
+    panes: &HashMap<String, LivePaneLocation>,
+    name: &str,
+) -> Result<(), String> {
+    fn matches_tree(
+        actual: &LiveLayoutNode,
+        expected: &LiveLayoutNode,
+        panes: &HashMap<String, LivePaneLocation>,
+    ) -> bool {
+        match (actual, expected) {
+            (LiveLayoutNode::Pane(actual), LiveLayoutNode::Pane(expected)) => panes
+                .get(expected)
+                .is_some_and(|location| location.pane_id == *actual),
+            (
+                LiveLayoutNode::Split {
+                    direction: actual_direction,
+                    ratio: actual_ratio,
+                    first: actual_first,
+                    second: actual_second,
+                },
+                LiveLayoutNode::Split {
+                    direction: expected_direction,
+                    ratio: expected_ratio,
+                    first: expected_first,
+                    second: expected_second,
+                },
+            ) => {
+                actual_direction == expected_direction
+                    && (actual_ratio - expected_ratio).abs() < 0.000_01
+                    && matches_tree(actual_first, expected_first, panes)
+                    && matches_tree(actual_second, expected_second, panes)
+            }
+            _ => false,
+        }
+    }
+
+    if matches_tree(&actual.root, expected, panes) {
+        Ok(())
+    } else {
+        Err(format!("Herdr did not restore the {name} agent layout"))
+    }
 }
 
 pub(super) fn watch_events(mut on_event: impl FnMut(Event) -> bool) -> Result<(), String> {
@@ -409,6 +793,45 @@ fn connect(path: &Path) -> std::io::Result<Stream> {
 
         let name = path.to_string_lossy().to_string();
         Stream::connect(name.to_ns_name::<GenericNamespaced>()?)
+    }
+}
+
+fn api_request(method: &str, params: &Value) -> Result<Value, String> {
+    let socket_path = std::env::var_os("HERDR_SOCKET_PATH")
+        .map(PathBuf::from)
+        .ok_or_else(|| "Herdr did not provide its API socket path".to_owned())?;
+    let mut stream = connect(&socket_path)
+        .map_err(|error| format!("Could not connect to the Herdr API: {error}"))?;
+    stream
+        .set_recv_timeout(Some(Duration::from_secs(60)))
+        .map_err(|error| format!("Could not configure the Herdr API connection: {error}"))?;
+    let mut request = serde_json::to_vec(&serde_json::json!({
+        "id": format!("hunkle:{method}"),
+        "method": method,
+        "params": params,
+    }))
+    .map_err(|error| format!("Could not encode the Herdr API request: {error}"))?;
+    request.push(b'\n');
+    stream
+        .write_all(&request)
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("Could not send the Herdr API request: {error}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    if reader
+        .read_line(&mut response)
+        .map_err(|error| format!("Could not read the Herdr API response: {error}"))?
+        == 0
+    {
+        return Err("Herdr closed the API connection without responding".to_owned());
+    }
+    let value: Value = serde_json::from_str(&response)
+        .map_err(|error| format!("Could not decode the Herdr API response: {error}"))?;
+    if let Some(message) = value.pointer("/error/message").and_then(Value::as_str) {
+        Err(message.to_owned())
+    } else {
+        Ok(value)
     }
 }
 
@@ -1064,6 +1487,45 @@ mod tests {
 
     use super::*;
 
+    fn pane(pane_id: &str) -> Value {
+        serde_json::json!({ "type": "pane", "pane_id": pane_id })
+    }
+
+    fn split(direction: &str, ratio: f32, first: Value, second: Value) -> Value {
+        serde_json::json!({
+            "type": "split",
+            "direction": direction,
+            "ratio": ratio,
+            "first": first,
+            "second": second,
+        })
+    }
+
+    fn layout(workspace_id: &str, tab_id: &str, focused_pane_id: &str, root: Value) -> Value {
+        serde_json::json!({
+            "result": {
+                "layout": {
+                    "workspace_id": workspace_id,
+                    "tab_id": tab_id,
+                    "zoomed": false,
+                    "focused_pane_id": focused_pane_id,
+                    "root": root,
+                }
+            }
+        })
+    }
+
+    fn moved(pane_id: &str, tab_id: &str) -> Value {
+        serde_json::json!({
+            "result": {
+                "move_result": {
+                    "changed": true,
+                    "pane": { "pane_id": pane_id, "tab_id": tab_id }
+                }
+            }
+        })
+    }
+
     #[test]
     fn parses_agent_status_events() {
         assert_eq!(
@@ -1257,8 +1719,8 @@ mod tests {
     }
 
     #[test]
-    fn displays_a_same_tab_agent_by_swapping_the_companion_pane() {
-        let mut calls = Vec::new();
+    fn agents_in_the_host_tab_share_the_displayed_layout() {
+        let mut exports = 0;
         display_agent_with(
             DisplayAgentRequest {
                 pane_id: "w1:p3".to_owned(),
@@ -1269,116 +1731,38 @@ mod tests {
                 host_tab_id: "w1:t1".to_owned(),
                 allow_cross_workspace: false,
             },
-            |args| {
-                calls.push(args.to_vec());
-                Ok(if calls.len() == 1 {
-                    serde_json::json!({
-                        "result": { "neighbor": { "neighbor_pane_id": "w1:p2" } }
-                    })
-                } else if calls.len() == 2 {
-                    serde_json::json!({
-                        "result": { "swap": { "changed": true } }
-                    })
-                } else {
-                    Value::Null
-                })
+            |_| panic!("A shared active layout must not move panes"),
+            |_, _| {
+                exports += 1;
+                Ok(layout(
+                    "w1",
+                    "w1:t1",
+                    "w1:p1",
+                    split("right", 0.6, pane("w1:p1"), pane("w1:p3")),
+                ))
             },
         )
         .unwrap();
-
-        assert_eq!(
-            calls,
-            vec![
-                [
-                    "pane",
-                    "neighbor",
-                    "--direction",
-                    "right",
-                    "--pane",
-                    "w1:p1",
-                ]
-                .map(str::to_owned)
-                .to_vec(),
-                [
-                    "pane",
-                    "swap",
-                    "--source-pane",
-                    "w1:p3",
-                    "--target-pane",
-                    "w1:p2",
-                ]
-                .map(str::to_owned)
-                .to_vec(),
-                ["pane", "focus", "--direction", "left", "--pane", "w1:p3",]
-                    .map(str::to_owned)
-                    .to_vec(),
-            ]
-        );
+        assert_eq!(exports, 1);
     }
 
     #[test]
-    fn rejects_an_unchanged_pane_swap_without_attempting_to_focus() {
-        let mut calls = Vec::new();
-        let result = display_agent_with(
-            DisplayAgentRequest {
-                pane_id: "w1:p3".to_owned(),
-                workspace_id: "w1".to_owned(),
-                tab_id: "w1:t1".to_owned(),
-                host_pane_id: "w1:p1".to_owned(),
-                host_workspace_id: "w1".to_owned(),
-                host_tab_id: "w1:t1".to_owned(),
-                allow_cross_workspace: false,
-            },
-            |args| {
-                calls.push(args.to_vec());
-                Ok(if calls.len() == 1 {
-                    serde_json::json!({
-                        "result": { "neighbor": { "neighbor_pane_id": "w1:p2" } }
-                    })
-                } else {
-                    serde_json::json!({
-                        "result": { "swap": { "changed": false, "reason": "cross_tab" } }
-                    })
-                })
-            },
+    fn exchanges_complete_saved_layouts_between_tabs() {
+        let outgoing = split(
+            "right",
+            0.7,
+            split("down", 0.3, pane("w1:p2"), pane("w1:p6")),
+            pane("w1:p4"),
         );
-
-        assert_eq!(
-            result.unwrap_err(),
-            "Herdr did not change the layout: cross_tab"
+        let selected = split(
+            "down",
+            0.4,
+            pane("w1:p3"),
+            split("right", 0.8, pane("w1:p5"), pane("w1:p7")),
         );
-        assert_eq!(calls.len(), 2);
-    }
+        let mut commands = Vec::new();
+        let mut exports = 0;
 
-    #[test]
-    fn rejects_a_same_tab_agent_when_hunkle_has_no_companion_pane() {
-        let mut calls = Vec::new();
-        let result = display_agent_with(
-            DisplayAgentRequest {
-                pane_id: "w1:p2".to_owned(),
-                workspace_id: "w1".to_owned(),
-                tab_id: "w1:t1".to_owned(),
-                host_pane_id: "w1:p1".to_owned(),
-                host_workspace_id: "w1".to_owned(),
-                host_tab_id: "w1:t1".to_owned(),
-                allow_cross_workspace: false,
-            },
-            |args| {
-                calls.push(args.to_vec());
-                Ok(serde_json::json!({ "result": { "neighbor": {} } }))
-            },
-        );
-
-        assert_eq!(
-            result.unwrap_err(),
-            "The selected agent is not in Hunkle's companion pane"
-        );
-        assert_eq!(calls.len(), 1);
-    }
-
-    #[test]
-    fn displays_a_background_agent_by_exchanging_panes_between_tabs() {
-        let mut calls = Vec::new();
         display_agent_with(
             DisplayAgentRequest {
                 pane_id: "w1:p3".to_owned(),
@@ -1390,59 +1774,303 @@ mod tests {
                 allow_cross_workspace: false,
             },
             |args| {
-                calls.push(args.to_vec());
-                Ok(match calls.len() {
-                    1 => serde_json::json!({
-                        "result": { "neighbor": { "neighbor_pane_id": "w1:p2" } }
-                    }),
-                    2 => serde_json::json!({
-                        "result": {
-                            "move_result": {
-                                "changed": true,
-                                "pane": { "pane_id": "w1:p2" }
-                            }
-                        }
-                    }),
-                    _ => serde_json::json!({
-                        "result": {
-                            "move_result": {
-                                "changed": true,
-                                "pane": { "pane_id": "w1:p3" }
-                            }
-                        }
-                    }),
+                commands.push(args.to_vec());
+                Ok(moved(&args[2], &args[4]))
+            },
+            |method, params| {
+                assert_eq!(method, "layout.export");
+                exports += 1;
+                Ok(match exports {
+                    1 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, pane("w1:p1"), outgoing.clone()),
+                    ),
+                    2 => layout("w1", "w1:t2", "w1:p3", selected.clone()),
+                    3 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, pane("w1:p1"), selected.clone()),
+                    ),
+                    4 => layout("w1", "w1:t2", "w1:p2", outgoing.clone()),
+                    _ => panic!("unexpected layout export for {params}"),
                 })
             },
         )
         .unwrap();
 
-        assert_eq!(calls.len(), 3);
+        let moves = commands
+            .iter()
+            .map(|args| {
+                (
+                    args[2].as_str(),
+                    args[4].as_str(),
+                    args[6].as_str(),
+                    args[8].as_str(),
+                    args[10].as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            calls[1][0..7],
-            [
-                "pane",
-                "move",
-                "w1:p2",
-                "--tab",
-                "w1:t2",
-                "--target-pane",
-                "w1:p3",
+            moves,
+            vec![
+                ("w1:p2", "w1:t2", "w1:p3", "right", "0.5"),
+                ("w1:p4", "w1:t2", "w1:p2", "right", "0.7"),
+                ("w1:p6", "w1:t2", "w1:p2", "down", "0.3"),
+                ("w1:p3", "w1:t1", "w1:p1", "right", "0.6"),
+                ("w1:p5", "w1:t1", "w1:p3", "down", "0.4"),
+                ("w1:p7", "w1:t1", "w1:p5", "right", "0.8"),
             ]
         );
-        assert_eq!(
-            calls[2][0..7],
-            [
-                "pane",
-                "move",
-                "w1:p3",
-                "--tab",
-                "w1:t1",
-                "--target-pane",
-                "w1:p1",
-            ]
+        assert!(
+            commands
+                .iter()
+                .all(|args| args.last().unwrap() == "--no-focus")
         );
-        assert_eq!(calls[1].last().map(String::as_str), Some("--no-focus"));
-        assert_eq!(calls[2].last().map(String::as_str), Some("--no-focus"));
+        assert_eq!(exports, 4);
+    }
+
+    #[test]
+    fn rejects_a_layout_exchange_without_a_layout_to_park() {
+        let mut exports = 0;
+        let result = display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |_| panic!("Preflight failure must not move panes"),
+            |_, _| {
+                exports += 1;
+                Ok(if exports == 1 {
+                    layout("w1", "w1:t1", "w1:p1", pane("w1:p1"))
+                } else {
+                    layout("w1", "w1:t2", "w1:p3", pane("w1:p3"))
+                })
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Hunkle needs a pane layout on its right before another layout can be exchanged"
+        );
+    }
+
+    #[test]
+    fn restores_both_layouts_when_reconstruction_fails() {
+        let outgoing = split("down", 0.7, pane("w1:p2"), pane("w1:p4"));
+        let selected = pane("w1:p3");
+        let mut commands = 0;
+        let mut exports = 0;
+        let mut tabs = HashMap::from([
+            ("w1:p2".to_owned(), "w1:t1".to_owned()),
+            ("w1:p3".to_owned(), "w1:t2".to_owned()),
+            ("w1:p4".to_owned(), "w1:t1".to_owned()),
+        ]);
+
+        let result = display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |args| {
+                commands += 1;
+                if commands == 2 {
+                    Err("pane move interrupted".to_owned())
+                } else {
+                    assert_ne!(tabs.get(&args[2]), Some(&args[4]));
+                    tabs.insert(args[2].clone(), args[4].clone());
+                    Ok(moved(&args[2], &args[4]))
+                }
+            },
+            |_, _| {
+                exports += 1;
+                Ok(match exports {
+                    1 | 3 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, pane("w1:p1"), outgoing.clone()),
+                    ),
+                    2 | 4 => layout("w1", "w1:t2", "w1:p3", selected.clone()),
+                    _ => panic!("unexpected layout export"),
+                })
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "pane move interrupted; restored the previous layouts"
+        );
+        assert_eq!(commands, 7);
+        assert_eq!(exports, 4);
+    }
+
+    #[test]
+    fn restores_both_layouts_when_selected_reconstruction_fails() {
+        let outgoing = pane("w1:p2");
+        let selected = split("down", 0.4, pane("w1:p3"), pane("w1:p5"));
+        let mut commands = 0;
+        let mut exports = 0;
+        let mut tabs = HashMap::from([
+            ("w1:p2".to_owned(), "w1:t1".to_owned()),
+            ("w1:p3".to_owned(), "w1:t2".to_owned()),
+            ("w1:p5".to_owned(), "w1:t2".to_owned()),
+        ]);
+
+        let result = display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |args| {
+                commands += 1;
+                if commands == 3 {
+                    Err("selected layout move interrupted".to_owned())
+                } else {
+                    assert_ne!(tabs.get(&args[2]), Some(&args[4]));
+                    tabs.insert(args[2].clone(), args[4].clone());
+                    Ok(moved(&args[2], &args[4]))
+                }
+            },
+            |_, _| {
+                exports += 1;
+                Ok(match exports {
+                    1 | 3 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, pane("w1:p1"), outgoing.clone()),
+                    ),
+                    2 | 4 => layout("w1", "w1:t2", "w1:p3", selected.clone()),
+                    _ => panic!("unexpected layout export"),
+                })
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "selected layout move interrupted; restored the previous layouts"
+        );
+        assert_eq!(commands, 7);
+        assert_eq!(exports, 4);
+    }
+
+    #[test]
+    fn tracks_reassigned_pane_ids_while_exchanging_workspaces() {
+        let outgoing = pane("w1:p2");
+        let selected = split("down", 0.4, pane("w2:p3"), pane("w2:p5"));
+        let mut commands = Vec::new();
+        let mut exports = 0;
+
+        display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w2:p3".to_owned(),
+                workspace_id: "w2".to_owned(),
+                tab_id: "w2:t1".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: true,
+            },
+            |args| {
+                commands.push(args.to_vec());
+                Ok(match commands.len() {
+                    1 => moved("w2:p8", "w2:t1"),
+                    2 => moved("w1:p8", "w1:t1"),
+                    3 => moved("w1:p9", "w1:t1"),
+                    _ => panic!("unexpected pane move"),
+                })
+            },
+            |_, _| {
+                exports += 1;
+                Ok(match exports {
+                    1 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, pane("w1:p1"), outgoing.clone()),
+                    ),
+                    2 => layout("w2", "w2:t1", "w2:p3", selected.clone()),
+                    3 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split(
+                            "right",
+                            0.6,
+                            pane("w1:p1"),
+                            split("down", 0.4, pane("w1:p8"), pane("w1:p9")),
+                        ),
+                    ),
+                    4 => layout("w2", "w2:t1", "w2:p8", pane("w2:p8")),
+                    _ => panic!("unexpected layout export"),
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(commands[1][2], "w2:p3");
+        assert_eq!(commands[2][2], "w2:p5");
+        assert_eq!(commands[2][6], "w1:p8");
+    }
+
+    #[test]
+    fn rejects_an_unchanged_layout_move() {
+        let mut exports = 0;
+        let result = display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |_| {
+                Ok(serde_json::json!({
+                    "result": {
+                        "move_result": { "changed": false, "reason": "not_found" }
+                    }
+                }))
+            },
+            |_, _| {
+                exports += 1;
+                Ok(if exports == 1 {
+                    layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, pane("w1:p1"), pane("w1:p2")),
+                    )
+                } else {
+                    layout("w1", "w1:t2", "w1:p3", pane("w1:p3"))
+                })
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Herdr did not change the layout: not_found"
+        );
+        assert_eq!(exports, 2);
     }
 
     #[test]
@@ -1458,6 +2086,7 @@ mod tests {
                 allow_cross_workspace: false,
             },
             |_| panic!("Herdr must not be called"),
+            |_, _| panic!("Herdr must not be called"),
         );
 
         assert_eq!(
