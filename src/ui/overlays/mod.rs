@@ -11,14 +11,15 @@ pub(super) use unicode_width::UnicodeWidthStr;
 pub(super) use crate::{git::Branch, repo_path::RepoPath};
 
 pub(super) use crate::app::{
-    ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandRecord, CommandStatus,
-    Explorer, ExplorerHitTarget, ExplorerTab, FileDialog, FileDialogKind, FileNameAction,
-    FileSearch, HerdrPrompt, HitTarget, Issue, PickerAction, PickerEntry, PullRequest, RemoteItems,
-    RepositoryBrowser, RepositoryBrowserHitTarget, Settings, SettingsPage, ShortcutAction,
-    Shortcuts, SnapshotLoadDialog, SurroundingEntry, WorkspaceDeleteDialog, WorkspaceDeleteKind,
-    WorkspacePanel, WorkspacePanelHitTarget, WorkspaceRenameDialog, WorkspaceRenameTarget,
-    WorktreeCreateDialog, WorktreeCreateField, WorktreeManager, WorktreeManagerHitTarget,
-    WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
+    ACTION_ITEMS, ActionsState, AgentPaneDirection, BranchDeleteDialog, BrowserTab, CommandRecord,
+    CommandStatus, Explorer, ExplorerHitTarget, ExplorerTab, FileDialog, FileDialogKind,
+    FileNameAction, FileSearch, HerdrPrompt, HitTarget, Issue, PickerAction, PickerEntry,
+    PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
+    SettingsPage, ShortcutAction, Shortcuts, SnapshotLoadDialog, SurroundingEntry,
+    WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
+    WorkspaceRenameDialog, WorkspaceRenameTarget, WorktreeCreateDialog, WorktreeCreateField,
+    WorktreeManager, WorktreeManagerHitTarget, WorktreeManagerRow, WorktreeRemoveDialog,
+    short_head, worktree_label,
 };
 
 pub(super) use super::{

@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use super::{HerdrPaneLayout, TextInput, workspace_panel};
+use super::{AgentPaneDirection, HerdrPaneLayout, TextInput, workspace_panel};
 
 pub(crate) struct HerdrPromptPoll {
     pub(crate) changed: bool,
@@ -181,6 +181,36 @@ impl HerdrPrompt {
             let result =
                 workspace_panel::replace_pane_with_agent(pending.path, workspace_id, pane_id)
                     .map(|pane_id| format!("Started agent in Herdr pane {pane_id}"));
+            let _ = sender.send(result);
+        });
+        Ok(())
+    }
+
+    pub(crate) fn split_agent_pane(
+        &mut self,
+        index: usize,
+        direction: AgentPaneDirection,
+    ) -> Result<(), String> {
+        let pending = self
+            .pending_agent
+            .as_ref()
+            .ok_or_else(|| "Agent pane selection is no longer open".to_owned())?;
+        let pane_id = pending
+            .layout
+            .as_ref()
+            .ok_or_else(|| "Herdr pane layout is still loading".to_owned())?
+            .panes
+            .get(index)
+            .ok_or_else(|| "That Herdr pane is no longer available".to_owned())?
+            .pane_id
+            .clone();
+        let pending = self.pending_agent.take().expect("pending agent checked");
+        let sender = self.sender.clone();
+        self.error = None;
+        self.sending = true;
+        thread::spawn(move || {
+            let result = workspace_panel::split_pane_with_agent(pending.path, pane_id, direction)
+                .map(|pane_id| format!("Started agent in new Herdr pane {pane_id}"));
             let _ = sender.send(result);
         });
         Ok(())

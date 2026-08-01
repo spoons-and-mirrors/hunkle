@@ -12,11 +12,12 @@ pub(super) use ratatui::{
 pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::app::{
-    App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, ExplorerTab,
-    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout,
-    HerdrPaneRect, HitTarget, LeftPane, Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget,
-    Settings, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, View, WorkspaceDropTarget,
-    WorkspacePanel, WorkspacePanelHitTarget, WorktreeManagerHitTarget, WorktreeManagerRow,
+    AgentPaneDirection, App, BrowserTab, ChangesHitTarget, CommitMessageGenerator,
+    ExplorerHitTarget, ExplorerTab, GraphColumn, GraphHitTarget, HeaderPickerItem,
+    HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect, HitTarget, LeftPane, Mode, PullRequest,
+    RemoteItems, RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore, ShortcutAction,
+    SqliteFocus, View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget,
+    WorktreeManagerHitTarget, WorktreeManagerRow,
 };
 pub(super) use crate::repo_path::RepoPath;
 

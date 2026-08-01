@@ -89,7 +89,7 @@ impl App {
     }
 
     pub(crate) fn open_header_repositories(&mut self) {
-        let (current_common_dir, current_stats) = self
+        let (current_common_dir, current_stats, current_branch) = self
             .git_repository()
             .map(|repository| {
                 (
@@ -97,6 +97,7 @@ impl App {
                     repository
                         .details_ready
                         .then(|| git::change_line_counts(&repository.changes)),
+                    repository.details_ready.then(|| repository.branch.clone()),
                 )
             })
             .unwrap_or_default();
@@ -111,6 +112,14 @@ impl App {
                     .is_some_and(|current| same_path(current, common_dir))
                 {
                     current_stats
+                } else {
+                    None
+                },
+                branch: if current_common_dir
+                    .as_deref()
+                    .is_some_and(|current| same_path(current, common_dir))
+                {
+                    current_branch.clone()
                 } else {
                     None
                 },
@@ -132,7 +141,7 @@ impl App {
         } else {
             self.header_picker
                 .open(HeaderPickerKind::Repositories, items, selected);
-            self.header_picker.start_repository_stats();
+            self.header_picker.start_change_details();
         }
     }
 
@@ -152,6 +161,9 @@ impl App {
             return;
         };
         let current = repository.root.clone();
+        let current_stats = repository
+            .details_ready
+            .then(|| git::change_line_counts(&repository.changes));
         match self.linked_worktrees.repository(common_dir) {
             Some(repository) if repository.error.is_none() => {
                 let worktrees = repository
@@ -168,10 +180,18 @@ impl App {
                     HeaderPickerKind::Worktrees,
                     worktrees
                         .into_iter()
-                        .map(HeaderPickerItem::Worktree)
+                        .map(|worktree| HeaderPickerItem::Worktree {
+                            stats: if same_path(&worktree.path, &current) {
+                                current_stats
+                            } else {
+                                None
+                            },
+                            worktree,
+                        })
                         .collect(),
                     selected,
                 );
+                self.header_picker.start_change_details();
             }
             Some(repository) => self.header_picker.open_message(
                 HeaderPickerKind::Worktrees,

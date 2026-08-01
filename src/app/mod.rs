@@ -728,7 +728,7 @@ impl App {
         changed |= self.header_picker.branch_name.poll_blink(naming_branch);
         let filtering_header_picker = self.header_picker.filtering();
         changed |= self.header_picker.query.poll_blink(filtering_header_picker);
-        changed |= self.header_picker.poll_repository_stats();
+        changed |= self.header_picker.poll_change_details();
         if let Some(done) = self
             .commit_draft_rx
             .as_ref()
@@ -1791,7 +1791,7 @@ impl App {
                 }
                 self.open_header_path(path);
             }
-            HeaderPickerItem::Worktree(worktree) => {
+            HeaderPickerItem::Worktree { worktree, .. } => {
                 if self
                     .repository()
                     .is_some_and(|repository| same_path(&repository.root, &worktree.path))

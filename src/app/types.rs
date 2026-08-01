@@ -92,6 +92,7 @@ pub(crate) enum HitTarget {
     HeaderAgent,
     AgentPanePickerOverlay,
     AgentPane(usize),
+    AgentPaneSplit(usize, AgentPaneDirection),
     HeaderPickerOverlay,
     HeaderPickerNewBranch,
     HeaderPickerItem(usize),
@@ -104,6 +105,25 @@ pub(crate) enum HitTarget {
     RepositoryBrowser(RepositoryBrowserHitTarget),
     WorktreeManager(WorktreeManagerHitTarget),
     WorkspacePanel(WorkspacePanelHitTarget),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentPaneDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl AgentPaneDirection {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

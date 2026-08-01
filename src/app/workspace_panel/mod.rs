@@ -14,8 +14,8 @@ pub(super) use serde::{Deserialize, Serialize};
 pub(super) use serde_json::Value;
 
 pub(super) use super::{
-    HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate, LinkedWorktreeObservation,
-    TextInput, settings::AgentTimeDisplay,
+    AgentPaneDirection, HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate,
+    LinkedWorktreeObservation, TextInput, settings::AgentTimeDisplay,
 };
 pub(super) use crate::filesystem::atomic_write;
 
@@ -48,6 +48,14 @@ pub(super) fn replace_pane_with_agent(
     pane_id: String,
 ) -> Result<String, String> {
     herdr::replace_pane_with_agent(path, workspace_id, pane_id)
+}
+
+pub(super) fn split_pane_with_agent(
+    path: PathBuf,
+    pane_id: String,
+    direction: AgentPaneDirection,
+) -> Result<String, String> {
+    herdr::split_pane_with_agent(path, pane_id, direction)
 }
 
 pub(super) fn pane_layout(pane_id: String) -> Result<HerdrPaneLayout, String> {

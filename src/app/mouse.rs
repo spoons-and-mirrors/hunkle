@@ -21,12 +21,23 @@ impl App {
             self.hovered_hit_target = self.regions.hit_target_at(point);
         }
         if self.herdr_prompt.agent_pane_picker_open() {
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                && let Some(HitTarget::AgentPane(index)) = self.regions.hit_target_at(point)
-            {
-                match self.herdr_prompt.select_agent_pane(index) {
-                    Ok(()) => self.notice = Some("Starting agent in selected pane".to_owned()),
-                    Err(error) => self.notice = Some(error),
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                match self.regions.hit_target_at(point) {
+                    Some(HitTarget::AgentPane(index)) => {
+                        match self.herdr_prompt.select_agent_pane(index) {
+                            Ok(()) => {
+                                self.notice = Some("Starting agent in selected pane".to_owned())
+                            }
+                            Err(error) => self.notice = Some(error),
+                        }
+                    }
+                    Some(HitTarget::AgentPaneSplit(index, direction)) => {
+                        match self.herdr_prompt.split_agent_pane(index, direction) {
+                            Ok(()) => self.notice = Some("Starting agent in new pane".to_owned()),
+                            Err(error) => self.notice = Some(error),
+                        }
+                    }
+                    _ => {}
                 }
             }
             return;
@@ -1164,6 +1175,7 @@ impl App {
                     | HitTarget::HeaderAgent
                     | HitTarget::AgentPanePickerOverlay
                     | HitTarget::AgentPane(_)
+                    | HitTarget::AgentPaneSplit(_, _)
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),
@@ -1226,6 +1238,7 @@ impl App {
                     | HitTarget::HeaderAgent
                     | HitTarget::AgentPanePickerOverlay
                     | HitTarget::AgentPane(_)
+                    | HitTarget::AgentPaneSplit(_, _)
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),

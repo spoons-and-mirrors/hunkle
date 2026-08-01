@@ -282,9 +282,69 @@ pub(crate) fn draw_agent_pane_picker(
         if !is_host {
             targets.push((HitTarget::AgentPane(index), pane_area));
         }
+        if display_area.width >= 3 && display_area.height >= 3 {
+            let horizontal_depth = display_area.height.div_ceil(5);
+            let vertical_depth = display_area.width.div_ceil(5);
+            let edges = [
+                (
+                    AgentPaneDirection::Up,
+                    Rect::new(
+                        display_area.x,
+                        display_area.y,
+                        display_area.width,
+                        horizontal_depth,
+                    ),
+                ),
+                (
+                    AgentPaneDirection::Down,
+                    Rect::new(
+                        display_area.x,
+                        display_area.bottom().saturating_sub(horizontal_depth),
+                        display_area.width,
+                        horizontal_depth,
+                    ),
+                ),
+                (
+                    AgentPaneDirection::Left,
+                    Rect::new(
+                        display_area.x,
+                        display_area.y,
+                        vertical_depth,
+                        display_area.height,
+                    ),
+                ),
+                (
+                    AgentPaneDirection::Right,
+                    Rect::new(
+                        display_area.right().saturating_sub(vertical_depth),
+                        display_area.y,
+                        vertical_depth,
+                        display_area.height,
+                    ),
+                ),
+            ];
+            for (direction, edge) in edges {
+                let target = HitTarget::AgentPaneSplit(index, direction);
+                if hovered == Some(target) {
+                    fill(frame, edge, palette().selected);
+                    let plus = Rect::new(
+                        edge.x.saturating_add(edge.width / 2),
+                        edge.y.saturating_add(edge.height / 2),
+                        1,
+                        1,
+                    );
+                    frame.render_widget(
+                        Paragraph::new("+")
+                            .style(Style::default().fg(palette().ink).bg(palette().selected)),
+                        plus,
+                    );
+                }
+                targets.push((target, edge));
+            }
+        }
     }
 
-    let footer = "CLICK A PANE TO REPLACE · ESC CANCEL";
+    let footer = "CLICK INSIDE TO REPLACE · CLICK AN EDGE TO SPLIT · ESC CANCEL";
     frame.render_widget(
         Paragraph::new(truncate_width(footer, usize::from(inner_width)))
             .alignment(Alignment::Center)

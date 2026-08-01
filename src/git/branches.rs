@@ -57,7 +57,7 @@ pub(crate) fn create_branch(root: &Path, branch: &str, base: &str) -> Result<Com
     Ok(command_output(output))
 }
 
-pub(super) fn branch_name(root: &Path) -> Result<String> {
+pub(crate) fn branch_name(root: &Path) -> Result<String> {
     let output = run(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());

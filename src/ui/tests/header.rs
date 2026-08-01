@@ -244,6 +244,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .hit_target_rect(HitTarget::HeaderPickerOverlay)
         .unwrap();
     assert_eq!((picker.x, picker.y), (repository.x, repository.bottom()));
+    assert_eq!(picker.width, 80);
     let repository_row = app
         .regions
         .hit_target_rect(HitTarget::HeaderPickerItem(0))
@@ -254,11 +255,8 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert!(repository_text.contains("repository"));
     assert!(repository_text.contains("+0"));
     assert!(repository_text.contains("-0"));
-    assert!(
-        repository_text
-            .trim_end()
-            .ends_with(&root.display().to_string())
-    );
+    assert!(repository_text.contains("feature/header"));
+    assert!(repository_text.trim_end().ends_with("repository"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -280,11 +278,24 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .hit_target_rect(HitTarget::HeaderPickerOverlay)
         .unwrap();
     assert_eq!((picker.x, picker.y), (repository.x, repository.bottom()));
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::HeaderPickerItem(0))
-            .is_some()
-    );
+    wait_for(&mut app, |app| {
+        matches!(
+            app.header_picker.items.first(),
+            Some(HeaderPickerItem::Worktree { stats: Some(_), .. })
+        )
+    });
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let worktree_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(0))
+        .unwrap();
+    let worktree_text = (worktree_row.x..worktree_row.right())
+        .map(|x| terminal.backend().buffer()[(x, worktree_row.y)].symbol())
+        .collect::<String>();
+    assert!(worktree_text.contains("linked"));
+    assert!(worktree_text.contains("+0"));
+    assert!(worktree_text.contains("-0"));
+    assert!(worktree_text.trim_end().ends_with("linked"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -535,6 +546,39 @@ fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
             .hit_target_rect(HitTarget::AgentPane(1))
             .is_none()
     );
+    let up = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Up))
+        .unwrap();
+    let left_edge = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Left))
+        .unwrap();
+    assert_eq!(up.width, left.width.saturating_sub(1));
+    assert_eq!(up.height, left.height.saturating_sub(1).div_ceil(5));
+    assert_eq!(left_edge.height, left.height.saturating_sub(1));
+    assert_eq!(left_edge.width, left.width.saturating_sub(1).div_ceil(5));
+    for index in 0..3 {
+        for direction in [
+            AgentPaneDirection::Up,
+            AgentPaneDirection::Down,
+            AgentPaneDirection::Left,
+            AgentPaneDirection::Right,
+        ] {
+            let edge = app
+                .regions
+                .hit_target_rect(HitTarget::AgentPaneSplit(index, direction))
+                .unwrap();
+            let point = Position::new(
+                edge.x.saturating_add(edge.width / 2),
+                edge.y.saturating_add(edge.height / 2),
+            );
+            assert_eq!(
+                app.regions.hit_target_at(point),
+                Some(HitTarget::AgentPaneSplit(index, direction))
+            );
+        }
+    }
     let screen: String = terminal
         .backend()
         .buffer()
@@ -545,7 +589,7 @@ fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
     assert!(screen.contains("START AGENT"));
     assert!(screen.contains("feature/modal"));
     assert!(screen.contains("HUNKLE"));
-    assert!(screen.contains("CLICK A PANE TO REPLACE"));
+    assert!(screen.contains("CLICK INSIDE TO REPLACE"));
     assert!(!screen.contains("w0:p1"));
     assert!(!screen.contains("w0:p3"));
     assert!(!screen.contains("w0:t1"));

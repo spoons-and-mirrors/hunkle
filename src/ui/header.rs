@@ -376,10 +376,10 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         app.header_picker.items.len().min(visible_items)
     };
     app.header_picker.set_viewport_rows(row_count);
-    let maximum_width = if kind == HeaderPickerKind::AgentDestinations {
-        72
-    } else {
-        58
+    let maximum_width = match kind {
+        HeaderPickerKind::Repositories => 80,
+        HeaderPickerKind::AgentDestinations => 72,
+        _ => 58,
     };
     let width = frame
         .area()
@@ -556,41 +556,38 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         .skip(start)
         .take(row_count)
         .map(|(index, item)| {
-            let (label, detail, current, minimum_label_width, stats) = match item {
+            let (label, detail, branch, current, minimum_label_width, stats, columnar) = match item
+            {
                 HeaderPickerItem::Repository {
                     common_dir,
                     path,
                     stats,
+                    branch,
                 } => (
                     path.file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or("repository")
                         .to_owned(),
                     path.display().to_string(),
+                    Some(branch.clone().unwrap_or_default()),
                     current_common_dir.is_some_and(|current| current == common_dir),
-                    Some(12),
+                    None,
                     *stats,
+                    true,
                 ),
-                HeaderPickerItem::Worktree(worktree) => (
-                    if worktree.is_main {
-                        "worktree".to_owned()
-                    } else {
-                        worktree
-                            .path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("worktree")
-                            .to_owned()
-                    },
+                HeaderPickerItem::Worktree { worktree, stats } => (
                     worktree
-                        .branch
-                        .as_deref()
-                        .and_then(|branch| branch.strip_prefix("refs/heads/"))
-                        .unwrap_or(if worktree.is_detached { "detached" } else { "" })
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("worktree")
                         .to_owned(),
+                    worktree.path.display().to_string(),
+                    None,
                     current_root.is_some_and(|current| current == worktree.path),
                     None,
-                    None,
+                    *stats,
+                    true,
                 ),
                 HeaderPickerItem::Branch(branch) => (
                     branch.name.clone(),
@@ -602,9 +599,11 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                         "local"
                     }
                     .to_owned(),
+                    None,
                     branch.current,
                     Some(4),
                     None,
+                    false,
                 ),
                 HeaderPickerItem::BranchBase(branch) => (
                     branch.name.clone(),
@@ -616,16 +615,20 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                         "local"
                     }
                     .to_owned(),
+                    None,
                     branch.current,
                     Some(4),
                     None,
+                    false,
                 ),
                 HeaderPickerItem::DiffTarget(branch) => (
                     branch.name.clone(),
                     if branch.remote { "remote" } else { "local" }.to_owned(),
+                    None,
                     branch.default,
                     Some(4),
                     None,
+                    false,
                 ),
                 HeaderPickerItem::AgentDestination {
                     path,
@@ -643,15 +646,26 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                         ),
                     },
                     path.display().to_string(),
+                    None,
                     current_root.is_some_and(|current| current == path),
                     Some(22),
                     None,
+                    false,
                 ),
             };
-            (index, label, detail, current, minimum_label_width, stats)
+            (
+                index,
+                label,
+                detail,
+                branch,
+                current,
+                minimum_label_width,
+                stats,
+                columnar,
+            )
         })
         .collect::<Vec<_>>();
-    for (row, (index, label, detail, current, minimum_label_width, stats)) in
+    for (row, (index, label, detail, branch, current, minimum_label_width, stats, columnar)) in
         rows.into_iter().enumerate()
     {
         let rect = Rect::new(
@@ -668,7 +682,19 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             palette().surface_alt
         };
-        if let Some(minimum_label_width) = minimum_label_width {
+        if columnar {
+            draw_change_location_row(
+                frame,
+                rect,
+                marker,
+                &label,
+                &detail,
+                branch.as_deref(),
+                current,
+                stats,
+                background,
+            );
+        } else if let Some(minimum_label_width) = minimum_label_width {
             fill(frame, rect, background);
             let detail_width = u16::try_from(UnicodeWidthStr::width(detail.as_str()))
                 .unwrap_or(u16::MAX)
@@ -730,6 +756,91 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         app.regions
             .register_hit_target(HitTarget::HeaderPickerItem(index), rect);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_change_location_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    marker: &str,
+    label: &str,
+    path: &str,
+    branch: Option<&str>,
+    current: bool,
+    stats: Option<(u64, u64)>,
+    background: Color,
+) {
+    fill(frame, area, background);
+    let stats_width = area.width.min(13);
+    let branch_width = if branch.is_some() {
+        area.width
+            .saturating_sub(stats_width)
+            .saturating_sub(24)
+            .min(20)
+    } else {
+        0
+    };
+    let name_width = area
+        .width
+        .saturating_sub(stats_width)
+        .saturating_sub(branch_width)
+        .saturating_sub(12)
+        .min(24);
+    let path_width = area
+        .width
+        .saturating_sub(name_width + stats_width + branch_width);
+    let name_area = Rect::new(area.x, area.y, name_width, 1);
+    let stats_area = Rect::new(area.x.saturating_add(name_width), area.y, stats_width, 1);
+    let branch_area = Rect::new(
+        stats_area.x.saturating_add(stats_width),
+        area.y,
+        branch_width,
+        1,
+    );
+    let path_area = Rect::new(
+        branch_area.x.saturating_add(branch_width),
+        area.y,
+        path_width,
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(header_picker_label_line(
+            marker,
+            label,
+            current,
+            None,
+            usize::from(name_width),
+        ))
+        .style(Style::default().bg(background)),
+        name_area,
+    );
+    if let Some((additions, deletions)) = stats {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("+{additions}"),
+                    Style::default().fg(palette().green),
+                ),
+                Span::raw(" "),
+                Span::styled(format!("-{deletions}"), Style::default().fg(palette().red)),
+            ]))
+            .style(Style::default().bg(background)),
+            stats_area,
+        );
+    }
+    if let Some(branch) = branch {
+        frame.render_widget(
+            Paragraph::new(truncate_width(branch, usize::from(branch_width)))
+                .style(Style::default().fg(palette().accent).bg(background)),
+            branch_area,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(truncate_start_width(path, usize::from(path_width)))
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted).bg(background)),
+        path_area,
+    );
 }
 
 pub(super) fn header_picker_label_line(

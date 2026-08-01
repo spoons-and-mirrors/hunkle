@@ -10,7 +10,10 @@ use serde_json::Value;
 
 use crate::process::{self, Limits};
 
-use super::{AgentSessionIdentity, AgentStatus, AgentTimingKey, HerdrAgent, HerdrWorkspace};
+use super::{
+    AgentPaneDirection, AgentSessionIdentity, AgentStatus, AgentTimingKey, HerdrAgent,
+    HerdrWorkspace,
+};
 
 const EVENT_SUBSCRIPTION_REQUEST: &str = concat!(
     r#"{"id":"hunkle:events","method":"events.subscribe","params":{"subscriptions":["#,
@@ -344,6 +347,50 @@ pub(super) fn replace_pane_with_agent(
         return Err("Agents can only be started inside Herdr".to_owned());
     }
     replace_pane_with_agent_with(path, workspace_id, pane_id, run)
+}
+
+pub(super) fn split_pane_with_agent(
+    path: PathBuf,
+    pane_id: String,
+    direction: AgentPaneDirection,
+) -> Result<String, String> {
+    if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
+        return Err("Agents can only be started inside Herdr".to_owned());
+    }
+    split_pane_with_agent_with(path, pane_id, direction, run)
+}
+
+fn split_pane_with_agent_with(
+    path: PathBuf,
+    pane_id: String,
+    direction: AgentPaneDirection,
+    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<String, String> {
+    let split = runner(&[
+        "pane".to_owned(),
+        "split".to_owned(),
+        pane_id,
+        "--direction".to_owned(),
+        direction.as_str().to_owned(),
+        "--cwd".to_owned(),
+        path.to_string_lossy().into_owned(),
+        "--no-focus".to_owned(),
+    ])?;
+    let pane_id = split
+        .pointer("/result/pane/pane_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Herdr did not identify the new pane".to_owned())?;
+    if let Err(error) = runner(&[
+        "pane".to_owned(),
+        "run".to_owned(),
+        pane_id.clone(),
+        "opencode".to_owned(),
+    ]) {
+        let _ = runner(&["pane".to_owned(), "close".to_owned(), pane_id]);
+        return Err(error);
+    }
+    Ok(pane_id)
 }
 
 fn replace_pane_with_agent_with(
@@ -1155,6 +1202,47 @@ mod tests {
                 ]
                 .map(str::to_owned)
                 .to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn splits_next_to_a_pane_and_starts_an_opencode_agent() {
+        let mut calls = Vec::new();
+        let pane_id = split_pane_with_agent_with(
+            PathBuf::from("/tmp/feature"),
+            "w1:p2".to_owned(),
+            AgentPaneDirection::Up,
+            |args| {
+                calls.push(args.to_vec());
+                Ok(if calls.len() == 1 {
+                    serde_json::json!({ "result": { "pane": { "pane_id": "w1:p4" } } })
+                } else {
+                    Value::Null
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(pane_id, "w1:p4");
+        assert_eq!(
+            calls,
+            vec![
+                [
+                    "pane",
+                    "split",
+                    "w1:p2",
+                    "--direction",
+                    "up",
+                    "--cwd",
+                    "/tmp/feature",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                ["pane", "run", "w1:p4", "opencode"]
+                    .map(str::to_owned)
+                    .to_vec(),
             ]
         );
     }
