@@ -668,7 +668,7 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
     frame.buffer_mut().set_style(
         area,
         Style::default()
-            .bg(palette().canvas)
+            .bg(Color::Rgb(0, 0, 0))
             .add_modifier(Modifier::DIM),
     );
     for (x, y, preserved) in preserved {
@@ -1038,7 +1038,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
             '▀',
             palette().raised,
-            palette().canvas,
+            Color::Rgb(0, 0, 0),
         );
     }
 
@@ -1297,7 +1297,7 @@ fn draw_header_picker_search(frame: &mut Frame<'_>, app: &App, area: Rect, actio
         Rect::new(area.x, area.y, area.width, 1),
         '▄',
         palette().surface_alt,
-        palette().canvas,
+        Color::Rgb(0, 0, 0),
     );
     draw_half_padding(
         frame,
