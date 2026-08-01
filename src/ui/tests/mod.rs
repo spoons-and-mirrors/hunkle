@@ -853,7 +853,8 @@ fn renders_every_primary_surface() {
     assert!(changes_screen.contains("AGENTS"));
     assert!(changes_screen.contains("terminal session"));
     assert!(changes_screen.contains("unassigned"));
-    assert!(changes_screen.contains("WORKING"));
+    assert!(changes_screen.contains('⠋'));
+    assert!(!changes_screen.contains("WORKING"));
     assert!(changes_screen.contains("ACTIONS"));
     assert!(app.regions.actions.is_some());
     assert!(app.regions.actions.unwrap().bottom() <= app.regions.worktree_list.unwrap().y);

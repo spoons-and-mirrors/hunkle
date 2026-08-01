@@ -72,9 +72,29 @@ fn renders_the_workspace_manager_as_a_bottom_drawer() {
     assert!(rendered.contains("AGENT ACTIVITY"));
     assert!(rendered.contains("HUNKLE"));
     assert!(rendered.contains("ACTIVE"));
-    assert!(rendered.contains("WORKING"));
+    assert!(rendered.contains('⠋'));
+    assert!(!rendered.contains("WORKING"));
     let agent_section = app.regions.workspace_panel_agents.unwrap();
+    let agent_card_y = agent_section.y.saturating_add(3);
+    let agent_target = Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)));
+    assert_eq!(
+        app.regions
+            .hit_target_at(Position::new(agent_section.x, agent_card_y)),
+        agent_target
+    );
+    assert_eq!(
+        app.regions.hit_target_at(Position::new(
+            agent_section.right().saturating_sub(1),
+            agent_card_y,
+        )),
+        agent_target
+    );
     let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(agent_section.x + 2, agent_card_y)].symbol(), "H");
+    assert_eq!(
+        buffer[(agent_section.right().saturating_sub(3), agent_card_y)].symbol(),
+        "⠋"
+    );
     let mut agent_rendered = String::new();
     for y in agent_section.y..agent_section.bottom() {
         for x in agent_section.x..agent_section.right() {
@@ -82,7 +102,15 @@ fn renders_the_workspace_manager_as_a_bottom_drawer() {
         }
     }
     assert!(agent_rendered.contains("HUNKLE"));
-    assert!(agent_rendered.contains("Refine workspace timers"));
+    assert!(agent_rendered.contains("topic"));
+    assert!(agent_rendered.contains('⠋'));
+    assert!(agent_rendered.contains("▐topic▌⠋"));
+    assert!(
+        agent_rendered.find("topic") < agent_rendered.find('⠋'),
+        "status should follow the branch: {agent_rendered:?}"
+    );
+    assert!(agent_rendered.contains("Refine workspace..."));
+    assert!(!agent_rendered.contains("Refine workspace timers"));
     assert!(!agent_rendered.contains("opencode"));
     assert_black_underlay(&terminal);
 
@@ -254,15 +282,19 @@ fn clicking_an_agent_focuses_it_without_opening_the_workspace_manager() {
             }
         }
     }));
+    app.workspace_panel.workspaces[0].branch = Some("feature/agents".to_owned());
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.mode, Mode::Normal);
 
     let agents = app.regions.agents_list.unwrap();
+    let splitter = app.regions.agents_splitter.unwrap();
     let agent = app
         .regions
         .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)))
         .unwrap();
+    assert_eq!(agent.x.saturating_add(1), splitter.x);
+    assert_eq!(agent.right(), splitter.right().saturating_add(1));
     let top_padding_row = agent.y - 1;
     assert_eq!(top_padding_row, agents.y);
     assert!((agent.x..agent.right()).all(|column| {
@@ -277,19 +309,37 @@ fn clicking_an_agent_focuses_it_without_opening_the_workspace_manager() {
         .map(|column| terminal.backend().buffer()[(column, agent.y)].symbol())
         .collect();
     assert!(agent_row.contains("HUNKLE"), "agent row was: {agent_row:?}");
-    assert!(agent_row.contains("WORKING"));
+    assert!(
+        agent_row.contains("feature/agents"),
+        "agent row was: {agent_row:?}"
+    );
+    assert!(agent_row.contains('⠋'));
+    assert!(agent_row.contains("▐feature/agents▌⠋"));
+    assert!(
+        agent_row.find("feature/agents") < agent_row.find('⠋'),
+        "status should follow the branch: {agent_row:?}"
+    );
+    assert!(!agent_row.contains("WORKING"));
     assert_eq!(
-        terminal.backend().buffer()[(agent.x, agent.y)].symbol(),
+        terminal.backend().buffer()[(splitter.x, agent.y)].symbol(),
         "●",
-        "status dot should be the first character of the row"
+        "card content should retain its original left inset"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(splitter.right().saturating_sub(1), agent.y)].symbol(),
+        "⠋",
+        "card content should retain its original right inset"
     );
     let session_row: String = (agent.x..agent.right())
         .map(|column| terminal.backend().buffer()[(column, agent.y + 1)].symbol())
         .collect();
     assert!(
-        session_row.contains("Refine workspace"),
+        session_row.contains("Refine workspace..."),
         "session row was: {session_row:?}"
     );
+    assert!(!session_row.contains('⠋'));
+    assert!(!session_row.contains("WORKING"));
+    assert!(!session_row.contains("timers"));
     let padding_row = agent.bottom();
     assert!(padding_row < agents.bottom());
     assert!(
@@ -378,8 +428,8 @@ fn colors_only_agents_in_hunkles_herdr_tab_yellow() {
                 index,
             )))
             .unwrap();
-        assert_eq!(buffer[(row.x + 2, row.y)].fg, super::palette().yellow);
-        assert_eq!(buffer[(row.x + 2, row.y)].bg, super::palette().surface_alt);
+        assert_eq!(buffer[(row.x + 3, row.y)].fg, super::palette().yellow);
+        assert_eq!(buffer[(row.x + 3, row.y)].bg, super::palette().surface_alt);
     }
     for index in [2, 3] {
         let row = app
@@ -388,9 +438,9 @@ fn colors_only_agents_in_hunkles_herdr_tab_yellow() {
                 index,
             )))
             .unwrap();
-        assert_eq!(buffer[(row.x + 2, row.y)].fg, super::palette().ink);
+        assert_eq!(buffer[(row.x + 3, row.y)].fg, super::palette().ink);
         assert_eq!(
-            buffer[(row.x + 2, row.y)].bg,
+            buffer[(row.x + 3, row.y)].bg,
             if index == 3 {
                 super::palette().selected
             } else {

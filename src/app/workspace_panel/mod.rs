@@ -519,6 +519,10 @@ impl WorkspacePanel {
         self.visible = visible;
     }
 
+    pub(crate) fn spinner_frame(&self) -> usize {
+        self.spinner_frame
+    }
+
     pub(crate) fn entry_count(&self) -> usize {
         self.workspaces.len().saturating_add(self.agents.len())
     }
@@ -811,7 +815,7 @@ impl WorkspacePanel {
     }
 
     fn poll_spinner(&mut self, now: Instant) -> bool {
-        let working = self.visible
+        let working = self.enabled
             && (self
                 .workspaces
                 .iter()

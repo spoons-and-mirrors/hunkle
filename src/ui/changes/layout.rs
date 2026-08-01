@@ -38,9 +38,9 @@ pub(super) fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> R
         1,
     ));
     app.regions.agents_list = Some(Rect::new(
-        agents_area.x,
+        agents_area.x.saturating_sub(1),
         agents_area.y.saturating_add(1),
-        agents_area.width,
+        agents_area.width.saturating_add(2),
         agents_area.height.saturating_sub(1),
     ));
     Rect::new(

@@ -13,7 +13,6 @@ use crate::app::{
     WorkspacePanelEntryState, WorkspacePanelHitTarget, WorkspacePanelRow,
 };
 
-#[cfg(test)]
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 use super::{fill, palette, truncate_width};
@@ -476,13 +475,14 @@ fn draw_agent_section(
     if section.width == 0 || section.height == 0 {
         return;
     }
-    let list = draw_section_frame(
+    let inset_list = draw_section_frame(
         frame,
         section,
         "AGENT ACTIVITY",
         panel.agents.len(),
         palette().cyan,
     );
+    let list = inset_list;
     let rows = panel
         .agent_rows()
         .into_iter()
@@ -537,6 +537,7 @@ fn draw_agent_section(
                     .saturating_sub(u16::try_from(screen_row).unwrap_or(0) * item_step),
             ),
         );
+        let full_row_area = Rect::new(section.x, row_area.y, section.width, row_area.height);
         match row {
             WorkspacePanelRow::Agent(index) => {
                 let state = panel.agent_entry_state(index, true);
@@ -544,8 +545,10 @@ fn draw_agent_section(
                 let workspace = panel
                     .workspaces
                     .iter()
-                    .find(|workspace| workspace.id == agent.workspace_id)
-                    .map_or("unassigned", |workspace| workspace.label.as_str());
+                    .find(|workspace| workspace.id == agent.workspace_id);
+                let workspace_name =
+                    workspace.map_or("unassigned", |workspace| workspace.label.as_str());
+                let branch = workspace.and_then(|workspace| workspace.branch.as_deref());
                 let elapsed = panel
                     .agent_elapsed(index, settings.agent_time_display)
                     .map(format_duration);
@@ -570,23 +573,26 @@ fn draw_agent_section(
                 if row_area.y > list.y {
                     draw_agent_gap(
                         frame,
-                        Rect::new(row_area.x, row_area.y - 1, row_area.width, 1),
+                        Rect::new(section.x, row_area.y - 1, section.width, 1),
                         previous_background.unwrap_or(palette().panel),
                         current_background,
                     );
                 }
+                fill(frame, full_row_area, current_background);
                 draw_agent_card(
                     frame,
                     row_area,
-                    workspace,
+                    workspace_name,
+                    branch,
                     session,
                     elapsed.as_deref(),
                     agent.status,
+                    panel.spinner_frame(),
                     state,
                     hovered == Some(target),
                 );
-                last_card = Some((row_area, current_background));
-                targets.push((HitTarget::WorkspacePanel(target), row_area));
+                last_card = Some((full_row_area, current_background));
+                targets.push((HitTarget::WorkspacePanel(target), full_row_area));
             }
             WorkspacePanelRow::EmptyAgents => {
                 let message = panel.error.as_deref().unwrap_or(if panel.loading {
@@ -594,6 +600,7 @@ fn draw_agent_section(
                 } else {
                     "No agents detected"
                 });
+                fill(frame, full_row_area, palette().surface_alt);
                 frame.render_widget(
                     Paragraph::new(format!(
                         "  {}",
@@ -800,9 +807,9 @@ pub(super) fn draw_agents_pane(
     let card_gap = 1;
     let top_padding = u16::from(list.height > card_height);
     let card_list = Rect::new(
-        list.x,
+        list.x.saturating_add(1),
         list.y.saturating_add(top_padding),
-        list.width,
+        list.width.saturating_sub(2),
         list.height.saturating_sub(top_padding),
     );
     let item_step = card_height + card_gap;
@@ -822,14 +829,16 @@ pub(super) fn draw_agents_pane(
             card_list.width,
             card_height.min(card_list.height.saturating_sub(offset)),
         );
+        let full_row_area = Rect::new(list.x, row_area.y, list.width, row_area.height);
         let agent = &panel.agents[index];
         let state = panel.agent_entry_state(index, false);
         let in_host_tab = panel.agent_is_in_host_tab(index);
         let workspace = panel
             .workspaces
             .iter()
-            .find(|workspace| workspace.id == agent.workspace_id)
-            .map_or("unassigned", |workspace| workspace.label.as_str());
+            .find(|workspace| workspace.id == agent.workspace_id);
+        let workspace_name = workspace.map_or("unassigned", |workspace| workspace.label.as_str());
+        let branch = workspace.and_then(|workspace| workspace.branch.as_deref());
         let session = panel
             .agent_display_name(index)
             .unwrap_or("terminal session");
@@ -849,26 +858,29 @@ pub(super) fn draw_agents_pane(
                 });
             draw_agent_gap(
                 frame,
-                Rect::new(row_area.x, row_area.y - 1, row_area.width, 1),
+                Rect::new(list.x, row_area.y - 1, list.width, 1),
                 previous_background.unwrap_or(palette().panel),
                 background,
             );
         }
+        fill(frame, full_row_area, background);
         draw_agents_pane_row(
             frame,
             row_area,
-            workspace,
+            workspace_name,
+            branch,
             session,
             elapsed.as_deref(),
             agent.status,
+            panel.spinner_frame(),
             state,
             in_host_tab,
             hovered == Some(index),
         );
-        last_card = Some((row_area, background));
+        last_card = Some((full_row_area, background));
         targets.push((
             HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index)),
-            row_area,
+            full_row_area,
         ));
     }
     if let Some((card, background)) = last_card {
@@ -893,9 +905,11 @@ fn draw_agents_pane_row(
     frame: &mut Frame<'_>,
     area: Rect,
     workspace: &str,
+    branch: Option<&str>,
     session: &str,
     elapsed: Option<&str>,
     status: AgentStatus,
+    spinner_frame: usize,
     state: WorkspacePanelEntryState,
     in_host_tab: bool,
     hovered: bool,
@@ -912,25 +926,35 @@ fn draw_agents_pane_row(
         area.width.saturating_sub(2),
         area.height,
     );
-    let status_text = status_label(status);
-    let badge = badge_width(status_text);
-    let badge_area = Rect::new(
-        content.right().saturating_sub(badge),
-        content.y,
-        badge.min(content.width),
-        1,
-    );
-    draw_badge(
+    let status_area = draw_agent_status(
         frame,
-        badge_area,
-        status_text,
-        status_color(status),
-        palette().raised,
+        Rect::new(content.x, content.y, content.width, 1),
+        status,
+        spinner_frame,
+        background,
     );
+    let branch_area = (area.height > 1).then(|| branch).flatten().map(|branch| {
+        let width = badge_width(branch)
+            .min(20)
+            .min(status_area.x.saturating_sub(content.x).saturating_sub(4));
+        Rect::new(status_area.x.saturating_sub(width), content.y, width, 1)
+    });
+    if let (Some(branch), Some(branch_area)) = (branch, branch_area) {
+        draw_half_padded_badge(
+            frame,
+            branch_area,
+            branch,
+            palette().accent,
+            palette().raised,
+            background,
+        );
+    }
     let name_area = Rect::new(
         area.x,
         content.y,
-        badge_area.x.saturating_sub(area.x.saturating_add(1)),
+        branch_area
+            .map_or(status_area.x, |area| area.x)
+            .saturating_sub(area.x.saturating_add(u16::from(branch_area.is_some()))),
         1,
     );
     let name_color = if in_host_tab {
@@ -957,19 +981,30 @@ fn draw_agents_pane_row(
         name_area,
     );
     if area.height > 1 {
+        let session = truncate_session_name(session);
+        let session_text_width =
+            u16::try_from(UnicodeWidthStr::width(session.as_str())).unwrap_or(u16::MAX);
         let time_width = elapsed
             .map(|time| u16::try_from(UnicodeWidthStr::width(time)).unwrap_or(u16::MAX))
             .unwrap_or(0)
             .min(content.width);
-        let session_width = content
-            .width
-            .saturating_sub(time_width.saturating_add(u16::from(time_width > 0)));
+        let detail_width = content.width;
+        let show_time = elapsed.is_some()
+            && detail_width
+                >= session_text_width
+                    .saturating_add(time_width)
+                    .saturating_add(1);
+        let session_width = detail_width.saturating_sub(if show_time {
+            time_width.saturating_add(1)
+        } else {
+            0
+        });
         frame.render_widget(
-            Paragraph::new(truncate_width(session, usize::from(session_width)))
+            Paragraph::new(truncate_width(&session, usize::from(session_width)))
                 .style(Style::default().fg(palette().muted).bg(background)),
             Rect::new(content.x, content.y.saturating_add(1), session_width, 1),
         );
-        if let Some(elapsed) = elapsed {
+        if show_time && let Some(elapsed) = elapsed {
             frame.render_widget(
                 Paragraph::new(elapsed)
                     .alignment(ratatui::layout::Alignment::Right)
@@ -1143,9 +1178,11 @@ fn draw_agent_card(
     frame: &mut Frame<'_>,
     area: Rect,
     repository: &str,
+    branch: Option<&str>,
     session: &str,
     elapsed: Option<&str>,
     status: AgentStatus,
+    spinner_frame: usize,
     state: WorkspacePanelEntryState,
     hovered: bool,
 ) {
@@ -1158,25 +1195,35 @@ fn draw_agent_card(
         area.width.saturating_sub(2),
         area.height,
     );
-    let status_text = status_label(status);
-    let badge = badge_width(status_text);
-    let badge_area = Rect::new(
-        content.right().saturating_sub(badge),
-        content.y,
-        badge.min(content.width),
-        1,
-    );
-    draw_badge(
+    let status_area = draw_agent_status(
         frame,
-        badge_area,
-        status_text,
-        status_color(status),
-        palette().raised,
+        Rect::new(content.x, content.y, content.width, 1),
+        status,
+        spinner_frame,
+        background,
     );
+    let branch_area = (area.height > 1).then(|| branch).flatten().map(|branch| {
+        let width = badge_width(branch)
+            .min(20)
+            .min(status_area.x.saturating_sub(content.x).saturating_sub(4));
+        Rect::new(status_area.x.saturating_sub(width), content.y, width, 1)
+    });
+    if let (Some(branch), Some(branch_area)) = (branch, branch_area) {
+        draw_half_padded_badge(
+            frame,
+            branch_area,
+            branch,
+            palette().accent,
+            palette().raised,
+            background,
+        );
+    }
     let name_area = Rect::new(
         content.x,
         content.y,
-        badge_area.x.saturating_sub(content.x.saturating_add(1)),
+        branch_area
+            .map_or(status_area.x, |area| area.x)
+            .saturating_sub(content.x.saturating_add(u16::from(branch_area.is_some()))),
         1,
     );
     frame.render_widget(
@@ -1197,19 +1244,30 @@ fn draw_agent_card(
         name_area,
     );
     if area.height > 1 {
+        let session = truncate_session_name(session);
+        let session_text_width =
+            u16::try_from(UnicodeWidthStr::width(session.as_str())).unwrap_or(u16::MAX);
         let time_width = elapsed
             .map(|time| u16::try_from(UnicodeWidthStr::width(time)).unwrap_or(u16::MAX))
             .unwrap_or(0)
             .min(content.width);
-        let session_width = content
-            .width
-            .saturating_sub(time_width.saturating_add(u16::from(time_width > 0)));
+        let detail_width = content.width;
+        let show_time = elapsed.is_some()
+            && detail_width
+                >= session_text_width
+                    .saturating_add(time_width)
+                    .saturating_add(1);
+        let session_width = detail_width.saturating_sub(if show_time {
+            time_width.saturating_add(1)
+        } else {
+            0
+        });
         frame.render_widget(
-            Paragraph::new(truncate_width(session, usize::from(session_width)))
+            Paragraph::new(truncate_width(&session, usize::from(session_width)))
                 .style(Style::default().fg(palette().muted).bg(background)),
             Rect::new(content.x, content.y.saturating_add(1), session_width, 1),
         );
-        if let Some(elapsed) = elapsed {
+        if show_time && let Some(elapsed) = elapsed {
             frame.render_widget(
                 Paragraph::new(elapsed)
                     .alignment(ratatui::layout::Alignment::Right)
@@ -1222,6 +1280,36 @@ fn draw_agent_card(
                 ),
             );
         }
+    }
+}
+
+fn draw_agent_status(
+    frame: &mut Frame<'_>,
+    row: Rect,
+    status: AgentStatus,
+    spinner_frame: usize,
+    background: Color,
+) -> Rect {
+    let area = Rect::new(row.right().saturating_sub(1), row.y, row.width.min(1), 1);
+    frame.render_widget(
+        Paragraph::new(status_marker(status, spinner_frame)).style(
+            Style::default()
+                .fg(agent_status_color(status))
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+    area
+}
+
+fn truncate_session_name(session: &str) -> String {
+    let mut chars = session.chars();
+    let prefix = chars.by_ref().take(16).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
     }
 }
 
@@ -1251,6 +1339,45 @@ fn draw_badge(
                 .add_modifier(Modifier::BOLD),
         ),
         area,
+    );
+}
+
+fn draw_half_padded_badge(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    foreground: Color,
+    background: Color,
+    outer_background: Color,
+) {
+    if area.width < 2 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new("▐").style(Style::default().fg(background).bg(outer_background)),
+        Rect::new(area.x, area.y, 1, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(truncate_width(
+            label,
+            usize::from(area.width.saturating_sub(2)),
+        ))
+        .style(
+            Style::default()
+                .fg(foreground)
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(
+            area.x.saturating_add(1),
+            area.y,
+            area.width.saturating_sub(2),
+            1,
+        ),
+    );
+    frame.render_widget(
+        Paragraph::new("▌").style(Style::default().fg(background).bg(outer_background)),
+        Rect::new(area.right().saturating_sub(1), area.y, 1, 1),
     );
 }
 
@@ -1502,14 +1629,23 @@ fn format_tenths(seconds: u64, unit: u64, suffix: char) -> String {
     }
 }
 
-#[cfg(test)]
 fn status_marker(status: AgentStatus, spinner_frame: usize) -> &'static str {
     match status {
-        AgentStatus::Idle => "●",
+        AgentStatus::Idle => "·",
         AgentStatus::Working => SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()],
-        AgentStatus::Blocked => "B",
-        AgentStatus::Done => "U",
+        AgentStatus::Blocked => "■",
+        AgentStatus::Done => "●",
         AgentStatus::Unknown => "?",
+    }
+}
+
+fn agent_status_color(status: AgentStatus) -> Color {
+    match status {
+        AgentStatus::Idle => palette().cyan,
+        AgentStatus::Working => palette().orange,
+        AgentStatus::Blocked => palette().red,
+        AgentStatus::Done => palette().green,
+        AgentStatus::Unknown => palette().faint,
     }
 }
 
@@ -1570,15 +1706,16 @@ mod tests {
 
     #[test]
     fn status_indicators_distinguish_attention_states() {
-        assert_eq!(status_marker(AgentStatus::Idle, 0), "●");
-        assert_eq!(status_color(AgentStatus::Idle), palette().cyan);
+        assert_eq!(status_marker(AgentStatus::Idle, 0), "·");
+        assert_eq!(agent_status_color(AgentStatus::Idle), palette().cyan);
         assert_eq!(status_marker(AgentStatus::Working, 0), "⠋");
-        assert_eq!(status_color(AgentStatus::Working), palette().yellow);
-        assert_eq!(status_marker(AgentStatus::Blocked, 0), "B");
-        assert_eq!(status_color(AgentStatus::Blocked), palette().red);
-        assert_eq!(status_marker(AgentStatus::Done, 0), "U");
-        assert_eq!(status_color(AgentStatus::Done), palette().green);
+        assert_eq!(status_marker(AgentStatus::Working, 1), "⠙");
+        assert_eq!(agent_status_color(AgentStatus::Working), palette().orange);
+        assert_eq!(status_marker(AgentStatus::Blocked, 0), "■");
+        assert_eq!(agent_status_color(AgentStatus::Blocked), palette().red);
+        assert_eq!(status_marker(AgentStatus::Done, 0), "●");
+        assert_eq!(agent_status_color(AgentStatus::Done), palette().green);
         assert_eq!(status_marker(AgentStatus::Unknown, 0), "?");
-        assert_eq!(status_color(AgentStatus::Unknown), palette().faint);
+        assert_eq!(agent_status_color(AgentStatus::Unknown), palette().faint);
     }
 }
