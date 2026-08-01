@@ -23,7 +23,14 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::{
+    fs::OpenOptions,
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::process::CommandExt,
+    },
+    process::Stdio,
+};
 
 use anyhow::Result;
 use app::{App, EditorRequest};
@@ -74,6 +81,8 @@ fn main() -> Result<()> {
         picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
     }
     app.configure_media_picker(picker, auto_kitty_supported());
+    #[cfg(unix)]
+    let mut stdin_nonblocking = NonblockingStdin::enable()?;
     let mut dirty = true;
     let mut restart_request: Option<PathBuf> = None;
     let mut restarting = false;
@@ -221,6 +230,7 @@ fn main() -> Result<()> {
             executable.display(),
             workspace.display()
         ));
+        stdin_nonblocking.restore()?;
         diagnostics::shutdown();
         restore_terminal();
         let error = Command::new(executable).arg(workspace).exec();
@@ -228,6 +238,61 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+struct NonblockingStdin {
+    target: libc::c_int,
+    original: OwnedFd,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl NonblockingStdin {
+    fn enable() -> io::Result<Self> {
+        let tty = OpenOptions::new().read(true).open("/dev/tty")?;
+        Self::replace_with(libc::STDIN_FILENO, tty.as_raw_fd())
+    }
+
+    fn replace_with(target: libc::c_int, source: libc::c_int) -> io::Result<Self> {
+        let original = unsafe { libc::fcntl(target, libc::F_DUPFD_CLOEXEC, 0) };
+        if original == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let original = unsafe { OwnedFd::from_raw_fd(original) };
+        let source_flags = unsafe { libc::fcntl(source, libc::F_GETFL) };
+        if source_flags == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(source, libc::F_SETFL, source_flags | libc::O_NONBLOCK) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::dup2(source, target) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            target,
+            original,
+            active: true,
+        })
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        if self.active {
+            if unsafe { libc::dup2(self.original.as_raw_fd(), self.target) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            self.active = false;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NonblockingStdin {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
 }
 
 struct DiagnosticsGuard;
@@ -242,10 +307,19 @@ fn run_editor(request: EditorRequest) -> Result<(), String> {
     let Some((program, args)) = request.command.split_first() else {
         return Err("Editor command is empty".to_owned());
     };
-    let status = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .arg(&request.file)
-        .current_dir(&request.repository)
+        .current_dir(&request.repository);
+    #[cfg(unix)]
+    command.stdin(Stdio::from(
+        OpenOptions::new()
+            .read(true)
+            .open("/dev/tty")
+            .map_err(|error| format!("Could not open terminal input: {error}"))?,
+    ));
+    let status = command
         .status()
         .map_err(|error| format!("Could not start {program}: {error}"))?;
     if status.success() {
@@ -359,5 +433,34 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         restore_terminal();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{os::fd::AsRawFd, os::unix::net::UnixStream};
+
+    use super::NonblockingStdin;
+
+    fn flags(fd: libc::c_int) -> libc::c_int {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        flags
+    }
+
+    #[test]
+    fn isolates_nonblocking_input_from_the_original_terminal_handle() {
+        let (target, _target_peer) = UnixStream::pair().unwrap();
+        let original = target.try_clone().unwrap();
+        let (source, _source_peer) = UnixStream::pair().unwrap();
+        let target_fd = target.as_raw_fd();
+        let original_flags = flags(original.as_raw_fd());
+        {
+            let mut guard = NonblockingStdin::replace_with(target_fd, source.as_raw_fd()).unwrap();
+            assert_ne!(flags(target_fd) & libc::O_NONBLOCK, 0);
+            assert_eq!(flags(original.as_raw_fd()), original_flags);
+            guard.restore().unwrap();
+            assert_eq!(flags(target_fd), original_flags);
+        }
     }
 }

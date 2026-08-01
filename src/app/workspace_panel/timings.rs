@@ -304,7 +304,7 @@ fn lock_path(index_path: &Path) -> PathBuf {
 fn lock_exclusive(file: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
 
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -454,5 +454,20 @@ mod tests {
 
         assert!(stale_process.is_empty());
         assert!(load(&path).unwrap().timings.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timing_index_lock_never_waits_for_another_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-timings.json");
+        let _held = IndexLock::acquire(&path).unwrap();
+
+        let error = match IndexLock::acquire(&path) {
+            Ok(_) => panic!("a held timing lock was acquired twice"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
     }
 }

@@ -272,7 +272,7 @@ impl Drop for Activity {
 }
 
 fn watchdog(activities: Arc<Mutex<Vec<ActiveActivity>>>, stop: Arc<AtomicBool>) {
-    let mut last_report = None;
+    let mut last_reported_id = None;
     loop {
         thread::park_timeout(Duration::from_secs(1));
         if stop.load(Ordering::Acquire) {
@@ -284,25 +284,37 @@ fn watchdog(activities: Arc<Mutex<Vec<ActiveActivity>>>, stop: Arc<AtomicBool>) 
             (elapsed >= STALLED_ACTIVITY).then(|| {
                 (
                     activity.id,
-                    elapsed.as_secs(),
                     activity.phase,
                     activity.detail.clone(),
                     elapsed.as_millis(),
                 )
             })
         });
-        let Some((id, second, phase, detail, elapsed_ms)) = report else {
-            last_report = None;
+        let Some((id, phase, detail, elapsed_ms)) = report else {
+            should_report_stall(&mut last_reported_id, None);
             continue;
         };
-        if last_report == Some((id, second)) {
+        if !should_report_stall(&mut last_reported_id, Some(id)) {
             continue;
         }
-        last_report = Some((id, second));
         send(
             "ERROR",
             format!("stalled phase={phase} elapsed_ms={elapsed_ms} {detail}"),
         );
+    }
+}
+
+fn should_report_stall(last_reported_id: &mut Option<u64>, current_id: Option<u64>) -> bool {
+    match current_id {
+        None => {
+            *last_reported_id = None;
+            false
+        }
+        Some(id) if *last_reported_id == Some(id) => false,
+        Some(id) => {
+            *last_reported_id = Some(id);
+            true
+        }
     }
 }
 
@@ -319,9 +331,10 @@ fn line(level: &str, message: String) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     format!(
-        "{}.{:03} {level} {message}",
+        "{}.{:03} pid={} {level} {message}",
         elapsed.as_secs(),
-        elapsed.subsec_millis()
+        elapsed.subsec_millis(),
+        std::process::id()
     )
 }
 
@@ -352,4 +365,20 @@ fn rotate_if_needed(path: &Path) -> io::Result<()> {
         fs::rename(path, rotated)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_report_stall;
+
+    #[test]
+    fn reports_each_stalled_activity_once() {
+        let mut last_reported = None;
+
+        assert!(should_report_stall(&mut last_reported, Some(7)));
+        assert!(!should_report_stall(&mut last_reported, Some(7)));
+        assert!(should_report_stall(&mut last_reported, Some(8)));
+        assert!(!should_report_stall(&mut last_reported, None));
+        assert!(should_report_stall(&mut last_reported, Some(8)));
+    }
 }

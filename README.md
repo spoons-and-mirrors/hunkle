@@ -282,9 +282,10 @@ hunkle writes lifecycle, workspace loading, file indexing, slow main-loop
 phases, and watchdog stall reports to `$XDG_STATE_HOME/hunkle/hunkle.log`, or
 `~/.local/state/hunkle/hunkle.log` when `XDG_STATE_HOME` is unset. Set
 `HUNKLE_LOG` to use another file. The log rotates to `hunkle.log.old` at 4 MiB.
-During a slowdown, run `tail -f ~/.local/state/hunkle/hunkle.log`; a
-`stalled phase=...` line identifies the main-loop phase that has remained
-blocked for at least two seconds.
+Every line includes the originating process ID. During a slowdown, run
+`tail -f ~/.local/state/hunkle/hunkle.log`; a `stalled phase=...` line identifies
+the main-loop phase that has remained blocked for at least two seconds. Each
+stalled activity is reported once rather than once per second.
 
 ## Architecture
 

@@ -677,7 +677,10 @@ impl App {
                 && self.workspace_panel.is_enabled())
             || self.workspace_panel.destructive_action_running()
         {
-            let panel_poll = self.workspace_panel.poll();
+            let panel_poll = {
+                let _activity = diagnostics::activity("poll-workspace-panel", "");
+                self.workspace_panel.poll()
+            };
             changed |= panel_poll.changed;
             if let Some(error) = panel_poll.notice {
                 self.notice = Some(error);
@@ -699,7 +702,10 @@ impl App {
         {
             self.linked_worktrees.refresh();
         }
-        let catalog_poll = self.linked_worktrees.poll();
+        let catalog_poll = {
+            let _activity = diagnostics::activity("poll-worktree-catalog", "");
+            self.linked_worktrees.poll()
+        };
         changed |= catalog_poll.changed;
         if let Some(notice) = catalog_poll.notice {
             self.notice = Some(notice);
@@ -707,7 +713,10 @@ impl App {
         self.worktree_manager
             .replace_catalog(self.linked_worktrees.snapshot());
         changed |= self.repository_browser.poll();
-        let worktree_poll = self.worktree_manager.poll();
+        let worktree_poll = {
+            let _activity = diagnostics::activity("poll-worktree-manager", "");
+            self.worktree_manager.poll()
+        };
         changed |= worktree_poll.changed;
         if let Some(notice) = worktree_poll.notice {
             self.notice = Some(notice);
@@ -818,13 +827,17 @@ impl App {
                 }
             }
         }
-        changed |= self.flush_commit_draft_if_due();
+        changed |= {
+            let _activity = diagnostics::activity("poll-commit-draft", "");
+            self.flush_commit_draft_if_due()
+        };
         if let Some(dialog) = &mut self.file_dialog {
             changed |= dialog.input.poll_blink(
                 self.mode == Mode::Files && matches!(dialog.kind, FileDialogKind::Name { .. }),
             );
         }
         let interval = self.settings.fetch_interval();
+        let session_worker_activity = diagnostics::activity("poll-session-workers", "");
         self.session
             .maybe_start_fetch(self.settings.auto_fetch, interval);
         self.session.maybe_start_status_check();
@@ -984,9 +997,11 @@ impl App {
             self.track_refresh_request(request, true);
             self.notice = None;
         }
+        drop(session_worker_activity);
         if self.session.open_running() {
             self.notice = Some("Opening workspace…".to_owned());
         }
+        let session_load_activity = diagnostics::activity("poll-session-loads", "");
         while let Some(done) = self.session.next_load_completion() {
             changed = true;
             let prepared_file_tree = done.prepared_file_tree;
@@ -1170,6 +1185,7 @@ impl App {
                 }
             }
         }
+        drop(session_load_activity);
         self.try_start_workspace_restore();
         self.maybe_start_workspace_fetch();
         changed |= self.changes.poll_directories(self.session.data());
