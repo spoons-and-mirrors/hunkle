@@ -33,9 +33,9 @@ pub(crate) fn draw_worktree_manager(
     let inner_width = area.width.saturating_sub(4);
     let summary = format!(
         "  Manage linked checkouts  {} repositories · {} worktrees{}",
-        manager.repositories.len(),
+        manager.repositories().len(),
         manager.worktree_count(),
-        if manager.loading {
+        if manager.loading() {
             " · refreshing"
         } else {
             ""
@@ -183,14 +183,14 @@ pub(crate) fn draw_worktree_manager(
         details_title,
     );
     let repository_column = manager
-        .repositories
+        .repositories()
         .iter()
         .map(|repository| UnicodeWidthStr::width(repository.label.as_str()))
         .max()
         .unwrap_or(0)
         .min(usize::from(list.width.saturating_sub(2)) / 3);
     let branch_column = manager
-        .repositories
+        .repositories()
         .iter()
         .flat_map(|repository| repository.worktrees.iter())
         .map(|worktree| UnicodeWidthStr::width(worktree_label(worktree).as_str()))
@@ -200,7 +200,7 @@ pub(crate) fn draw_worktree_manager(
         .min(usize::from(list.width.saturating_sub(3)).saturating_sub(repository_column) / 2);
     let items = if rows.is_empty() {
         vec![status_row(
-            if manager.loading {
+            if manager.loading() {
                 "Loading known repositories…"
             } else if manager.query.is_empty() {
                 "No linked Git worktrees found"
@@ -214,7 +214,7 @@ pub(crate) fn draw_worktree_manager(
             .enumerate()
             .map(|(row_index, row)| match *row {
                 WorktreeManagerRow::Group(repository_index) => {
-                    let group = manager.repositories[repository_index].group.as_deref();
+                    let group = manager.repositories()[repository_index].group.as_deref();
                     let label = Line::from(Span::styled(
                         group.unwrap_or("Ungrouped").to_uppercase(),
                         Style::default()
@@ -228,7 +228,7 @@ pub(crate) fn draw_worktree_manager(
                     }
                 }
                 WorktreeManagerRow::Status(repository_index) => {
-                    let repository = &manager.repositories[repository_index];
+                    let repository = &manager.repositories()[repository_index];
                     let label = truncate_width(&repository.label, repository_column);
                     let label = format!(
                         "{label}{}",
@@ -259,7 +259,7 @@ pub(crate) fn draw_worktree_manager(
                     repository: repository_index,
                     worktree,
                 } => {
-                    let repository = &manager.repositories[repository_index];
+                    let repository = &manager.repositories()[repository_index];
                     let worktree = &repository.worktrees[worktree];
                     let current = manager.is_current(&worktree.path);
                     let selected = manager

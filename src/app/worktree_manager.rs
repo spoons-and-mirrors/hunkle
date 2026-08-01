@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -14,9 +13,7 @@ use crate::{
     git::{self, LinkedWorktree},
 };
 
-mod known_repositories;
-
-use known_repositories::KnownRepositoryStore;
+use super::{LinkedWorktreeCatalogSnapshot, LinkedWorktreeRepository};
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
@@ -31,14 +28,7 @@ pub(crate) enum WorktreeManagerEffect {
         branch: String,
         start_point: String,
     },
-    RemoveNative {
-        common_dir: PathBuf,
-        path: PathBuf,
-    },
-    RemoveHerdr {
-        workspace_id: String,
-        path: PathBuf,
-    },
+    Remove(PathBuf),
     Notice(String),
 }
 
@@ -64,25 +54,8 @@ pub(crate) struct WorktreeCreateDialog {
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorktreeRemoveDialog {
-    pub(crate) common_dir: PathBuf,
     pub(crate) path: PathBuf,
     pub(crate) label: String,
-    pub(crate) herdr_workspace_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct WorktreeRepository {
-    pub(crate) common_dir: PathBuf,
-    pub(crate) label: String,
-    pub(crate) group: Option<String>,
-    pub(crate) worktrees: Vec<LinkedWorktree>,
-    pub(crate) error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorktreeCandidate {
-    pub(crate) path: PathBuf,
-    pub(crate) group: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,13 +63,6 @@ pub(crate) enum WorktreeManagerRow {
     Group(usize),
     Worktree { repository: usize, worktree: usize },
     Status(usize),
-}
-
-struct InventoryCompletion {
-    generation: u64,
-    repositories: Vec<WorktreeRepository>,
-    discovered: Vec<PathBuf>,
-    pruned: Vec<PathBuf>,
 }
 
 struct RemovalCompletion {
@@ -110,7 +76,6 @@ struct CreationCompletion {
 }
 
 enum Completion {
-    Inventory(InventoryCompletion),
     Creation(CreationCompletion),
     Removal(RemovalCompletion),
 }
@@ -120,24 +85,17 @@ pub(crate) struct WorktreeManagerPoll {
     pub(crate) changed: bool,
     pub(crate) notice: Option<String>,
     pub(crate) open_path: Option<PathBuf>,
+    pub(crate) refresh_catalog: bool,
 }
 
 pub(crate) struct WorktreeManager {
     pub(crate) query: String,
     pub(crate) state: ListState,
-    pub(crate) repositories: Vec<WorktreeRepository>,
-    pub(crate) loading: bool,
+    catalog: LinkedWorktreeCatalogSnapshot,
     pub(crate) create_running: bool,
     pub(crate) create_dialog: Option<WorktreeCreateDialog>,
     pub(crate) remove_running: bool,
     pub(crate) remove_dialog: Option<WorktreeRemoveDialog>,
-    current_path: Option<PathBuf>,
-    candidates: Vec<WorktreeCandidate>,
-    herdr_worktrees: Vec<(PathBuf, String)>,
-    herdr_enabled: bool,
-    herdr_verified: bool,
-    store: KnownRepositoryStore,
-    generation: u64,
     content_generation: u64,
     last_click: Option<(PathBuf, Instant)>,
     pending_create: Option<WorktreeCreateDialog>,
@@ -146,24 +104,16 @@ pub(crate) struct WorktreeManager {
 }
 
 impl WorktreeManager {
-    pub(crate) fn new(store_path: Option<PathBuf>) -> Self {
+    pub(crate) fn new() -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
             query: String::new(),
             state: ListState::default(),
-            repositories: Vec::new(),
-            loading: false,
+            catalog: LinkedWorktreeCatalogSnapshot::default(),
             create_running: false,
             create_dialog: None,
             remove_running: false,
             remove_dialog: None,
-            current_path: None,
-            candidates: Vec::new(),
-            herdr_worktrees: Vec::new(),
-            herdr_enabled: false,
-            herdr_verified: true,
-            store: KnownRepositoryStore::new(store_path),
-            generation: 0,
             content_generation: 0,
             last_click: None,
             pending_create: None,
@@ -172,126 +122,24 @@ impl WorktreeManager {
         }
     }
 
-    pub(crate) fn remember(&mut self, common_dir: &Path, root: &Path) -> Result<(), String> {
-        self.store
-            .remember_and_save(common_dir.to_owned(), root.to_owned())
-    }
-
-    pub(crate) fn recent_repositories(&self) -> impl Iterator<Item = (&Path, &Path)> {
-        self.store
-            .recent
-            .iter()
-            .map(|recent| (recent.common_dir.as_path(), recent.root.as_path()))
-    }
-
-    pub(crate) fn open(
-        &mut self,
-        candidates: Vec<WorktreeCandidate>,
-        herdr_worktrees: Vec<(PathBuf, String)>,
-        current_path: Option<PathBuf>,
-        herdr_enabled: bool,
-        herdr_verified: bool,
-    ) -> Option<String> {
+    pub(crate) fn open(&mut self, catalog: LinkedWorktreeCatalogSnapshot) {
         self.query.clear();
         self.create_dialog = None;
         self.remove_dialog = None;
-        self.current_path = current_path;
-        self.candidates = candidates;
-        self.herdr_worktrees = herdr_worktrees;
-        self.herdr_enabled = herdr_enabled;
-        self.herdr_verified = herdr_verified;
         self.last_click = None;
+        self.replace_catalog(catalog);
+    }
+
+    pub(crate) fn replace_catalog(&mut self, catalog: LinkedWorktreeCatalogSnapshot) {
+        if self.catalog.revision() == catalog.revision() {
+            return;
+        }
+        let selected_path = self
+            .selected_worktree()
+            .map(|(_, worktree)| worktree.path.clone());
+        self.catalog = catalog;
         self.bump_content_generation();
-        self.start_refresh();
-        self.store.load_error.clone()
-    }
-
-    pub(crate) fn update_herdr_inventory(
-        &mut self,
-        candidates: Vec<WorktreeCandidate>,
-        herdr_worktrees: Vec<(PathBuf, String)>,
-        verified: bool,
-    ) -> bool {
-        let candidates_changed = self.candidates != candidates;
-        self.candidates = candidates;
-        self.herdr_worktrees = herdr_worktrees;
-        self.herdr_verified = verified;
-        candidates_changed
-    }
-
-    pub(crate) fn start_refresh(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        let known = self.store.repositories.clone();
-        let candidates = self.candidates.clone();
-        let sender = self.sender.clone();
-        self.loading = true;
-        thread::spawn(move || {
-            let mut common_dirs = known;
-            let mut seen = common_dirs.iter().cloned().collect::<HashSet<_>>();
-            let mut candidate_ranks = HashMap::new();
-            let mut discovered = Vec::new();
-            for (rank, candidate) in candidates.into_iter().enumerate() {
-                let Ok(common_dir) = git::common_git_dir(&candidate.path) else {
-                    continue;
-                };
-                candidate_ranks
-                    .entry(common_dir.clone())
-                    .or_insert((rank, candidate.group));
-                if seen.insert(common_dir.clone()) {
-                    discovered.push(common_dir.clone());
-                    common_dirs.push(common_dir);
-                }
-            }
-            common_dirs.sort_by_cached_key(|path| {
-                (
-                    !candidate_ranks.contains_key(path),
-                    candidate_ranks
-                        .get(path)
-                        .map_or(usize::MAX, |(rank, _)| *rank),
-                    path.to_string_lossy().to_lowercase(),
-                )
-            });
-            let mut pruned = Vec::new();
-            let repositories = common_dirs
-                .into_iter()
-                .filter_map(|common_dir| {
-                    let group = candidate_ranks
-                        .get(&common_dir)
-                        .and_then(|(_, group)| group.clone());
-                    let is_candidate = candidate_ranks.contains_key(&common_dir);
-                    match git::list_worktrees(&common_dir) {
-                        Ok(worktrees) => Some(WorktreeRepository {
-                            label: repository_label(&common_dir, &worktrees),
-                            group,
-                            common_dir,
-                            worktrees,
-                            error: None,
-                        }),
-                        Err(error) => {
-                            if is_candidate {
-                                Some(WorktreeRepository {
-                                    label: repository_label(&common_dir, &[]),
-                                    group,
-                                    common_dir,
-                                    worktrees: Vec::new(),
-                                    error: Some(error.to_string()),
-                                })
-                            } else {
-                                pruned.push(common_dir);
-                                None
-                            }
-                        }
-                    }
-                })
-                .collect();
-            let _ = sender.send(Completion::Inventory(InventoryCompletion {
-                generation,
-                repositories,
-                discovered,
-                pruned,
-            }));
-        });
+        self.restore_selection(selected_path.as_deref());
     }
 
     pub(crate) fn start_remove(&mut self, common_dir: PathBuf, path: PathBuf) -> bool {
@@ -335,32 +183,9 @@ impl WorktreeManager {
 
     pub(crate) fn poll(&mut self) -> WorktreeManagerPoll {
         let mut result = WorktreeManagerPoll::default();
-        let mut refresh = false;
         while let Ok(completion) = self.receiver.try_recv() {
             result.changed = true;
             match completion {
-                Completion::Inventory(completion) => {
-                    if completion.generation != self.generation {
-                        continue;
-                    }
-                    self.loading = false;
-                    let selected_path = self
-                        .selected_worktree()
-                        .map(|(_, worktree)| worktree.path.clone());
-                    self.repositories = completion.repositories;
-                    self.bump_content_generation();
-                    if !completion.discovered.is_empty()
-                        && let Err(error) = self.store.extend_and_save(completion.discovered)
-                    {
-                        result.notice = Some(error);
-                    }
-                    if !completion.pruned.is_empty()
-                        && let Err(error) = self.store.prune_and_save(&completion.pruned)
-                    {
-                        result.notice = Some(error);
-                    }
-                    self.restore_selection(selected_path.as_deref());
-                }
                 Completion::Creation(completion) => {
                     self.create_running = false;
                     match completion.result {
@@ -369,7 +194,7 @@ impl WorktreeManager {
                             result.notice =
                                 Some(format!("Created worktree {}", completion.path.display()));
                             result.open_path = Some(completion.path);
-                            refresh = true;
+                            result.refresh_catalog = true;
                         }
                         Err(error) => {
                             if let Some(mut dialog) = self.pending_create.take() {
@@ -386,15 +211,12 @@ impl WorktreeManager {
                         Ok(()) => {
                             result.notice =
                                 Some(format!("Removed worktree {}", completion.path.display()));
-                            refresh = true;
+                            result.refresh_catalog = true;
                         }
                         Err(error) => result.notice = Some(error),
                     }
                 }
             }
-        }
-        if refresh {
-            self.start_refresh();
         }
         result
     }
@@ -476,11 +298,12 @@ impl WorktreeManager {
         let query = self.query.to_lowercase();
         let mut rows = Vec::new();
         let show_groups = self
+            .catalog
             .repositories
             .iter()
             .any(|repository| repository.group.is_some());
         let mut previous_group = None;
-        for (repository_index, repository) in self.repositories.iter().enumerate() {
+        for (repository_index, repository) in self.catalog.repositories.iter().enumerate() {
             let repository_matches = query.is_empty()
                 || repository.label.to_lowercase().contains(&query)
                 || repository
@@ -525,22 +348,27 @@ impl WorktreeManager {
     }
 
     pub(crate) fn worktree_count(&self) -> usize {
-        self.repositories
+        self.catalog
+            .repositories
             .iter()
             .map(|repository| repository.worktrees.len())
             .sum()
     }
 
+    pub(crate) fn repositories(&self) -> &[LinkedWorktreeRepository] {
+        &self.catalog.repositories
+    }
+
+    pub(crate) fn loading(&self) -> bool {
+        self.catalog.loading
+    }
+
     pub(crate) fn is_current(&self, path: &Path) -> bool {
-        self.current_path
-            .as_deref()
-            .is_some_and(|current| same_path(current, path))
+        self.catalog.is_active(path)
     }
 
     pub(crate) fn is_herdr(&self, path: &Path) -> bool {
-        self.herdr_worktrees
-            .iter()
-            .any(|(candidate, _)| same_path(candidate, path))
+        self.catalog.is_herdr_owned(path)
     }
 
     pub(crate) fn content_generation(&self) -> u64 {
@@ -643,25 +471,7 @@ impl WorktreeManager {
         if self.operation_running() {
             return Some("A worktree operation is already running".to_owned());
         }
-        if self.herdr_enabled && !self.herdr_verified {
-            return Some("Waiting for Herdr to verify linked worktree ownership".to_owned());
-        }
-        if worktree.is_main {
-            return Some("The primary worktree cannot be removed".to_owned());
-        }
-        if worktree.locked {
-            return Some(worktree.locked_reason.as_ref().map_or_else(
-                || "Unlock this worktree before removing it".to_owned(),
-                |reason| format!("Worktree is locked: {reason}"),
-            ));
-        }
-        if worktree.prunable {
-            return Some("This missing worktree requires repository metadata pruning".to_owned());
-        }
-        self.current_path
-            .as_deref()
-            .is_some_and(|current| same_path(current, &worktree.path))
-            .then(|| "Open another worktree before removing the current one".to_owned())
+        self.catalog.removal_plan(&worktree.path).err()
     }
 
     fn activate_selected(&self) -> Option<WorktreeManagerEffect> {
@@ -673,20 +483,13 @@ impl WorktreeManager {
     }
 
     fn begin_remove(&mut self) -> Option<WorktreeManagerEffect> {
-        let (repository, worktree) = self.selected_worktree()?;
+        let (_, worktree) = self.selected_worktree()?;
         if let Some(reason) = self.remove_protection(worktree) {
             return Some(WorktreeManagerEffect::Notice(reason));
         }
-        let herdr_workspace_id = self
-            .herdr_worktrees
-            .iter()
-            .find(|(path, _)| same_path(path, &worktree.path))
-            .map(|(_, workspace_id)| workspace_id.clone());
         self.remove_dialog = Some(WorktreeRemoveDialog {
-            common_dir: repository.common_dir.clone(),
             path: worktree.path.clone(),
             label: worktree_label(worktree),
-            herdr_workspace_id,
         });
         None
     }
@@ -852,23 +655,13 @@ impl WorktreeManager {
             }
             KeyCode::Enter | KeyCode::Char('y') => {
                 let dialog = self.remove_dialog.take()?;
-                Some(if let Some(workspace_id) = dialog.herdr_workspace_id {
-                    WorktreeManagerEffect::RemoveHerdr {
-                        workspace_id,
-                        path: dialog.path,
-                    }
-                } else {
-                    WorktreeManagerEffect::RemoveNative {
-                        common_dir: dialog.common_dir,
-                        path: dialog.path,
-                    }
-                })
+                Some(WorktreeManagerEffect::Remove(dialog.path))
             }
             _ => None,
         }
     }
 
-    pub(crate) fn selected_worktree(&self) -> Option<(&WorktreeRepository, &LinkedWorktree)> {
+    pub(crate) fn selected_worktree(&self) -> Option<(&LinkedWorktreeRepository, &LinkedWorktree)> {
         let row = *self.rows().get(self.state.selected()?)?;
         let WorktreeManagerRow::Worktree {
             repository,
@@ -878,8 +671,12 @@ impl WorktreeManager {
             return None;
         };
         Some((
-            self.repositories.get(repository)?,
-            self.repositories.get(repository)?.worktrees.get(worktree)?,
+            self.catalog.repositories.get(repository)?,
+            self.catalog
+                .repositories
+                .get(repository)?
+                .worktrees
+                .get(worktree)?,
         ))
     }
 
@@ -910,7 +707,7 @@ impl WorktreeManager {
                 WorktreeManagerRow::Worktree {
                     repository,
                     worktree,
-                } => self.repositories[*repository]
+                } => self.catalog.repositories[*repository]
                     .worktrees
                     .get(*worktree)
                     .is_some_and(|candidate| same_path(&candidate.path, path)),
@@ -962,20 +759,6 @@ fn worktree_matches(worktree: &LinkedWorktree, query: &str) -> bool {
             .is_some_and(|head| head.to_lowercase().contains(query))
 }
 
-fn repository_label(common_dir: &Path, worktrees: &[LinkedWorktree]) -> String {
-    worktrees
-        .first()
-        .and_then(|worktree| worktree.path.file_name())
-        .or_else(|| {
-            (common_dir.file_name().is_some_and(|name| name == ".git"))
-                .then(|| common_dir.parent().and_then(Path::file_name))
-                .flatten()
-        })
-        .or_else(|| common_dir.file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| common_dir.display().to_string())
-}
-
 fn update_automatic_path(dialog: &mut WorktreeCreateDialog) {
     if !dialog.path_automatic {
         return;
@@ -1012,12 +795,8 @@ fn expand_home(path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    #[cfg(unix)]
-    use std::os::unix::ffi::OsStringExt;
-    use std::process::Command;
-
     use super::*;
+    use crate::app::HerdrOwnership;
 
     fn linked(path: &str, branch: &str, is_main: bool) -> LinkedWorktree {
         LinkedWorktree {
@@ -1035,18 +814,21 @@ mod tests {
     }
 
     fn manager() -> WorktreeManager {
-        let mut manager = WorktreeManager::new(None);
-        manager.repositories = vec![WorktreeRepository {
-            common_dir: PathBuf::from("/repo/.git"),
-            label: "repo".to_owned(),
-            group: None,
-            worktrees: vec![
-                linked("/repo", "main", true),
-                linked("/repo-feature", "feature/modal", false),
-            ],
-            error: None,
-        }];
-        manager.current_path = Some(PathBuf::from("/repo"));
+        let mut manager = WorktreeManager::new();
+        manager.catalog = LinkedWorktreeCatalogSnapshot::for_test(
+            vec![LinkedWorktreeRepository {
+                common_dir: PathBuf::from("/repo/.git"),
+                label: "repo".to_owned(),
+                group: None,
+                worktrees: vec![
+                    linked("/repo", "main", true),
+                    linked("/repo-feature", "feature/modal", false),
+                ],
+                error: None,
+            }],
+            Some(PathBuf::from("/repo")),
+            HerdrOwnership::Disabled,
+        );
         manager.select_first();
         manager
     }
@@ -1070,29 +852,33 @@ mod tests {
     #[test]
     fn inserts_group_headings_only_when_groups_change() {
         let mut manager = manager();
-        manager.repositories = vec![
-            WorktreeRepository {
-                common_dir: PathBuf::from("/alpha/.git"),
-                label: "alpha".to_owned(),
-                group: Some("Projects".to_owned()),
-                worktrees: vec![linked("/alpha", "main", true)],
-                error: None,
-            },
-            WorktreeRepository {
-                common_dir: PathBuf::from("/zulu/.git"),
-                label: "zulu".to_owned(),
-                group: Some("Projects".to_owned()),
-                worktrees: vec![linked("/zulu", "main", true)],
-                error: None,
-            },
-            WorktreeRepository {
-                common_dir: PathBuf::from("/solo/.git"),
-                label: "solo".to_owned(),
-                group: None,
-                worktrees: vec![linked("/solo", "main", true)],
-                error: None,
-            },
-        ];
+        manager.catalog = LinkedWorktreeCatalogSnapshot::for_test(
+            vec![
+                LinkedWorktreeRepository {
+                    common_dir: PathBuf::from("/alpha/.git"),
+                    label: "alpha".to_owned(),
+                    group: Some("Projects".to_owned()),
+                    worktrees: vec![linked("/alpha", "main", true)],
+                    error: None,
+                },
+                LinkedWorktreeRepository {
+                    common_dir: PathBuf::from("/zulu/.git"),
+                    label: "zulu".to_owned(),
+                    group: Some("Projects".to_owned()),
+                    worktrees: vec![linked("/zulu", "main", true)],
+                    error: None,
+                },
+                LinkedWorktreeRepository {
+                    common_dir: PathBuf::from("/solo/.git"),
+                    label: "solo".to_owned(),
+                    group: None,
+                    worktrees: vec![linked("/solo", "main", true)],
+                    error: None,
+                },
+            ],
+            None,
+            HerdrOwnership::Disabled,
+        );
         manager.select_first();
 
         assert_eq!(
@@ -1161,7 +947,7 @@ mod tests {
             Some(WorktreeManagerEffect::Notice(_))
         ));
 
-        manager.repositories[0].worktrees[0].is_main = false;
+        manager.catalog.repositories[0].worktrees[0].is_main = false;
         assert!(matches!(
             manager.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
             Some(WorktreeManagerEffect::Notice(_))
@@ -1169,9 +955,8 @@ mod tests {
     }
 
     #[test]
-    fn routes_live_herdr_worktree_removal_after_confirmation() {
+    fn emits_semantic_removal_after_confirmation() {
         let mut manager = manager();
-        manager.herdr_worktrees = vec![(PathBuf::from("/repo-feature"), "workspace-2".to_owned())];
         manager.move_selection(1);
 
         assert_eq!(
@@ -1183,74 +968,9 @@ mod tests {
         assert!(manager.query.is_empty());
         assert_eq!(
             manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(WorktreeManagerEffect::RemoveHerdr {
-                workspace_id: "workspace-2".to_owned(),
-                path: PathBuf::from("/repo-feature"),
-            })
-        );
-    }
-
-    #[test]
-    fn persists_known_repository_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("known-repositories.json");
-        let mut manager = WorktreeManager::new(Some(path.clone()));
-        manager
-            .remember(Path::new("/metadata/repo.git"), Path::new("/checkout/repo"))
-            .unwrap();
-
-        let restored = WorktreeManager::new(Some(path));
-        assert_eq!(
-            restored.store.repositories,
-            [PathBuf::from("/metadata/repo.git")]
-        );
-        assert_eq!(
-            restored.store.recent[0].common_dir,
-            PathBuf::from("/metadata/repo.git")
-        );
-        assert_eq!(
-            restored.store.recent[0].root,
-            PathBuf::from("/checkout/repo")
-        );
-    }
-
-    #[test]
-    fn persists_the_ten_most_recent_repositories_in_recency_order() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("known-repositories.json");
-        let mut manager = WorktreeManager::new(Some(path.clone()));
-        for index in 0..12 {
-            manager
-                .remember(
-                    Path::new(&format!("/repo-{index}/.git")),
-                    Path::new(&format!("/repo-{index}")),
-                )
-                .unwrap();
-        }
-        manager
-            .remember(Path::new("/repo-5/.git"), Path::new("/repo-5-linked"))
-            .unwrap();
-
-        let restored = WorktreeManager::new(Some(path));
-        assert_eq!(restored.store.recent.len(), 10);
-        assert_eq!(
-            restored.store.recent[0].common_dir,
-            PathBuf::from("/repo-5/.git")
-        );
-        assert_eq!(
-            restored.store.recent[1].common_dir,
-            PathBuf::from("/repo-11/.git")
-        );
-        assert_eq!(
-            restored.store.recent[0].root,
-            PathBuf::from("/repo-5-linked")
-        );
-        assert!(
-            !restored
-                .store
-                .recent
-                .iter()
-                .any(|recent| recent.common_dir == Path::new("/repo-0/.git"))
+            Some(WorktreeManagerEffect::Remove(PathBuf::from(
+                "/repo-feature"
+            )))
         );
     }
 
@@ -1268,8 +988,11 @@ mod tests {
     #[test]
     fn waits_for_verified_herdr_inventory_before_removing() {
         let mut manager = manager();
-        manager.herdr_enabled = true;
-        manager.herdr_verified = false;
+        manager.catalog = LinkedWorktreeCatalogSnapshot::for_test(
+            manager.catalog.repositories.clone(),
+            Some(PathBuf::from("/repo")),
+            HerdrOwnership::Unverified,
+        );
         manager.move_selection(1);
 
         assert!(matches!(
@@ -1278,150 +1001,6 @@ mod tests {
                 if message.contains("Waiting for Herdr")
         ));
         assert!(!manager.remove_dialog_open());
-    }
-
-    #[test]
-    fn detects_new_candidate_paths_from_a_late_herdr_snapshot() {
-        let mut manager = manager();
-        let paths = vec![WorktreeCandidate {
-            path: PathBuf::from("/another-repository"),
-            group: None,
-        }];
-
-        assert!(manager.update_herdr_inventory(paths.clone(), Vec::new(), true));
-        assert!(!manager.update_herdr_inventory(paths, Vec::new(), true));
-    }
-
-    #[test]
-    fn orders_repositories_by_workspace_candidate_order() {
-        let directory = tempfile::tempdir().unwrap();
-        let alpha = directory.path().join("alpha");
-        let zulu = directory.path().join("zulu");
-        for repository in [&alpha, &zulu] {
-            fs::create_dir(repository).unwrap();
-            assert!(
-                Command::new("git")
-                    .args(["init", "--quiet"])
-                    .current_dir(repository)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-
-        let mut manager = WorktreeManager::new(None);
-        manager.candidates = vec![
-            WorktreeCandidate {
-                path: zulu,
-                group: Some("First".to_owned()),
-            },
-            WorktreeCandidate {
-                path: alpha,
-                group: Some("Second".to_owned()),
-            },
-        ];
-        manager.start_refresh();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while manager.loading && Instant::now() < deadline {
-            manager.poll();
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(!manager.loading);
-        assert_eq!(
-            manager
-                .repositories
-                .iter()
-                .map(|repository| repository.label.as_str())
-                .collect::<Vec<_>>(),
-            ["zulu", "alpha"]
-        );
-        assert_eq!(manager.repositories[0].group.as_deref(), Some("First"));
-        assert_eq!(manager.repositories[1].group.as_deref(), Some("Second"));
-    }
-
-    #[test]
-    fn prunes_stale_known_repositories_that_no_longer_resolve() {
-        let directory = tempfile::tempdir().unwrap();
-        let live = directory.path().join("live");
-        fs::create_dir(&live).unwrap();
-        assert!(
-            Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(&live)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let live_common = live.join(".git");
-        let stale_common = directory.path().join("renamed-away").join(".git");
-
-        let store_path = directory.path().join("known-repositories.json");
-        fs::write(
-            &store_path,
-            format!(
-                "{{\"version\":1,\"repositories\":[{{\"common_dir\":\"{}\"}},{{\"common_dir\":\"{}\"}}]}}",
-                stale_common.display(),
-                live_common.display()
-            ),
-        )
-        .unwrap();
-
-        let mut manager = WorktreeManager::new(Some(store_path.clone()));
-        manager.candidates = vec![WorktreeCandidate {
-            path: live,
-            group: None,
-        }];
-        manager.start_refresh();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while manager.loading && Instant::now() < deadline {
-            manager.poll();
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(!manager.loading);
-        assert_eq!(manager.repositories.len(), 1);
-        assert_eq!(manager.repositories[0].common_dir, live_common);
-        assert!(
-            !manager
-                .repositories
-                .iter()
-                .any(|repository| repository.common_dir == stale_common)
-        );
-        let restored = WorktreeManager::new(Some(store_path));
-        assert_eq!(restored.store.repositories, [live_common]);
-    }
-
-    #[test]
-    fn malformed_inventory_is_not_overwritten() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("known-repositories.json");
-        fs::write(&path, b"not json").unwrap();
-        let mut manager = WorktreeManager::new(Some(path.clone()));
-
-        assert!(
-            manager
-                .remember(Path::new("/repo/.git"), Path::new("/repo"))
-                .is_err()
-        );
-        assert!(manager.store.repositories.is_empty());
-        assert_eq!(fs::read(path).unwrap(), b"not json");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn persists_non_utf8_repository_identity_without_loss() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("known-repositories.json");
-        let common_dir = PathBuf::from(std::ffi::OsString::from_vec(b"/repo/\xff/.git".to_vec()));
-        let mut manager = WorktreeManager::new(Some(path.clone()));
-
-        let root = PathBuf::from(std::ffi::OsString::from_vec(b"/repo/\xff".to_vec()));
-        manager.remember(&common_dir, &root).unwrap();
-
-        let restored = WorktreeManager::new(Some(path));
-        assert_eq!(restored.store.repositories, [common_dir]);
-        assert_eq!(restored.store.recent[0].root, root);
     }
 
     #[test]

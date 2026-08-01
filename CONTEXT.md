@@ -22,6 +22,12 @@ The tracked and untracked changes shown in the left CHANGES pane. Staging action
 
 A Git checkout registered through `git worktree`. The Worktrees interaction lists linked worktrees from repositories Hunkle knows about and can open or safely remove them. This is distinct from the CHANGES-pane Worktree.
 
+Git inventory is authoritative for whether a linked worktree exists and for its checkout state. Herdr may own an existing linked worktree and therefore determine how Hunkle removes it, but Herdr observations do not create catalog entries. Known repositories are discovery memory rather than authoritative topology.
+
+## Linked worktree catalog
+
+The application-owned catalog that reconciles Git inventory, known repository discovery, Herdr ownership, and the active workspace. Interactions consume its snapshot and ask it to plan destructive removal; they do not independently reconstruct ownership or safety policy.
+
 ## Files
 
 The complete filesystem tree inside the workspace, including Git-ignored content but excluding Git's own metadata directory.

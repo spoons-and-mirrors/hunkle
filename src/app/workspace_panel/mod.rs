@@ -14,7 +14,8 @@ pub(super) use serde::{Deserialize, Serialize};
 pub(super) use serde_json::Value;
 
 pub(super) use super::{
-    TextInput, settings::AgentTimeDisplay, worktree_manager::WorktreeCandidate,
+    HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate, LinkedWorktreeObservation,
+    TextInput, settings::AgentTimeDisplay,
 };
 pub(super) use crate::filesystem::atomic_write;
 
@@ -413,7 +414,7 @@ impl WorkspacePanel {
         self.enabled
     }
 
-    pub(crate) fn worktree_candidates(&self) -> Vec<WorktreeCandidate> {
+    pub(crate) fn linked_worktree_observation(&self) -> LinkedWorktreeObservation {
         let mut candidates = Vec::new();
         for group_index in 0..self.groups.len() {
             let group = self.groups[group_index].name.clone();
@@ -424,7 +425,7 @@ impl WorkspacePanel {
                         self.workspaces[index]
                             .path
                             .clone()
-                            .map(|path| WorktreeCandidate {
+                            .map(|path| LinkedWorktreeCandidate {
                                 path,
                                 group: Some(group.clone()),
                             })
@@ -441,7 +442,7 @@ impl WorkspacePanel {
                         self.workspaces[index]
                             .path
                             .clone()
-                            .map(|path| WorktreeCandidate { path, group: None })
+                            .map(|path| LinkedWorktreeCandidate { path, group: None })
                     }),
             );
         }
@@ -455,33 +456,37 @@ impl WorkspacePanel {
                     workspace
                         .path
                         .clone()
-                        .map(|path| WorktreeCandidate { path, group: None })
+                        .map(|path| LinkedWorktreeCandidate { path, group: None })
                 }),
         );
-        candidates
-    }
-
-    pub(crate) fn linked_herdr_worktrees(&self) -> Vec<(PathBuf, String)> {
-        self.workspaces
-            .iter()
-            .filter(|workspace| workspace.linked_worktree)
-            .filter_map(|workspace| {
-                workspace
-                    .path
-                    .clone()
-                    .map(|path| (path, workspace.id.clone()))
-            })
-            .collect()
+        let ownership = if !self.enabled {
+            HerdrOwnership::Disabled
+        } else if !self.inventory_verified {
+            HerdrOwnership::Unverified
+        } else {
+            HerdrOwnership::Verified(
+                self.workspaces
+                    .iter()
+                    .filter(|workspace| workspace.linked_worktree)
+                    .filter_map(|workspace| {
+                        workspace.path.clone().map(|path| HerdrOwnedWorktree {
+                            path,
+                            workspace_id: workspace.id.clone(),
+                        })
+                    })
+                    .collect(),
+            )
+        };
+        LinkedWorktreeObservation {
+            candidates,
+            ownership,
+        }
     }
 
     pub(crate) fn refresh_worktree_inventory(&mut self) {
         if self.enabled && !self.loading {
             self.start_snapshot();
         }
-    }
-
-    pub(crate) fn worktree_inventory_verified(&self) -> bool {
-        self.inventory_verified
     }
 
     pub(crate) fn set_visible(&mut self, visible: bool) {

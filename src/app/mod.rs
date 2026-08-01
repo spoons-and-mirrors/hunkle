@@ -10,6 +10,7 @@ mod files;
 mod fuzzy;
 mod header_picker;
 mod herdr_prompt;
+mod linked_worktrees;
 mod mouse;
 mod repository_browser;
 mod settings;
@@ -33,6 +34,11 @@ pub(crate) use header_picker::{
     BranchPickerStep, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
 };
 pub(crate) use herdr_prompt::HerdrPrompt;
+pub(crate) use linked_worktrees::{
+    HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
+    LinkedWorktreeCatalogSnapshot, LinkedWorktreeObservation, LinkedWorktreeRemovalPlan,
+    LinkedWorktreeRepository,
+};
 pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, Issue, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserEffect,
@@ -46,8 +52,8 @@ pub(crate) use workspace_panel::{
     WorkspacePanelRow, WorkspaceRenameDialog, WorkspaceRenameTarget,
 };
 pub(crate) use worktree_manager::{
-    WorktreeCandidate, WorktreeCreateDialog, WorktreeCreateField, WorktreeManager,
-    WorktreeManagerEffect, WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
+    WorktreeCreateDialog, WorktreeCreateField, WorktreeManager, WorktreeManagerEffect,
+    WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
 };
 
 pub(super) use std::{
@@ -117,7 +123,7 @@ pub struct App {
     pub(crate) herdr_prompt: HerdrPrompt,
     pub(crate) repository_browser: RepositoryBrowser,
     pub(crate) header_picker: HeaderPicker,
-    pub(crate) header_worktree_name: Option<String>,
+    pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) worktree_manager: WorktreeManager,
     pub(crate) workspace_panel: WorkspacePanel,
     pub(crate) agents_visible: bool,
@@ -225,13 +231,17 @@ impl App {
         if let Some(repo) = session.data().filter(|repo| repo.github_remote) {
             repository_browser.prefetch(&repo.root);
         }
-        let mut worktree_manager = WorktreeManager::new(known_repositories_path);
+        let mut linked_worktrees = LinkedWorktreeCatalog::new(known_repositories_path);
         if let Some(repository) = session.data()
             && let Some(common_dir) = repository.common_dir.as_deref()
         {
-            let _ = worktree_manager.remember(common_dir, &repository.root);
+            let _ = linked_worktrees.remember_repository(common_dir, &repository.root);
         }
-        let header_worktree_name = session.data().and_then(current_worktree_name);
+        linked_worktrees.set_active_path(session.data().map(|repository| repository.root.clone()));
+        let workspace_panel =
+            WorkspacePanel::detect(workspace_groups_path, workspace_snapshots_path);
+        linked_worktrees.observe_herdr(workspace_panel.linked_worktree_observation());
+        linked_worktrees.refresh();
         let mut author_filter = AuthorFilter::default();
         if let Some(repo) = session.data() {
             author_filter.sync(&repo.root, &repo.commits);
@@ -266,12 +276,9 @@ impl App {
             herdr_prompt: HerdrPrompt::default(),
             repository_browser,
             header_picker: HeaderPicker::default(),
-            header_worktree_name,
-            worktree_manager,
-            workspace_panel: WorkspacePanel::detect(
-                workspace_groups_path,
-                workspace_snapshots_path,
-            ),
+            linked_worktrees,
+            worktree_manager: WorktreeManager::new(),
+            workspace_panel,
             agents_visible: true,
             hovered_hit_target: None,
             settings,
@@ -673,17 +680,20 @@ impl App {
                 self.queue_workspace_restore(path);
                 changed = true;
             }
-            if self.mode == Mode::Explorer && self.explorer_tab == ExplorerTab::Worktrees {
-                let candidates_changed = self.worktree_manager.update_herdr_inventory(
-                    self.workspace_panel.worktree_candidates(),
-                    self.workspace_panel.linked_herdr_worktrees(),
-                    self.workspace_panel.worktree_inventory_verified(),
-                );
-                if candidates_changed {
-                    self.worktree_manager.start_refresh();
-                }
-            }
         }
+        if self
+            .linked_worktrees
+            .observe_herdr(self.workspace_panel.linked_worktree_observation())
+        {
+            self.linked_worktrees.refresh();
+        }
+        let catalog_poll = self.linked_worktrees.poll();
+        changed |= catalog_poll.changed;
+        if let Some(notice) = catalog_poll.notice {
+            self.notice = Some(notice);
+        }
+        self.worktree_manager
+            .replace_catalog(self.linked_worktrees.snapshot());
         changed |= self.repository_browser.poll();
         let worktree_poll = self.worktree_manager.poll();
         changed |= worktree_poll.changed;
@@ -693,6 +703,9 @@ impl App {
         if let Some(path) = worktree_poll.open_path {
             self.mode = Mode::Normal;
             self.queue_workspace_restore(path);
+        }
+        if worktree_poll.refresh_catalog {
+            self.linked_worktrees.refresh();
         }
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
@@ -937,7 +950,19 @@ impl App {
             let prepared_file_tree = done.prepared_file_tree;
             match (done.kind, done.result) {
                 (LoadKind::Open, Ok(())) => {
-                    self.header_worktree_name = self.session.data().and_then(current_worktree_name);
+                    self.linked_worktrees.set_active_path(
+                        self.session
+                            .data()
+                            .map(|repository| repository.root.clone()),
+                    );
+                    let remember_error = self.session.data().and_then(|repository| {
+                        repository.common_dir.as_deref().and_then(|common_dir| {
+                            self.linked_worktrees
+                                .remember_repository(common_dir, &repository.root)
+                                .err()
+                        })
+                    });
+                    self.linked_worktrees.refresh();
                     let _activity =
                         diagnostics::activity("apply-workspace", self.diagnostic_context());
                     diagnostics::event(format!("workspace opened {}", self.diagnostic_context()));
@@ -979,13 +1004,6 @@ impl App {
                             .then_some(0),
                     );
                     self.restore_commit_draft();
-                    let remember_error = self.session.data().and_then(|repository| {
-                        repository.common_dir.as_deref().and_then(|common_dir| {
-                            self.worktree_manager
-                                .remember(common_dir, &repository.root)
-                                .err()
-                        })
-                    });
                     self.reload(RefreshScope::ALL);
                     self.notice = remember_error.or_else(|| {
                         Some(
@@ -2015,22 +2033,6 @@ fn first_error(stderr: &str, fallback: &str) -> String {
         .find(|line| !line.trim().is_empty())
         .unwrap_or(fallback)
         .to_owned()
-}
-
-fn current_worktree_name(repository: &RepositoryData) -> Option<String> {
-    let common_dir = repository.common_dir.as_deref()?;
-    let worktree = git::list_worktrees(common_dir)
-        .ok()?
-        .into_iter()
-        .find(|worktree| same_path(&worktree.path, &repository.root))?;
-    if worktree.is_main {
-        return None;
-    }
-    worktree
-        .path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_owned)
 }
 
 fn is_markdown_path(path: &RepoPath) -> bool {

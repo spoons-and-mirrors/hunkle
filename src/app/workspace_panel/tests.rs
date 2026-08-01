@@ -70,11 +70,17 @@ fn snapshots_continue_while_the_panel_is_hidden() {
 #[test]
 fn keeps_worktree_inventory_verified_during_routine_refresh() {
     let mut panel = WorkspacePanel::ready_for_test(&snapshot());
-    assert!(panel.worktree_inventory_verified());
+    assert!(matches!(
+        panel.linked_worktree_observation().ownership,
+        HerdrOwnership::Verified(_)
+    ));
 
     panel.loading = true;
 
-    assert!(panel.worktree_inventory_verified());
+    assert!(matches!(
+        panel.linked_worktree_observation().ownership,
+        HerdrOwnership::Verified(_)
+    ));
 }
 
 fn agent(name: &str, status: AgentStatus) -> HerdrAgent {
@@ -1075,13 +1081,13 @@ fn sorts_grouped_workspaces_by_label_and_reorders_after_rename() {
         ]
     );
     assert_eq!(
-        panel.worktree_candidates(),
+        panel.linked_worktree_observation().candidates,
         [
-            WorktreeCandidate {
+            LinkedWorktreeCandidate {
                 path: PathBuf::from("/work/alpha"),
                 group: Some("Projects".to_owned()),
             },
-            WorktreeCandidate {
+            LinkedWorktreeCandidate {
                 path: PathBuf::from("/work/zulu"),
                 group: Some("Projects".to_owned()),
             }

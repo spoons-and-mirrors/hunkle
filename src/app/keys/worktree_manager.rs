@@ -6,30 +6,15 @@ impl App {
             return;
         }
         self.workspace_panel.refresh_worktree_inventory();
-        let current_path = self.repository().map(|repository| repository.root.clone());
-        let mut candidates = self.workspace_panel.worktree_candidates();
-        if let Some(path) = current_path.as_ref()
-            && !candidates
-                .iter()
-                .any(|candidate| same_path(&candidate.path, path))
+        if self
+            .linked_worktrees
+            .observe_herdr(self.workspace_panel.linked_worktree_observation())
         {
-            candidates.push(WorktreeCandidate {
-                path: path.clone(),
-                group: None,
-            });
+            self.linked_worktrees.refresh();
         }
-        let warning = self.worktree_manager.open(
-            candidates,
-            self.workspace_panel.linked_herdr_worktrees(),
-            current_path,
-            self.workspace_panel.is_enabled(),
-            self.workspace_panel.worktree_inventory_verified(),
-        );
+        self.worktree_manager.open(self.linked_worktrees.snapshot());
         self.explorer_tab = ExplorerTab::Worktrees;
         self.mode = Mode::Explorer;
-        if let Some(warning) = warning {
-            self.notice = Some(warning);
-        }
     }
 
     pub(crate) fn handle_worktree_manager(&mut self, key: KeyEvent) {
@@ -81,12 +66,7 @@ impl App {
             }
             WorktreeManagerEffect::Refresh => {
                 self.workspace_panel.refresh_worktree_inventory();
-                let _ = self.worktree_manager.update_herdr_inventory(
-                    self.workspace_panel.worktree_candidates(),
-                    self.workspace_panel.linked_herdr_worktrees(),
-                    self.workspace_panel.worktree_inventory_verified(),
-                );
-                self.worktree_manager.start_refresh();
+                self.linked_worktrees.refresh();
             }
             WorktreeManagerEffect::CreateHerdr {
                 cwd,
@@ -110,7 +90,7 @@ impl App {
                 }
                 self.notice = Some(format!("Creating worktree {}...", path.display()));
             }
-            WorktreeManagerEffect::RemoveNative { common_dir, path } => {
+            WorktreeManagerEffect::Remove(path) => {
                 if self
                     .repository()
                     .is_some_and(|repository| same_path(&repository.root, &path))
@@ -123,26 +103,19 @@ impl App {
                     );
                     return;
                 }
-                if !self.worktree_manager.start_remove(common_dir, path) {
-                    self.notice = Some("A worktree removal is already running".to_owned());
+                match self.linked_worktrees.removal_plan(&path) {
+                    Ok(LinkedWorktreeRemovalPlan::Native { common_dir, path }) => {
+                        if !self.worktree_manager.start_remove(common_dir, path) {
+                            self.notice = Some("A worktree removal is already running".to_owned());
+                        }
+                    }
+                    Ok(LinkedWorktreeRemovalPlan::Herdr { workspace_id, path }) => {
+                        self.workspace_panel.delete_worktree(&workspace_id, None);
+                        self.notice = Some(format!("Removing worktree {}…", path.display()));
+                        self.mode = Mode::Normal;
+                    }
+                    Err(reason) => self.notice = Some(reason),
                 }
-            }
-            WorktreeManagerEffect::RemoveHerdr { workspace_id, path } => {
-                if self
-                    .repository()
-                    .is_some_and(|repository| same_path(&repository.root, &path))
-                    || self.session.open_running()
-                    || self.worktree_removal_running()
-                {
-                    self.notice = Some(
-                        "Cannot remove a worktree while it is active or another workspace operation is running"
-                            .to_owned(),
-                    );
-                    return;
-                }
-                self.workspace_panel.delete_worktree(&workspace_id, None);
-                self.notice = Some(format!("Removing worktree {}…", path.display()));
-                self.mode = Mode::Normal;
             }
             WorktreeManagerEffect::Notice(notice) => self.notice = Some(notice),
         }

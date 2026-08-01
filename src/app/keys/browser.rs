@@ -101,7 +101,7 @@ impl App {
             })
             .unwrap_or_default();
         let items = self
-            .worktree_manager
+            .linked_worktrees
             .recent_repositories()
             .map(|(common_dir, root)| HeaderPickerItem::Repository {
                 path: root.to_owned(),
@@ -152,11 +152,13 @@ impl App {
             return;
         };
         let current = repository.root.clone();
-        match git::list_worktrees(common_dir) {
-            Ok(worktrees) => {
-                let worktrees = worktrees
-                    .into_iter()
+        match self.linked_worktrees.repository(common_dir) {
+            Some(repository) if repository.error.is_none() => {
+                let worktrees = repository
+                    .worktrees
+                    .iter()
                     .filter(|worktree| !worktree.is_bare)
+                    .cloned()
                     .collect::<Vec<_>>();
                 let selected = worktrees
                     .iter()
@@ -171,9 +173,13 @@ impl App {
                     selected,
                 );
             }
-            Err(error) => self.header_picker.open_message(
+            Some(repository) => self.header_picker.open_message(
                 HeaderPickerKind::Worktrees,
-                format!("Could not list worktrees: {error}"),
+                repository.error.clone().unwrap_or_default(),
+            ),
+            None => self.header_picker.open_message(
+                HeaderPickerKind::Worktrees,
+                "Worktrees are still loading".to_owned(),
             ),
         }
     }

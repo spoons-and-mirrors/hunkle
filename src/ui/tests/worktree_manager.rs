@@ -22,7 +22,7 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
     app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
     assert_eq!(app.mode, Mode::Explorer);
     assert_eq!(app.explorer_tab, ExplorerTab::Worktrees);
-    wait_for(&mut app, |app| !app.worktree_manager.loading);
+    wait_for(&mut app, |app| !app.worktree_manager.loading());
 
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -65,7 +65,9 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
             WorktreeManagerRow::Worktree {
                 repository,
                 worktree,
-            } => app.worktree_manager.repositories[*repository].worktrees[*worktree].path == linked,
+            } => {
+                app.worktree_manager.repositories()[*repository].worktrees[*worktree].path == linked
+            }
             _ => false,
         })
         .unwrap();
@@ -106,7 +108,7 @@ fn worktree_manager_renders_and_uses_semantic_rows() {
             WorktreeManagerRow::Worktree {
                 repository,
                 worktree,
-            } => app.worktree_manager.repositories[*repository].worktrees[*worktree].path == root,
+            } => app.worktree_manager.repositories()[*repository].worktrees[*worktree].path == root,
             _ => false,
         })
         .unwrap();
@@ -206,17 +208,8 @@ fn worktree_manager_separates_groups_with_a_top_margin() {
     let _ = app.workspace_panel.finish_workspace_drag();
     app.workspace_panel.loading = true;
 
-    let candidates = app.workspace_panel.worktree_candidates();
-    let _ = app.worktree_manager.open(
-        candidates,
-        app.workspace_panel.linked_herdr_worktrees(),
-        Some(alpha.clone()),
-        app.workspace_panel.is_enabled(),
-        app.workspace_panel.worktree_inventory_verified(),
-    );
-    app.mode = Mode::Explorer;
-    app.explorer_tab = ExplorerTab::Worktrees;
-    wait_for(&mut app, |app| !app.worktree_manager.loading);
+    app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
+    wait_for(&mut app, |app| !app.worktree_manager.loading());
     let rows = app.worktree_manager.rows();
     assert_eq!(
         rows,
@@ -312,23 +305,15 @@ fn worktree_manager_groups_repositories_into_aligned_columns() {
     }
     app.workspace_panel.loading = true;
 
-    let candidates = app.workspace_panel.worktree_candidates();
+    let candidates = app.workspace_panel.linked_worktree_observation().candidates;
     assert_eq!(candidates.len(), 2);
     assert!(
         candidates
             .iter()
             .all(|candidate| candidate.group.as_deref() == Some("Projects"))
     );
-    let _ = app.worktree_manager.open(
-        candidates,
-        app.workspace_panel.linked_herdr_worktrees(),
-        Some(alpha.clone()),
-        app.workspace_panel.is_enabled(),
-        app.workspace_panel.worktree_inventory_verified(),
-    );
-    app.mode = Mode::Explorer;
-    app.explorer_tab = ExplorerTab::Worktrees;
-    wait_for(&mut app, |app| !app.worktree_manager.loading);
+    app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
+    wait_for(&mut app, |app| !app.worktree_manager.loading());
     let rows = app.worktree_manager.rows();
     assert_eq!(
         rows,

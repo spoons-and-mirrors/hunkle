@@ -344,7 +344,10 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert_eq!(created_head, base_head);
 
     drop(app);
-    let mut linked_app = App::new(linked);
+    let mut linked_app = App::new(linked.clone());
+    wait_for(&mut linked_app, |app| {
+        app.linked_worktrees.worktree_name(&linked).is_some()
+    });
     terminal.draw(|frame| draw(frame, &mut linked_app)).unwrap();
     let linked_card = linked_app
         .regions
