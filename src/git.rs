@@ -797,6 +797,11 @@ fn load_worktree(root: &Path) -> Result<WorktreeData> {
     })
 }
 
+pub(crate) fn load_change_line_counts(root: &Path) -> Result<(u64, u64)> {
+    let worktree = load_worktree(root)?;
+    Ok(change_line_counts(&worktree.changes))
+}
+
 fn load_git_inventory(root: &Path) -> Result<InventoryData> {
     let (files, directories, truncated) = inventory::git_entries(root)?;
     Ok(InventoryData {
@@ -992,6 +997,17 @@ fn change_counts(changes: &[Change]) -> (usize, usize) {
             (staged, unstaged + 1)
         }
     })
+}
+
+pub(crate) fn change_line_counts(changes: &[Change]) -> (u64, u64) {
+    changes
+        .iter()
+        .fold((0, 0), |(additions, deletions), change| {
+            (
+                additions.saturating_add(change.additions),
+                deletions.saturating_add(change.deletions),
+            )
+        })
 }
 
 pub fn file_content(root: &Path, relative_path: &RepoPath) -> Result<String> {
@@ -1946,6 +1962,30 @@ fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sums_change_line_counts() {
+        let changes = [
+            Change {
+                path: RepoPath::from("staged.txt"),
+                original_path: None,
+                code: 'M',
+                staged: true,
+                additions: 4,
+                deletions: 2,
+            },
+            Change {
+                path: RepoPath::from("unstaged.txt"),
+                original_path: None,
+                code: 'M',
+                staged: false,
+                additions: 3,
+                deletions: 5,
+            },
+        ];
+
+        assert_eq!(change_line_counts(&changes), (7, 7));
+    }
 
     #[test]
     fn parses_main_worktree_with_spaces() {

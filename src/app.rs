@@ -1009,6 +1009,7 @@ impl App {
         changed |= self.header_picker.branch_name.poll_blink(naming_branch);
         let filtering_header_picker = self.header_picker.filtering();
         changed |= self.header_picker.query.poll_blink(filtering_header_picker);
+        changed |= self.header_picker.poll_repository_stats();
         if let Some(done) = self
             .commit_draft_rx
             .as_ref()
@@ -2829,18 +2830,35 @@ impl App {
     }
 
     fn open_header_repositories(&mut self) {
-        let current = self
+        let (current_common_dir, current_stats) = self
             .git_repository()
-            .and_then(|repository| repository.common_dir.as_deref());
+            .map(|repository| {
+                (
+                    repository.common_dir.clone(),
+                    repository
+                        .details_ready
+                        .then(|| git::change_line_counts(&repository.changes)),
+                )
+            })
+            .unwrap_or_default();
         let items = self
             .worktree_manager
             .recent_repositories()
             .map(|(common_dir, root)| HeaderPickerItem::Repository {
                 path: root.to_owned(),
                 common_dir: common_dir.to_owned(),
+                stats: if current_common_dir
+                    .as_deref()
+                    .is_some_and(|current| same_path(current, common_dir))
+                {
+                    current_stats
+                } else {
+                    None
+                },
             })
             .collect::<Vec<_>>();
-        let selected = current
+        let selected = current_common_dir
+            .as_deref()
             .and_then(|current| {
                 items.iter().position(|item| {
                     matches!(item, HeaderPickerItem::Repository { common_dir, .. } if same_path(common_dir, current))
@@ -2855,6 +2873,7 @@ impl App {
         } else {
             self.header_picker
                 .open(HeaderPickerKind::Repositories, items, selected);
+            self.header_picker.start_repository_stats();
         }
     }
 
@@ -3129,7 +3148,9 @@ impl App {
         self.header_picker.close();
         match item {
             HeaderPickerItem::BranchBase(_) => unreachable!(),
-            HeaderPickerItem::Repository { common_dir, path } => {
+            HeaderPickerItem::Repository {
+                common_dir, path, ..
+            } => {
                 if self
                     .git_repository()
                     .and_then(|repository| repository.common_dir.as_deref())

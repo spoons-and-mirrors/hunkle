@@ -1143,8 +1143,12 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         .skip(start)
         .take(row_count)
         .map(|(index, item)| {
-            let (label, detail, current, minimum_label_width) = match item {
-                HeaderPickerItem::Repository { common_dir, path } => (
+            let (label, detail, current, minimum_label_width, stats) = match item {
+                HeaderPickerItem::Repository {
+                    common_dir,
+                    path,
+                    stats,
+                } => (
                     path.file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or("repository")
@@ -1152,6 +1156,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     path.display().to_string(),
                     current_common_dir.is_some_and(|current| current == common_dir),
                     Some(12),
+                    *stats,
                 ),
                 HeaderPickerItem::Worktree(worktree) => (
                     if worktree.is_main {
@@ -1172,6 +1177,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                         .to_owned(),
                     current_root.is_some_and(|current| current == worktree.path),
                     None,
+                    None,
                 ),
                 HeaderPickerItem::Branch(branch) => (
                     branch.name.clone(),
@@ -1185,6 +1191,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     .to_owned(),
                     branch.current,
                     Some(4),
+                    None,
                 ),
                 HeaderPickerItem::BranchBase(branch) => (
                     branch.name.clone(),
@@ -1198,18 +1205,20 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     .to_owned(),
                     branch.current,
                     Some(4),
+                    None,
                 ),
                 HeaderPickerItem::DiffTarget(branch) => (
                     branch.name.clone(),
                     if branch.remote { "remote" } else { "local" }.to_owned(),
                     branch.default,
                     Some(4),
+                    None,
                 ),
             };
-            (index, label, detail, current, minimum_label_width)
+            (index, label, detail, current, minimum_label_width, stats)
         })
         .collect::<Vec<_>>();
-    for (row, (index, label, detail, current, minimum_label_width)) in
+    for (row, (index, label, detail, current, minimum_label_width, stats)) in
         rows.into_iter().enumerate()
     {
         let rect = Rect::new(
@@ -1249,19 +1258,14 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                 1,
             );
             frame.render_widget(
-                Paragraph::new(truncate_width(
-                    &format!(" {marker} {label}"),
+                Paragraph::new(header_picker_label_line(
+                    marker,
+                    &label,
+                    current,
+                    stats,
                     usize::from(label_rect.width),
                 ))
-                .style(
-                    Style::default()
-                        .fg(if current {
-                            palette().accent
-                        } else {
-                            palette().ink
-                        })
-                        .bg(background),
-                ),
+                .style(Style::default().bg(background)),
                 label_rect,
             );
             frame.render_widget(
@@ -1269,8 +1273,8 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     &detail,
                     usize::from(detail_rect.width),
                 ))
-                    .alignment(Alignment::Right)
-                    .style(Style::default().fg(palette().muted).bg(background)),
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(palette().muted).bg(background)),
                 detail_rect,
             );
         } else {
@@ -1294,6 +1298,40 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         app.regions
             .register_hit_target(HitTarget::HeaderPickerItem(index), rect);
     }
+}
+
+fn header_picker_label_line(
+    marker: &str,
+    label: &str,
+    current: bool,
+    stats: Option<(u64, u64)>,
+    width: usize,
+) -> Line<'static> {
+    let label_style = Style::default().fg(if current {
+        palette().accent
+    } else {
+        palette().ink
+    });
+    let prefix = format!(" {marker} ");
+    let stats_text =
+        stats.map(|(additions, deletions)| (format!("+{additions}"), format!("-{deletions}")));
+    let stats_width = stats_text.as_ref().map_or(0, |(additions, deletions)| {
+        UnicodeWidthStr::width(format!("  {additions} {deletions}").as_str())
+    });
+    let label_width = width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()) + stats_width);
+    let mut spans = vec![
+        Span::styled(prefix, label_style),
+        Span::styled(truncate_width(label, label_width), label_style),
+    ];
+    if let Some((additions, deletions)) = stats_text {
+        spans.extend([
+            Span::raw("  "),
+            Span::styled(additions, Style::default().fg(palette().green)),
+            Span::raw(" "),
+            Span::styled(deletions, Style::default().fg(palette().red)),
+        ]);
+    }
+    Line::from(spans)
 }
 
 fn draw_header_picker_search(frame: &mut Frame<'_>, app: &App, area: Rect, action_width: u16) {

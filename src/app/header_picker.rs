@@ -1,8 +1,12 @@
-use crate::git::{Branch, LinkedWorktree};
+use crate::git::{self, Branch, LinkedWorktree};
 
 use super::TextInput;
 
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeaderPickerKind {
@@ -14,11 +18,21 @@ pub(crate) enum HeaderPickerKind {
 
 #[derive(Debug, Clone)]
 pub(crate) enum HeaderPickerItem {
-    Repository { common_dir: PathBuf, path: PathBuf },
+    Repository {
+        common_dir: PathBuf,
+        path: PathBuf,
+        stats: Option<(u64, u64)>,
+    },
     Worktree(LinkedWorktree),
     Branch(Branch),
     BranchBase(Branch),
     DiffTarget(Branch),
+}
+
+#[derive(Debug)]
+struct RepositoryStatsCompletion {
+    common_dir: PathBuf,
+    stats: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +55,7 @@ pub(crate) struct HeaderPicker {
     pub(crate) branch_step: BranchPickerStep,
     pub(crate) branch_base: Option<Branch>,
     pub(crate) branch_name: TextInput,
+    repository_stats_rx: Option<Receiver<RepositoryStatsCompletion>>,
 }
 
 impl Default for BranchPickerStep {
@@ -56,6 +71,7 @@ impl HeaderPicker {
         items: Vec<HeaderPickerItem>,
         selected: usize,
     ) {
+        self.repository_stats_rx = None;
         self.kind = Some(kind);
         self.default_selected = selected.min(items.len().saturating_sub(1));
         self.searchable = true;
@@ -71,6 +87,7 @@ impl HeaderPicker {
     }
 
     pub(crate) fn open_message(&mut self, kind: HeaderPickerKind, message: String) {
+        self.repository_stats_rx = None;
         self.kind = Some(kind);
         self.items.clear();
         self.all_items.clear();
@@ -86,6 +103,7 @@ impl HeaderPicker {
     }
 
     pub(crate) fn open_branch_bases(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
+        self.repository_stats_rx = None;
         self.kind = Some(HeaderPickerKind::Branches);
         self.default_selected = selected.min(items.len().saturating_sub(1));
         self.searchable = true;
@@ -101,6 +119,7 @@ impl HeaderPicker {
     }
 
     pub(crate) fn open_branch_name(&mut self, base: Branch) {
+        self.repository_stats_rx = None;
         self.kind = Some(HeaderPickerKind::Branches);
         self.selected = 0;
         self.items.clear();
@@ -116,6 +135,7 @@ impl HeaderPicker {
     }
 
     pub(crate) fn close(&mut self) {
+        self.repository_stats_rx = None;
         self.kind = None;
         self.items.clear();
         self.all_items.clear();
@@ -127,6 +147,97 @@ impl HeaderPicker {
         self.branch_step = BranchPickerStep::Branches;
         self.branch_base = None;
         self.branch_name.clear();
+    }
+
+    pub(crate) fn start_repository_stats(&mut self) {
+        self.repository_stats_rx = None;
+        if self.kind != Some(HeaderPickerKind::Repositories) {
+            return;
+        }
+        let repositories = self
+            .all_items
+            .iter()
+            .filter_map(|item| match item {
+                HeaderPickerItem::Repository {
+                    common_dir, path, ..
+                } => Some((common_dir.clone(), path.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if repositories.is_empty() {
+            return;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        self.repository_stats_rx = Some(receiver);
+        let _ = thread::Builder::new()
+            .name("repository-picker-stats".to_owned())
+            .spawn(move || {
+                for (common_dir, path) in repositories {
+                    let stats = git::load_change_line_counts(&path).ok();
+                    if sender
+                        .send(RepositoryStatsCompletion { common_dir, stats })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+    }
+
+    pub(crate) fn poll_repository_stats(&mut self) -> bool {
+        let Some(receiver) = self.repository_stats_rx.as_ref() else {
+            return false;
+        };
+        let mut completions = Vec::new();
+        let mut disconnected = false;
+        loop {
+            match receiver.try_recv() {
+                Ok(completion) => completions.push(completion),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        let mut changed = false;
+        for completion in completions {
+            let Some(stats) = completion.stats else {
+                continue;
+            };
+            changed |=
+                Self::update_repository_stats(&mut self.all_items, &completion.common_dir, stats);
+            changed |=
+                Self::update_repository_stats(&mut self.items, &completion.common_dir, stats);
+        }
+        if disconnected {
+            self.repository_stats_rx = None;
+        }
+        changed
+    }
+
+    fn update_repository_stats(
+        items: &mut [HeaderPickerItem],
+        common_dir: &Path,
+        stats: (u64, u64),
+    ) -> bool {
+        let mut changed = false;
+        for item in items {
+            if let HeaderPickerItem::Repository {
+                common_dir: item_common_dir,
+                stats: item_stats,
+                ..
+            } = item
+                && item_common_dir == common_dir
+                && *item_stats != Some(stats)
+            {
+                *item_stats = Some(stats);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub(crate) fn is_open(&self) -> bool {
