@@ -5,7 +5,7 @@ pub(super) use ratatui::{
     text::{Line, Span},
     widgets::{Clear, List, ListItem, Paragraph, Wrap},
 };
-pub(super) use unicode_segmentation::UnicodeSegmentation;
+
 pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::{git::Branch, repo_path::RepoPath};
