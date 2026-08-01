@@ -13,7 +13,7 @@ use crate::{
         App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, ShortcutAction,
         TextInput, View, WorkspacePanelHitTarget,
     },
-    git::{Change, DiffSummary},
+    git::{Change, Commit, DiffSummary},
     repo_path::{RepoPath, display_os_str},
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
@@ -397,7 +397,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         .or(section_summary.as_ref());
     let summary_unavailable =
         selected_commit.is_some_and(|commit| app.commit_summaries.failed(&commit.oid));
-    let scrolled_commit_message = selected_commit.map(|commit| commit.message.clone());
+    let scrolled_commit = selected_commit.cloned();
+    let scrolled_commit_message = scrolled_commit
+        .as_ref()
+        .map(|commit| commit.message.clone());
     let scrolled_summary = summary.cloned();
     let maximum_summary_height = columns[1]
         .height
@@ -411,7 +414,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     let metadata_height = if message_height > 0 || summary_height > 0 {
         message_height
             .saturating_add(summary_height)
-            .saturating_add(1)
+            .saturating_add(if inspecting_commit { 2 } else { 1 })
     } else {
         0
     };
@@ -426,20 +429,31 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
     } else {
         metadata_height.saturating_add(metadata_bottom_margin)
     };
-    let diff_body = Rect::new(
-        diff_header.x,
-        diff_header
-            .y
-            .saturating_add(2)
-            .saturating_add(fixed_metadata_height),
-        diff_header.width,
-        columns[1].bottom().saturating_sub(
+    let diff_body = if inspecting_commit {
+        Rect::new(
+            diff_header.x,
+            columns[1].y.saturating_add(1),
+            diff_header.width,
+            columns[1]
+                .bottom()
+                .saturating_sub(columns[1].y.saturating_add(1)),
+        )
+    } else {
+        Rect::new(
+            diff_header.x,
             diff_header
                 .y
-                .saturating_add(3)
+                .saturating_add(2)
                 .saturating_add(fixed_metadata_height),
-        ),
-    );
+            diff_header.width,
+            columns[1].bottom().saturating_sub(
+                diff_header
+                    .y
+                    .saturating_add(3)
+                    .saturating_add(fixed_metadata_height),
+            ),
+        )
+    };
     let wrap_label = if app.changes.diff_wrap {
         format!(
             "  {}:on",
@@ -457,44 +471,45 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
             8 + UnicodeWidthStr::width(state) + UnicodeWidthStr::width(wrap_label.as_str()),
         ),
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                if branch_comparison.is_some() {
-                    "DIFF"
-                } else {
-                    "DIFF  "
-                },
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                display_path,
-                Style::default()
-                    .fg(palette().ink)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {state}"),
-                Style::default().fg(match state {
-                    "staged" => palette().green,
-                    "commit" => palette().accent,
-                    "branch" => palette().purple,
-                    _ => palette().yellow,
-                }),
-            ),
-            Span::styled(
-                wrap_label,
-                Style::default().fg(if app.changes.diff_wrap {
-                    palette().accent
-                } else {
-                    palette().faint
-                }),
-            ),
-        ])),
-        diff_header,
-    );
+    if !inspecting_commit {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    if branch_comparison.is_some() {
+                        "DIFF"
+                    } else {
+                        "DIFF  "
+                    },
+                    Style::default()
+                        .fg(palette().muted)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    display_path,
+                    Style::default()
+                        .fg(palette().ink)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {state}"),
+                    Style::default().fg(match state {
+                        "staged" => palette().green,
+                        "branch" => palette().purple,
+                        _ => palette().yellow,
+                    }),
+                ),
+                Span::styled(
+                    wrap_label,
+                    Style::default().fg(if app.changes.diff_wrap {
+                        palette().accent
+                    } else {
+                        palette().faint
+                    }),
+                ),
+            ])),
+            diff_header,
+        );
+    }
     if !inspecting_commit {
         draw_metadata_card(
             frame,
@@ -580,6 +595,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
             app.changes.diff_scroll,
             CommitMetadata {
                 height: metadata_height,
+                commit: scrolled_commit
+                    .as_ref()
+                    .expect("commit metadata requires a selected commit"),
                 message,
                 message_height,
                 summary: scrolled_summary.as_ref(),
@@ -1402,6 +1420,7 @@ fn draw_metadata_card(
 
 struct CommitMetadata<'a> {
     height: u16,
+    commit: &'a Commit,
     message: &'a str,
     message_height: u16,
     summary: Option<&'a DiffSummary>,
@@ -1425,6 +1444,18 @@ fn draw_scrolled_metadata_card(
 
     let content_x = card.x.saturating_add(1);
     let content_width = card.width.saturating_sub(2);
+    draw_scrolled_text(
+        frame,
+        card,
+        Rect::new(content_x, 1, content_width, 1),
+        scroll,
+        Text::from(commit_metadata_line(
+            metadata.commit,
+            metadata.summary,
+            metadata.summary_unavailable,
+        )),
+        false,
+    );
     let mut message_lines = vec![Line::styled(
         "MESSAGE",
         Style::default()
@@ -1437,7 +1468,7 @@ fn draw_scrolled_metadata_card(
         card,
         Rect::new(
             content_x,
-            1,
+            3,
             content_width,
             metadata.message_height.saturating_sub(1),
         ),
@@ -1450,9 +1481,9 @@ fn draw_scrolled_metadata_card(
         card,
         Rect::new(
             content_x,
-            metadata.message_height.saturating_add(1),
+            metadata.message_height.saturating_add(3),
             content_width,
-            metadata.summary_height.saturating_sub(1),
+            metadata.summary_height.saturating_sub(2),
         ),
         scroll,
         diff_summary_text(
@@ -1460,10 +1491,71 @@ fn draw_scrolled_metadata_card(
             metadata.summary_unavailable,
             true,
             content_width,
-            metadata.summary_height.saturating_sub(1),
+            metadata.summary_height.saturating_sub(2),
+            false,
         ),
         false,
     );
+}
+
+fn commit_metadata_line(
+    commit: &Commit,
+    summary: Option<&DiffSummary>,
+    summary_unavailable: bool,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(
+            "COMMIT  ",
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            commit.oid.chars().take(7).collect::<String>(),
+            Style::default()
+                .fg(palette().ink)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {}  {}", commit.author, commit.date),
+            Style::default().fg(palette().soft),
+        ),
+    ];
+    if let Some(summary) = summary {
+        spans.extend([
+            Span::styled(
+                format!("  +{}", summary.additions),
+                Style::default().fg(palette().green),
+            ),
+            Span::styled(
+                format!("  -{}", summary.deletions),
+                Style::default().fg(palette().red),
+            ),
+            Span::styled(
+                format!(
+                    "  {}{} {}",
+                    summary.files.len(),
+                    if summary.files_truncated { "+" } else { "" },
+                    if summary.files.len() == 1 {
+                        "file"
+                    } else {
+                        "files"
+                    }
+                ),
+                Style::default().fg(palette().faint),
+            ),
+        ]);
+    } else {
+        spans.push(Span::styled(
+            if summary_unavailable {
+                "  summary unavailable"
+            } else {
+                "  summary loading…"
+            },
+            Style::default().fg(palette().faint),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn draw_scrolled_text(
@@ -1509,6 +1601,7 @@ fn draw_diff_summary(
             wrapped,
             area.width,
             area.height,
+            true,
         )),
         area,
     );
@@ -1520,6 +1613,7 @@ fn diff_summary_text(
     wrapped: bool,
     width: u16,
     height: u16,
+    include_changes: bool,
 ) -> Text<'static> {
     let Some(summary) = summary else {
         let state = if unavailable {
@@ -1527,8 +1621,9 @@ fn diff_summary_text(
         } else {
             "loading…"
         };
-        return Text::from(vec![
-            Line::from(vec![
+        let mut lines = Vec::new();
+        if include_changes {
+            lines.push(Line::from(vec![
                 Span::styled(
                     "CHANGES  ",
                     Style::default()
@@ -1536,12 +1631,13 @@ fn diff_summary_text(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(state, Style::default().fg(palette().faint)),
-            ]),
-            Line::styled(
-                format!("FILES  {state}"),
-                Style::default().fg(palette().faint),
-            ),
-        ]);
+            ]));
+        }
+        lines.push(Line::styled(
+            format!("FILES  {state}"),
+            Style::default().fg(palette().faint),
+        ));
+        return Text::from(lines);
     };
 
     let file_count = summary.files.len();
@@ -1550,37 +1646,40 @@ fn diff_summary_text(
         file_count,
         if summary.files_truncated { "+" } else { "" }
     );
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "CHANGES  ",
-            Style::default()
-                .fg(palette().muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("+{}", summary.additions),
-            Style::default().fg(palette().green),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("-{}", summary.deletions),
-            Style::default().fg(palette().red),
-        ),
-        Span::styled(
-            format!(
-                "  {displayed_file_count} {}",
-                if file_count == 1 { "file" } else { "files" }
+    let mut lines = Vec::new();
+    if include_changes {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "CHANGES  ",
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Style::default().fg(palette().faint),
-        ),
-    ])];
+            Span::styled(
+                format!("+{}", summary.additions),
+                Style::default().fg(palette().green),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("-{}", summary.deletions),
+                Style::default().fg(palette().red),
+            ),
+            Span::styled(
+                format!(
+                    "  {displayed_file_count} {}",
+                    if file_count == 1 { "file" } else { "files" }
+                ),
+                Style::default().fg(palette().faint),
+            ),
+        ]));
+    }
     let label = "FILES  ";
     let available = usize::from(width).saturating_sub(label.len());
     let file_lines = if wrapped {
         wrapped_file_summary(
             &summary.files,
             available,
-            usize::from(height.saturating_sub(1)),
+            usize::from(height.saturating_sub(u16::from(include_changes))),
         )
     } else {
         vec![truncate_width(

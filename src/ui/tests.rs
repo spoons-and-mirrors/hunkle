@@ -1556,7 +1556,6 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(commit_diff_screen.contains("DIFF"));
     assert!(commit_diff_screen.contains("initial commit"));
     assert!(commit_diff_screen.contains("Detailed body line."));
     assert!(commit_diff_screen.contains("Final note."));
@@ -1567,6 +1566,33 @@ fn renders_every_primary_surface() {
         "the first file heading should be visible"
     );
     let file_header = app.regions.diff_file_headers[0].clone();
+    let commit_diff = app.regions.diff.unwrap();
+    let mut metadata_text = String::new();
+    for row in commit_diff.y..file_header.rect.y {
+        for column in commit_diff.x..commit_diff.right() {
+            metadata_text.push_str(terminal.backend().buffer()[(column, row)].symbol());
+        }
+        metadata_text.push('\n');
+    }
+    let selected_commit = app
+        .repository()
+        .unwrap()
+        .commits
+        .iter()
+        .find(|commit| commit.oid == commit_oid)
+        .unwrap()
+        .clone();
+    assert!(metadata_text.contains("COMMIT"));
+    assert!(metadata_text.contains(&selected_commit.oid[..7]));
+    assert!(metadata_text.contains(&selected_commit.author));
+    assert!(metadata_text.contains(&selected_commit.date));
+    assert!(metadata_text.contains("MESSAGE"));
+    assert!(metadata_text.contains("FILES"));
+    assert!(!metadata_text.contains("CHANGES"));
+    let top_row = (commit_diff.x..commit_diff.right())
+        .map(|column| terminal.backend().buffer()[(column, commit_diff.y + 1)].symbol())
+        .collect::<String>();
+    assert!(!top_row.contains("DIFF"));
     assert_eq!(file_header.path, RepoPath::from("fixtures/file-00.txt"));
     assert!(file_header.line > 0);
     app.handle_mouse(mouse(
@@ -1589,7 +1615,6 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let commit_diff = app.regions.diff.unwrap();
     let files_row = (commit_diff.y..commit_diff.bottom())
         .find(|row| {
             (commit_diff.x..commit_diff.right())
@@ -1615,18 +1640,15 @@ fn renders_every_primary_surface() {
     assert!(app.regions.graph_table.is_none());
     app.changes.diff_scroll = 2;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let scrolled_commit_diff: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(
-        !scrolled_commit_diff.contains("MESSAGE"),
-        "commit metadata should scroll with the patch"
-    );
-    assert!(scrolled_commit_diff.contains("CHANGES"));
+    let mut scrolled_commit_diff = String::new();
+    for row in commit_diff.y..commit_diff.bottom() {
+        for column in commit_diff.x..commit_diff.right() {
+            scrolled_commit_diff.push_str(terminal.backend().buffer()[(column, row)].symbol());
+        }
+    }
+    assert!(!scrolled_commit_diff.contains(&format!("COMMIT  {}", &commit_oid[..7])));
+    assert!(scrolled_commit_diff.contains("MESSAGE"));
+    assert!(!scrolled_commit_diff.contains("CHANGES"));
     app.changes.diff_scroll = 0;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     app.changes.diff_wrap = false;
