@@ -200,6 +200,11 @@ impl HerdrPrompt {
         self.error = None;
         self.sending = true;
         thread::spawn(move || {
+            crate::diagnostics::event(format!(
+                "new agent replacing pane={} path={}",
+                pane_id,
+                pending.path.display()
+            ));
             let reopen_path = pending.path.clone();
             let result =
                 workspace_panel::replace_pane_with_agent(pending.path, workspace_id, pane_id).map(
@@ -236,6 +241,12 @@ impl HerdrPrompt {
         self.error = None;
         self.sending = true;
         thread::spawn(move || {
+            crate::diagnostics::event(format!(
+                "new agent splitting pane={} direction={} path={}",
+                pane_id,
+                direction.as_str(),
+                pending.path.display()
+            ));
             let reopen_path = pending.path.clone();
             let result = workspace_panel::split_pane_with_agent(pending.path, pane_id, direction)
                 .map(|pane_id| HerdrPromptCompletion {

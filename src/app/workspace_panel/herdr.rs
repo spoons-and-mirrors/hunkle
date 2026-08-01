@@ -1141,24 +1141,6 @@ fn replace_pane_with_agent_with(
     pane_id: String,
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
 ) -> Result<String, String> {
-    let tabs = runner(&[
-        "tab".to_owned(),
-        "list".to_owned(),
-        "--workspace".to_owned(),
-        workspace_id.clone(),
-    ])?;
-    let background_tab_id = tabs
-        .pointer("/result/tabs")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Herdr did not return the workspace tabs".to_owned())?
-        .iter()
-        .find(|tab| {
-            tab.get("label").and_then(Value::as_str) == Some("background")
-                && tab.get("focused").and_then(Value::as_bool) != Some(true)
-        })
-        .and_then(|tab| tab.get("tab_id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
     let split = runner(&[
         "pane".to_owned(),
         "split".to_owned(),
@@ -1183,24 +1165,17 @@ fn replace_pane_with_agent_with(
         let _ = runner(&["pane".to_owned(), "close".to_owned(), replacement_pane_id]);
         return Err(error);
     }
-    let mut move_args = vec!["pane".to_owned(), "move".to_owned(), pane_id.clone()];
-    if let Some(background_tab_id) = background_tab_id {
-        move_args.extend([
-            "--tab".to_owned(),
-            background_tab_id,
-            "--split".to_owned(),
-            "right".to_owned(),
-        ]);
-    } else {
-        move_args.extend([
-            "--new-tab".to_owned(),
-            "--workspace".to_owned(),
-            workspace_id,
-            "--label".to_owned(),
-            "background".to_owned(),
-        ]);
-    }
-    move_args.push("--no-focus".to_owned());
+    let move_args = vec![
+        "pane".to_owned(),
+        "move".to_owned(),
+        pane_id.clone(),
+        "--new-tab".to_owned(),
+        "--workspace".to_owned(),
+        workspace_id,
+        "--label".to_owned(),
+        "background".to_owned(),
+        "--no-focus".to_owned(),
+    ];
     if let Err(error) = runner(&move_args) {
         let _ = runner(&["pane".to_owned(), "close".to_owned(), replacement_pane_id]);
         return Err(error);
@@ -2523,8 +2498,7 @@ mod tests {
             |args| {
                 calls.push(args.to_vec());
                 Ok(match calls.len() {
-                    1 => serde_json::json!({ "result": { "tabs": [] } }),
-                    2 => {
+                    1 => {
                         serde_json::json!({ "result": { "pane": { "pane_id": "w1:p4" } } })
                     }
                     _ => Value::Null,
@@ -2537,9 +2511,6 @@ mod tests {
         assert_eq!(
             calls,
             vec![
-                ["tab", "list", "--workspace", "w1"]
-                    .map(str::to_owned)
-                    .to_vec(),
                 [
                     "pane",
                     "split",
@@ -2614,7 +2585,7 @@ mod tests {
     }
 
     #[test]
-    fn reuses_the_background_tab_for_displaced_panes() {
+    fn gives_each_displaced_pane_its_own_background_tab() {
         let mut calls = Vec::new();
         replace_pane_with_agent_with(
             PathBuf::from("/tmp/feature"),
@@ -2623,21 +2594,7 @@ mod tests {
             |args| {
                 calls.push(args.to_vec());
                 Ok(match calls.len() {
-                    1 => serde_json::json!({
-                        "result": { "tabs": [
-                            {
-                                "tab_id": "w1:t1",
-                                "label": "1",
-                                "focused": true
-                            },
-                            {
-                                "tab_id": "w1:t8",
-                                "label": "background",
-                                "focused": false
-                            }
-                        ] }
-                    }),
-                    2 => {
+                    1 => {
                         serde_json::json!({ "result": { "pane": { "pane_id": "w1:p4" } } })
                     }
                     _ => Value::Null,
@@ -2647,15 +2604,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            calls[3],
+            calls[2],
             [
                 "pane",
                 "move",
                 "w1:p2",
-                "--tab",
-                "w1:t8",
-                "--split",
-                "right",
+                "--new-tab",
+                "--workspace",
+                "w1",
+                "--label",
+                "background",
                 "--no-focus",
             ]
             .map(str::to_owned)
@@ -2673,11 +2631,10 @@ mod tests {
             |args| {
                 calls.push(args.to_vec());
                 match calls.len() {
-                    1 => Ok(serde_json::json!({ "result": { "tabs": [] } })),
-                    2 => Ok(serde_json::json!({
+                    1 => Ok(serde_json::json!({
                         "result": { "pane": { "pane_id": "w1:p4" } }
                     })),
-                    3 => Err("agent failed".to_owned()),
+                    2 => Err("agent failed".to_owned()),
                     _ => Ok(Value::Null),
                 }
             },
@@ -2686,7 +2643,7 @@ mod tests {
 
         assert_eq!(error, "agent failed");
         assert_eq!(
-            calls[3],
+            calls[2],
             ["pane", "close", "w1:p4"].map(str::to_owned).to_vec()
         );
     }
