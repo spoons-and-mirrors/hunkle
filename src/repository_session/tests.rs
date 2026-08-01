@@ -145,7 +145,7 @@ fn ignores_status_result_from_a_previous_repository() {
         })
         .unwrap();
 
-    assert!(session.next_worktree_change().is_none());
+    assert!(session.next_worktree_change(Duration::ZERO).is_none());
     assert_eq!(session.status_signature, Some(signature(10, 1)));
     assert!(!session.operations.is_running(Operation::StatusCheck));
 }
@@ -165,7 +165,7 @@ fn ignores_status_result_with_a_superseded_baseline() {
         })
         .unwrap();
 
-    assert!(session.next_worktree_change().is_none());
+    assert!(session.next_worktree_change(Duration::ZERO).is_none());
     assert_eq!(session.status_signature, Some(signature(20, 1)));
     assert!(!session.operations.is_running(Operation::StatusCheck));
 }
@@ -205,7 +205,7 @@ fn stale_background_results_do_not_clear_current_repository_operations() {
         })
         .unwrap();
 
-    assert!(session.next_worktree_change().is_none());
+    assert!(session.next_worktree_change(Duration::ZERO).is_none());
     assert!(session.operations.is_running(Operation::StatusCheck));
     assert_eq!(session.status_signature, Some(signature(10, 1)));
 }
@@ -245,7 +245,7 @@ fn activity_keeps_status_checks_at_a_bounded_interval() {
             result: Ok(signature(10, 1)),
         })
         .unwrap();
-    assert!(session.next_worktree_change().is_none());
+    assert!(session.next_worktree_change(Duration::ZERO).is_none());
     assert_eq!(session.status_interval, MIN_STATUS_INTERVAL);
     assert!(session.next_status_check > Instant::now());
 }
@@ -265,7 +265,11 @@ fn scopes_external_refreshes_by_branch_identity() {
         })
         .unwrap();
     assert_eq!(
-        session.next_worktree_change(),
+        session.next_worktree_change(Duration::ZERO),
+        Some(RefreshRequest::Started)
+    );
+    assert_eq!(
+        session.active_refresh_scope,
         Some(RefreshScope::WORKTREE_AND_INVENTORY)
     );
 
@@ -280,7 +284,112 @@ fn scopes_external_refreshes_by_branch_identity() {
             result: Ok(signature(30, 2)),
         })
         .unwrap();
-    assert_eq!(session.next_worktree_change(), Some(RefreshScope::ALL));
+    assert_eq!(
+        session.next_worktree_change(Duration::ZERO),
+        Some(RefreshRequest::Queued)
+    );
+    assert_eq!(session.queued_refresh, Some(RefreshScope::ALL));
+}
+
+#[test]
+fn unions_exact_scopes_while_a_refresh_is_active() {
+    let mut session = session("/active", Some(10));
+    session.data.as_mut().unwrap().details_ready = false;
+    assert!(session.operations.start(Operation::Load(LoadKind::Reload)));
+    session.active_refresh_scope = Some(RefreshScope::ALL);
+
+    assert_eq!(
+        session.request_refresh(RefreshScope::WORKTREE, Duration::ZERO),
+        Some(RefreshRequest::Queued)
+    );
+    assert_eq!(
+        session.request_refresh(RefreshScope::HISTORY_AND_REFS, Duration::ZERO),
+        Some(RefreshRequest::Queued)
+    );
+    assert_eq!(
+        session.queued_refresh,
+        Some(RefreshScope::WORKTREE.union(RefreshScope::HISTORY_AND_REFS))
+    );
+}
+
+#[test]
+fn drains_queued_scopes_after_a_refresh_completion() {
+    let mut session = session("/active", Some(10));
+    begin_fake_refresh(&mut session, RefreshScope::ALL);
+    assert_eq!(
+        session.request_refresh(RefreshScope::WORKTREE, Duration::ZERO),
+        Some(RefreshRequest::Queued)
+    );
+    send_failed_load(&session, LoadKind::Reload);
+
+    let completion = session.next_load_completion().unwrap();
+    assert_eq!(completion.kind, LoadKind::Reload);
+    assert!(completion.result.is_err());
+    assert_eq!(completion.follow_up_refresh, Some(RefreshRequest::Started));
+    assert_eq!(session.active_refresh_scope, Some(RefreshScope::WORKTREE));
+    assert_eq!(session.queued_refresh, None);
+}
+
+#[test]
+fn escalates_refresh_recovery_while_the_snapshot_is_not_ready() {
+    let mut session = session("/active", Some(10));
+    session.data.as_mut().unwrap().details_ready = false;
+    begin_fake_refresh(&mut session, RefreshScope::ALL);
+    assert_eq!(
+        session.request_refresh(RefreshScope::WORKTREE, Duration::ZERO),
+        Some(RefreshRequest::Queued)
+    );
+    send_failed_load(&session, LoadKind::Reload);
+
+    let completion = session.next_load_completion().unwrap();
+    assert_eq!(completion.follow_up_refresh, Some(RefreshRequest::Started));
+    assert_eq!(session.active_refresh_scope, Some(RefreshScope::ALL));
+}
+
+#[test]
+fn successful_open_automatically_starts_initial_hydration() {
+    let mut session = session("/previous", Some(10));
+    assert!(session.operations.start(Operation::Load(LoadKind::Open)));
+    session.load_generation = 1;
+    let mut bootstrap = session.data.clone().unwrap();
+    bootstrap.root = PathBuf::from("/opened");
+    bootstrap.details_ready = false;
+    session
+        .load_tx
+        .send(LoadResult {
+            generation: 1,
+            kind: LoadKind::Open,
+            fetch_interval: Duration::ZERO,
+            result: Ok((LoadPayload::Open(bootstrap), None, None)),
+        })
+        .unwrap();
+
+    let completion = session.next_load_completion().unwrap();
+    assert!(completion.result.is_ok());
+    assert_eq!(completion.follow_up_refresh, Some(RefreshRequest::Started));
+    assert_eq!(session.data().unwrap().root, Path::new("/opened"));
+    assert!(!session.data().unwrap().details_ready);
+    assert_eq!(session.active_refresh_scope, Some(RefreshScope::ALL));
+}
+
+#[test]
+fn failed_open_resumes_hydration_for_the_retained_bootstrap() {
+    let mut session = session("/active", Some(10));
+    session.data.as_mut().unwrap().details_ready = false;
+    assert!(session.operations.start(Operation::Load(LoadKind::Reload)));
+    session.active_refresh_scope = Some(RefreshScope::ALL);
+    assert!(session.operations.start(Operation::Load(LoadKind::Open)));
+    session.active_refresh_scope = None;
+    session.queued_refresh = None;
+    session.load_generation = 1;
+    send_failed_load(&session, LoadKind::Open);
+
+    let completion = session.next_load_completion().unwrap();
+    assert!(completion.result.is_err());
+    assert_eq!(completion.follow_up_refresh, Some(RefreshRequest::Started));
+    assert_eq!(session.data().unwrap().root, Path::new("/active"));
+    assert!(!session.data().unwrap().details_ready);
+    assert_eq!(session.active_refresh_scope, Some(RefreshScope::ALL));
 }
 
 #[test]
@@ -345,6 +454,24 @@ fn signature(state: u64, branch: u64) -> git::WorktreeSignature {
     git::WorktreeSignature::for_test(state, branch)
 }
 
+fn begin_fake_refresh(session: &mut RepositorySession, scope: RefreshScope) {
+    assert!(session.operations.start(Operation::Load(LoadKind::Reload)));
+    session.active_refresh_scope = Some(scope);
+    session.load_generation = 1;
+}
+
+fn send_failed_load(session: &RepositorySession, kind: LoadKind) {
+    session
+        .load_tx
+        .send(LoadResult {
+            generation: session.load_generation,
+            kind,
+            fetch_interval: Duration::ZERO,
+            result: Err("load failed".to_owned()),
+        })
+        .unwrap();
+}
+
 fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
     let status_signature = status_signature.map(|state| signature(state, 1));
     let (worker_tx, worker_rx) = mpsc::channel();
@@ -384,6 +511,8 @@ fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
         status_activity_generation: 0,
         repository_generation: 0,
         load_generation: 0,
+        active_refresh_scope: None,
+        queued_refresh: None,
         load_tx,
         load_rx,
     }

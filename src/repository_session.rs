@@ -41,6 +41,7 @@ pub(crate) enum WorkerOutcome {
 pub(crate) struct WorkerCompletion {
     pub(crate) outcome: WorkerOutcome,
     invalidation: Option<RefreshScope>,
+    refresh_request: Option<RefreshRequest>,
 }
 
 impl WorkerCompletion {
@@ -77,11 +78,17 @@ impl WorkerCompletion {
         Self {
             outcome,
             invalidation,
+            refresh_request: None,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn invalidation(&self) -> Option<RefreshScope> {
         self.invalidation
+    }
+
+    pub(crate) fn refresh_request(&self) -> Option<RefreshRequest> {
+        self.refresh_request
     }
 }
 
@@ -116,10 +123,17 @@ pub(crate) enum LoadKind {
     Reload,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshRequest {
+    Started,
+    Queued,
+}
+
 pub(crate) struct LoadCompletion {
     pub(crate) kind: LoadKind,
     pub(crate) result: Result<(), String>,
     pub(crate) prepared_file_tree: Option<PreparedFileTree>,
+    pub(crate) follow_up_refresh: Option<RefreshRequest>,
 }
 
 pub(crate) struct CommandCompletion {
@@ -226,6 +240,8 @@ pub(crate) struct RepositorySession {
     status_activity_generation: u64,
     repository_generation: u64,
     load_generation: u64,
+    active_refresh_scope: Option<RefreshScope>,
+    queued_refresh: Option<RefreshScope>,
     load_tx: Sender<LoadResult>,
     load_rx: Receiver<LoadResult>,
 }
@@ -263,6 +279,8 @@ impl RepositorySession {
             status_activity_generation: 0,
             repository_generation: 0,
             load_generation: 0,
+            active_refresh_scope: None,
+            queued_refresh: None,
             load_tx,
             load_rx,
         }
@@ -312,24 +330,60 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {
-        self.start_load(
+        let started = self.start_load(
             path,
             LoadKind::Open,
             RefreshScope::ALL,
             None,
             fetch_interval,
-        )
+        );
+        if started {
+            self.active_refresh_scope = None;
+            self.queued_refresh = None;
+        }
+        started
     }
 
-    pub(crate) fn start_reload(&mut self, scope: RefreshScope, fetch_interval: Duration) -> bool {
-        let Some((root, kind)) = self
-            .data
-            .as_ref()
-            .map(|repository| (repository.root.clone(), repository.kind))
-        else {
-            return false;
+    pub(crate) fn request_refresh(
+        &mut self,
+        scope: RefreshScope,
+        fetch_interval: Duration,
+    ) -> Option<RefreshRequest> {
+        if self.open_running() {
+            return None;
+        }
+        if self
+            .operations
+            .is_running(Operation::Load(LoadKind::Reload))
+        {
+            self.queued_refresh = Some(
+                self.queued_refresh
+                    .map_or(scope, |queued| queued.union(scope)),
+            );
+            return Some(RefreshRequest::Queued);
+        }
+        let (root, kind, details_ready) = self.data.as_ref().map(|repository| {
+            (
+                repository.root.clone(),
+                repository.kind,
+                repository.details_ready,
+            )
+        })?;
+        let scope = if details_ready {
+            scope
+        } else {
+            RefreshScope::ALL
         };
-        self.start_load(root, LoadKind::Reload, scope, Some(kind), fetch_interval)
+        if self.start_load(root, LoadKind::Reload, scope, Some(kind), fetch_interval) {
+            self.active_refresh_scope = Some(scope);
+            Some(RefreshRequest::Started)
+        } else {
+            self.queued_refresh = Some(
+                self.queued_refresh
+                    .map_or(scope, |queued| queued.union(scope)),
+            );
+            Some(RefreshRequest::Queued)
+        }
     }
 
     pub(crate) fn next_load_completion(&mut self) -> Option<LoadCompletion> {
@@ -338,6 +392,9 @@ impl RepositorySession {
                 continue;
             }
             self.operations.finish(Operation::Load(done.kind));
+            if done.kind == LoadKind::Reload {
+                self.active_refresh_scope = None;
+            }
             let (result, prepared_file_tree) = match done.result {
                 Ok((payload, signature, prepared_file_tree)) => {
                     if done.kind == LoadKind::Open {
@@ -363,10 +420,36 @@ impl RepositorySession {
                 }
                 Err(error) => (Err(error), None),
             };
+            let follow_up_scope = match done.kind {
+                LoadKind::Open if result.is_ok() => Some(RefreshScope::ALL),
+                LoadKind::Open
+                    if self
+                        .data
+                        .as_ref()
+                        .is_some_and(|repository| !repository.details_ready) =>
+                {
+                    Some(RefreshScope::ALL)
+                }
+                LoadKind::Open => None,
+                LoadKind::Reload => self.queued_refresh.take().map(|scope| {
+                    if self
+                        .data
+                        .as_ref()
+                        .is_some_and(|repository| repository.details_ready)
+                    {
+                        scope
+                    } else {
+                        RefreshScope::ALL
+                    }
+                }),
+            };
+            let follow_up_refresh =
+                follow_up_scope.and_then(|scope| self.request_refresh(scope, done.fetch_interval));
             return Some(LoadCompletion {
                 kind: done.kind,
                 result,
                 prepared_file_tree,
+                follow_up_refresh,
             });
         }
         None
@@ -693,7 +776,10 @@ impl RepositorySession {
                 WorkerKind::Commit => {
                     self.operations.finish(Operation::Commit);
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::Commit(done.result)));
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::Commit(done.result)),
+                            fetch_interval,
+                        ));
                     }
                 }
                 WorkerKind::Fetch {
@@ -705,60 +791,72 @@ impl RepositorySession {
                     self.operations.finish(Operation::Fetch);
                     self.next_fetch_at = Instant::now() + fetch_interval;
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::Fetch(done.result)));
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::Fetch(done.result)),
+                            fetch_interval,
+                        ));
                     }
                 }
                 WorkerKind::Command { label } => {
                     self.operations.finish(Operation::Command);
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::Command(
-                            CommandCompletion {
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::Command(CommandCompletion {
                                 label,
                                 result: done.result,
-                            },
-                        )));
+                            })),
+                            fetch_interval,
+                        ));
                     }
                 }
                 WorkerKind::Mutation => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::Mutation(
-                            done.result.map(|_| ()),
-                        )));
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::Mutation(done.result.map(|_| ()))),
+                            fetch_interval,
+                        ));
                     }
                 }
                 WorkerKind::FileOperation { selection, message } => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::FileOperation(
-                            FileOperationCompletion {
-                                result: done.result.map(|_| selection),
-                                message,
-                            },
-                        )));
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::FileOperation(
+                                FileOperationCompletion {
+                                    result: done.result.map(|_| selection),
+                                    message,
+                                },
+                            )),
+                            fetch_interval,
+                        ));
                     }
                 }
                 WorkerKind::DiscardUnstaged { path } => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::DiscardUnstaged(
-                            DiscardUnstagedCompletion {
-                                path,
-                                result: done.result.map(|_| ()),
-                            },
-                        )));
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::DiscardUnstaged(
+                                DiscardUnstagedCompletion {
+                                    path,
+                                    result: done.result.map(|_| ()),
+                                },
+                            )),
+                            fetch_interval,
+                        ));
                     }
                 }
                 WorkerKind::Format { path, formatter } => {
                     self.operations.finish(Operation::Format);
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::Format(
-                            FormatCompletion {
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::Format(FormatCompletion {
                                 path,
                                 formatter,
                                 result: done.result,
-                            },
-                        )));
+                            })),
+                            fetch_interval,
+                        ));
                     }
                 }
                 WorkerKind::BranchDelete {
@@ -768,36 +866,45 @@ impl RepositorySession {
                 } => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::BranchDelete(
-                            BranchDeleteCompletion {
-                                branch,
-                                remote,
-                                force,
-                                result: done.result.map(|_| ()),
-                            },
-                        )));
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::BranchDelete(
+                                BranchDeleteCompletion {
+                                    branch,
+                                    remote,
+                                    force,
+                                    result: done.result.map(|_| ()),
+                                },
+                            )),
+                            fetch_interval,
+                        ));
                     }
                 }
                 WorkerKind::BranchCheckout { branch } => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::BranchCheckout(
-                            BranchCheckoutCompletion {
-                                branch,
-                                result: done.result,
-                            },
-                        )));
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::BranchCheckout(
+                                BranchCheckoutCompletion {
+                                    branch,
+                                    result: done.result,
+                                },
+                            )),
+                            fetch_interval,
+                        ));
                     }
                 }
                 WorkerKind::BranchCreate { branch } => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::new(WorkerOutcome::BranchCreate(
-                            BranchCreateCompletion {
-                                branch,
-                                result: done.result,
-                            },
-                        )));
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::BranchCreate(
+                                BranchCreateCompletion {
+                                    branch,
+                                    result: done.result,
+                                },
+                            )),
+                            fetch_interval,
+                        ));
                     }
                 }
             }
@@ -805,7 +912,21 @@ impl RepositorySession {
         None
     }
 
-    pub(crate) fn next_worktree_change(&mut self) -> Option<RefreshScope> {
+    fn schedule_completion_refresh(
+        &mut self,
+        mut completion: WorkerCompletion,
+        fetch_interval: Duration,
+    ) -> WorkerCompletion {
+        completion.refresh_request = completion
+            .invalidation
+            .and_then(|scope| self.request_refresh(scope, fetch_interval));
+        completion
+    }
+
+    pub(crate) fn next_worktree_change(
+        &mut self,
+        fetch_interval: Duration,
+    ) -> Option<RefreshRequest> {
         while let Ok(done) = self.status_rx.try_recv() {
             if done.repository_generation != self.repository_generation {
                 continue;
@@ -822,7 +943,10 @@ impl RepositorySession {
                 let previous = self.status_signature.replace(signature);
                 if let Some(previous) = previous.filter(|previous| *previous != signature) {
                     self.reset_status_interval();
-                    return Some(signature.refresh_scope_since(previous));
+                    let scope = signature.refresh_scope_since(previous);
+                    if let Some(request) = self.request_refresh(scope, fetch_interval) {
+                        return Some(request);
+                    }
                 }
             }
             if done.activity_generation == self.status_activity_generation {

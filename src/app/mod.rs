@@ -80,7 +80,7 @@ pub(super) use crate::{
     formatter,
     git::{self, Branch, RefreshScope, RepositoryData},
     repo_path::RepoPath,
-    repository_session::{LoadKind, Mutation, RepositorySession, WorkerOutcome},
+    repository_session::{LoadKind, Mutation, RefreshRequest, RepositorySession, WorkerOutcome},
     selection::SelectionState,
 };
 
@@ -145,7 +145,6 @@ pub struct App {
     pub should_quit: bool,
     pub(crate) settings_store: SettingsStore,
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
-    reload_queued: Option<RefreshScope>,
     pub(crate) editor_input: String,
     pub(crate) file_editor: Option<FileEditor>,
     pub(crate) file_editor_anchor: Option<Position>,
@@ -298,7 +297,6 @@ impl App {
             should_quit: false,
             settings_store,
             pending_reload: None,
-            reload_queued: None,
             editor_input: String::new(),
             file_editor: None,
             file_editor_anchor: None,
@@ -807,9 +805,8 @@ impl App {
         self.session.maybe_start_status_check();
         while let Some(done) = self.session.next_worker_completion(interval) {
             changed = true;
-            let invalidation = done.invalidation();
-            if let Some(scope) = invalidation {
-                self.reload(scope);
+            if let Some(request) = done.refresh_request() {
+                self.track_refresh_request(request, true);
             }
             match done.outcome {
                 WorkerOutcome::Commit(result) => match result {
@@ -937,9 +934,9 @@ impl App {
                 },
             }
         }
-        while let Some(scope) = self.session.next_worktree_change() {
+        while let Some(request) = self.session.next_worktree_change(interval) {
             changed = true;
-            self.reload(scope);
+            self.track_refresh_request(request, true);
             self.notice = None;
         }
         if self.session.open_running() {
@@ -948,6 +945,7 @@ impl App {
         while let Some(done) = self.session.next_load_completion() {
             changed = true;
             let prepared_file_tree = done.prepared_file_tree;
+            let follow_up_refresh = done.follow_up_refresh;
             match (done.kind, done.result) {
                 (LoadKind::Open, Ok(())) => {
                     self.linked_worktrees.set_active_path(
@@ -967,7 +965,6 @@ impl App {
                         diagnostics::activity("apply-workspace", self.diagnostic_context());
                     diagnostics::event(format!("workspace opened {}", self.diagnostic_context()));
                     self.pending_reload = None;
-                    self.reload_queued = None;
                     if self.mode != Mode::WorkspacePanel {
                         self.mode = Mode::Normal;
                     }
@@ -1004,7 +1001,9 @@ impl App {
                             .then_some(0),
                     );
                     self.restore_commit_draft();
-                    self.reload(RefreshScope::ALL);
+                    if let Some(request) = follow_up_refresh {
+                        self.track_refresh_request(request, false);
+                    }
                     self.notice = remember_error.or_else(|| {
                         Some(
                             if local {
@@ -1026,7 +1025,9 @@ impl App {
                         .data()
                         .is_some_and(|repository| !repository.details_ready)
                     {
-                        self.reload(RefreshScope::ALL);
+                        if let Some(request) = follow_up_refresh {
+                            self.track_refresh_request(request, false);
+                        }
                     } else if self.session.data().is_none() {
                         self.initial_pane_pending = false;
                         self.mode = Mode::Explorer;
@@ -1095,24 +1096,14 @@ impl App {
                             .to_owned(),
                         );
                     }
-                    if let Some(scope) = self.reload_queued.take() {
-                        self.reload(scope);
+                    if let Some(request) = follow_up_refresh {
+                        self.track_refresh_request(request, true);
                     }
                 }
                 (LoadKind::Reload, Err(error)) => {
                     self.pending_reload = None;
-                    let queued = self.reload_queued.take();
-                    if let Some(scope) = queued {
-                        let scope = if self
-                            .session
-                            .data()
-                            .is_some_and(|repository| !repository.details_ready)
-                        {
-                            RefreshScope::ALL
-                        } else {
-                            scope
-                        };
-                        self.reload(scope);
+                    if let Some(request) = follow_up_refresh {
+                        self.track_refresh_request(request, false);
                         self.notice = Some(format!("{error} (retrying queued refresh…)"));
                     } else {
                         self.initial_pane_pending = false;
@@ -1918,6 +1909,16 @@ impl App {
     }
 
     fn reload(&mut self, scope: RefreshScope) {
+        let Some(request) = self
+            .session
+            .request_refresh(scope, self.settings.fetch_interval())
+        else {
+            return;
+        };
+        self.track_refresh_request(request, true);
+    }
+
+    fn track_refresh_request(&mut self, request: RefreshRequest, show_notice: bool) {
         let Some(repo) = self.repository() else {
             return;
         };
@@ -1928,11 +1929,8 @@ impl App {
             .selected_graph_commit()
             .map(|commit| commit.oid.clone());
 
-        if self
-            .session
-            .start_reload(scope, self.settings.fetch_interval())
-        {
-            self.pending_reload = Some((selection, selected_oid));
+        self.pending_reload = Some((selection, selected_oid));
+        if request == RefreshRequest::Started && show_notice {
             self.notice = Some(
                 if details_ready {
                     "Refreshing…"
@@ -1942,12 +1940,6 @@ impl App {
                     "Loading repository details…"
                 }
                 .to_owned(),
-            );
-        } else {
-            self.pending_reload = Some((selection, selected_oid));
-            self.reload_queued = Some(
-                self.reload_queued
-                    .map_or(scope, |queued| queued.union(scope)),
             );
         }
     }

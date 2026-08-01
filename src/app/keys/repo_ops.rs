@@ -110,7 +110,6 @@ impl App {
         {
             self.header_picker.close();
             self.pending_reload = None;
-            self.reload_queued = None;
             self.workspace_fetch_pending = fetch_if_stale;
             self.workspace_explorer.error = None;
             self.notice = Some("Opening workspace…".to_owned());

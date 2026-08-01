@@ -10,6 +10,10 @@ The directory Hunkle has opened. A workspace is either a Git repository root or 
 
 A Git-backed workspace. Repository data includes the worktree, file inventory, history, graph, refs, and host capabilities.
 
+## Repository session
+
+The application-owned lifecycle for the active Repository or Local workspace. It publishes a bootstrap snapshot, hydrates repository details, schedules and unions scoped refreshes, retries interrupted hydration, and rejects stale background results. Application code submits refresh intents and reconciles completed snapshots with UI state; it does not maintain a parallel refresh queue.
+
 ## Local workspace
 
 A directory opened without Git behavior. It supports file browsing, search, previews, and file operations.

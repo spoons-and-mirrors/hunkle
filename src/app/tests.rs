@@ -118,61 +118,6 @@ fn repeated_open_keeps_the_first_workspace_request_active() {
 }
 
 #[test]
-fn failed_open_resumes_interrupted_initial_hydration() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    fs::write(root.join("file.txt"), "content\n").unwrap();
-    let mut app = App::new(root.to_path_buf());
-
-    app.open_repository(root.to_path_buf());
-    wait_for_state(&mut app, |app| {
-        !app.session.open_running()
-            && app
-                .repository()
-                .is_some_and(|repository| !repository.details_ready)
-    });
-    app.open_repository(root.join("missing"));
-    wait_for_state(&mut app, |app| !app.session.open_running());
-    wait_for_state(&mut app, |app| {
-        app.repository()
-            .is_some_and(|repository| repository.details_ready)
-    });
-
-    assert_eq!(
-        app.repository().unwrap().root,
-        fs::canonicalize(root).unwrap()
-    );
-    assert!(
-        app.notice
-            .as_deref()
-            .is_some_and(|notice| notice.starts_with("Could not open workspace:"))
-    );
-}
-
-#[test]
-fn initial_hydration_keeps_successful_queued_refreshes_scoped() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    fs::write(root.join("file.txt"), "content\n").unwrap();
-    let mut app = App::new(root.to_path_buf());
-
-    app.open_repository(root.to_path_buf());
-    wait_for_state(&mut app, |app| {
-        !app.session.open_running()
-            && app
-                .repository()
-                .is_some_and(|repository| !repository.details_ready)
-    });
-    app.editor_finished(Ok(()));
-
-    assert_eq!(app.reload_queued, Some(RefreshScope::WORKTREE));
-    wait_for_state(&mut app, |app| {
-        app.repository()
-            .is_some_and(|repository| repository.details_ready)
-    });
-}
-
-#[test]
 fn opening_a_workspace_keeps_the_workspace_panel_focused() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
