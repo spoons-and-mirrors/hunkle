@@ -114,20 +114,33 @@ impl App {
                     self.toggle_header_picker(HeaderPickerKind::DiffTargets);
                     return;
                 }
+                Some(HitTarget::HeaderAgent) => {
+                    self.toggle_header_picker(HeaderPickerKind::AgentDestinations);
+                    return;
+                }
                 _ => {}
             }
         }
         if self.header_picker.is_open() {
             match mouse.kind {
-                MouseEventKind::Moved => {
-                    if let Some(HitTarget::HeaderPickerItem(index)) =
-                        self.regions.hit_target_at(point)
-                    {
-                        self.header_picker.select(index);
-                    }
+                MouseEventKind::ScrollDown
+                    if matches!(
+                        self.regions.hit_target_at(point),
+                        Some(HitTarget::HeaderPickerOverlay | HitTarget::HeaderPickerItem(_))
+                    ) =>
+                {
+                    self.hovered_hit_target = None;
+                    self.header_picker.scroll_by(3);
                 }
-                MouseEventKind::ScrollDown => self.header_picker.move_selection(1),
-                MouseEventKind::ScrollUp => self.header_picker.move_selection(-1),
+                MouseEventKind::ScrollUp
+                    if matches!(
+                        self.regions.hit_target_at(point),
+                        Some(HitTarget::HeaderPickerOverlay | HitTarget::HeaderPickerItem(_))
+                    ) =>
+                {
+                    self.hovered_hit_target = None;
+                    self.header_picker.scroll_by(-3);
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     match self.regions.hit_target_at(point) {
                         Some(HitTarget::HeaderPickerItem(index)) => {
@@ -1137,6 +1150,7 @@ impl App {
                     | HitTarget::HeaderWorktrees
                     | HitTarget::HeaderBranch
                     | HitTarget::HeaderDiff
+                    | HitTarget::HeaderAgent
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),
@@ -1196,6 +1210,7 @@ impl App {
                     | HitTarget::HeaderWorktrees
                     | HitTarget::HeaderBranch
                     | HitTarget::HeaderDiff
+                    | HitTarget::HeaderAgent
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),

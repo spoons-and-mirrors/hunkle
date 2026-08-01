@@ -90,6 +90,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .hit_target_rect(HitTarget::HeaderBranch)
         .unwrap();
     let diff = app.regions.hit_target_rect(HitTarget::HeaderDiff).unwrap();
+    let agent = app.regions.hit_target_rect(HitTarget::HeaderAgent).unwrap();
     assert_eq!(repository.x, 1);
     assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), "▀");
     assert_eq!(
@@ -103,13 +104,14 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert_eq!(repository.right().saturating_add(1), worktrees.x);
     assert!(worktrees.right() <= branch.x);
     assert_eq!(branch.right().saturating_add(1), diff.x);
+    assert_eq!(diff.right().saturating_add(1), agent.x);
     assert_eq!(
         terminal.backend().buffer()[(repository.x, repository.y)].bg,
         super::palette().yellow
     );
     assert_eq!(
-        terminal.backend().buffer()[(repository.x, repository.y)].fg,
-        super::palette().canvas
+        terminal.backend().buffer()[(repository.x + 1, repository.y)].bg,
+        super::palette().surface_alt
     );
     assert_eq!(
         terminal.backend().buffer()[(worktrees.x, worktrees.y)].bg,
@@ -123,6 +125,31 @@ fn header_cards_open_pickers_and_checkout_branches() {
         terminal.backend().buffer()[(diff.x, diff.y)].bg,
         super::palette().purple
     );
+    assert_eq!(
+        terminal.backend().buffer()[(agent.x, agent.y)].bg,
+        super::palette().green
+    );
+    for card in [repository, worktrees, branch, diff, agent] {
+        assert_eq!(
+            terminal.backend().buffer()[(card.x + 1, card.y)].bg,
+            super::palette().surface_alt
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(card.x + 1, card.y)].fg,
+            super::palette().ink
+        );
+    }
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        repository.x + 1,
+        repository.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x + 1, repository.y)].bg,
+        super::lighter(super::palette().yellow)
+    );
+    app.hovered_hit_target = None;
     assert_eq!(worktrees.width, " worktree ".width() as u16);
     let worktree_text = (worktrees.x..worktrees.right())
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())
@@ -132,6 +159,52 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
         .collect::<String>();
     assert_eq!(branch_text, format!(" {long_branch} "));
+
+    click(&mut app, agent.x, agent.y);
+    assert_eq!(
+        app.header_picker.kind,
+        Some(HeaderPickerKind::AgentDestinations)
+    );
+    assert_eq!(app.header_picker.items.len(), 2);
+    assert!(app.header_picker.items.iter().any(|item| matches!(
+        item,
+        HeaderPickerItem::AgentDestination { path, kind, .. }
+            if path == &linked && *kind == super::AgentDestinationKind::Worktree
+    )));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOverlay)
+        .unwrap();
+    assert_eq!(picker.y, agent.bottom());
+    assert_eq!(picker.x, agent.x.min(terminal.size().unwrap().width - picker.width - 1));
+    let mut picker_text = String::new();
+    for y in picker.y..picker.bottom() {
+        for x in picker.x..picker.right() {
+            picker_text.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    assert!(picker_text.contains("START AGENT"));
+
+    assert_eq!(app.header_picker.selected, 0);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.header_picker.selected, 1);
+    let first_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(0))
+        .unwrap();
+    app.handle_mouse(mouse(MouseEventKind::Moved, first_row.x + 1, first_row.y));
+    assert_eq!(app.header_picker.selected, 1);
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollUp,
+        first_row.x + 1,
+        first_row.y,
+    ));
+    assert_eq!(app.header_picker.selected, 1);
+    assert_eq!(app.hovered_hit_target, None);
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 0, 20));
+    assert_eq!(app.header_picker.selected, 1);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     click(&mut app, diff.x, diff.y);
     assert_eq!(app.mode, Mode::Normal);
@@ -324,6 +397,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         (HitTarget::HeaderWorktrees, true),
         (HitTarget::HeaderBranch, true),
         (HitTarget::HeaderDiff, true),
+        (HitTarget::HeaderAgent, true),
     ] {
         let control = app.regions.hit_target_rect(target).unwrap();
         assert_eq!(

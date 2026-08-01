@@ -14,6 +14,13 @@ pub(crate) enum HeaderPickerKind {
     Worktrees,
     Branches,
     DiffTargets,
+    AgentDestinations,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentDestinationKind {
+    Repository,
+    Worktree,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +34,11 @@ pub(crate) enum HeaderPickerItem {
     Branch(Branch),
     BranchBase(Branch),
     DiffTarget(Branch),
+    AgentDestination {
+        path: PathBuf,
+        repository: String,
+        kind: AgentDestinationKind,
+    },
 }
 
 #[derive(Debug)]
@@ -50,6 +62,9 @@ pub(crate) struct HeaderPicker {
     default_selected: usize,
     searchable: bool,
     pub(crate) selected: usize,
+    scroll: usize,
+    viewport_rows: usize,
+    scroll_follows_selection: bool,
     pub(crate) message: Option<String>,
     pub(crate) query: TextInput,
     pub(crate) branch_step: BranchPickerStep,
@@ -76,6 +91,9 @@ impl HeaderPicker {
         self.default_selected = selected.min(items.len().saturating_sub(1));
         self.searchable = true;
         self.selected = self.default_selected;
+        self.scroll = 0;
+        self.viewport_rows = 0;
+        self.scroll_follows_selection = true;
         self.items.clone_from(&items);
         self.all_items = items;
         self.message = None;
@@ -94,6 +112,9 @@ impl HeaderPicker {
         self.default_selected = 0;
         self.searchable = false;
         self.selected = 0;
+        self.scroll = 0;
+        self.viewport_rows = 0;
+        self.scroll_follows_selection = true;
         self.message = Some(message);
         self.query.clear();
         self.query.focus();
@@ -108,6 +129,9 @@ impl HeaderPicker {
         self.default_selected = selected.min(items.len().saturating_sub(1));
         self.searchable = true;
         self.selected = self.default_selected;
+        self.scroll = 0;
+        self.viewport_rows = 0;
+        self.scroll_follows_selection = true;
         self.items.clone_from(&items);
         self.all_items = items;
         self.message = None;
@@ -122,6 +146,9 @@ impl HeaderPicker {
         self.repository_stats_rx = None;
         self.kind = Some(HeaderPickerKind::Branches);
         self.selected = 0;
+        self.scroll = 0;
+        self.viewport_rows = 0;
+        self.scroll_follows_selection = true;
         self.items.clear();
         self.all_items.clear();
         self.default_selected = 0;
@@ -142,6 +169,9 @@ impl HeaderPicker {
         self.default_selected = 0;
         self.searchable = false;
         self.selected = 0;
+        self.scroll = 0;
+        self.viewport_rows = 0;
+        self.scroll_follows_selection = true;
         self.message = None;
         self.query.clear();
         self.branch_step = BranchPickerStep::Branches;
@@ -264,6 +294,9 @@ impl HeaderPicker {
             self.selected = self
                 .default_selected
                 .min(self.items.len().saturating_sub(1));
+            self.scroll = 0;
+            self.scroll_follows_selection = true;
+            self.ensure_selection_visible();
             return;
         }
         self.items = self
@@ -276,6 +309,8 @@ impl HeaderPicker {
             .cloned()
             .collect();
         self.selected = 0;
+        self.scroll = 0;
+        self.scroll_follows_selection = true;
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
@@ -286,12 +321,71 @@ impl HeaderPicker {
             .selected
             .saturating_add_signed(delta)
             .min(self.items.len() - 1);
+        self.scroll_follows_selection = true;
+        self.ensure_selection_visible();
     }
 
-    pub(crate) fn select(&mut self, index: usize) {
-        if index < self.items.len() {
-            self.selected = index;
+    pub(crate) fn scroll_by(&mut self, delta: isize) {
+        self.scroll_follows_selection = false;
+        self.scroll = self
+            .scroll
+            .saturating_add_signed(delta)
+            .min(self.maximum_scroll());
+    }
+
+    pub(crate) fn set_viewport_rows(&mut self, rows: usize) {
+        self.viewport_rows = rows;
+        self.scroll = self.scroll.min(self.maximum_scroll());
+        if self.scroll_follows_selection {
+            self.ensure_selection_visible();
         }
+    }
+
+    pub(crate) fn visible_start(&self) -> usize {
+        self.scroll
+    }
+
+    fn maximum_scroll(&self) -> usize {
+        self.items.len().saturating_sub(self.viewport_rows)
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        if self.viewport_rows == 0 {
+            return;
+        }
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll.saturating_add(self.viewport_rows) {
+            self.scroll = self.selected.saturating_add(1).saturating_sub(self.viewport_rows);
+        }
+        self.scroll = self.scroll.min(self.maximum_scroll());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrolling_moves_the_viewport_without_moving_selection() {
+        let items = (0..12)
+            .map(|index| HeaderPickerItem::AgentDestination {
+                path: PathBuf::from(format!("/tmp/repository-{index}")),
+                repository: format!("repository-{index}"),
+                kind: AgentDestinationKind::Repository,
+            })
+            .collect();
+        let mut picker = HeaderPicker::default();
+        picker.open(HeaderPickerKind::AgentDestinations, items, 0);
+        picker.set_viewport_rows(3);
+
+        picker.scroll_by(2);
+        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.visible_start(), 2);
+
+        picker.move_selection(1);
+        assert_eq!(picker.selected, 1);
+        assert_eq!(picker.visible_start(), 1);
     }
 }
 
@@ -307,6 +401,11 @@ impl HeaderPickerItem {
             Self::Branch(branch) | Self::BranchBase(branch) | Self::DiffTarget(branch) => {
                 branch.name.clone()
             }
+            Self::AgentDestination {
+                path,
+                repository,
+                ..
+            } => format!("{} {}", path.display(), repository),
         }
     }
 }

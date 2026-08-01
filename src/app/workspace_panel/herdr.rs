@@ -12,6 +12,12 @@ use crate::process::{self, Limits};
 
 use super::{AgentSessionIdentity, AgentStatus, AgentTimingKey, HerdrAgent, HerdrWorkspace};
 
+const EVENT_SUBSCRIPTION_REQUEST: &str = concat!(
+    r#"{"id":"hunkle:events","method":"events.subscribe","params":{"subscriptions":["#,
+    r#"{"type":"pane.agent_status_changed"}]}}"#,
+    "\n"
+);
+
 pub(super) struct Environment {
     pub(super) workspace_id: Option<String>,
     pub(super) tab_id: Option<String>,
@@ -32,37 +38,30 @@ pub(super) struct AgentStatusEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Event {
-    Focus(FocusEvent),
     AgentStatus(AgentStatusEvent),
 }
 
 struct EventCoalescer {
     replaying: bool,
-    latest: Option<FocusEvent>,
 }
 
 impl EventCoalescer {
     fn new() -> Self {
         Self {
             replaying: true,
-            latest: None,
         }
     }
 
     fn observe(&mut self, event: Event) -> Option<Event> {
         if self.replaying {
-            if let Event::Focus(event) = event {
-                self.latest = Some(event);
-            }
             None
         } else {
             Some(event)
         }
     }
 
-    fn finish_replay(&mut self) -> Option<Event> {
+    fn finish_replay(&mut self) {
         self.replaying = false;
-        self.latest.take().map(Event::Focus)
     }
 }
 
@@ -132,14 +131,7 @@ pub(super) fn watch_events(mut on_event: impl FnMut(Event) -> bool) -> Result<()
     let mut stream = connect(&socket_path)
         .map_err(|error| format!("Could not subscribe to Herdr events: {error}"))?;
     stream
-        .write_all(
-            concat!(
-                r#"{"id":"hunkle:events","method":"events.subscribe","params":{"subscriptions":["#,
-                r#"{"type":"pane.focused"},{"type":"pane.agent_status_changed"}]}}"#,
-                "\n"
-            )
-            .as_bytes(),
-        )
+        .write_all(EVENT_SUBSCRIPTION_REQUEST.as_bytes())
         .and_then(|()| stream.flush())
         .map_err(|error| format!("Could not subscribe to Herdr events: {error}"))?;
 
@@ -190,11 +182,7 @@ pub(super) fn watch_events(mut on_event: impl FnMut(Event) -> bool) -> Result<()
                 reader.get_ref().set_recv_timeout(None).map_err(|error| {
                     format!("Could not configure the Herdr event stream: {error}")
                 })?;
-                if let Some(event) = events.finish_replay()
-                    && !on_event(event)
-                {
-                    return Ok(());
-                }
+                events.finish_replay();
                 continue;
             }
             Err(error) => return Err(format!("Herdr event stream failed: {error}")),
@@ -238,10 +226,6 @@ fn parse_event(value: &Value) -> Option<Event> {
     let workspace_id = value.pointer("/data/workspace_id")?.as_str()?.to_owned();
     let pane_id = value.pointer("/data/pane_id")?.as_str()?.to_owned();
     match value.get("event")?.as_str()? {
-        "pane_focused" => Some(Event::Focus(FocusEvent {
-            workspace_id,
-            pane_id,
-        })),
         "pane_agent_status_changed" => Some(Event::AgentStatus(AgentStatusEvent {
             workspace_id,
             pane_id,
@@ -249,6 +233,34 @@ fn parse_event(value: &Value) -> Option<Event> {
         })),
         _ => None,
     }
+}
+
+pub(super) fn focused_pane(
+    workspace_id: String,
+) -> Result<Option<(String, String)>, String> {
+    focused_pane_with(workspace_id, run)
+}
+
+fn focused_pane_with(
+    workspace_id: String,
+    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<Option<(String, String)>, String> {
+    let value = runner(&[
+        "pane".to_owned(),
+        "list".to_owned(),
+        "--workspace".to_owned(),
+        workspace_id.clone(),
+    ])?;
+    let panes = value
+        .pointer("/result/panes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Herdr did not return the workspace panes".to_owned())?;
+    let focused = panes
+        .iter()
+        .find(|pane| pane.get("focused").and_then(Value::as_bool) == Some(true));
+    Ok(focused
+        .and_then(|pane| pane.get("pane_id").and_then(Value::as_str))
+        .map(|pane_id| (workspace_id, pane_id.to_owned())))
 }
 
 pub(super) fn restore(request: RestoreRequest) -> Result<Option<String>, String> {
@@ -260,6 +272,86 @@ pub(super) fn send_command_below(command: String) -> Result<String, String> {
         return Err("Herdr command prompt is only available inside Herdr".to_owned());
     }
     send_command_below_with(command, run)
+}
+
+pub(super) fn replace_pane_with_agent(
+    path: PathBuf,
+    workspace_id: String,
+    pane_id: String,
+) -> Result<String, String> {
+    if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
+        return Err("Agents can only be started inside Herdr".to_owned());
+    }
+    replace_pane_with_agent_with(path, workspace_id, pane_id, run)
+}
+
+fn replace_pane_with_agent_with(
+    path: PathBuf,
+    workspace_id: String,
+    pane_id: String,
+    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<String, String> {
+    let split = runner(&[
+        "pane".to_owned(),
+        "split".to_owned(),
+        pane_id.clone(),
+        "--direction".to_owned(),
+        "right".to_owned(),
+        "--cwd".to_owned(),
+        path.to_string_lossy().into_owned(),
+        "--no-focus".to_owned(),
+    ])?;
+    let replacement_pane_id = split
+        .pointer("/result/pane/pane_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Herdr did not identify the new pane".to_owned())?;
+    if let Err(error) = runner(&[
+        "pane".to_owned(),
+        "move".to_owned(),
+        pane_id.clone(),
+        "--new-tab".to_owned(),
+        "--workspace".to_owned(),
+        workspace_id,
+        "--no-focus".to_owned(),
+    ]) {
+        let _ = runner(&[
+            "pane".to_owned(),
+            "close".to_owned(),
+            replacement_pane_id,
+        ]);
+        return Err(error);
+    }
+    if let Err(error) = runner(&[
+        "agent".to_owned(),
+        "start".to_owned(),
+        "opencode".to_owned(),
+        "--kind".to_owned(),
+        "opencode".to_owned(),
+        "--pane".to_owned(),
+        replacement_pane_id.clone(),
+    ]) {
+        if runner(&[
+            "pane".to_owned(),
+            "move".to_owned(),
+            pane_id,
+            "--target-pane".to_owned(),
+            replacement_pane_id.clone(),
+            "--split".to_owned(),
+            "right".to_owned(),
+            "--no-focus".to_owned(),
+        ])
+        .is_ok()
+        {
+            let _ = runner(&[
+                "pane".to_owned(),
+                "close".to_owned(),
+                replacement_pane_id,
+            ]);
+        }
+        return Err(error);
+    }
+    Ok(replacement_pane_id)
 }
 
 fn send_command_below_with(
@@ -675,17 +767,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_focus_events() {
-        assert_eq!(
-            parse_event(&serde_json::json!({
-                "event": "pane_focused",
-                "data": { "workspace_id": "w2", "pane_id": "w2:p3" }
-            })),
-            Some(Event::Focus(FocusEvent {
-                workspace_id: "w2".to_owned(),
-                pane_id: "w2:p3".to_owned(),
-            }))
-        );
+    fn parses_agent_status_events() {
         assert_eq!(
             parse_event(&serde_json::json!({
                 "event": "pane_agent_status_changed",
@@ -704,21 +786,57 @@ mod tests {
     }
 
     #[test]
-    fn coalesces_replayed_focus_events_before_forwarding_live_events() {
+    fn subscribes_only_to_supported_herdr_events() {
+        let request: Value = serde_json::from_str(EVENT_SUBSCRIPTION_REQUEST.trim()).unwrap();
+        assert_eq!(
+            request.pointer("/params/subscriptions"),
+            Some(&serde_json::json!([
+                { "type": "pane.agent_status_changed" }
+            ]))
+        );
+    }
+
+    #[test]
+    fn discards_replayed_events_before_forwarding_live_events() {
         let mut events = EventCoalescer::new();
-        let event = |workspace_id: &str, pane_id: &str| {
-            Event::Focus(FocusEvent {
-                workspace_id: workspace_id.to_owned(),
-                pane_id: pane_id.to_owned(),
+        let event = || {
+            Event::AgentStatus(AgentStatusEvent {
+                workspace_id: "w1".to_owned(),
+                pane_id: "w1:p1".to_owned(),
+                status: AgentStatus::Working,
             })
         };
 
-        assert_eq!(events.observe(event("w1", "w1:p1")), None);
-        assert_eq!(events.observe(event("w2", "w2:p2")), None);
-        assert_eq!(events.finish_replay(), Some(event("w2", "w2:p2")));
+        assert_eq!(events.observe(event()), None);
+        events.finish_replay();
+        assert_eq!(events.observe(event()), Some(event()));
+    }
+
+    #[test]
+    fn reads_the_globally_focused_pane() {
+        let mut calls = Vec::new();
+        let focused = focused_pane_with(
+            "w2".to_owned(),
+            |args| {
+                calls.push(args.to_vec());
+                Ok(serde_json::json!({
+                    "result": {
+                        "panes": [
+                            { "pane_id": "w2:p1", "focused": false },
+                            { "pane_id": "w2:p3", "focused": true }
+                        ]
+                    }
+                }))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(focused, Some(("w2".to_owned(), "w2:p3".to_owned())));
         assert_eq!(
-            events.observe(event("w3", "w3:p3")),
-            Some(event("w3", "w3:p3"))
+            calls,
+            vec![["pane", "list", "--workspace", "w2"]
+                .map(str::to_owned)
+                .to_vec()]
         );
     }
 
@@ -900,6 +1018,102 @@ mod tests {
                     .map(str::to_owned)
                     .to_vec(),
             ]
+        );
+    }
+
+    #[test]
+    fn replaces_a_focused_pane_with_an_opencode_agent() {
+        let mut calls = Vec::new();
+        let pane_id = replace_pane_with_agent_with(
+            PathBuf::from("/tmp/feature"),
+            "w1".to_owned(),
+            "w1:p2".to_owned(),
+            |args| {
+                calls.push(args.to_vec());
+                Ok(if calls.len() == 1 {
+                    serde_json::json!({ "result": { "pane": { "pane_id": "w1:p4" } } })
+                } else {
+                    Value::Null
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(pane_id, "w1:p4");
+        assert_eq!(
+            calls,
+            vec![
+                [
+                    "pane",
+                    "split",
+                    "w1:p2",
+                    "--direction",
+                    "right",
+                    "--cwd",
+                    "/tmp/feature",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                [
+                    "pane",
+                    "move",
+                    "w1:p2",
+                    "--new-tab",
+                    "--workspace",
+                    "w1",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                [
+                    "agent", "start", "opencode", "--kind", "opencode", "--pane", "w1:p4",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn restores_the_focused_pane_when_agent_startup_fails() {
+        let mut calls = Vec::new();
+        let error = replace_pane_with_agent_with(
+            PathBuf::from("/tmp/feature"),
+            "w1".to_owned(),
+            "w1:p2".to_owned(),
+            |args| {
+                calls.push(args.to_vec());
+                match calls.len() {
+                    1 => Ok(serde_json::json!({
+                        "result": { "pane": { "pane_id": "w1:p4" } }
+                    })),
+                    3 => Err("agent failed".to_owned()),
+                    _ => Ok(Value::Null),
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "agent failed");
+        assert_eq!(
+            calls[3],
+            [
+                "pane",
+                "move",
+                "w1:p2",
+                "--target-pane",
+                "w1:p4",
+                "--split",
+                "right",
+                "--no-focus",
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        );
+        assert_eq!(
+            calls[4],
+            ["pane", "close", "w1:p4"].map(str::to_owned).to_vec()
         );
     }
 

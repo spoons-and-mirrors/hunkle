@@ -30,7 +30,7 @@ pub(crate) use file_editor::{FileEditor, TAB_WIDTH};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use header_picker::{
-    BranchPickerStep, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
+    AgentDestinationKind, BranchPickerStep, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
 };
 pub(crate) use herdr_prompt::HerdrPrompt;
 pub(crate) use repository_browser::{
@@ -171,6 +171,7 @@ pub(crate) enum HitTarget {
     HeaderWorktrees,
     HeaderBranch,
     HeaderDiff,
+    HeaderAgent,
     HeaderPickerOverlay,
     HeaderPickerNewBranch,
     HeaderPickerItem(usize),
@@ -785,6 +786,13 @@ impl App {
             self.should_quit = true;
             return;
         }
+        if key.code == KeyCode::Esc
+            && !self.header_picker.is_open()
+            && self.herdr_prompt.cancel_pending_agent()
+        {
+            self.notice = Some("Agent pane selection cancelled".to_owned());
+            return;
+        }
         if self.header_picker.is_open() {
             self.handle_header_picker(key);
             return;
@@ -1050,11 +1058,11 @@ impl App {
         if let Some(completion) = self.herdr_prompt.poll() {
             changed = true;
             match completion {
-                Ok(pane_id) => {
+                Ok(message) => {
                     if self.mode == Mode::HerdrPrompt {
                         self.mode = Mode::Normal;
                     }
-                    self.notice = Some(format!("Sent to Herdr pane {pane_id}"));
+                    self.notice = Some(message);
                 }
                 Err(error) if self.mode == Mode::HerdrPrompt => {
                     self.herdr_prompt.error = Some(error);
@@ -2937,6 +2945,7 @@ impl App {
             HeaderPickerKind::Worktrees => self.open_header_worktrees(),
             HeaderPickerKind::Branches => self.open_header_branches(),
             HeaderPickerKind::DiffTargets => self.open_header_diff_targets(),
+            HeaderPickerKind::AgentDestinations => self.open_header_agent_destinations(),
         }
     }
 
@@ -3123,6 +3132,62 @@ impl App {
         }
     }
 
+    fn open_header_agent_destinations(&mut self) {
+        if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
+            self.header_picker.open_message(
+                HeaderPickerKind::AgentDestinations,
+                "Agents can only be started inside Herdr".to_owned(),
+            );
+            return;
+        }
+
+        let current = self.repository().map(|repository| repository.root.clone());
+        let mut items = Vec::new();
+        for (common_dir, root) in self.worktree_manager.recent_repositories() {
+            let Ok(worktrees) = git::list_worktrees(common_dir) else {
+                continue;
+            };
+            let repository_root = worktrees
+                .iter()
+                .find(|worktree| worktree.is_main)
+                .map_or(root, |worktree| worktree.path.as_path());
+            let repository = repository_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("repository")
+                .trim_end_matches(".git")
+                .to_owned();
+            for worktree in worktrees.into_iter().filter(|worktree| !worktree.is_bare) {
+                items.push(HeaderPickerItem::AgentDestination {
+                    path: worktree.path,
+                    repository: repository.clone(),
+                    kind: if worktree.is_main {
+                        AgentDestinationKind::Repository
+                    } else {
+                        AgentDestinationKind::Worktree
+                    },
+                });
+            }
+        }
+        let selected = current
+            .as_deref()
+            .and_then(|current| {
+                items.iter().position(|item| {
+                    matches!(item, HeaderPickerItem::AgentDestination { path, .. } if same_path(path, current))
+                })
+            })
+            .unwrap_or(0);
+        if items.is_empty() {
+            self.header_picker.open_message(
+                HeaderPickerKind::AgentDestinations,
+                "No agent destinations".to_owned(),
+            );
+        } else {
+            self.header_picker
+                .open(HeaderPickerKind::AgentDestinations, items, selected);
+        }
+    }
+
     fn handle_header_picker(&mut self, key: KeyEvent) {
         if self.header_picker.naming_branch() {
             self.handle_new_branch_name(key);
@@ -3140,8 +3205,14 @@ impl App {
             {
                 self.begin_header_branch_creation();
             }
-            KeyCode::Up => self.header_picker.move_selection(-1),
-            KeyCode::Down => self.header_picker.move_selection(1),
+            KeyCode::Up => {
+                self.hovered_hit_target = None;
+                self.header_picker.move_selection(-1);
+            }
+            KeyCode::Down => {
+                self.hovered_hit_target = None;
+                self.header_picker.move_selection(1);
+            }
             KeyCode::Enter => self.activate_header_picker(self.header_picker.selected),
             KeyCode::Backspace => self.edit_header_picker_query(TextInput::backspace),
             KeyCode::Delete => self.edit_header_picker_query(TextInput::delete),
@@ -3312,6 +3383,13 @@ impl App {
                     current_revision,
                     target_revision,
                 );
+            }
+            HeaderPickerItem::AgentDestination { path, .. } => {
+                if let Err(error) = self.herdr_prompt.prepare_agent(path) {
+                    self.notice = Some(error);
+                } else {
+                    self.notice = Some("Focus the pane to replace · Esc cancels".to_owned());
+                }
             }
         }
     }
