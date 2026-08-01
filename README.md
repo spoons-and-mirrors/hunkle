@@ -16,6 +16,8 @@
   any vertical header separator to resize the adjacent columns.
 - A filterable repository browser for local and remote branches plus open GitHub
   pull requests and issues.
+- Herdr-aware agent launching from any known repository or linked worktree into
+  a selected pane in the active tab.
 - Source-aware diffs with changed-file and line-count summaries, line numbers,
   syntax color, and tinted additions, deletions, and hunk headers.
 - Nonblocking worktree refresh when files, the index, branches, or HEAD change
@@ -130,6 +132,11 @@ its destination path, and Hunkle opens the result after Git creates it. Press
 `Enter` or double-click to open a checkout. `Delete` safely removes a selected
 linked worktree after confirmation; primary, current, locked, missing, and dirty
 worktrees are protected, and Herdr-owned worktrees are removed through Herdr.
+
+When Hunkle runs inside Herdr, click the green **AGENT** header card to choose a
+Git-inventoried repository or linked worktree, then choose which non-Hunkle pane
+in the active Herdr tab to replace with an OpenCode agent. The destination
+picker can be filtered by repository, branch, or path.
 
 When hunkle runs inside Herdr, press `w` to open the Workspace Manager, a
 responsive modal backed by Herdr's session snapshot. It presents workspace
@@ -281,12 +288,14 @@ own:
 | `app::changes::preview_loader`  | Coalesced asynchronous file, commit, and diff preview loading                                              |
 | `app::commit_summary`           | Lazy, repository-scoped cache of commit file and line-change summaries                                     |
 | `app::explorer`                 | Workspace discovery, navigation, fuzzy search, and semantic interaction targets                            |
+| `app::file_editor`              | Bounded UTF-8 editor state, selections, undo/redo, indentation, and safe atomic persistence                 |
+| `app::linked_worktrees`         | Git-authoritative linked-worktree catalog, discovery memory, Herdr ownership, and removal planning          |
 | `app::repository_browser`       | Branch, pull-request, and issue interaction plus cached remote data                                        |
 | `app::settings`                 | Settings discovery, legacy fallback, validation, and persistence                                           |
 | `app::shortcuts`                | Named command registry, contextual conflict checks, key normalization, overrides, and labels               |
-| `app::worktree_manager`         | Known-repository inventory and linked-worktree interaction, creation, filtering, opening, and safe removal |
+| `app::worktree_manager`         | Linked-worktree interaction, creation, filtering, opening, and semantic removal requests                   |
 | `app::workspace_panel`          | Workspace Panel interaction, focus transitions, groups, presets, and background refresh                    |
-| `app::workspace_panel::herdr`   | Typed Herdr environment, command, restore, and session-snapshot adapter                                    |
+| `app::workspace_panel::herdr`   | Typed Herdr environment, command, pane-layout, agent replacement, restore, and session-snapshot adapter     |
 | `app::workspace_panel::presets` | Preset and group persistence, migration, matching, and recall planning                                     |
 | `repository_session`            | Active workspace lifecycle, background operations, and completion invalidation policy                      |
 | `git`                           | Installed-Git facade, refresh orchestration, worktree operations, and history loading                      |
@@ -297,6 +306,7 @@ own:
 | `tree`                          | Pure worktree and file-tree projection                                                                     |
 | `ui`                            | Rendering shell, header, and view dispatch                                                                 |
 | `ui::changes`                   | Changes, Files, Diff, and commit workspace                                                                 |
+| `ui::editor`                    | Inline-editor layout, cursor, selection, wrapping, and gutter presentation                                 |
 | `ui::history`                   | Current-branch history and all-refs graph                                                                  |
 | `ui::overlays`                  | Explorer, worktree manager, repository browser, settings, and help overlays                                |
 | `ui::workspace_panel`           | Responsive Herdr Workspace Manager modal                                                                   |

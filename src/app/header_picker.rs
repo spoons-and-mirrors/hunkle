@@ -48,8 +48,9 @@ struct RepositoryStatsCompletion {
     stats: Option<(u64, u64)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BranchPickerStep {
+    #[default]
     Branches,
     Base,
     Name,
@@ -72,12 +73,6 @@ pub(crate) struct HeaderPicker {
     pub(crate) branch_base: Option<Branch>,
     pub(crate) branch_name: TextInput,
     repository_stats_rx: Option<Receiver<RepositoryStatsCompletion>>,
-}
-
-impl Default for BranchPickerStep {
-    fn default() -> Self {
-        Self::Branches
-    }
 }
 
 impl HeaderPicker {
@@ -366,6 +361,28 @@ impl HeaderPicker {
     }
 }
 
+impl HeaderPickerItem {
+    fn searchable_text(&self) -> String {
+        match self {
+            Self::Repository { path, .. } => path.display().to_string(),
+            Self::Worktree(worktree) => format!(
+                "{} {}",
+                worktree.path.display(),
+                worktree.branch.as_deref().unwrap_or_default()
+            ),
+            Self::Branch(branch) | Self::BranchBase(branch) | Self::DiffTarget(branch) => {
+                branch.name.clone()
+            }
+            Self::AgentDestination {
+                path,
+                repository,
+                branch,
+                ..
+            } => format!("{} {repository} {branch}", path.display()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,23 +409,23 @@ mod tests {
         assert_eq!(picker.selected, 1);
         assert_eq!(picker.visible_start(), 1);
     }
-}
 
-impl HeaderPickerItem {
-    fn searchable_text(&self) -> String {
-        match self {
-            Self::Repository { path, .. } => path.display().to_string(),
-            Self::Worktree(worktree) => format!(
-                "{} {}",
-                worktree.path.display(),
-                worktree.branch.as_deref().unwrap_or_default()
-            ),
-            Self::Branch(branch) | Self::BranchBase(branch) | Self::DiffTarget(branch) => {
-                branch.name.clone()
-            }
-            Self::AgentDestination {
-                path, repository, ..
-            } => format!("{} {}", path.display(), repository),
-        }
+    #[test]
+    fn filters_agent_destinations_by_branch() {
+        let mut picker = HeaderPicker::default();
+        picker.open(
+            HeaderPickerKind::AgentDestinations,
+            vec![HeaderPickerItem::AgentDestination {
+                path: PathBuf::from("/tmp/checkout"),
+                repository: "repository".to_owned(),
+                branch: "topic-branch".to_owned(),
+                kind: AgentDestinationKind::Worktree,
+            }],
+            0,
+        );
+        picker.query.insert("topic");
+        picker.apply_filter();
+
+        assert_eq!(picker.items.len(), 1);
     }
 }

@@ -44,6 +44,10 @@ The `o` interaction for finding and opening another workspace. Explorer is not t
 
 The `b` interaction for branches, pull requests, and issues belonging to the active repository.
 
+## Agent destination
+
+A Git-inventoried Repository or Linked worktree where Hunkle can launch an OpenCode agent. Inside Herdr, the user first chooses this filesystem destination and then chooses a non-Hunkle pane in the active tab to replace. The Linked worktree catalog remains authoritative for destination existence; Herdr remains the adapter for pane layout and replacement.
+
 ## Interaction
 
 A focused user flow that owns its transient state and interprets input. An interaction may emit an application effect, such as opening a branch tip in Graph.

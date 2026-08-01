@@ -160,8 +160,7 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         editor_body,
         wrapped,
         &app.regions.editor_rows,
-        editor.scroll_line,
-        editor.scroll_column,
+        (editor.scroll_line, editor.scroll_column),
     );
     let cursor_x = editor_body
         .x
@@ -181,8 +180,7 @@ fn render_file_editor_selection(
     body: Rect,
     wrapped: bool,
     rows: &[crate::app::EditorRenderedRow],
-    scroll_line: usize,
-    scroll_column: usize,
+    scroll: (usize, usize),
 ) {
     let Some(selection) = selection else {
         return;
@@ -212,6 +210,7 @@ fn render_file_editor_selection(
         return;
     }
 
+    let (scroll_line, scroll_column) = scroll;
     for row in 0..usize::from(body.height) {
         let line = scroll_line.saturating_add(row);
         let Some((start, end)) = selected_display_range(source, line, selection) else {

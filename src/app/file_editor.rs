@@ -127,7 +127,7 @@ impl FileEditor {
         let (start, end) = self.selection_range()?;
         Some((
             line_number_at(&self.text, start),
-            line_number_at(&self.text, end),
+            line_number_at(&self.text, end.saturating_sub(1)),
         ))
     }
 
@@ -201,6 +201,11 @@ impl FileEditor {
 
     pub(crate) fn refresh_from_disk(&mut self) -> Result<()> {
         let file = filesystem::safe_regular_file(&self.root, &self.path)?;
+        let metadata = std::fs::metadata(&file)
+            .with_context(|| format!("could not inspect {}", file.display()))?;
+        if metadata.len() > MAX_EDITABLE_BYTES as u64 {
+            bail!("{} is too large for inline editing", self.path.display());
+        }
         let bytes =
             std::fs::read(&file).with_context(|| format!("could not read {}", file.display()))?;
         if bytes.len() > MAX_EDITABLE_BYTES {
@@ -904,6 +909,19 @@ mod tests {
     }
 
     #[test]
+    fn selection_ending_at_the_next_line_start_targets_only_the_selected_line() {
+        let (_directory, mut editor) = editor("one\ntwo\n");
+        editor.set_cursor(0, 0);
+        editor.begin_selection();
+        editor.extend_cursor(1, 0);
+
+        assert_eq!(editor.selected_text(), Some("one\n"));
+        assert_eq!(editor.selected_line_range(), Some((0, 0)));
+        editor.indent_lines(0, 0, false).unwrap();
+        assert_eq!(editor.text(), "\tone\ntwo\n");
+    }
+
+    #[test]
     fn undo_and_redo_are_kept_for_each_editor() {
         let (_directory, mut first) = editor("text\n");
         let (_other_directory, mut second) = editor("other\n");
@@ -958,6 +976,19 @@ mod tests {
         assert_eq!(editor.text(), "formatted\n");
         assert!(!editor.redo());
         assert!(editor.undo());
+        assert_eq!(editor.text(), "original\n");
+    }
+
+    #[test]
+    fn refresh_rejects_oversized_files_before_reading_them() {
+        let (directory, mut editor) = editor("original\n");
+        let file = directory.path().join("file.txt");
+        let oversized = std::fs::File::create(&file).unwrap();
+        oversized.set_len(MAX_EDITABLE_BYTES as u64 + 1).unwrap();
+
+        let error = editor.refresh_from_disk().unwrap_err().to_string();
+
+        assert!(error.contains("too large for inline editing"));
         assert_eq!(editor.text(), "original\n");
     }
 

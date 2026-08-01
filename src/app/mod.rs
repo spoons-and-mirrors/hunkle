@@ -1772,12 +1772,9 @@ impl App {
         let Some(item) = self.header_picker.items.get(index).cloned() else {
             return;
         };
-        match item {
-            HeaderPickerItem::BranchBase(branch) => {
-                self.header_picker.open_branch_name(branch);
-                return;
-            }
-            _ => {}
+        if let HeaderPickerItem::BranchBase(branch) = item {
+            self.header_picker.open_branch_name(branch);
+            return;
         }
         self.header_picker.close();
         match item {

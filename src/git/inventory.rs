@@ -261,11 +261,10 @@ fn collect_recursive_file_candidates(
             })?;
             if file_type.is_dir() && !file_type.is_symlink() {
                 directories.push(entry.path());
-            } else if let Ok(relative) = entry.path().strip_prefix(root) {
-                if add_ignored_file_candidate(RepoPath::from(relative), candidates, candidate_bytes)
-                {
-                    return Ok(true);
-                }
+            } else if let Ok(relative) = entry.path().strip_prefix(root)
+                && add_ignored_file_candidate(RepoPath::from(relative), candidates, candidate_bytes)
+            {
+                return Ok(true);
             }
         }
     }

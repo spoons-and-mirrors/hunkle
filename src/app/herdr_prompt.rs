@@ -190,10 +190,10 @@ impl HerdrPrompt {
         let mut changed = false;
         let mut completion = None;
         while let Ok((request_id, result)) = self.layout_receiver.try_recv() {
-            if !self
+            if self
                 .pending_agent
                 .as_ref()
-                .is_some_and(|pending| pending.request_id == request_id)
+                .is_none_or(|pending| pending.request_id != request_id)
             {
                 continue;
             }

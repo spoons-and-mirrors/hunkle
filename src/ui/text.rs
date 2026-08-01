@@ -779,19 +779,18 @@ pub(super) fn diff_new_line_markers(diff: &str, target: &RepoPath) -> Vec<(usize
         } else if line.starts_with('-') {
             deletion_pending = true;
         } else if line.starts_with(' ') {
-            if deletion_pending {
-                if let Some(line_number) = new_line {
-                    markers.push((line_number.saturating_sub(1) as usize, '-'));
-                }
+            if deletion_pending && let Some(line_number) = new_line {
+                markers.push((line_number.saturating_sub(1) as usize, '-'));
             }
             new_line = new_line.map(|line| line.saturating_add(1));
             deletion_pending = false;
         }
     }
-    if deletion_pending && path.as_ref() == Some(target) {
-        if let Some(line_number) = new_line {
-            markers.push((line_number.saturating_sub(1) as usize, '-'));
-        }
+    if deletion_pending
+        && path.as_ref() == Some(target)
+        && let Some(line_number) = new_line
+    {
+        markers.push((line_number.saturating_sub(1) as usize, '-'));
     }
     markers
 }

@@ -80,7 +80,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .saturating_sub(badge_width.saturating_add(4))
         .min(30);
     let notice = (available >= 100 && notice_budget > 0)
-        .then(|| app.notice.as_deref())
+        .then_some(app.notice.as_deref())
         .flatten()
         .map(|notice| truncate_width(notice, notice_budget));
     let notice_width = notice

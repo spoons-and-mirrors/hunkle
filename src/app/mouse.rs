@@ -415,10 +415,10 @@ impl App {
                     });
                 if double_click {
                     self.last_file_editor_click = None;
-                    if let Some(editor) = &mut self.file_editor {
-                        if !editor.select_word_at_cursor() {
-                            editor.clear_selection();
-                        }
+                    if let Some(editor) = &mut self.file_editor
+                        && !editor.select_word_at_cursor()
+                    {
+                        editor.clear_selection();
                     }
                 } else if has_selection {
                     self.last_file_editor_click = None;
