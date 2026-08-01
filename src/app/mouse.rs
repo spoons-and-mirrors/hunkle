@@ -1444,38 +1444,45 @@ impl App {
             self.toggle_workspace_panel_enabled();
         } else if self
             .regions
-            .agent_harness_setting
+            .cross_workspace_agents_setting
             .is_some_and(|rect| rect.contains(point))
         {
             self.settings_selection = 4;
+            self.toggle_cross_workspace_agents();
+        } else if self
+            .regions
+            .agent_harness_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 5;
             self.toggle_agent_harness();
         } else if self
             .regions
             .agent_time_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 5;
+            self.settings_selection = 6;
             self.toggle_agent_time_display();
         } else if self
             .regions
             .clear_agent_timings_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 6;
+            self.settings_selection = 7;
             self.clear_agent_timing_history();
         } else if self
             .regions
             .media_preview_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 7;
+            self.settings_selection = 8;
             self.toggle_media_preview_protocol();
         } else if self
             .regions
             .editor_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 8;
+            self.settings_selection = 9;
             self.open_editor_setting();
         }
     }

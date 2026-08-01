@@ -212,6 +212,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.opencode_model_setting = regions.opencode_model;
             app.regions.opencode_reasoning_setting = regions.opencode_reasoning;
             app.regions.workspace_panel_setting = regions.workspace_panel;
+            app.regions.cross_workspace_agents_setting = regions.cross_workspace_agents;
             app.regions.agent_harness_setting = regions.agent_harness;
             app.regions.agent_time_setting = regions.agent_time;
             app.regions.clear_agent_timings_setting = regions.clear_agent_timings;

@@ -30,7 +30,7 @@ pub(crate) fn draw_settings(
         opencode_model_input,
         opencode_error,
     } = view;
-    let area = centered_min(frame.area(), 58, 0, 48, 28);
+    let area = centered_min(frame.area(), 58, 0, 48, 30);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -186,6 +186,7 @@ pub(crate) fn draw_settings(
             opencode_model: None,
             opencode_reasoning: None,
             workspace_panel: None,
+            cross_workspace_agents: None,
             agent_harness: None,
             agent_time: None,
             clear_agent_timings: None,
@@ -306,6 +307,7 @@ pub(crate) fn draw_settings(
             opencode_model: Some(model_row),
             opencode_reasoning: Some(reasoning_row),
             workspace_panel: None,
+            cross_workspace_agents: None,
             agent_harness: None,
             agent_time: None,
             clear_agent_timings: None,
@@ -332,18 +334,19 @@ pub(crate) fn draw_settings(
         area.width.saturating_sub(4),
         area.height,
     );
-    let compact = area.height < 26;
+    let compact = area.height < 28;
     let automation_header_y = if compact { 3 } else { 4 };
     let auto_y = if compact { 4 } else { 7 };
     let interval_y = if compact { 5 } else { 9 };
     let format_on_save_y = if compact { 6 } else { 11 };
     let interface_header_y = if compact { 8 } else { 14 };
     let workspace_y = if compact { 9 } else { 15 };
-    let agent_y = if compact { 10 } else { 17 };
-    let agent_time_y = if compact { 11 } else { 19 };
-    let clear_timings_y = if compact { 12 } else { 21 };
-    let media_y = if compact { 13 } else { 23 };
-    let editor_y = if compact { 14 } else { 25 };
+    let cross_workspace_y = if compact { 10 } else { 17 };
+    let agent_y = if compact { 11 } else { 19 };
+    let agent_time_y = if compact { 12 } else { 21 };
+    let clear_timings_y = if compact { 13 } else { 23 };
+    let media_y = if compact { 14 } else { 25 };
+    let editor_y = if compact { 15 } else { 27 };
     let auto_row = Rect::new(inner.x, area.y.saturating_add(auto_y), inner.width, 1);
     let interval_row = Rect::new(inner.x, area.y.saturating_add(interval_y), inner.width, 1);
     let format_on_save_row = Rect::new(
@@ -354,6 +357,12 @@ pub(crate) fn draw_settings(
     );
     let workspace_panel_row =
         Rect::new(inner.x, area.y.saturating_add(workspace_y), inner.width, 1);
+    let cross_workspace_agents_row = Rect::new(
+        inner.x,
+        area.y.saturating_add(cross_workspace_y),
+        inner.width,
+        1,
+    );
     let agent_harness_row = Rect::new(inner.x, area.y.saturating_add(agent_y), inner.width, 1);
     let agent_time_row = Rect::new(inner.x, area.y.saturating_add(agent_time_y), inner.width, 1);
     let clear_agent_timings_row = Rect::new(
@@ -384,7 +393,7 @@ pub(crate) fn draw_settings(
             ),
             Span::styled(media_protocol_label, Style::default().fg(palette().accent)),
         ]))
-        .style(Style::default().bg(if selection == 7 {
+        .style(Style::default().bg(if selection == 8 {
             palette().selected
         } else {
             palette().surface_alt
@@ -547,6 +556,31 @@ pub(crate) fn draw_settings(
         workspace_panel_row,
     );
 
+    let (cross_workspace_switch, cross_workspace_switch_color) =
+        settings_toggle(settings.cross_workspace_agents);
+    let cross_workspace_padding = usize::from(cross_workspace_agents_row.width)
+        .saturating_sub(22 + UnicodeWidthStr::width(cross_workspace_switch));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Cross-workspace agents", Style::default().fg(palette().ink)),
+            Span::raw(" ".repeat(cross_workspace_padding)),
+            Span::styled(
+                cross_workspace_switch,
+                Style::default()
+                    .fg(palette().canvas)
+                    .bg(cross_workspace_switch_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]))
+        .style(Style::default().bg(if selection == 4 {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        cross_workspace_agents_row,
+    );
+
     let (agent_harness_switch, agent_harness_switch_color) =
         settings_toggle(settings.show_agent_harness);
     let agent_harness_padding = usize::from(agent_harness_row.width)
@@ -564,7 +598,7 @@ pub(crate) fn draw_settings(
             ),
             Span::raw(" "),
         ]))
-        .style(Style::default().bg(if selection == 4 {
+        .style(Style::default().bg(if selection == 5 {
             palette().selected
         } else {
             palette().surface_alt
@@ -581,7 +615,7 @@ pub(crate) fn draw_settings(
             Span::raw(" ".repeat(agent_time_padding)),
             Span::styled(agent_time_label, Style::default().fg(palette().accent)),
         ]))
-        .style(Style::default().bg(if selection == 5 {
+        .style(Style::default().bg(if selection == 6 {
             palette().selected
         } else {
             palette().surface_alt
@@ -598,7 +632,7 @@ pub(crate) fn draw_settings(
             Span::raw(" ".repeat(clear_padding)),
             Span::styled(clear_label, Style::default().fg(palette().orange)),
         ]))
-        .style(Style::default().bg(if selection == 6 {
+        .style(Style::default().bg(if selection == 7 {
             palette().selected
         } else {
             palette().surface_alt
@@ -626,7 +660,7 @@ pub(crate) fn draw_settings(
                 }),
             ),
         ]))
-        .style(Style::default().bg(if selection == 8 {
+        .style(Style::default().bg(if selection == 9 {
             palette().selected
         } else {
             palette().surface_alt
@@ -647,6 +681,7 @@ pub(crate) fn draw_settings(
         opencode_model: None,
         opencode_reasoning: None,
         workspace_panel: Some(workspace_panel_row),
+        cross_workspace_agents: Some(cross_workspace_agents_row),
         agent_harness: Some(agent_harness_row),
         agent_time: Some(agent_time_row),
         clear_agent_timings: Some(clear_agent_timings_row),

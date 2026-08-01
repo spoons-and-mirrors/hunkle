@@ -79,18 +79,21 @@ impl App {
                 self.toggle_workspace_panel_enabled();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 4 => {
-                self.toggle_agent_harness();
+                self.toggle_cross_workspace_agents();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 5 => {
-                self.toggle_agent_time_display();
+                self.toggle_agent_harness();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 6 => {
-                self.clear_agent_timing_history();
+                self.toggle_agent_time_display();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 7 => {
-                self.toggle_media_preview_protocol();
+                self.clear_agent_timing_history();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 8 => {
+                self.toggle_media_preview_protocol();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 9 => {
                 self.open_editor_setting();
             }
             _ => {}
@@ -268,6 +271,13 @@ impl App {
 
     pub(crate) fn toggle_agent_harness(&mut self) {
         self.settings.show_agent_harness = !self.settings.show_agent_harness;
+        self.settings_changed();
+    }
+
+    pub(crate) fn toggle_cross_workspace_agents(&mut self) {
+        self.settings.cross_workspace_agents = !self.settings.cross_workspace_agents;
+        self.workspace_panel
+            .set_cross_workspace_agents(self.settings.cross_workspace_agents);
         self.settings_changed();
     }
 

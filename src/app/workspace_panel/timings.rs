@@ -348,6 +348,7 @@ mod tests {
             workspace_id: "workspace".to_owned(),
             tab_id: "tab".to_owned(),
             pane_id: "pane".to_owned(),
+            cwd: None,
             focused: false,
             status: AgentStatus::Idle,
             timing_key: agent_key.clone(),

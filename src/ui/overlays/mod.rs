@@ -63,6 +63,7 @@ pub(super) struct SettingsRegions {
     pub(super) opencode_model: Option<Rect>,
     pub(super) opencode_reasoning: Option<Rect>,
     pub(super) workspace_panel: Option<Rect>,
+    pub(super) cross_workspace_agents: Option<Rect>,
     pub(super) agent_harness: Option<Rect>,
     pub(super) agent_time: Option<Rect>,
     pub(super) clear_agent_timings: Option<Rect>,

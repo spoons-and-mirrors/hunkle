@@ -63,6 +63,10 @@ pub(super) enum Completion {
         warning: Option<String>,
         destructive: bool,
     },
+    AgentDisplay {
+        result: Result<(), String>,
+        reopen_path: Option<PathBuf>,
+    },
     SnapshotRecall {
         name: String,
         result: Result<SnapshotRecallResult, String>,

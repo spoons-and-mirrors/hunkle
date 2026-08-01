@@ -161,6 +161,7 @@ pub(crate) struct HerdrAgent {
     pub(crate) workspace_id: String,
     pub(crate) tab_id: String,
     pub(crate) pane_id: String,
+    pub(crate) cwd: Option<PathBuf>,
     pub(crate) focused: bool,
     pub(crate) status: AgentStatus,
     timing_key: AgentTimingKey,
@@ -308,6 +309,9 @@ pub(crate) struct WorkspacePanel {
     last_click: Option<(SelectionKey, Instant)>,
     focus: WorkspaceFocusState,
     host_tab_id: Option<String>,
+    host_pane_id: Option<String>,
+    cross_workspace_agents: bool,
+    agent_display_running: bool,
     destructive_actions_running: usize,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
@@ -343,6 +347,7 @@ impl WorkspacePanel {
         if let Some(environment) = environment {
             panel.focus.set_host(environment.workspace_id);
             panel.host_tab_id = environment.tab_id;
+            panel.host_pane_id = environment.pane_id;
             panel.start_event_listener();
         }
         panel
@@ -418,6 +423,9 @@ impl WorkspacePanel {
             last_click: None,
             focus: WorkspaceFocusState::default(),
             host_tab_id: None,
+            host_pane_id: None,
+            cross_workspace_agents: false,
+            agent_display_running: false,
             destructive_actions_running: 0,
             sender,
             receiver,
@@ -665,6 +673,20 @@ impl WorkspacePanel {
                         Err(error) => action_error = Some(error),
                     }
                 }
+                Completion::AgentDisplay {
+                    result,
+                    reopen_path: agent_reopen_path,
+                } => {
+                    self.agent_display_running = false;
+                    self.next_refresh = Instant::now();
+                    match result {
+                        Ok(()) => {
+                            self.inventory_verified = false;
+                            reopen_path = agent_reopen_path;
+                        }
+                        Err(error) => action_error = Some(error),
+                    }
+                }
                 Completion::SnapshotRecall { name, result } => match result {
                     Ok(result) => {
                         self.snapshot_loading = false;
@@ -702,6 +724,15 @@ impl WorkspacePanel {
     }
 
     fn apply_agent_snapshot_at(&mut self, agents: Vec<HerdrAgent>, now_ms: u64) {
+        let agents = if self.cross_workspace_agents || self.focus.host().is_none() {
+            agents
+        } else {
+            let host_workspace_id = self.focus.host();
+            agents
+                .into_iter()
+                .filter(|agent| host_workspace_id == Some(agent.workspace_id.as_str()))
+                .collect()
+        };
         let synced = self.agent_timings_path.as_deref().is_some_and(|path| {
             timings::sync(path, &mut self.agent_timings, &agents, now_ms).is_ok()
         });
@@ -1641,9 +1672,7 @@ impl WorkspacePanel {
             return WorkspacePanelEffect::None;
         }
         self.last_click = None;
-        let pane_id = self.agents[index].pane_id.clone();
-        self.observe_agent_focus(&pane_id);
-        WorkspacePanelEffect::FocusAgent(pane_id)
+        WorkspacePanelEffect::DisplayAgent(self.agents[index].pane_id.clone())
     }
 
     fn is_double_click(&self, key: &SelectionKey) -> bool {
@@ -1719,7 +1748,7 @@ impl WorkspacePanel {
         index: usize,
         panel_focused: bool,
     ) -> WorkspacePanelEntryState {
-        let active = self.agents.get(index).is_some_and(|agent| agent.focused);
+        let active = self.agent_is_in_host_tab(index);
         WorkspacePanelEntryState {
             active,
             loaded: false,
@@ -1901,7 +1930,7 @@ impl WorkspacePanel {
         else {
             return;
         };
-        self.focus_agent(pane_id);
+        self.display_agent(pane_id);
     }
 
     pub(crate) fn start_workspace_focus(&mut self, workspace_id: String) {
@@ -1932,21 +1961,6 @@ impl WorkspacePanel {
                 thread::sleep(Duration::from_millis(250));
             }
         });
-    }
-
-    fn apply_focus_event(&mut self, event: herdr::FocusEvent) {
-        let herdr::FocusEvent {
-            workspace_id,
-            pane_id,
-            ..
-        } = event;
-        self.focus.observe(Some(workspace_id.clone()));
-        for workspace in &mut self.workspaces {
-            workspace.focused = workspace.id == workspace_id;
-        }
-        for agent in &mut self.agents {
-            agent.focused = agent.pane_id == pane_id;
-        }
     }
 
     fn apply_agent_status_event_at(&mut self, event: herdr::AgentStatusEvent, now_ms: u64) {
@@ -1980,23 +1994,52 @@ impl WorkspacePanel {
         }
     }
 
-    pub(crate) fn focus_agent(&mut self, pane_id: String) {
-        self.observe_agent_focus(&pane_id);
-        self.start_action(herdr::Action::FocusAgent { pane_id });
+    pub(crate) fn display_agent(&mut self, pane_id: String) {
+        if self.agent_display_running {
+            return;
+        }
+        let Some(agent) = self.agents.iter().find(|agent| agent.pane_id == pane_id) else {
+            return;
+        };
+        let (Some(host_workspace_id), Some(host_tab_id), Some(host_pane_id)) = (
+            self.focus.host().map(str::to_owned),
+            self.host_tab_id.clone(),
+            self.host_pane_id.clone(),
+        ) else {
+            return;
+        };
+        let request = herdr::DisplayAgentRequest {
+            pane_id: agent.pane_id.clone(),
+            workspace_id: agent.workspace_id.clone(),
+            tab_id: agent.tab_id.clone(),
+            host_pane_id,
+            host_workspace_id,
+            host_tab_id,
+            allow_cross_workspace: self.cross_workspace_agents,
+        };
+        let reopen_path = agent.cwd.clone();
+        self.agent_display_running = true;
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = herdr::display_agent(request);
+            let reopen_path = result.as_ref().ok().and(reopen_path);
+            let _ = sender.send(Completion::AgentDisplay {
+                result,
+                reopen_path,
+            });
+        });
     }
 
-    fn observe_agent_focus(&mut self, pane_id: &str) {
-        if let Some(workspace_id) = self
-            .agents
-            .iter()
-            .find(|agent| agent.pane_id == pane_id)
-            .map(|agent| agent.workspace_id.clone())
-        {
-            self.apply_focus_event(herdr::FocusEvent {
-                workspace_id,
-                pane_id: pane_id.to_owned(),
-            });
+    pub(crate) fn set_cross_workspace_agents(&mut self, enabled: bool) {
+        let previous = self.selection_key();
+        self.cross_workspace_agents = enabled;
+        if !enabled {
+            let host_workspace_id = self.focus.host();
+            self.agents
+                .retain(|agent| host_workspace_id == Some(agent.workspace_id.as_str()));
         }
+        self.restore_selection(previous);
+        self.next_refresh = Instant::now();
     }
 
     fn start_action(&self, action: herdr::Action) {
@@ -2238,6 +2281,7 @@ impl WorkspacePanel {
     #[cfg(test)]
     pub(crate) fn ready_for_test(value: &Value) -> Self {
         let mut panel = Self::new(true, None, None);
+        panel.cross_workspace_agents = true;
         let (workspaces, agents) = herdr::parse_snapshot(value).unwrap();
         panel.focus.apply_snapshot(&workspaces);
         panel.workspaces = workspaces;
@@ -2251,6 +2295,7 @@ impl WorkspacePanel {
     pub(crate) fn set_host_location_for_test(&mut self, workspace_id: &str, tab_id: &str) {
         self.focus.set_host(Some(workspace_id.to_owned()));
         self.host_tab_id = Some(tab_id.to_owned());
+        self.host_pane_id = Some("hunkle-pane".to_owned());
     }
 }
 
@@ -2275,7 +2320,7 @@ pub(crate) enum WorkspacePanelEffect {
         path: Option<PathBuf>,
         parent_path: Option<PathBuf>,
     },
-    FocusAgent(String),
+    DisplayAgent(String),
     OpenWorkspace(PathBuf),
     Notice(String),
 }

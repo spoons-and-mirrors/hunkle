@@ -290,6 +290,7 @@ pub struct Regions {
     pub opencode_reasoning_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub workspace_panel_setting: Option<Rect>,
+    pub cross_workspace_agents_setting: Option<Rect>,
     pub agent_harness_setting: Option<Rect>,
     pub agent_time_setting: Option<Rect>,
     pub clear_agent_timings_setting: Option<Rect>,

@@ -68,7 +68,7 @@ pub(super) use std::{
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
-const SETTINGS_ROW_COUNT: usize = 9;
+const SETTINGS_ROW_COUNT: usize = 10;
 
 pub(super) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) use ratatui::{
@@ -241,8 +241,9 @@ impl App {
             let _ = linked_worktrees.remember_repository(common_dir, &repository.root);
         }
         linked_worktrees.set_active_path(session.data().map(|repository| repository.root.clone()));
-        let workspace_panel =
+        let mut workspace_panel =
             WorkspacePanel::detect(workspace_groups_path, workspace_snapshots_path);
+        workspace_panel.set_cross_workspace_agents(settings.cross_workspace_agents);
         linked_worktrees.observe_herdr(workspace_panel.linked_worktree_observation());
         linked_worktrees.refresh();
         let mut author_filter = AuthorFilter::default();
@@ -670,7 +671,7 @@ impl App {
         let mut changed = self.mode == Mode::Explorer
             && self.explorer_tab == ExplorerTab::Explorer
             && self.workspace_explorer.poll_index();
-        if self.workspace_panel_enabled()
+        if self.workspace_panel.is_enabled()
             || (self.mode == Mode::Explorer
                 && self.explorer_tab == ExplorerTab::Worktrees
                 && self.workspace_panel.is_enabled())
@@ -682,10 +683,7 @@ impl App {
                 self.notice = Some(error);
             }
             if let Some(path) = panel_poll.reopen_path {
-                diagnostics::event(format!(
-                    "opening parent workspace after worktree removal path={}",
-                    path.display()
-                ));
+                diagnostics::event(format!("opening repository path={}", path.display()));
                 self.queue_workspace_restore(path);
             }
             if panel_poll.workspace_focus_succeeded
@@ -1934,9 +1932,9 @@ impl App {
                 self.workspace_panel
                     .delete_worktree(&workspace_id, reopen_path);
             }
-            WorkspacePanelEffect::FocusAgent(pane_id) => {
-                diagnostics::event(format!("Herdr agent focus requested pane={pane_id}"));
-                self.workspace_panel.focus_agent(pane_id);
+            WorkspacePanelEffect::DisplayAgent(pane_id) => {
+                diagnostics::event(format!("Herdr agent display requested pane={pane_id}"));
+                self.workspace_panel.display_agent(pane_id);
             }
             WorkspacePanelEffect::OpenWorkspace(path) => {
                 if self.workspace_focus_restore_path.is_none() {

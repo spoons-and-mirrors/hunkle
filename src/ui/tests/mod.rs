@@ -1630,6 +1630,7 @@ fn renders_every_primary_surface() {
     assert!(settings_screen.contains("Fetch interval"));
     assert!(settings_screen.contains("Format on save"));
     assert!(settings_screen.contains("Workspace manager"));
+    assert!(settings_screen.contains("Cross-workspace agents"));
     assert!(settings_screen.contains("Agent harness"));
     assert!(settings_screen.contains("Agent time"));
     assert!(settings_screen.contains("Latest loop"));
@@ -1649,13 +1650,15 @@ fn renders_every_primary_surface() {
     assert!(app.regions.fetch_interval_up.is_some());
     let format_on_save_setting = app.regions.format_on_save_setting.unwrap();
     let workspace_setting = app.regions.workspace_panel_setting.unwrap();
+    let cross_workspace_setting = app.regions.cross_workspace_agents_setting.unwrap();
     let agent_harness_setting = app.regions.agent_harness_setting.unwrap();
     let agent_time_setting = app.regions.agent_time_setting.unwrap();
     let clear_agent_timings_setting = app.regions.clear_agent_timings_setting.unwrap();
     let media_preview_setting = app.regions.media_preview_setting.unwrap();
     let editor_setting = app.regions.editor_setting.unwrap();
     assert!(format_on_save_setting.y < workspace_setting.y);
-    assert_eq!(agent_harness_setting.y, workspace_setting.y + 2);
+    assert_eq!(cross_workspace_setting.y, workspace_setting.y + 2);
+    assert_eq!(agent_harness_setting.y, cross_workspace_setting.y + 2);
     assert_eq!(agent_time_setting.y, agent_harness_setting.y + 2);
     assert_eq!(clear_agent_timings_setting.y, agent_time_setting.y + 2);
     assert_eq!(media_preview_setting.y, clear_agent_timings_setting.y + 2);

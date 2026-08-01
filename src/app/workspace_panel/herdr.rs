@@ -24,6 +24,17 @@ const EVENT_SUBSCRIPTION_REQUEST: &str = concat!(
 pub(super) struct Environment {
     pub(super) workspace_id: Option<String>,
     pub(super) tab_id: Option<String>,
+    pub(super) pane_id: Option<String>,
+}
+
+pub(super) struct DisplayAgentRequest {
+    pub(super) pane_id: String,
+    pub(super) workspace_id: String,
+    pub(super) tab_id: String,
+    pub(super) host_pane_id: String,
+    pub(super) host_workspace_id: String,
+    pub(super) host_tab_id: String,
+    pub(super) allow_cross_workspace: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,12 +54,6 @@ pub(crate) struct HerdrPaneRect {
     pub(crate) y: u16,
     pub(crate) width: u16,
     pub(crate) height: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct FocusEvent {
-    pub(super) workspace_id: String,
-    pub(super) pane_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,9 +108,6 @@ pub(super) enum Action {
     FocusWorkspace {
         workspace_id: String,
     },
-    FocusAgent {
-        pane_id: String,
-    },
     RenameWorkspace {
         workspace_id: String,
         label: String,
@@ -129,6 +131,7 @@ pub(super) fn environment() -> Option<Environment> {
         std::env::var("HERDR_ENV").ok().as_deref(),
         std::env::var("HERDR_WORKSPACE_ID").ok(),
         std::env::var("HERDR_TAB_ID").ok(),
+        std::env::var("HERDR_PANE_ID").ok(),
     )
 }
 
@@ -138,6 +141,177 @@ pub(super) fn perform(action: Action) -> Result<(), String> {
 
 pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String> {
     run(&["api".to_owned(), "snapshot".to_owned()]).and_then(|value| parse_snapshot(&value))
+}
+
+pub(super) fn display_agent(request: DisplayAgentRequest) -> Result<(), String> {
+    display_agent_with(request, |args| run(args))
+}
+
+fn display_agent_with<F>(request: DisplayAgentRequest, mut runner: F) -> Result<(), String>
+where
+    F: FnMut(&[String]) -> Result<Value, String>,
+{
+    if request.workspace_id != request.host_workspace_id && !request.allow_cross_workspace {
+        return Err("Cross-workspace agents are disabled in Settings".to_owned());
+    }
+
+    let neighbor = runner(&[
+        "pane".to_owned(),
+        "neighbor".to_owned(),
+        "--direction".to_owned(),
+        "right".to_owned(),
+        "--pane".to_owned(),
+        request.host_pane_id.clone(),
+    ])?;
+    let companion_pane_id = neighbor
+        .pointer("/result/neighbor/neighbor_pane_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    if companion_pane_id.as_deref() == Some(request.pane_id.as_str()) {
+        return Ok(());
+    }
+
+    let ratio = companion_pane_id
+        .as_deref()
+        .and_then(|companion| companion_ratio(&neighbor, &request.host_pane_id, companion));
+    let Some(companion_pane_id) = companion_pane_id else {
+        if request.tab_id == request.host_tab_id {
+            return Err("The selected agent is not in Hunkle's companion pane".to_owned());
+        }
+        if request.workspace_id != request.host_workspace_id {
+            return Err(
+                "A companion pane is required to display an agent from another workspace"
+                    .to_owned(),
+            );
+        }
+        move_pane(
+            &mut runner,
+            &request.pane_id,
+            &request.host_tab_id,
+            &request.host_pane_id,
+            ratio,
+        )?;
+        return Ok(());
+    };
+
+    if request.tab_id == request.host_tab_id {
+        let result = runner(&[
+            "pane".to_owned(),
+            "swap".to_owned(),
+            "--source-pane".to_owned(),
+            request.pane_id.clone(),
+            "--target-pane".to_owned(),
+            companion_pane_id,
+        ])?;
+        require_changed(&result, "/result/swap", "pane swap")?;
+        runner(&[
+            "pane".to_owned(),
+            "focus".to_owned(),
+            "--direction".to_owned(),
+            "left".to_owned(),
+            "--pane".to_owned(),
+            request.pane_id,
+        ])?;
+        return Ok(());
+    }
+
+    let moved_companion = move_pane(
+        &mut runner,
+        &companion_pane_id,
+        &request.tab_id,
+        &request.pane_id,
+        None,
+    )?;
+    if let Err(error) = move_pane(
+        &mut runner,
+        &request.pane_id,
+        &request.host_tab_id,
+        &request.host_pane_id,
+        ratio,
+    ) {
+        let rollback = move_pane(
+            &mut runner,
+            &moved_companion,
+            &request.host_tab_id,
+            &request.host_pane_id,
+            ratio,
+        );
+        return Err(match rollback {
+            Ok(_) => error,
+            Err(rollback) => format!("{error}; could not restore the companion pane: {rollback}"),
+        });
+    }
+    Ok(())
+}
+
+fn move_pane<F>(
+    runner: &mut F,
+    pane_id: &str,
+    tab_id: &str,
+    target_pane_id: &str,
+    ratio: Option<f32>,
+) -> Result<String, String>
+where
+    F: FnMut(&[String]) -> Result<Value, String>,
+{
+    let mut args = vec![
+        "pane".to_owned(),
+        "move".to_owned(),
+        pane_id.to_owned(),
+        "--tab".to_owned(),
+        tab_id.to_owned(),
+        "--target-pane".to_owned(),
+        target_pane_id.to_owned(),
+        "--split".to_owned(),
+        "right".to_owned(),
+    ];
+    if let Some(ratio) = ratio {
+        args.extend(["--ratio".to_owned(), ratio.to_string()]);
+    }
+    args.push("--no-focus".to_owned());
+    let value = runner(&args)?;
+    let result = require_changed(&value, "/result/move_result", "pane move")?;
+    result
+        .pointer("/pane/pane_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Herdr returned an invalid pane move result".to_owned())
+}
+
+fn require_changed<'a>(
+    value: &'a Value,
+    pointer: &str,
+    operation: &str,
+) -> Result<&'a Value, String> {
+    let result = value
+        .pointer(pointer)
+        .ok_or_else(|| format!("Herdr returned an invalid {operation} result"))?;
+    match result.get("changed").and_then(Value::as_bool) {
+        Some(true) => Ok(result),
+        Some(false) => {
+            let reason = result
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unchanged");
+            Err(format!("Herdr did not change the layout: {reason}"))
+        }
+        None => Err(format!("Herdr returned an invalid {operation} result")),
+    }
+}
+
+fn companion_ratio(value: &Value, host_pane_id: &str, companion_pane_id: &str) -> Option<f32> {
+    let panes = value.pointer("/result/neighbor/layout/panes")?.as_array()?;
+    let width = |pane_id: &str| {
+        panes
+            .iter()
+            .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))?
+            .pointer("/rect/width")
+            .and_then(Value::as_u64)
+    };
+    let host = width(host_pane_id)? as f32;
+    let companion = width(companion_pane_id)? as f32;
+    (host + companion > 0.0).then_some(host / (host + companion))
 }
 
 pub(super) fn watch_events(mut on_event: impl FnMut(Event) -> bool) -> Result<(), String> {
@@ -510,10 +684,12 @@ fn environment_from(
     enabled: Option<&str>,
     workspace_id: Option<String>,
     tab_id: Option<String>,
+    pane_id: Option<String>,
 ) -> Option<Environment> {
     (enabled == Some("1")).then_some(Environment {
         workspace_id,
         tab_id,
+        pane_id,
     })
 }
 
@@ -583,9 +759,6 @@ fn action_args(action: Action) -> Vec<String> {
         ],
         Action::FocusWorkspace { workspace_id } => {
             vec!["workspace".to_owned(), "focus".to_owned(), workspace_id]
-        }
-        Action::FocusAgent { pane_id } => {
-            vec!["agent".to_owned(), "focus".to_owned(), pane_id]
         }
         Action::RenameWorkspace {
             workspace_id,
@@ -671,7 +844,7 @@ pub(super) fn parse_snapshot(
             .iter()
             .enumerate()
             .map(|(index, agent)| {
-                parse_agent(agent)
+                parse_agent(agent, snapshot)
                     .ok_or_else(|| format!("Herdr snapshot agent {index} is malformed"))
             })
             .collect::<Result<_, _>>()?,
@@ -795,16 +968,29 @@ fn workspace_path(workspace: &Value, snapshot: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn parse_agent(value: &Value) -> Option<HerdrAgent> {
+fn parse_agent(value: &Value, snapshot: &Value) -> Option<HerdrAgent> {
     let pane_id = value.get("pane_id")?.as_str()?.to_owned();
     let name = value.get("agent")?.as_str()?.to_owned();
     let session_timing_key = parse_agent_session_identity(value).map(AgentTimingKey::Session);
+    let pane = snapshot
+        .get("panes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id.as_str()));
     Some(HerdrAgent {
         name: name.clone(),
         session_name: parse_agent_session_name(value),
         workspace_id: value.get("workspace_id")?.as_str()?.to_owned(),
         tab_id: value.get("tab_id")?.as_str()?.to_owned(),
         pane_id: pane_id.clone(),
+        cwd: pane
+            .and_then(|pane| {
+                pane.get("foreground_cwd")
+                    .and_then(Value::as_str)
+                    .or_else(|| pane.get("cwd").and_then(Value::as_str))
+            })
+            .map(PathBuf::from),
         focused: value
             .get("focused")
             .and_then(Value::as_bool)
@@ -1028,12 +1214,6 @@ mod tests {
             ["workspace", "focus", "w1"].map(str::to_owned)
         );
         assert_eq!(
-            action_args(Action::FocusAgent {
-                pane_id: "w1:p2".to_owned(),
-            }),
-            ["agent", "focus", "w1:p2"].map(str::to_owned)
-        );
-        assert_eq!(
             action_args(Action::RenameWorkspace {
                 workspace_id: "w1".to_owned(),
                 label: "code".to_owned(),
@@ -1073,6 +1253,216 @@ mod tests {
                 "--no-focus",
             ]
             .map(str::to_owned)
+        );
+    }
+
+    #[test]
+    fn displays_a_same_tab_agent_by_swapping_the_companion_pane() {
+        let mut calls = Vec::new();
+        display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t1".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |args| {
+                calls.push(args.to_vec());
+                Ok(if calls.len() == 1 {
+                    serde_json::json!({
+                        "result": { "neighbor": { "neighbor_pane_id": "w1:p2" } }
+                    })
+                } else if calls.len() == 2 {
+                    serde_json::json!({
+                        "result": { "swap": { "changed": true } }
+                    })
+                } else {
+                    Value::Null
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls,
+            vec![
+                [
+                    "pane",
+                    "neighbor",
+                    "--direction",
+                    "right",
+                    "--pane",
+                    "w1:p1",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                [
+                    "pane",
+                    "swap",
+                    "--source-pane",
+                    "w1:p3",
+                    "--target-pane",
+                    "w1:p2",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                ["pane", "focus", "--direction", "left", "--pane", "w1:p3",]
+                    .map(str::to_owned)
+                    .to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_an_unchanged_pane_swap_without_attempting_to_focus() {
+        let mut calls = Vec::new();
+        let result = display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t1".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |args| {
+                calls.push(args.to_vec());
+                Ok(if calls.len() == 1 {
+                    serde_json::json!({
+                        "result": { "neighbor": { "neighbor_pane_id": "w1:p2" } }
+                    })
+                } else {
+                    serde_json::json!({
+                        "result": { "swap": { "changed": false, "reason": "cross_tab" } }
+                    })
+                })
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Herdr did not change the layout: cross_tab"
+        );
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[test]
+    fn rejects_a_same_tab_agent_when_hunkle_has_no_companion_pane() {
+        let mut calls = Vec::new();
+        let result = display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p2".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t1".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |args| {
+                calls.push(args.to_vec());
+                Ok(serde_json::json!({ "result": { "neighbor": {} } }))
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "The selected agent is not in Hunkle's companion pane"
+        );
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn displays_a_background_agent_by_exchanging_panes_between_tabs() {
+        let mut calls = Vec::new();
+        display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |args| {
+                calls.push(args.to_vec());
+                Ok(match calls.len() {
+                    1 => serde_json::json!({
+                        "result": { "neighbor": { "neighbor_pane_id": "w1:p2" } }
+                    }),
+                    2 => serde_json::json!({
+                        "result": {
+                            "move_result": {
+                                "changed": true,
+                                "pane": { "pane_id": "w1:p2" }
+                            }
+                        }
+                    }),
+                    _ => serde_json::json!({
+                        "result": {
+                            "move_result": {
+                                "changed": true,
+                                "pane": { "pane_id": "w1:p3" }
+                            }
+                        }
+                    }),
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls[1][0..7],
+            [
+                "pane",
+                "move",
+                "w1:p2",
+                "--tab",
+                "w1:t2",
+                "--target-pane",
+                "w1:p3",
+            ]
+        );
+        assert_eq!(
+            calls[2][0..7],
+            [
+                "pane",
+                "move",
+                "w1:p3",
+                "--tab",
+                "w1:t1",
+                "--target-pane",
+                "w1:p1",
+            ]
+        );
+        assert_eq!(calls[1].last().map(String::as_str), Some("--no-focus"));
+        assert_eq!(calls[2].last().map(String::as_str), Some("--no-focus"));
+    }
+
+    #[test]
+    fn refuses_cross_workspace_agents_without_the_setting() {
+        let result = display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w2:p1".to_owned(),
+                workspace_id: "w2".to_owned(),
+                tab_id: "w2:t1".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+            },
+            |_| panic!("Herdr must not be called"),
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Cross-workspace agents are disabled in Settings"
         );
     }
 
@@ -1328,12 +1718,24 @@ mod tests {
     #[test]
     fn detects_environment_and_nested_workspace_ids() {
         assert!(
-            environment_from(Some("0"), Some("w1".to_owned()), Some("w1:t1".to_owned())).is_none()
+            environment_from(
+                Some("0"),
+                Some("w1".to_owned()),
+                Some("w1:t1".to_owned()),
+                Some("w1:p1".to_owned()),
+            )
+            .is_none()
         );
-        let environment =
-            environment_from(Some("1"), Some("w1".to_owned()), Some("w1:t1".to_owned())).unwrap();
+        let environment = environment_from(
+            Some("1"),
+            Some("w1".to_owned()),
+            Some("w1:t1".to_owned()),
+            Some("w1:p1".to_owned()),
+        )
+        .unwrap();
         assert_eq!(environment.workspace_id.as_deref(), Some("w1"));
         assert_eq!(environment.tab_id.as_deref(), Some("w1:t1"));
+        assert_eq!(environment.pane_id.as_deref(), Some("w1:p1"));
         let response = serde_json::json!({
             "result": { "event": { "workspace": { "workspace_id": "workspace-42" } } }
         });

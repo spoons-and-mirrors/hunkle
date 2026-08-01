@@ -250,7 +250,7 @@ fn toggles_worktree_directories_with_the_mouse() {
 }
 
 #[test]
-fn clicking_an_agent_focuses_it_without_opening_the_workspace_manager() {
+fn clicking_an_agent_displays_it_without_opening_the_workspace_manager() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);

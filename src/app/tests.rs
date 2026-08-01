@@ -632,6 +632,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
             format_on_save: true,
             worktree_width: 38,
             workspace_panel_enabled: true,
+            cross_workspace_agents: false,
             show_agent_harness: false,
             agent_time_display: settings::AgentTimeDisplay::LatestLoop,
             agents_height: 7,
@@ -657,6 +658,10 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(!app.settings.workspace_panel_enabled);
+    assert_eq!(app.settings_store.load(), app.settings);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.settings.cross_workspace_agents);
     assert_eq!(app.settings_store.load(), app.settings);
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

@@ -138,6 +138,14 @@ Git-inventoried repository or linked worktree, then choose which non-Hunkle pane
 in the active Herdr tab to replace with an OpenCode agent. The destination
 picker can be filtered by repository, branch, or path.
 
+The Agents section acts as a terminal switcher. Clicking an agent shows its
+running pane immediately to Hunkle's right, keeps keyboard focus in Hunkle, and
+opens the agent's working directory. Agents parked in another tab are exchanged
+with the current companion pane without restarting either terminal. By default,
+the section lists and operates on agents in Hunkle's Herdr workspace only;
+enable **Cross-workspace agents** in Settings to include agents from other Herdr
+workspaces.
+
 When hunkle runs inside Herdr, press `w` to open the Workspace Manager, a
 responsive modal backed by Herdr's session snapshot. It presents workspace
 hierarchy and agent activity without reducing the width of the main repository
@@ -167,7 +175,7 @@ between groups independently. Inside the manager, press `g` to create a group.
 Click groups to fold or expand them, and drag parent workspaces onto a group or
 back into ungrouped space. A single workspace click opens it in Hunkle; press
 `Enter` or double-click to switch to its Herdr workspace. Agents are ordered by
-recent Herdr activity, and clicking one focuses its terminal pane directly.
+recent Herdr activity, and clicking one displays it beside Hunkle.
 Agent timers accumulate across every session used by the same agent in a
 terminal, are shared between Hunkle processes, and persist across restarts in
 `agent-timings.json` beside Hunkle's config. Press `Delete` to confirm closing a
@@ -178,8 +186,8 @@ worktree from disk.
 
 - Click header controls to switch views, refresh, open Explorer, or open help.
 - Drag the divider between Changes and Diff to resize either panel.
-- Click a workspace or agent in the Workspace Manager to select it; click
-  outside the modal to close it.
+- Click a workspace in the Workspace Manager to select it, or click an agent to
+  display it beside Hunkle; click outside the modal to close it.
 - Drag the History section header vertically to resize the current-branch commit
   shelf.
 - Click `x ACTIONS` above History to push, fetch, pull with rebase, or run a

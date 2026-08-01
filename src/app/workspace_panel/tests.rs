@@ -90,6 +90,7 @@ fn agent(name: &str, status: AgentStatus) -> HerdrAgent {
         workspace_id: "workspace".to_owned(),
         tab_id: format!("tab-{name}"),
         pane_id: format!("pane-{name}"),
+        cwd: None,
         focused: false,
         status,
         timing_key: AgentTimingKey::Terminal(format!("{name}@terminal-{name}")),
@@ -374,45 +375,41 @@ fn orders_agents_by_latest_state_change() {
 }
 
 #[test]
+fn cross_workspace_agent_visibility_is_opt_in() {
+    let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+    panel.set_host_location_for_test("w1", "w1:t1");
+    let mut local = agent("local", AgentStatus::Idle);
+    local.workspace_id = "w1".to_owned();
+    let mut remote = agent("remote", AgentStatus::Working);
+    remote.workspace_id = "w2".to_owned();
+
+    panel.set_cross_workspace_agents(false);
+    panel.apply_agent_snapshot(vec![local.clone(), remote.clone()]);
+    assert_eq!(panel.agents, vec![local.clone()]);
+
+    panel.set_cross_workspace_agents(true);
+    panel.apply_agent_snapshot(vec![local, remote]);
+    assert_eq!(panel.agents.len(), 2);
+}
+
+#[test]
 fn agent_highlight_follows_herdr_focus_over_panel_selection() {
     let mut panel = WorkspacePanel::ready_for_test(&snapshot());
     panel.agents = vec![
         agent("alpha", AgentStatus::Idle),
         HerdrAgent {
             focused: true,
+            workspace_id: "w1".to_owned(),
+            tab_id: "w1:t1".to_owned(),
             ..agent("beta", AgentStatus::Idle)
         },
     ];
+    panel.set_host_location_for_test("w1", "w1:t1");
     assert!(panel.select_agent(0));
 
     assert!(!panel.agent_entry_state(0, true).selected);
     assert!(panel.agent_entry_state(1, true).selected);
     assert_eq!(panel.highlighted_agent_index(true), Some(1));
-
-    panel.agents[1].focused = false;
-    assert!(panel.agent_entry_state(0, true).selected);
-    assert_eq!(panel.highlighted_agent_index(true), Some(0));
-}
-
-#[test]
-fn focus_events_update_workspace_and_agent_highlights_immediately() {
-    let mut panel = WorkspacePanel::ready_for_test(&snapshot());
-    panel.agents = vec![
-        HerdrAgent {
-            focused: true,
-            ..agent("alpha", AgentStatus::Idle)
-        },
-        agent("beta", AgentStatus::Idle),
-    ];
-    let workspace_id = panel.workspaces[1].id.clone();
-
-    let pane_id = panel.agents[1].pane_id.clone();
-    panel.apply_focus_event(herdr::FocusEvent {
-        workspace_id,
-        pane_id,
-    });
-    assert!(!panel.agents[0].focused);
-    assert!(panel.agents[1].focused);
 }
 
 #[test]
@@ -434,6 +431,10 @@ fn parses_snapshot_and_tracks_workspace_and_agent_selection() {
         Some(Path::new("/tmp/hunkle-worktree"))
     );
     assert_eq!(panel.agents[0].status, AgentStatus::Blocked);
+    assert_eq!(
+        panel.agents[0].cwd.as_deref(),
+        Some(Path::new("/home/spoon/code/gitui"))
+    );
     assert_eq!(panel.selected, Some(0));
     assert_eq!(panel.selected_visual_row(), Some(1));
 
@@ -481,21 +482,32 @@ fn a_second_workspace_click_becomes_a_focus_request() {
 }
 
 #[test]
-fn every_agent_click_requests_its_pane() {
+fn every_agent_click_requests_displaying_its_pane() {
     let mut panel = WorkspacePanel::ready_for_test(&snapshot());
     panel.agents.push(HerdrAgent {
         focused: true,
         ..agent("beta", AgentStatus::Idle)
     });
+    let focused = panel
+        .agents
+        .iter()
+        .map(|agent| agent.focused)
+        .collect::<Vec<_>>();
 
     for _ in 0..2 {
         assert_eq!(
             panel.click_agent(0),
-            WorkspacePanelEffect::FocusAgent("w1:p1".to_owned())
+            WorkspacePanelEffect::DisplayAgent("w1:p1".to_owned())
         );
         assert_eq!(panel.selected, Some(panel.workspaces.len()));
-        assert!(panel.agents[0].focused);
-        assert!(!panel.agents[1].focused);
+        assert_eq!(
+            panel
+                .agents
+                .iter()
+                .map(|agent| agent.focused)
+                .collect::<Vec<_>>(),
+            focused
+        );
     }
 }
 

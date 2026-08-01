@@ -106,6 +106,7 @@ pub struct Settings {
     pub format_on_save: bool,
     pub worktree_width: u16,
     pub workspace_panel_enabled: bool,
+    pub cross_workspace_agents: bool,
     pub show_agent_harness: bool,
     pub agent_time_display: AgentTimeDisplay,
     pub agents_height: u16,
@@ -160,6 +161,7 @@ impl Default for Settings {
             format_on_save: true,
             worktree_width: 38,
             workspace_panel_enabled: true,
+            cross_workspace_agents: false,
             show_agent_harness: false,
             agent_time_display: AgentTimeDisplay::LatestLoop,
             agents_height: 7,
@@ -229,12 +231,13 @@ impl SettingsStore {
             fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nopencode_model={}\nopencode_reasoning={}\nmedia_preview_protocol={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nworkspace_panel_enabled={}\ncross_workspace_agents={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nopencode_model={}\nopencode_reasoning={}\nmedia_preview_protocol={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.format_on_save,
             settings.worktree_width,
             settings.workspace_panel_enabled,
+            settings.cross_workspace_agents,
             settings.show_agent_harness,
             settings.agent_time_display.as_str(),
             settings.agents_height,
@@ -305,6 +308,9 @@ fn load(path: &Path) -> Settings {
             }
             "workspace_panel_enabled" => {
                 settings.workspace_panel_enabled = value.trim() == "true";
+            }
+            "cross_workspace_agents" => {
+                settings.cross_workspace_agents = value.trim() == "true";
             }
             "show_agent_harness" => {
                 settings.show_agent_harness = value.trim() == "true";
@@ -415,6 +421,7 @@ mod tests {
             format_on_save: false,
             worktree_width: 61,
             workspace_panel_enabled: false,
+            cross_workspace_agents: true,
             show_agent_harness: true,
             agent_time_display: AgentTimeDisplay::AgentTotal,
             agents_height: 9,
