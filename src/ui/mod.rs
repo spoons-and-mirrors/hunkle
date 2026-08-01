@@ -29,7 +29,7 @@ pub(super) use crate::{
 };
 
 mod header;
-pub(super) use header::*;
+use header::*;
 
 
 fn palette() -> &'static Palette {
