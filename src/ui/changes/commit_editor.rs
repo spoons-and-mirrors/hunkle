@@ -183,7 +183,12 @@ pub(super) fn draw_actions(frame: &mut Frame<'_>, area: Rect, mode: Mode) -> Rec
     button
 }
 
-pub(super) fn draw_commit_message_action(frame: &mut Frame<'_>, area: Rect, app: &mut App, has_changes: bool) {
+pub(super) fn draw_commit_message_action(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    has_changes: bool,
+) {
     if app.commit_running() || !app.commit_message_available() || !has_changes || area.width < 3 {
         return;
     }

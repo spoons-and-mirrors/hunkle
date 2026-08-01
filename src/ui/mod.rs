@@ -31,7 +31,6 @@ pub(super) use crate::{
 mod header;
 use header::*;
 
-
 fn palette() -> &'static Palette {
     static THEME: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
     THEME.get_or_init(|| load_theme().palette)
@@ -682,16 +681,6 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
 fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().surface_alt)),
@@ -748,7 +737,9 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut spans = Vec::new();
     let start_x = area.right().saturating_sub(total_width).max(area.x);
     if start_x > area.x
-        && let Some(path) = app.repository().map(|repository| repository.root.display().to_string())
+        && let Some(path) = app
+            .repository()
+            .map(|repository| repository.root.display().to_string())
     {
         let width = usize::from(start_x.saturating_sub(area.x));
         frame.render_widget(

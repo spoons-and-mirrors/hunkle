@@ -21,7 +21,9 @@ pub(super) use crate::app::{
     WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
 };
 
-pub(super) use super::{fill, palette, text::word_wrapped_height, truncate_start_width, truncate_width};
+pub(super) use super::{
+    fill, palette, text::word_wrapped_height, truncate_start_width, truncate_width,
+};
 
 mod actions;
 pub(super) use actions::*;
@@ -41,7 +43,6 @@ mod workspace_panel;
 pub(super) use workspace_panel::*;
 mod worktree_manager;
 pub(super) use worktree_manager::*;
-
 
 pub(super) struct FileSearchRegions {
     pub(super) overlay: Rect,
@@ -85,31 +86,9 @@ pub(super) struct FileDialogRegions {
     pub(super) secondary: Rect,
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 fn status_row(message: &str, color: Color) -> ListItem<'_> {
     ListItem::new(Line::styled(message, Style::default().fg(color)))
 }
-
-
-
-
-
 
 fn command_lines<'a>(
     status: CommandStatus,
@@ -219,25 +198,6 @@ fn rendered_height(lines: &[Line<'_>], width: usize) -> usize {
         })
         .sum()
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 fn centered_min(
     area: Rect,

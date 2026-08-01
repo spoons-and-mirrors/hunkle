@@ -47,8 +47,7 @@ pub(super) fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> R
 }
 
 pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
-    let (Some(header), Some(list)) = (app.regions.agents_splitter, app.regions.agents_list)
-    else {
+    let (Some(header), Some(list)) = (app.regions.agents_splitter, app.regions.agents_list) else {
         return;
     };
     let hovered = match &app.hovered_hit_target {

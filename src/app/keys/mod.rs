@@ -1,0 +1,10 @@
+mod actions;
+mod browser;
+mod commit;
+mod explorer;
+mod file_editor;
+mod repo_ops;
+mod selection;
+mod settings;
+mod workspace_panel;
+mod worktree_manager;

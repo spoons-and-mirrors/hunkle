@@ -17,21 +17,21 @@ pub(crate) struct WorkspaceSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WorkspaceSnapshotEntry {
-    pub(super)label: String,
-    pub(super)path: PathBuf,
-    pub(super)focused: bool,
-    pub(super)linked_worktree: bool,
-    pub(super)group: Option<String>,
+    pub(super) label: String,
+    pub(super) path: PathBuf,
+    pub(super) focused: bool,
+    pub(super) linked_worktree: bool,
+    pub(super) group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WorkspaceSnapshotGroup {
-    pub(super)name: String,
-    pub(super)expanded: bool,
+    pub(super) name: String,
+    pub(super) expanded: bool,
 }
 
 pub(super) struct SnapshotRecallResult {
-    pub(super)groups: Vec<WorkspaceGroup>,
+    pub(super) groups: Vec<WorkspaceGroup>,
 }
 
 pub(super) fn recall_snapshot(

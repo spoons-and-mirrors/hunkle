@@ -51,7 +51,12 @@ pub(super) fn scroll_to_row(row: usize, rendered_height: usize) -> usize {
     row.min(rendered_height.saturating_sub(1))
 }
 
-pub(super) fn draw_hunk_actions(frame: &mut Frame<'_>, app: &mut App, body: Rect, hunks: Vec<VisibleHunk>) {
+pub(super) fn draw_hunk_actions(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    body: Rect,
+    hunks: Vec<VisibleHunk>,
+) {
     if body.width < 3 {
         return;
     }

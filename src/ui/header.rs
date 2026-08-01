@@ -656,7 +656,12 @@ pub(super) fn header_picker_label_line(
     Line::from(spans)
 }
 
-pub(super) fn draw_header_picker_search(frame: &mut Frame<'_>, app: &App, area: Rect, action_width: u16) {
+pub(super) fn draw_header_picker_search(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    action_width: u16,
+) {
     let mut query = app.header_picker.query.text().to_owned();
     let cursor_visible = app.header_picker.query.cursor_visible();
     if !query.is_empty() && cursor_visible {

@@ -35,7 +35,6 @@ use wrap::*;
 #[cfg(test)]
 mod tests;
 
-
 const MAX_CACHED_PREVIEW_LINES: usize = 30_000;
 const MAX_CACHED_PREVIEW_BYTES: usize = 512 * 1024;
 const MARKDOWN_LINE_GUTTER_WIDTH: usize = 7;
@@ -860,21 +859,6 @@ impl Drop for PreviewPresentation {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 fn rendered_hunk_rows(
     diff: &str,
     wrapped_line_starts: Option<&[usize]>,
@@ -924,5 +908,3 @@ fn rendered_hunk_rows(
     }
     (rows, rendered_row)
 }
-
-

@@ -54,7 +54,6 @@ struct RefsData {
     github_remote: bool,
 }
 
-
 const GIT_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
 const GIT_STDERR_LIMIT: usize = 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -164,11 +163,6 @@ pub struct RepositoryUpdate {
     refs: Option<RefsData>,
 }
 
-
-
-
-
-
 #[derive(Debug, Clone)]
 pub struct Branch {
     pub name: String,
@@ -258,8 +252,6 @@ pub struct Change {
     pub deletions: u64,
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct Commit {
     pub oid: String,
@@ -294,14 +286,6 @@ pub struct CommandOutput {
     pub exit_code: Option<i32>,
 }
 
-
-
-
-
-
-
-
-
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -328,15 +312,6 @@ fn trim_line_ending(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-
-
-
-
-
-
-
-
-
 fn join_refresh_worker<T>(
     worker: Option<thread::ScopedJoinHandle<'_, Result<T>>>,
     label: &str,
@@ -349,71 +324,6 @@ fn join_refresh_worker<T>(
         })
         .transpose()
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 mod branches;
 pub(super) use branches::*;

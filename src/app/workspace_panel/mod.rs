@@ -13,7 +13,9 @@ pub(super) use serde::{Deserialize, Serialize};
 #[cfg(test)]
 pub(super) use serde_json::Value;
 
-pub(super) use super::{TextInput, settings::AgentTimeDisplay, worktree_manager::WorktreeCandidate};
+pub(super) use super::{
+    TextInput, settings::AgentTimeDisplay, worktree_manager::WorktreeCandidate,
+};
 pub(super) use crate::filesystem::atomic_write;
 
 mod focus;
@@ -31,7 +33,6 @@ mod snapshot;
 pub(crate) use snapshot::*;
 #[cfg(test)]
 mod tests;
-
 
 pub(super) fn send_command_below(command: String) -> Result<String, String> {
     herdr::send_command_below(command)
@@ -240,27 +241,11 @@ impl AgentTiming {
     }
 }
 
-
-
-
-
-
-
-
-
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct AgentNamesFile {
     #[serde(default)]
     names: HashMap<String, String>,
 }
-
-
-
-
-
-
-
-
 
 pub(crate) struct WorkspacePanel {
     enabled: bool,
@@ -2265,9 +2250,3 @@ pub(crate) enum WorkspacePanelEffect {
     OpenWorkspace(PathBuf),
     Notice(String),
 }
-
-
-
-
-
-

@@ -757,10 +757,7 @@ pub(super) fn draw_agents_pane(
             }),
         ));
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(header_spans)),
-        header,
-    );
+    frame.render_widget(Paragraph::new(Line::from(header_spans)), header);
     if !enabled {
         if list.height > 0 {
             frame.render_widget(
@@ -950,7 +947,11 @@ fn draw_agents_pane_row(
                 Style::default()
                     .fg(name_color)
                     .bg(background)
-                    .add_modifier(if highlighted { Modifier::BOLD } else { Modifier::empty() }),
+                    .add_modifier(if highlighted {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
             ),
         ])),
         name_area,

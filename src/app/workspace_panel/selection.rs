@@ -18,7 +18,10 @@ pub(crate) enum WorkspaceDropTarget {
     Ungrouped,
 }
 
-pub(super) fn append_agent_cards(rows: &mut Vec<WorkspacePanelRow>, agents: impl IntoIterator<Item = usize>) {
+pub(super) fn append_agent_cards(
+    rows: &mut Vec<WorkspacePanelRow>,
+    agents: impl IntoIterator<Item = usize>,
+) {
     for (position, index) in agents.into_iter().enumerate() {
         if position > 0 {
             rows.push(WorkspacePanelRow::Spacer);
@@ -30,9 +33,9 @@ pub(super) fn append_agent_cards(rows: &mut Vec<WorkspacePanelRow>, agents: impl
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkspaceDrag {
-    pub(super)workspace: usize,
-    pub(super)active: bool,
-    pub(super)target: Option<WorkspaceDropTarget>,
+    pub(super) workspace: usize,
+    pub(super) active: bool,
+    pub(super) target: Option<WorkspaceDropTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

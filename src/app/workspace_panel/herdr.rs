@@ -906,15 +906,10 @@ mod tests {
     #[test]
     fn detects_environment_and_nested_workspace_ids() {
         assert!(
-            environment_from(Some("0"), Some("w1".to_owned()), Some("w1:t1".to_owned()))
-                .is_none()
+            environment_from(Some("0"), Some("w1".to_owned()), Some("w1:t1".to_owned())).is_none()
         );
-        let environment = environment_from(
-            Some("1"),
-            Some("w1".to_owned()),
-            Some("w1:t1".to_owned()),
-        )
-        .unwrap();
+        let environment =
+            environment_from(Some("1"), Some("w1".to_owned()), Some("w1:t1".to_owned())).unwrap();
         assert_eq!(environment.workspace_id.as_deref(), Some("w1"));
         assert_eq!(environment.tab_id.as_deref(), Some("w1:t1"));
         let response = serde_json::json!({

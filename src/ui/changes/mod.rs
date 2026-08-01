@@ -38,7 +38,6 @@ use layout::*;
 mod metadata;
 use metadata::*;
 
-
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
     if app.repository().is_none() {
         super::draw_empty(frame, area, "Open a repository to inspect its changes");
@@ -631,39 +630,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         details_ready,
     );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 #[cfg(test)]

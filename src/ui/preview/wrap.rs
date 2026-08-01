@@ -42,7 +42,10 @@ pub(super) fn markdown_content_width(width: usize) -> usize {
     }
 }
 
-pub(super) fn numbered_markdown_lines(mut lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+pub(super) fn numbered_markdown_lines(
+    mut lines: Vec<Line<'static>>,
+    width: usize,
+) -> Vec<Line<'static>> {
     if width < MIN_NUMBERED_MARKDOWN_WIDTH {
         return lines;
     }
@@ -256,7 +259,12 @@ pub(super) struct WrapGutter {
     continuation: Vec<Span<'static>>,
 }
 
-pub(super) fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool, markdown: bool) -> WrapGutter {
+pub(super) fn line_gutter(
+    line: &Line<'_>,
+    width: usize,
+    is_diff: bool,
+    markdown: bool,
+) -> WrapGutter {
     if markdown {
         let mut gutter = 0;
         let mut span_count = 0;

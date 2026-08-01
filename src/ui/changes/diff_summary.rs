@@ -137,7 +137,11 @@ pub(super) fn diff_summary_height(
     (rows as u16).saturating_add(2).min(maximum)
 }
 
-pub(super) fn wrapped_file_summary(files: &[RepoPath], width: usize, maximum_lines: usize) -> Vec<String> {
+pub(super) fn wrapped_file_summary(
+    files: &[RepoPath],
+    width: usize,
+    maximum_lines: usize,
+) -> Vec<String> {
     if width == 0 || maximum_lines == 0 {
         return Vec::new();
     }

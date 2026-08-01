@@ -317,7 +317,11 @@ pub(super) fn draw_explorer_changes(
     }
 }
 
-pub(super) fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) -> ListItem<'a> {
+pub(super) fn worktree_item<'a>(
+    row: &'a WorktreeRow,
+    changes: &'a [Change],
+    width: usize,
+) -> ListItem<'a> {
     if let Some(section) = row.section {
         let Some((additions, deletions)) = row.section_stats else {
             return ListItem::new("");
@@ -429,7 +433,11 @@ pub(super) fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], wid
     ListItem::new(Line::from(spans))
 }
 
-pub(super) fn explorer_item(row: &ExplorerRow, change_code: Option<char>, width: usize) -> ListItem<'static> {
+pub(super) fn explorer_item(
+    row: &ExplorerRow,
+    change_code: Option<char>,
+    width: usize,
+) -> ListItem<'static> {
     if row.file_path.is_none() {
         let marker = if row.directory_expanded == Some(false) {
             "> "
