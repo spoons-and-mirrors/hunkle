@@ -1201,13 +1201,14 @@ fn inline_save_skips_formatting_when_disabled() {
     app.file_editor = Some(editor);
     app.mode = Mode::FileEdit;
 
-    app.save_file_editor();
+    app.save_file_editor(false);
 
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).unwrap(),
         "edited notes\n"
     );
     assert_eq!(app.notice.as_deref(), Some("Saved notes.txt"));
+    assert_eq!(app.mode, Mode::FileEdit);
     assert!(!app.format_running());
 }
 

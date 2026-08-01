@@ -21,13 +21,17 @@ pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::{
     app::{
-        App, BranchPickerStep, ExplorerTab, FileDialogKind, GraphHitTarget, HeaderPickerItem,
-        HeaderPickerKind, HitTarget, LeftPane, Mode, Regions, ShortcutAction, TAB_WIDTH, View,
-        WorkspacePanelHitTarget,
+        AgentDestinationKind, App, BranchPickerStep, ExplorerTab, FileDialogKind, GraphHitTarget,
+        HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode, Regions, ShortcutAction,
+        TAB_WIDTH, View, WorkspacePanelHitTarget,
     },
     theme::{Palette, load_theme},
 };
 
+mod editor;
+use editor::draw_file_editor;
+#[cfg(test)]
+use editor::{selected_display_range, wrapped_editor_cursor};
 mod header;
 use header::*;
 
@@ -63,6 +67,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .style(Style::default().fg(palette().ink)),
             frame.area(),
         );
+        draw_agent_pane_picker_overlay(frame, app);
         finish_selection(frame, app);
         return;
     }
@@ -83,6 +88,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.reset_media_presentation();
         draw_empty(frame, main_content, "Loading workspace…");
         draw_navigation(frame, app, layout[2]);
+        draw_agent_pane_picker_overlay(frame, app);
         finish_selection(frame, app);
         return;
     }
@@ -343,288 +349,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         dim_except_header_controls(frame, app);
         draw_header_picker(frame, app);
     }
+    draw_agent_pane_picker_overlay(frame, app);
     finish_selection(frame, app);
 }
 
-fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
-    let Some(panel) = app.regions.diff else {
-        return;
-    };
-    let header = Rect::new(
-        panel.x.saturating_add(1),
-        panel.y.saturating_add(1),
-        panel.width.saturating_sub(2),
-        1,
-    );
-    let body = Rect::new(
-        header.x,
-        header.y.saturating_add(2),
-        header.width,
-        panel.bottom().saturating_sub(header.y.saturating_add(3)),
-    );
-    const LINE_NUMBER_WIDTH: u16 = 7;
-    let gutter_width = LINE_NUMBER_WIDTH.min(body.width);
-    let gutter = Rect::new(body.x, body.y, gutter_width, body.height);
-    let editor_body = Rect::new(
-        body.x.saturating_add(gutter_width),
-        body.y,
-        body.width.saturating_sub(gutter_width),
-        body.height,
-    );
-    app.regions.preview_body = Some(editor_body);
-    app.regions.diff_scrollbar = None;
-    app.regions.diff_scroll_thumb = None;
-    app.regions.diff_scroll_max = 0;
-    app.regions.editor_rows.clear();
-    frame.render_widget(Clear, panel);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(palette().panel).fg(palette().ink)),
-        panel,
-    );
-
-    let save_label = app.settings.shortcuts.label(ShortcutAction::SaveOrFormat);
-    let wrapped = app.changes.diff_wrap;
-    let Some(editor) = &mut app.file_editor else {
-        return;
-    };
-    let (cursor_line, cursor_column) = editor.cursor_position();
-    let path = editor.path().display();
-    let dirty = if editor.dirty() { "modified" } else { "saved" };
-    let title = format!(
-        "EDIT  {path}  {dirty}  Ln {}, Col {}  {save_label} save + close  esc close",
-        cursor_line.saturating_add(1),
-        cursor_column.saturating_add(1)
-    );
-    frame.render_widget(
-        Paragraph::new(truncate_width(&title, usize::from(header.width))).style(
-            Style::default()
-                .fg(palette().accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        header,
-    );
-
-    let viewport_height = usize::from(editor_body.height);
-    let viewport_width = usize::from(editor_body.width).max(1);
-    let (lines, line_numbers, cursor_row, rendered_cursor_column) = if wrapped {
-        let (cursor_row, rendered_cursor_column) =
-            wrapped_editor_cursor(editor.text(), viewport_width, cursor_line, cursor_column);
-        if let Some(anchor) = app.file_editor_anchor.take() {
-            let row = usize::from(anchor.y.saturating_sub(editor_body.y))
-                .min(viewport_height.saturating_sub(1));
-            editor.anchor_wrapped_cursor_at(cursor_row, row);
-        }
-        editor.ensure_wrapped_cursor_visible(cursor_row, viewport_height);
-        let (lines, line_numbers, rows) = wrapped_editor_view(
-            editor.text(),
-            &path,
-            viewport_width,
-            editor.wrap_scroll_row,
-            viewport_height,
-        );
-        app.regions.editor_rows = rows;
-        (
-            lines,
-            line_numbers,
-            cursor_row.saturating_sub(editor.wrap_scroll_row),
-            rendered_cursor_column,
-        )
-    } else {
-        if let Some(anchor) = app.file_editor_anchor.take() {
-            let row = usize::from(anchor.y.saturating_sub(editor_body.y))
-                .min(viewport_height.saturating_sub(1));
-            let column = usize::from(anchor.x.saturating_sub(editor_body.x))
-                .min(viewport_width.saturating_sub(1));
-            editor.anchor_cursor_at(row, column);
-        }
-        editor.ensure_cursor_visible(viewport_height, viewport_width);
-        let lines = text::styled_source_window(
-            editor.text(),
-            &path,
-            0,
-            editor.scroll_line,
-            viewport_height,
-        );
-        let mut lines = editor_visible_lines(lines, editor.scroll_column, viewport_width);
-        while lines.len() <= cursor_line.saturating_sub(editor.scroll_line) {
-            lines.push(Line::default().style(Style::default().bg(palette().panel)));
-        }
-        let line_count = editor.visible_line_count();
-        let line_numbers = (0..viewport_height)
-            .map(|row| {
-                let line = editor.scroll_line.saturating_add(row);
-                editor_line_number((line < line_count).then_some(line))
-            })
-            .collect::<Vec<_>>();
-        (
-            lines,
-            line_numbers,
-            cursor_line.saturating_sub(editor.scroll_line),
-            cursor_column.saturating_sub(editor.scroll_column),
-        )
-    };
-    frame.render_widget(Paragraph::new(line_numbers), gutter);
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(palette().panel)),
-        editor_body,
-    );
-    let cursor_x = editor_body
-        .x
-        .saturating_add(u16::try_from(rendered_cursor_column).unwrap_or(u16::MAX));
-    let cursor_y = editor_body
-        .y
-        .saturating_add(u16::try_from(cursor_row).unwrap_or(u16::MAX));
-    if cursor_x < editor_body.right() && cursor_y < editor_body.bottom() {
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
-}
-
-fn editor_line_number(line: Option<usize>) -> Line<'static> {
-    line.map_or_else(
-        || Line::default().style(Style::default().bg(palette().panel)),
-        |line| {
-            Line::styled(
-                format!("{:>5}  ", line.saturating_add(1)),
-                Style::default().fg(palette().faint).bg(palette().panel),
-            )
-        },
-    )
-}
-
-fn wrapped_editor_cursor(
-    source: &str,
-    width: usize,
-    cursor_line: usize,
-    cursor_column: usize,
-) -> (usize, usize) {
-    let mut visual_row = 0usize;
-    for (line, content) in editor_source_lines(source).enumerate() {
-        let rows = text::word_wrapped_rows(content, width);
-        if line == cursor_line {
-            let (row, rendered_column) = rows
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, row)| {
-                    row.source_column_at(row.rendered_column_at(cursor_column))
-                        .abs_diff(cursor_column)
-                })
-                .map_or((0, 0), |(index, row)| {
-                    (index, row.rendered_column_at(cursor_column))
-                });
-            return (visual_row.saturating_add(row), rendered_column);
-        }
-        visual_row = visual_row.saturating_add(rows.len());
-    }
-    (visual_row, 0)
-}
-
-fn wrapped_editor_view(
-    source: &str,
-    path: &str,
-    width: usize,
-    scroll: usize,
-    height: usize,
-) -> (
-    Vec<Line<'static>>,
-    Vec<Line<'static>>,
-    Vec<crate::app::EditorRenderedRow>,
-) {
-    let mut lines = Vec::new();
-    let mut line_numbers = Vec::new();
-    let mut rendered_rows = Vec::new();
-    let mut visual_row = 0usize;
-    for (line_number, content) in editor_source_lines(source).enumerate() {
-        let rows = text::word_wrapped_rows(content, width);
-        let line_end = visual_row.saturating_add(rows.len());
-        if line_end > scroll && visual_row < scroll.saturating_add(height) {
-            let styled = text::styled_source_window(source, path, 0, line_number, 1)
-                .into_iter()
-                .next()
-                .unwrap_or_default();
-            for (index, row) in rows.iter().enumerate() {
-                let absolute_row = visual_row.saturating_add(index);
-                if absolute_row < scroll || absolute_row >= scroll.saturating_add(height) {
-                    continue;
-                }
-                let rendered =
-                    editor_visible_lines(vec![styled.clone()], row.source_start(), row.width())
-                        .into_iter()
-                        .next()
-                        .unwrap_or_default();
-                lines.push(rendered);
-                line_numbers.push(editor_line_number((index == 0).then_some(line_number)));
-                rendered_rows.push(crate::app::EditorRenderedRow {
-                    line: line_number,
-                    columns: row.columns(),
-                });
-            }
-        }
-        visual_row = line_end;
-        if visual_row >= scroll.saturating_add(height) {
-            break;
+fn draw_agent_pane_picker_overlay(frame: &mut Frame<'_>, app: &mut App) {
+    if app.herdr_prompt.agent_pane_picker_open() {
+        dim(frame);
+        for (target, rect) in
+            overlays::draw_agent_pane_picker(frame, &app.herdr_prompt, app.hovered_hit_target)
+        {
+            app.regions.register_hit_target(target, rect);
         }
     }
-    while lines.len() < height {
-        lines.push(Line::default().style(Style::default().bg(palette().panel)));
-        line_numbers.push(editor_line_number(None));
-    }
-    (lines, line_numbers, rendered_rows)
-}
-
-fn editor_source_lines(source: &str) -> impl Iterator<Item = &str> {
-    source
-        .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
-}
-
-fn editor_visible_lines(
-    mut lines: Vec<Line<'static>>,
-    start: usize,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let end = start.saturating_add(width);
-    for line in &mut lines {
-        let mut column = 0usize;
-        let mut visible_spans = Vec::new();
-        for span in std::mem::take(&mut line.spans) {
-            let mut visible = String::new();
-            for grapheme in span.content.graphemes(true) {
-                let grapheme_width = if grapheme == "\t" {
-                    TAB_WIDTH - column % TAB_WIDTH
-                } else {
-                    UnicodeWidthStr::width(grapheme)
-                };
-                let grapheme_end = column.saturating_add(grapheme_width);
-                if grapheme_width == 0 {
-                    if column >= start && column < end {
-                        visible.push_str(grapheme);
-                    }
-                } else if column >= start && grapheme_end <= end {
-                    if grapheme == "\t" {
-                        visible.push_str(&" ".repeat(grapheme_width));
-                    } else {
-                        visible.push_str(grapheme);
-                    }
-                } else {
-                    let overlap_start = column.max(start);
-                    let overlap_end = grapheme_end.min(end);
-                    visible.push_str(&" ".repeat(overlap_end.saturating_sub(overlap_start)));
-                }
-                column = grapheme_end;
-                if column >= end {
-                    break;
-                }
-            }
-            if !visible.is_empty() {
-                visible_spans.push(Span::styled(visible, span.style));
-            }
-            if column >= end {
-                break;
-            }
-        }
-        line.spans = visible_spans;
-    }
-    lines
 }
 
 fn finish_selection(frame: &mut Frame<'_>, app: &mut App) {
@@ -655,6 +392,7 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
         HitTarget::HeaderWorktrees,
         HitTarget::HeaderBranch,
         HitTarget::HeaderDiff,
+        HitTarget::HeaderAgent,
     ] {
         let Some(rect) = app.regions.hit_target_rect(target) else {
             continue;

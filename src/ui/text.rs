@@ -351,7 +351,6 @@ pub(super) fn styled_diff_window(
         let file_header = line.starts_with("diff --git");
         if file_header {
             in_hunk = false;
-            old_line = None;
             new_line = None;
             if show_initial_header {
                 if seen_header {
@@ -601,8 +600,7 @@ pub(super) fn diff_new_line_and_payload_at_display_row(
                 display_index += 1;
             }
             in_hunk = true;
-            if let Some((old, new)) = parse_hunk_lines(line) {
-                old_line = Some(old);
+            if let Some((_, new)) = parse_hunk_lines(line) {
                 new_line = Some(new);
             }
         }
@@ -728,6 +726,74 @@ pub(super) fn diff_file_header_at_display_row(
         display_index += 1;
     }
     None
+}
+
+pub(super) fn diff_new_line_markers(diff: &str, target: &RepoPath) -> Vec<(usize, char)> {
+    let lines = diff.lines().collect::<Vec<_>>();
+    let has_hunks = lines.iter().any(|line| line.starts_with("@@"));
+    if !has_hunks {
+        return Vec::new();
+    }
+    let has_file_headers = lines.iter().any(|line| line.starts_with("diff --git"));
+    let mut path = (!has_file_headers).then(|| target.clone());
+    let mut in_hunk = false;
+    let mut new_line = None;
+    let mut deletion_pending = false;
+    let mut markers = Vec::new();
+
+    for (index, line) in lines.iter().copied().enumerate() {
+        let file_header = line.starts_with("diff --git");
+        if file_header {
+            path = diff_file_destination(&lines, index).map(|(path, _)| path);
+            in_hunk = false;
+            new_line = None;
+            deletion_pending = false;
+        }
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header && !file_header {
+            continue;
+        }
+        if hunk_header {
+            in_hunk = true;
+            if let Some((_, new)) = parse_hunk_lines(line) {
+                new_line = Some(new);
+            }
+            deletion_pending = false;
+            continue;
+        }
+        if !in_hunk || path.as_ref() != Some(target) {
+            continue;
+        }
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            if let Some(line_number) = new_line {
+                markers.push((
+                    line_number.saturating_sub(1) as usize,
+                    if deletion_pending { '~' } else { '+' },
+                ));
+            }
+            new_line = new_line.map(|line| line.saturating_add(1));
+            deletion_pending = false;
+        } else if line.starts_with('-') {
+            deletion_pending = true;
+        } else if line.starts_with(' ') {
+            if deletion_pending {
+                if let Some(line_number) = new_line {
+                    markers.push((line_number.saturating_sub(1) as usize, '-'));
+                }
+            }
+            new_line = new_line.map(|line| line.saturating_add(1));
+            deletion_pending = false;
+        }
+    }
+    if deletion_pending && path.as_ref() == Some(target) {
+        if let Some(line_number) = new_line {
+            markers.push((line_number.saturating_sub(1) as usize, '-'));
+        }
+    }
+    markers
 }
 
 fn diff_file_destination(lines: &[&str], header_index: usize) -> Option<(RepoPath, usize)> {
@@ -935,6 +1001,25 @@ mod tests {
         assert_eq!(
             diff_file_header_at_display_row(diff, 0, true),
             Some((RepoPath::from("odd b/target"), 1))
+        );
+    }
+
+    #[test]
+    fn maps_added_modified_and_removed_lines_for_editor_gutters() {
+        let diff = concat!(
+            "diff --git a/src/main.rs b/src/main.rs\n",
+            "--- a/src/main.rs\n",
+            "+++ b/src/main.rs\n",
+            "@@ -1,3 +1,4 @@\n",
+            " context\n",
+            "-old\n",
+            "+new\n",
+            "+more\n",
+        );
+
+        assert_eq!(
+            diff_new_line_markers(diff, &RepoPath::from("src/main.rs")),
+            vec![(1, '~'), (2, '+')]
         );
     }
 

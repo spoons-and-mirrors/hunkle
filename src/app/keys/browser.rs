@@ -277,6 +277,73 @@ impl App {
         }
     }
 
+    pub(crate) fn open_header_agent_destinations(&mut self) {
+        if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
+            self.header_picker.open_message(
+                HeaderPickerKind::AgentDestinations,
+                "Agents can only be started inside Herdr".to_owned(),
+            );
+            return;
+        }
+
+        let current = self.repository().map(|repository| repository.root.clone());
+        let snapshot = self.linked_worktrees.snapshot();
+        let mut items = Vec::new();
+        for repository in snapshot
+            .repositories
+            .iter()
+            .filter(|repository| repository.error.is_none())
+        {
+            for worktree in repository
+                .worktrees
+                .iter()
+                .filter(|worktree| !worktree.is_bare)
+            {
+                let branch = worktree
+                    .branch
+                    .as_deref()
+                    .map(|branch| {
+                        branch
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(branch)
+                            .to_owned()
+                    })
+                    .unwrap_or_else(|| "detached HEAD".to_owned());
+                items.push(HeaderPickerItem::AgentDestination {
+                    path: worktree.path.clone(),
+                    repository: repository.label.clone(),
+                    branch,
+                    kind: if worktree.is_main {
+                        AgentDestinationKind::Repository
+                    } else {
+                        AgentDestinationKind::Worktree
+                    },
+                });
+            }
+        }
+        let selected = current
+            .as_deref()
+            .and_then(|current| {
+                items.iter().position(|item| {
+                    matches!(item, HeaderPickerItem::AgentDestination { path, .. } if same_path(path, current))
+                })
+            })
+            .unwrap_or(0);
+        if items.is_empty() {
+            self.header_picker.open_message(
+                HeaderPickerKind::AgentDestinations,
+                if snapshot.loading {
+                    "Agent destinations are still loading".to_owned()
+                } else {
+                    "No agent destinations".to_owned()
+                },
+            );
+        } else {
+            self.header_picker
+                .open(HeaderPickerKind::AgentDestinations, items, selected);
+        }
+    }
+
     pub(crate) fn handle_header_picker(&mut self, key: KeyEvent) {
         if self.header_picker.naming_branch() {
             self.handle_new_branch_name(key);
@@ -294,8 +361,14 @@ impl App {
             {
                 self.begin_header_branch_creation();
             }
-            KeyCode::Up => self.header_picker.move_selection(-1),
-            KeyCode::Down => self.header_picker.move_selection(1),
+            KeyCode::Up => {
+                self.hovered_hit_target = None;
+                self.header_picker.move_selection(-1);
+            }
+            KeyCode::Down => {
+                self.hovered_hit_target = None;
+                self.header_picker.move_selection(1);
+            }
             KeyCode::Enter => self.activate_header_picker(self.header_picker.selected),
             KeyCode::Backspace => self.edit_header_picker_query(TextInput::backspace),
             KeyCode::Delete => self.edit_header_picker_query(TextInput::delete),

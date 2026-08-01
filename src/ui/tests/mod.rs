@@ -13,14 +13,17 @@ pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::app::{
     App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, ExplorerTab,
-    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode,
-    PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore,
-    ShortcutAction, SqliteFocus, View, WorkspaceDropTarget, WorkspacePanel,
-    WorkspacePanelHitTarget, WorktreeManagerHitTarget, WorktreeManagerRow,
+    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout,
+    HerdrPaneRect, HitTarget, LeftPane, Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget,
+    Settings, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, View, WorkspaceDropTarget,
+    WorkspacePanel, WorkspacePanelHitTarget, WorktreeManagerHitTarget, WorktreeManagerRow,
 };
 pub(super) use crate::repo_path::RepoPath;
 
-pub(super) use super::{BranchPickerStep, draw, palette, text, wrapped_editor_cursor};
+pub(super) use super::{
+    AgentDestinationKind, BranchPickerStep, draw, lighter, palette, selected_display_range, text,
+    wrapped_editor_cursor,
+};
 
 mod editor;
 mod files;
@@ -616,7 +619,6 @@ fn renders_every_primary_surface() {
     assert!(!app.dragging_agents);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let agents = app.regions.agents_list.unwrap();
     app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
         "result": {
             "snapshot": {
@@ -633,6 +635,7 @@ fn renders_every_primary_surface() {
         }
     }));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let agents = app.regions.agents_list.unwrap();
     click(&mut app, agents.x + 2, agents.y);
     assert_eq!(app.mode, Mode::Normal);
 

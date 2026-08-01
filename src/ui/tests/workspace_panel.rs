@@ -418,3 +418,87 @@ fn workspace_focus_passes_through_application_shortcuts() {
     app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::FileSearch);
 }
+
+#[test]
+fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Agents Fit Test"]);
+    run_git(root, &["config", "user.email", "agents-fit@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+
+    let snapshot = |agent_count: usize| {
+        serde_json::json!({
+            "result": { "snapshot": {
+                "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE", "focused": false }],
+                "agents": (0..agent_count).map(|index| {
+                    serde_json::json!({
+                        "agent": "opencode",
+                        "agent_status": "idle",
+                        "focused": false,
+                        "pane_id": format!("w:p{index}"),
+                        "tab_id": "w:t1",
+                        "workspace_id": "w1"
+                    })
+                }).collect::<Vec<_>>()
+            } }
+        })
+    };
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.settings.agents_height, 5);
+
+    app.workspace_panel = WorkspacePanel::ready_for_test(&snapshot(1));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.settings.agents_height, 5);
+
+    app.workspace_panel = WorkspacePanel::ready_for_test(&snapshot(2));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.settings.agents_height, 8);
+
+    app.workspace_panel = WorkspacePanel::ready_for_test(&snapshot(1));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.settings.agents_height, 5);
+
+    let splitter = app.regions.agents_splitter.unwrap();
+    let bounds = app.regions.agents_bounds.unwrap();
+    let column = splitter.right().saturating_sub(2);
+    let target = bounds.bottom().saturating_sub(10);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        column,
+        target,
+    ));
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, target));
+    assert_eq!(app.settings.agents_height, 10);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.settings.agents_height, 10);
+
+    let splitter = app.regions.agents_splitter.unwrap();
+    let bounds = app.regions.agents_bounds.unwrap();
+    let floor = bounds.bottom().saturating_sub(1);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        column,
+        floor,
+    ));
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, floor));
+    assert_eq!(app.settings.agents_height, 5);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.settings.agents_height, 5);
+}

@@ -317,7 +317,7 @@ fn load(path: &Path) -> Settings {
             }
             "agents_height" | "history_height" => {
                 if let Ok(height) = value.trim().parse::<u16>() {
-                    settings.agents_height = height.clamp(3, 256);
+                    settings.agents_height = height.clamp(5, 256);
                 }
             }
             "graph_changes_width" => {
@@ -472,7 +472,7 @@ mod tests {
         assert!(loaded.format_on_save);
         assert_eq!(loaded.fetch_interval_minutes, 1);
         assert_eq!(loaded.worktree_width, 24);
-        assert_eq!(loaded.agents_height, 3);
+        assert_eq!(loaded.agents_height, 5);
         assert_eq!(
             loaded.explorer_left_pane_width,
             Some(MINIMUM_EXPLORER_PANE_WIDTH)

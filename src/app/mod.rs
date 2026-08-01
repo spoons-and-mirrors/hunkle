@@ -31,9 +31,9 @@ pub(crate) use file_editor::{FileEditor, TAB_WIDTH};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use header_picker::{
-    BranchPickerStep, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
+    AgentDestinationKind, BranchPickerStep, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
 };
-pub(crate) use herdr_prompt::HerdrPrompt;
+pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use linked_worktrees::{
     HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
     LinkedWorktreeCatalogSnapshot, LinkedWorktreeObservation, LinkedWorktreeRemovalPlan,
@@ -46,8 +46,10 @@ pub(crate) use repository_browser::{
 pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use settings::{SettingsStore, valid_opencode_model};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
+#[cfg(test)]
+pub(crate) use workspace_panel::HerdrPaneRect;
 pub(crate) use workspace_panel::{
-    AgentStatus, SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
+    AgentStatus, HerdrPaneLayout, SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
     WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect, WorkspacePanelEntryState,
     WorkspacePanelRow, WorkspaceRenameDialog, WorkspaceRenameTarget,
 };
@@ -113,6 +115,7 @@ pub struct App {
     commit_draft_rx: Option<Receiver<CommitDraftResult>>,
     pub dragging_splitter: bool,
     pub dragging_agents: bool,
+    pub(crate) agents_height_fit_for: Option<usize>,
     pub dragging_diff_scrollbar: bool,
     pub(crate) dragging_graph_column: Option<GraphColumnDrag>,
     diff_scroll_drag_offset: u16,
@@ -156,6 +159,7 @@ pub struct App {
     file_drag: Option<FileDrag>,
     last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
     last_file_editor_click: Option<(Position, Instant)>,
+    pub(crate) file_editor_dragging: bool,
     pending_file_selection: Option<RepoPath>,
     workspace_focus_restore_path: Option<PathBuf>,
     pending_workspace_restore: Option<PathBuf>,
@@ -265,6 +269,7 @@ impl App {
             commit_draft_rx: None,
             dragging_splitter: false,
             dragging_agents: false,
+            agents_height_fit_for: None,
             dragging_diff_scrollbar: false,
             dragging_graph_column: None,
             diff_scroll_drag_offset: 0,
@@ -308,6 +313,7 @@ impl App {
             file_drag: None,
             last_worktree_file_click: None,
             last_file_editor_click: None,
+            file_editor_dragging: false,
             pending_file_selection: None,
             workspace_focus_restore_path: None,
             pending_workspace_restore: None,
@@ -468,6 +474,15 @@ impl App {
             self.handle_file_editor(key);
             return;
         }
+        if self.herdr_prompt.agent_pane_picker_open() {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                self.should_quit = true;
+            } else if key.code == KeyCode::Esc {
+                self.herdr_prompt.cancel_pending_agent();
+                self.notice = Some("Agent pane selection cancelled".to_owned());
+            }
+            return;
+        }
         if self.selection.has_selection() {
             self.selection.clear();
             if key.code == KeyCode::Esc {
@@ -589,9 +604,10 @@ impl App {
         }
         match self.mode {
             Mode::FileEdit => {
-                self.selection.clear();
                 if self.file_editor_viewport_too_small() {
                     self.notice = Some("Resize the terminal before editing".to_owned());
+                } else if self.format_running() {
+                    self.notice = Some("Wait for the formatter to finish".to_owned());
                 } else if let Some(editor) = &mut self.file_editor
                     && let Err(error) = editor.insert(text)
                 {
@@ -745,14 +761,18 @@ impl App {
             .herdr_prompt
             .input
             .poll_blink(self.mode == Mode::HerdrPrompt && !self.herdr_prompt.sending);
-        if let Some(completion) = self.herdr_prompt.poll() {
-            changed = true;
+        let HerdrPromptPoll {
+            changed: herdr_changed,
+            completion,
+        } = self.herdr_prompt.poll();
+        changed |= herdr_changed;
+        if let Some(completion) = completion {
             match completion {
-                Ok(pane_id) => {
+                Ok(message) => {
                     if self.mode == Mode::HerdrPrompt {
                         self.mode = Mode::Normal;
                     }
-                    self.notice = Some(format!("Sent to Herdr pane {pane_id}"));
+                    self.notice = Some(message);
                 }
                 Err(error) if self.mode == Mode::HerdrPrompt => {
                     self.herdr_prompt.error = Some(error);
@@ -870,21 +890,41 @@ impl App {
                         Err(error) => error,
                     });
                 }
-                WorkerOutcome::Format(done) => match done.result {
-                    Ok(output) if output.success => {
-                        self.notice =
-                            Some(format!("Formatted {} with {}", done.path, done.formatter));
+                WorkerOutcome::Format(done) => {
+                    let refresh_error = self
+                        .file_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.path() == &done.path)
+                        .then(|| {
+                            self.file_editor
+                                .as_mut()
+                                .and_then(|editor| editor.refresh_from_disk().err())
+                        })
+                        .flatten();
+                    if let Some(error) = refresh_error {
+                        self.notice = Some(format!(
+                            "Formatter completed for {}, but the editor could not refresh: {error}",
+                            done.path
+                        ));
+                        continue;
                     }
-                    Ok(output) => {
-                        let fallback = format!("{} could not format {}", done.formatter, done.path);
-                        self.notice = Some(if output.stderr.trim().is_empty() {
-                            first_error(&output.stdout, &fallback)
-                        } else {
-                            first_error(&output.stderr, &fallback)
-                        });
+                    match done.result {
+                        Ok(output) if output.success => {
+                            self.notice =
+                                Some(format!("Formatted {} with {}", done.path, done.formatter));
+                        }
+                        Ok(output) => {
+                            let fallback =
+                                format!("{} could not format {}", done.formatter, done.path);
+                            self.notice = Some(if output.stderr.trim().is_empty() {
+                                first_error(&output.stdout, &fallback)
+                            } else {
+                                first_error(&output.stderr, &fallback)
+                            });
+                        }
+                        Err(error) => self.notice = Some(error),
                     }
-                    Err(error) => self.notice = Some(error),
-                },
+                }
                 WorkerOutcome::BranchDelete(done) => {
                     self.notice = Some(match done.result {
                         Ok(()) => done.remote.map_or_else(
@@ -1716,6 +1756,7 @@ impl App {
             HeaderPickerKind::Worktrees => self.open_header_worktrees(),
             HeaderPickerKind::Branches => self.open_header_branches(),
             HeaderPickerKind::DiffTargets => self.open_header_diff_targets(),
+            HeaderPickerKind::AgentDestinations => self.open_header_agent_destinations(),
         }
     }
 
@@ -1794,6 +1835,13 @@ impl App {
                     current_revision,
                     target_revision,
                 );
+            }
+            HeaderPickerItem::AgentDestination { path, branch, .. } => {
+                if let Err(error) = self.herdr_prompt.prepare_agent(path, branch) {
+                    self.notice = Some(error);
+                } else {
+                    self.notice = Some("Loading active Herdr tab layout".to_owned());
+                }
             }
         }
     }

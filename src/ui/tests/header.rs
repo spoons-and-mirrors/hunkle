@@ -42,6 +42,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .hit_target_rect(HitTarget::HeaderBranch)
         .unwrap();
     let diff = app.regions.hit_target_rect(HitTarget::HeaderDiff).unwrap();
+    let agent = app.regions.hit_target_rect(HitTarget::HeaderAgent).unwrap();
     assert_eq!(repository.x, 1);
     assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), "▀");
     assert_eq!(
@@ -55,35 +56,131 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert_eq!(repository.right().saturating_add(1), worktrees.x);
     assert!(worktrees.right() <= branch.x);
     assert_eq!(branch.right().saturating_add(1), diff.x);
+    assert_eq!(diff.right().saturating_add(1), agent.x);
     assert_eq!(
-        terminal.backend().buffer()[(repository.x, repository.y)].bg,
-        super::palette().yellow
+        terminal.backend().buffer()[(repository.x, repository.y)].symbol(),
+        "▌"
     );
     assert_eq!(
         terminal.backend().buffer()[(repository.x, repository.y)].fg,
-        super::palette().canvas
+        super::palette().yellow
     );
     assert_eq!(
-        terminal.backend().buffer()[(worktrees.x, worktrees.y)].bg,
+        terminal.backend().buffer()[(repository.x, repository.y)].bg,
+        super::palette().surface_alt
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x + 1, repository.y)].bg,
+        super::palette().surface_alt
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(worktrees.x, worktrees.y)].fg,
         super::palette().orange
     );
     assert_eq!(
-        terminal.backend().buffer()[(branch.x, branch.y)].bg,
+        terminal.backend().buffer()[(branch.x, branch.y)].fg,
         super::palette().accent
     );
     assert_eq!(
-        terminal.backend().buffer()[(diff.x, diff.y)].bg,
+        terminal.backend().buffer()[(diff.x, diff.y)].fg,
         super::palette().purple
     );
+    assert_eq!(
+        terminal.backend().buffer()[(agent.x, agent.y)].fg,
+        super::palette().green
+    );
+    for card in [repository, worktrees, branch, diff, agent] {
+        assert_eq!(
+            terminal.backend().buffer()[(card.x + 1, card.y)].bg,
+            super::palette().surface_alt
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(card.x + 1, card.y)].fg,
+            super::palette().ink
+        );
+    }
+    app.handle_mouse(mouse(MouseEventKind::Moved, repository.x + 1, repository.y));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x + 1, repository.y)].bg,
+        super::lighter(super::palette().yellow)
+    );
+    app.hovered_hit_target = None;
     assert_eq!(worktrees.width, " worktree ".width() as u16);
     let worktree_text = (worktrees.x..worktrees.right())
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())
         .collect::<String>();
-    assert_eq!(worktree_text, " worktree ");
+    assert_eq!(worktree_text, "▌worktree ");
     let branch_text = (branch.x..branch.right())
         .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
         .collect::<String>();
-    assert_eq!(branch_text, format!(" {long_branch} "));
+    assert_eq!(branch_text, format!("▌{long_branch} "));
+
+    wait_for(&mut app, |app| {
+        app.linked_worktrees
+            .snapshot()
+            .repositories
+            .iter()
+            .map(|repository| repository.worktrees.len())
+            .sum::<usize>()
+            >= 2
+    });
+    click(&mut app, agent.x, agent.y);
+    assert_eq!(
+        app.header_picker.kind,
+        Some(HeaderPickerKind::AgentDestinations)
+    );
+    assert_eq!(app.header_picker.items.len(), 2);
+    assert!(app.header_picker.items.iter().any(|item| matches!(
+        item,
+        HeaderPickerItem::AgentDestination {
+            path,
+            branch,
+            kind,
+            ..
+        } if path == &linked
+            && branch == "linked"
+            && *kind == super::AgentDestinationKind::Worktree
+    )));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOverlay)
+        .unwrap();
+    assert_eq!(picker.y, agent.bottom());
+    assert_eq!(
+        picker.x,
+        agent
+            .x
+            .min(terminal.size().unwrap().width - picker.width - 1)
+    );
+    let mut picker_text = String::new();
+    for y in picker.y..picker.bottom() {
+        for x in picker.x..picker.right() {
+            picker_text.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    assert!(picker_text.contains("START AGENT"));
+
+    assert_eq!(app.header_picker.selected, 0);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.header_picker.selected, 1);
+    let first_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(0))
+        .unwrap();
+    app.handle_mouse(mouse(MouseEventKind::Moved, first_row.x + 1, first_row.y));
+    assert_eq!(app.header_picker.selected, 1);
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollUp,
+        first_row.x + 1,
+        first_row.y,
+    ));
+    assert_eq!(app.header_picker.selected, 1);
+    assert_eq!(app.hovered_hit_target, None);
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 0, 20));
+    assert_eq!(app.header_picker.selected, 1);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     click(&mut app, diff.x, diff.y);
     assert_eq!(app.mode, Mode::Normal);
@@ -264,6 +361,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         (HitTarget::HeaderWorktrees, true),
         (HitTarget::HeaderBranch, true),
         (HitTarget::HeaderDiff, true),
+        (HitTarget::HeaderAgent, true),
     ] {
         let control = app.regions.hit_target_rect(target).unwrap();
         assert_eq!(
@@ -280,10 +378,10 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let search_bottom = &terminal.backend().buffer()[(picker.x, picker.y + 2)];
     assert_eq!(search_bottom.symbol(), "▀");
     assert_eq!(search_bottom.fg, super::palette().surface_alt);
-    assert_eq!(search_bottom.bg, super::palette().raised);
+    assert_eq!(search_bottom.bg, super::palette().surface_alt);
     let list_bottom = &terminal.backend().buffer()[(picker.x, picker.bottom() - 1)];
     assert_eq!(list_bottom.symbol(), "▀");
-    assert_eq!(list_bottom.fg, super::palette().raised);
+    assert_eq!(list_bottom.fg, super::palette().surface_alt);
     assert_eq!(list_bottom.bg, Color::Rgb(0, 0, 0));
     let current_index = app
         .header_picker
@@ -299,6 +397,20 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|x| terminal.backend().buffer()[(x, current_row.y)].symbol())
         .collect::<String>();
     assert!(current_text.trim_end().ends_with("current"));
+    let unselected_index = app
+        .header_picker
+        .items
+        .iter()
+        .position(|item| matches!(item, HeaderPickerItem::Branch(branch) if !branch.current))
+        .unwrap();
+    let unselected_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(unselected_index))
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(unselected_row.x, unselected_row.y)].bg,
+        super::palette().surface_alt
+    );
     let new_branch = app
         .regions
         .hit_target_rect(HitTarget::HeaderPickerNewBranch)
@@ -356,5 +468,85 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let linked_text = (linked_card.x..linked_card.right())
         .map(|x| terminal.backend().buffer()[(x, linked_card.y)].symbol())
         .collect::<String>();
-    assert_eq!(linked_text, " linked ");
+    assert_eq!(linked_text, "▌linked ");
+}
+
+#[test]
+fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::opening(directory.path().to_path_buf());
+    app.herdr_prompt.show_agent_pane_picker(
+        directory.path().to_path_buf(),
+        "feature/modal".to_owned(),
+        "w0:p2".to_owned(),
+        HerdrPaneLayout {
+            workspace_id: "w0".to_owned(),
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+            panes: vec![
+                HerdrPaneRect {
+                    pane_id: "w0:p1".to_owned(),
+                    x: 0,
+                    y: 0,
+                    width: 72,
+                    height: 40,
+                },
+                HerdrPaneRect {
+                    pane_id: "w0:p2".to_owned(),
+                    x: 72,
+                    y: 0,
+                    width: 48,
+                    height: 20,
+                },
+                HerdrPaneRect {
+                    pane_id: "w0:p3".to_owned(),
+                    x: 72,
+                    y: 20,
+                    width: 48,
+                    height: 20,
+                },
+            ],
+        },
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert_eq!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPanePickerOverlay),
+        Some(ratatui::layout::Rect::new(0, 0, 100, 30))
+    );
+    let left = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPane(0))
+        .unwrap();
+    let bottom_right = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPane(2))
+        .unwrap();
+    assert!(left.width > bottom_right.width);
+    assert!(left.height > bottom_right.height);
+    assert_eq!(left.right(), bottom_right.x);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPane(1))
+            .is_none()
+    );
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("START AGENT"));
+    assert!(screen.contains("feature/modal"));
+    assert!(screen.contains("HUNKLE"));
+    assert!(screen.contains("CLICK A PANE TO REPLACE"));
+    assert!(!screen.contains("w0:p1"));
+    assert!(!screen.contains("w0:p3"));
+    assert!(!screen.contains("w0:t1"));
 }

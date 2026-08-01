@@ -44,8 +44,9 @@ it never climbs into an enclosing repository.
 ## Keys
 
 These are the default bindings. Open Settings and select **Shortcuts** to
-reassign named commands; structural editing/navigation keys, `Esc`, and
-emergency `Ctrl+C` remain fixed.
+reassign named commands; structural editing/navigation keys and `Esc` remain
+fixed. `Ctrl+C` copies a native selection in the inline editor and remains the
+emergency quit command elsewhere.
 
 | Key                               | Action                                                                                                                                                                               |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -61,8 +62,12 @@ emergency `Ctrl+C` remain fixed.
 | `F2`                              | Rename the selected file or folder in Files                                                                                                                                          |
 | `F3`                              | Fuzzy-search repository files from the main view                                                                                                                                     |
 | `Ctrl+Delete`                     | Permanently delete the selected file or folder from Files after confirmation                                                                                                         |
-| `Ctrl+S`                          | Save in the inline editor and optionally format; otherwise format the selected Files entry                                                                                           |
-| `Esc` in the inline editor        | Close the editor; press twice to discard unsaved edits                                                                                                                               |
+| `Ctrl+S`                          | Save and stay in the inline editor, optionally formatting; otherwise format the selected Files entry                                                                                |
+| `Ctrl+Enter` in the inline editor | Save and close the inline editor                                                                                                                                                    |
+| `Ctrl+A`, `Ctrl+C`, `Ctrl+X`      | Select all, copy, or cut text in the inline editor                                                                                                                                  |
+| `Ctrl+Z`, `Ctrl+Shift+Z`, `Ctrl+Y` | Undo or redo the active file's inline edits                                                                                                                                          |
+| `Tab`, `Shift+Tab` in the inline editor | Indent or outdent the selected lines as one undoable edit                                                                                                                        |
+| `Esc` in the inline editor        | Collapse a selection, close the editor, or press twice to discard unsaved edits                                                                                                     |
 | `h`, `l`, `Left`, `Right`         | Navigate the tree; Right enters/stages in hunk mode and Left exits it                                                                                                                |
 | `Enter`                           | Toggle the selected directory                                                                                                                                                        |
 | `Space`                           | Stage or unstage the selected entry, or stage the selected hunk                                                                                                                      |
@@ -178,8 +183,15 @@ worktree from disk.
 - Click a directory to expand or collapse it. Click a file's right-aligned
   checkbox or right-click its row to stage or unstage it.
 - Click `CHANGES` or `FILES` in the left header to switch modes; clicking a
-  repository file previews its contents. Click plain source, or an added/context
-  line in an unstaged diff, to edit the working file inline.
+   repository file previews its contents. Click plain source, or an added/context
+   line in an unstaged diff, to edit the working file inline.
+- In the inline editor, drag to select source text, double-click a word, and use
+   `Shift` with navigation keys to extend a selection. Typing, paste, and delete
+   replace the selected text; editor selection is separate from review-pane copy
+   selection. `Tab` and `Shift+Tab` indent or outdent selected lines, and the
+   mouse wheel scrolls the editor viewport without moving the cursor.
+- Inline editor gutters show added, removed, and modified lines from the current
+  diff, plus unsaved lines changed during the current editing session.
 - Markdown files in Files show a top-right `Preview` button for switching
   between rendered Markdown and source.
 - Click `+` in the Files header to create a file or folder. Drag a Files entry

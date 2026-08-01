@@ -9,7 +9,7 @@ use super::{
     HeaderPickerKind, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
     RepositoryBrowserHitTarget, SettingsPage, Shortcuts, View, WorkspaceDropTarget,
     WorkspacePanelHitTarget, WorktreeManagerEffect, WorktreeManagerHitTarget,
-    changes::ChangesEffect, scroll_table,
+    changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -19,6 +19,17 @@ impl App {
         let point = Position::new(mouse.column, mouse.row);
         if mouse.kind == MouseEventKind::Moved {
             self.hovered_hit_target = self.regions.hit_target_at(point);
+        }
+        if self.herdr_prompt.agent_pane_picker_open() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && let Some(HitTarget::AgentPane(index)) = self.regions.hit_target_at(point)
+            {
+                match self.herdr_prompt.select_agent_pane(index) {
+                    Ok(()) => self.notice = Some("Starting agent in selected pane".to_owned()),
+                    Err(error) => self.notice = Some(error),
+                }
+            }
+            return;
         }
         if self.dragging_splitter {
             match mouse.kind {
@@ -114,20 +125,33 @@ impl App {
                     self.toggle_header_picker(HeaderPickerKind::DiffTargets);
                     return;
                 }
+                Some(HitTarget::HeaderAgent) => {
+                    self.toggle_header_picker(HeaderPickerKind::AgentDestinations);
+                    return;
+                }
                 _ => {}
             }
         }
         if self.header_picker.is_open() {
             match mouse.kind {
-                MouseEventKind::Moved => {
-                    if let Some(HitTarget::HeaderPickerItem(index)) =
-                        self.regions.hit_target_at(point)
-                    {
-                        self.header_picker.select(index);
-                    }
+                MouseEventKind::ScrollDown
+                    if matches!(
+                        self.regions.hit_target_at(point),
+                        Some(HitTarget::HeaderPickerOverlay | HitTarget::HeaderPickerItem(_))
+                    ) =>
+                {
+                    self.hovered_hit_target = None;
+                    self.header_picker.scroll_by(3);
                 }
-                MouseEventKind::ScrollDown => self.header_picker.move_selection(1),
-                MouseEventKind::ScrollUp => self.header_picker.move_selection(-1),
+                MouseEventKind::ScrollUp
+                    if matches!(
+                        self.regions.hit_target_at(point),
+                        Some(HitTarget::HeaderPickerOverlay | HitTarget::HeaderPickerItem(_))
+                    ) =>
+                {
+                    self.hovered_hit_target = None;
+                    self.header_picker.scroll_by(-3);
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     match self.regions.hit_target_at(point) {
                         Some(HitTarget::HeaderPickerItem(index)) => {
@@ -334,53 +358,74 @@ impl App {
     fn handle_file_editor_mouse(&mut self, mouse: MouseEvent, point: Position) {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                self.selection.clear();
                 self.last_file_editor_click = None;
+                let height = self
+                    .regions
+                    .preview_body
+                    .map_or(1, |body| usize::from(body.height).max(1));
+                let wrapped = self.changes.diff_wrap;
                 if let Some(editor) = &mut self.file_editor {
-                    editor.move_vertical(3);
+                    editor.scroll_viewport(3, height, wrapped);
                 }
             }
             MouseEventKind::ScrollUp => {
-                self.selection.clear();
                 self.last_file_editor_click = None;
+                let height = self
+                    .regions
+                    .preview_body
+                    .map_or(1, |body| usize::from(body.height).max(1));
+                let wrapped = self.changes.diff_wrap;
                 if let Some(editor) = &mut self.file_editor {
-                    editor.move_vertical(-3);
+                    editor.scroll_viewport(-3, height, wrapped);
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                self.selection.clear();
-                let region = self
-                    .regions
-                    .preview_body
-                    .unwrap_or_else(|| self.selection_region(point));
-                self.selection.begin(point, region);
-            }
-            MouseEventKind::Drag(MouseButton::Left) if self.selection.is_active() => {
-                self.selection.update(point);
-            }
-            MouseEventKind::Up(MouseButton::Left) if self.selection.is_active() => {
                 let in_editor = self
                     .regions
                     .preview_body
                     .is_some_and(|body| body.contains(point));
+                if in_editor {
+                    self.place_file_editor_cursor(point, false);
+                    if let Some(editor) = &mut self.file_editor {
+                        editor.begin_selection();
+                        self.file_editor_dragging = true;
+                    }
+                } else {
+                    self.file_editor_dragging = false;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.file_editor_dragging => {
+                self.place_file_editor_cursor(point, true);
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.file_editor_dragging => {
+                self.place_file_editor_cursor(point, true);
+                self.file_editor_dragging = false;
+                let in_editor = self
+                    .regions
+                    .preview_body
+                    .is_some_and(|body| body.contains(point));
+                let has_selection = self
+                    .file_editor
+                    .as_ref()
+                    .is_some_and(FileEditor::has_selection);
                 let double_click = in_editor
-                    && !self.selection.has_selection()
+                    && !has_selection
                     && self.last_file_editor_click.is_some_and(|(previous, at)| {
                         previous == point && at.elapsed() <= DOUBLE_CLICK_INTERVAL
                     });
-                let outcome = if double_click {
+                if double_click {
                     self.last_file_editor_click = None;
-                    self.selection.finish_word(point)
-                } else {
-                    self.selection.finish(point)
-                };
-                match outcome {
-                    SelectionOutcome::Click => {
-                        self.last_file_editor_click = in_editor.then(|| (point, Instant::now()));
-                        self.place_file_editor_cursor(point);
+                    if let Some(editor) = &mut self.file_editor {
+                        if !editor.select_word_at_cursor() {
+                            editor.clear_selection();
+                        }
                     }
-                    SelectionOutcome::Selected(Some(_)) | SelectionOutcome::Selected(None) => {
-                        self.last_file_editor_click = None;
+                } else if has_selection {
+                    self.last_file_editor_click = None;
+                } else {
+                    self.last_file_editor_click = in_editor.then(|| (point, Instant::now()));
+                    if let Some(editor) = &mut self.file_editor {
+                        editor.clear_selection();
                     }
                 }
             }
@@ -510,7 +555,7 @@ impl App {
             Mode::ActionMenu => self.handle_action_mouse(mouse),
             Mode::Command => self.handle_command_mouse(mouse),
             Mode::HerdrPrompt => {}
-            Mode::FileEdit => self.place_file_editor_cursor(point),
+            Mode::FileEdit => self.place_file_editor_cursor(point, false),
             Mode::Explorer => match self.explorer_tab {
                 ExplorerTab::Explorer => self.handle_explorer_mouse(mouse),
                 ExplorerTab::Worktrees => self.handle_worktree_manager_mouse(mouse),
@@ -745,7 +790,7 @@ impl App {
         self.start_file_editor(path, line, column, point);
     }
 
-    fn place_file_editor_cursor(&mut self, point: Position) {
+    fn place_file_editor_cursor(&mut self, point: Position, extend: bool) {
         let Some(body) = self
             .regions
             .preview_body
@@ -758,7 +803,11 @@ impl App {
                 let row = usize::from(point.y.saturating_sub(body.y));
                 if let Some(rendered) = self.regions.editor_rows.get(row) {
                     let column = usize::from(point.x.saturating_sub(body.x));
-                    editor.set_cursor(rendered.line, rendered.source_column_at(column));
+                    if extend {
+                        editor.extend_cursor(rendered.line, rendered.source_column_at(column));
+                    } else {
+                        editor.set_cursor(rendered.line, rendered.source_column_at(column));
+                    }
                 }
                 return;
             }
@@ -768,7 +817,11 @@ impl App {
             let column = editor
                 .scroll_column
                 .saturating_add(usize::from(point.x.saturating_sub(body.x)));
-            editor.set_cursor(line, column);
+            if extend {
+                editor.extend_cursor(line, column);
+            } else {
+                editor.set_cursor(line, column);
+            }
         }
     }
 
@@ -1108,6 +1161,9 @@ impl App {
                     | HitTarget::HeaderWorktrees
                     | HitTarget::HeaderBranch
                     | HitTarget::HeaderDiff
+                    | HitTarget::HeaderAgent
+                    | HitTarget::AgentPanePickerOverlay
+                    | HitTarget::AgentPane(_)
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),
@@ -1167,6 +1223,9 @@ impl App {
                     | HitTarget::HeaderWorktrees
                     | HitTarget::HeaderBranch
                     | HitTarget::HeaderDiff
+                    | HitTarget::HeaderAgent
+                    | HitTarget::AgentPanePickerOverlay
+                    | HitTarget::AgentPane(_)
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),
@@ -1609,8 +1668,8 @@ impl App {
         let Some(bounds) = self.regions.agents_bounds else {
             return;
         };
-        let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(3));
-        self.settings.agents_height = bounds.bottom().saturating_sub(top).max(3);
+        let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(5));
+        self.settings.agents_height = bounds.bottom().saturating_sub(top).max(5);
     }
 
     fn resize_graph_column(&mut self, drag: GraphColumnDrag, column: u16) {

@@ -86,52 +86,6 @@ impl SelectionState {
         SelectionOutcome::Selected(self.selected.clone())
     }
 
-    pub fn finish_word(&mut self, point: Position) -> SelectionOutcome {
-        let bounds = (|| {
-            let screen = self.screen.as_ref()?;
-            let region = intersection(self.region?, screen.area);
-            if region.is_empty() {
-                return None;
-            }
-            let point = clamp(point, region);
-            let row = screen.row(point.y)?;
-            let index = row.symbols.iter().position(|symbol| {
-                symbol.x <= point.x
-                    && symbol.x.saturating_add(symbol.width.saturating_sub(1)) >= point.x
-                    && symbol_is_word(row, symbol)
-            })?;
-            let mut first = index;
-            while first > 0
-                && row.symbols[first - 1].x >= region.x
-                && symbol_is_word(row, &row.symbols[first - 1])
-            {
-                first -= 1;
-            }
-            let mut last = index;
-            while last + 1 < row.symbols.len()
-                && row.symbols[last + 1].x < region.right()
-                && symbol_is_word(row, &row.symbols[last + 1])
-            {
-                last += 1;
-            }
-            let start = row.symbols[first].x.max(region.x);
-            let end = row.symbols[last]
-                .x
-                .saturating_add(row.symbols[last].width.saturating_sub(1))
-                .min(region.right().saturating_sub(1));
-            Some((Position::new(start, point.y), Position::new(end, point.y)))
-        })();
-        let Some((start, end)) = bounds else {
-            return self.finish(point);
-        };
-        self.anchor = Some(start);
-        self.cursor = Some(end);
-        self.active = false;
-        self.dragged = true;
-        self.selected = self.selected_text().filter(|text| !text.is_empty());
-        SelectionOutcome::Selected(self.selected.clone())
-    }
-
     pub fn clear(&mut self) {
         self.anchor = None;
         self.cursor = None;
@@ -139,23 +93,6 @@ impl SelectionState {
         self.active = false;
         self.dragged = false;
         self.selected = None;
-    }
-
-    pub fn copy_text(&self) -> Option<String> {
-        self.selected.clone()
-    }
-
-    pub fn selected_rows(&self) -> Option<(u16, u16)> {
-        if !self.dragged {
-            return None;
-        }
-        let anchor = self.anchor?;
-        let cursor = self.cursor?;
-        Some(if anchor.y <= cursor.y {
-            (anchor.y, cursor.y)
-        } else {
-            (cursor.y, anchor.y)
-        })
     }
 
     pub fn render(&self, buffer: &mut Buffer, style: Style) {
@@ -284,14 +221,6 @@ impl ScreenSnapshot {
     fn row(&self, y: u16) -> Option<&ScreenRow> {
         self.rows.get(usize::from(y.saturating_sub(self.area.y)))
     }
-}
-
-fn symbol_is_word(row: &ScreenRow, symbol: &ScreenSymbol) -> bool {
-    let text = &row.text[symbol.start..symbol.end];
-    !text.is_empty()
-        && text
-            .chars()
-            .all(|character| character.is_alphanumeric() || character == '_')
 }
 
 fn intersection(left: Rect, right: Rect) -> Rect {
