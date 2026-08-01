@@ -90,7 +90,8 @@ fn renders_the_workspace_manager_as_a_bottom_drawer() {
         agent_target
     );
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(agent_section.x + 2, agent_card_y)].symbol(), "H");
+    assert_eq!(buffer[(agent_section.x + 2, agent_card_y)].symbol(), "▐");
+    assert_eq!(buffer[(agent_section.x + 3, agent_card_y)].symbol(), "H");
     assert_eq!(
         buffer[(agent_section.right().saturating_sub(3), agent_card_y)].symbol(),
         "⠋"
@@ -102,15 +103,14 @@ fn renders_the_workspace_manager_as_a_bottom_drawer() {
         }
     }
     assert!(agent_rendered.contains("HUNKLE"));
+    assert!(!agent_rendered.contains("basetree"));
     assert!(agent_rendered.contains("topic"));
     assert!(agent_rendered.contains('⠋'));
-    assert!(agent_rendered.contains("▐topic▌⠋"));
     assert!(
         agent_rendered.find("topic") < agent_rendered.find('⠋'),
         "status should follow the branch: {agent_rendered:?}"
     );
-    assert!(agent_rendered.contains("Refine workspace..."));
-    assert!(!agent_rendered.contains("Refine workspace timers"));
+    assert!(agent_rendered.contains("Refine workspace timers"));
     assert!(!agent_rendered.contains("opencode"));
     assert_black_underlay(&terminal);
 
@@ -308,22 +308,20 @@ fn clicking_an_agent_displays_it_without_opening_the_workspace_manager() {
     let agent_row: String = (agent.x..agent.right())
         .map(|column| terminal.backend().buffer()[(column, agent.y)].symbol())
         .collect();
-    assert!(agent_row.contains("HUNKLE"), "agent row was: {agent_row:?}");
-    assert!(
-        agent_row.contains("feature/agents"),
-        "agent row was: {agent_row:?}"
-    );
+    assert!(agent_row.contains("▐HUNK"), "agent row was: {agent_row:?}");
+    assert!(!agent_row.contains("basetree"));
+    assert!(agent_row.contains("fea"), "agent row was: {agent_row:?}");
     assert!(agent_row.contains('⠋'));
-    assert!(agent_row.contains("▐feature/agents▌⠋"));
+    assert!(agent_row.contains("0s"));
     assert!(
-        agent_row.find("feature/agents") < agent_row.find('⠋'),
+        agent_row.find("fea") < agent_row.find('⠋'),
         "status should follow the branch: {agent_row:?}"
     );
     assert!(!agent_row.contains("WORKING"));
     assert_eq!(
-        terminal.backend().buffer()[(splitter.x, agent.y)].symbol(),
-        "●",
-        "card content should retain its original left inset"
+        terminal.backend().buffer()[(agent.x, agent.y)].symbol(),
+        "▐",
+        "the repository badge should align with the agent row"
     );
     assert_eq!(
         terminal.backend().buffer()[(splitter.right().saturating_sub(1), agent.y)].symbol(),
@@ -334,12 +332,12 @@ fn clicking_an_agent_displays_it_without_opening_the_workspace_manager() {
         .map(|column| terminal.backend().buffer()[(column, agent.y + 1)].symbol())
         .collect();
     assert!(
-        session_row.contains("Refine workspace..."),
+        session_row.contains("Refine workspace timers"),
         "session row was: {session_row:?}"
     );
     assert!(!session_row.contains('⠋'));
+    assert!(!session_row.contains("0s"));
     assert!(!session_row.contains("WORKING"));
-    assert!(!session_row.contains("timers"));
     let padding_row = agent.bottom();
     assert!(padding_row < agents.bottom());
     assert!(
@@ -355,7 +353,7 @@ fn clicking_an_agent_displays_it_without_opening_the_workspace_manager() {
     app.handle_mouse(mouse(MouseEventKind::Moved, agent.x + 2, agent.y));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
-        terminal.backend().buffer()[(agent.x + 2, agent.y)].bg,
+        terminal.backend().buffer()[(agent.x + 2, agent.y + 1)].bg,
         super::palette().selected
     );
 
@@ -428,8 +426,8 @@ fn colors_only_agents_in_hunkles_herdr_tab_yellow() {
                 index,
             )))
             .unwrap();
-        assert_eq!(buffer[(row.x + 3, row.y)].fg, super::palette().yellow);
-        assert_eq!(buffer[(row.x + 3, row.y)].bg, super::palette().surface_alt);
+        assert_eq!(buffer[(row.x + 4, row.y)].fg, super::palette().yellow);
+        assert_eq!(buffer[(row.x + 4, row.y)].bg, super::palette().raised);
     }
     for index in [2, 3] {
         let row = app
@@ -438,9 +436,9 @@ fn colors_only_agents_in_hunkles_herdr_tab_yellow() {
                 index,
             )))
             .unwrap();
-        assert_eq!(buffer[(row.x + 3, row.y)].fg, super::palette().ink);
+        assert_eq!(buffer[(row.x + 4, row.y)].fg, super::palette().cyan);
         assert_eq!(
-            buffer[(row.x + 3, row.y)].bg,
+            buffer[(row.x + 3, row.y + 1)].bg,
             if index == 3 {
                 super::palette().selected
             } else {

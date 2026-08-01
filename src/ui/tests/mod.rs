@@ -197,7 +197,7 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(header.contains("worktree"));
+    assert!(header.contains("basetree"));
     assert!(header.contains("main"));
     let footer: String = terminal.backend().buffer().content[35 * 120..]
         .iter()

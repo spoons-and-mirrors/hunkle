@@ -162,6 +162,7 @@ pub(crate) struct HerdrAgent {
     pub(crate) tab_id: String,
     pub(crate) pane_id: String,
     pub(crate) cwd: Option<PathBuf>,
+    pub(crate) destination_cwd: Option<PathBuf>,
     pub(crate) focused: bool,
     pub(crate) status: AgentStatus,
     timing_key: AgentTimingKey,

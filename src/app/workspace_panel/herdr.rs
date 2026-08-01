@@ -1414,6 +1414,9 @@ fn parse_agent(value: &Value, snapshot: &Value) -> Option<HerdrAgent> {
                     .or_else(|| pane.get("cwd").and_then(Value::as_str))
             })
             .map(PathBuf::from),
+        destination_cwd: pane
+            .and_then(|pane| pane.get("cwd").and_then(Value::as_str))
+            .map(PathBuf::from),
         focused: value
             .get("focused")
             .and_then(Value::as_bool)

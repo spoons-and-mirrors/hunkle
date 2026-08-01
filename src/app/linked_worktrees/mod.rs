@@ -23,6 +23,37 @@ pub(crate) struct LinkedWorktreeRepository {
     pub(crate) error: Option<String>,
 }
 
+pub(crate) struct AgentDestinationMetadata<'a> {
+    repository: &'a LinkedWorktreeRepository,
+    worktree: &'a LinkedWorktree,
+}
+
+impl<'a> AgentDestinationMetadata<'a> {
+    pub(crate) fn repository(&self) -> &'a str {
+        &self.repository.label
+    }
+
+    pub(crate) fn worktree(&self) -> &'a str {
+        if self.worktree.is_main {
+            "basetree"
+        } else {
+            self.worktree
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("worktree")
+        }
+    }
+
+    pub(crate) fn branch(&self) -> &'a str {
+        self.worktree
+            .branch
+            .as_deref()
+            .map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch))
+            .unwrap_or("detached HEAD")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LinkedWorktreeCandidate {
     pub(crate) path: PathBuf,
@@ -102,6 +133,19 @@ impl LinkedWorktreeCatalogSnapshot {
             .file_name()
             .and_then(|name| name.to_str())
             .map(str::to_owned)
+    }
+
+    fn agent_destination(&self, path: &Path) -> Option<AgentDestinationMetadata<'_>> {
+        self.repositories.iter().find_map(|repository| {
+            repository
+                .worktrees
+                .iter()
+                .find(|worktree| same_path(&worktree.path, path))
+                .map(|worktree| AgentDestinationMetadata {
+                    repository,
+                    worktree,
+                })
+        })
     }
 
     pub(crate) fn removal_plan(&self, path: &Path) -> Result<LinkedWorktreeRemovalPlan, String> {
@@ -220,6 +264,10 @@ impl LinkedWorktreeCatalog {
 
     pub(crate) fn worktree_name(&self, path: &Path) -> Option<String> {
         self.snapshot.worktree_name(path)
+    }
+
+    pub(crate) fn agent_destination(&self, path: &Path) -> Option<AgentDestinationMetadata<'_>> {
+        self.snapshot.agent_destination(path)
     }
 
     pub(crate) fn removal_plan(&self, path: &Path) -> Result<LinkedWorktreeRemovalPlan, String> {

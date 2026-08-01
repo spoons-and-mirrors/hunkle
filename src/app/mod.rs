@@ -35,9 +35,9 @@ pub(crate) use header_picker::{
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use linked_worktrees::{
-    HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
-    LinkedWorktreeCatalogSnapshot, LinkedWorktreeObservation, LinkedWorktreeRemovalPlan,
-    LinkedWorktreeRepository,
+    AgentDestinationMetadata, HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate,
+    LinkedWorktreeCatalog, LinkedWorktreeCatalogSnapshot, LinkedWorktreeObservation,
+    LinkedWorktreeRemovalPlan, LinkedWorktreeRepository,
 };
 pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, Issue, PullRequest, RemoteItems, RepositoryBrowser,

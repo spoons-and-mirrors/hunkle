@@ -63,6 +63,7 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
     for (target, rect) in workspace_panel::draw_agents_pane(
         frame,
         &mut app.workspace_panel,
+        &app.linked_worktrees,
         &app.settings,
         header,
         list,

@@ -18,7 +18,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let worktree = app
         .linked_worktrees
         .worktree_name(&repo.root)
-        .unwrap_or_else(|| "worktree".to_owned());
+        .unwrap_or_else(|| "basetree".to_owned());
     let is_local = repo.is_local();
     let branch = if !is_local && !repo.details_ready {
         "loading".to_owned()

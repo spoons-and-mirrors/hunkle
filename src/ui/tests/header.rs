@@ -106,11 +106,11 @@ fn header_cards_open_pickers_and_checkout_branches() {
         super::lighter(super::palette().yellow)
     );
     app.hovered_hit_target = None;
-    assert_eq!(worktrees.width, " worktree ".width() as u16);
+    assert_eq!(worktrees.width, " basetree ".width() as u16);
     let worktree_text = (worktrees.x..worktrees.right())
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())
         .collect::<String>();
-    assert_eq!(worktree_text, "▌worktree ");
+    assert_eq!(worktree_text, "▌basetree ");
     let branch_text = (branch.x..branch.right())
         .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
         .collect::<String>();

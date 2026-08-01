@@ -91,6 +91,7 @@ fn agent(name: &str, status: AgentStatus) -> HerdrAgent {
         tab_id: format!("tab-{name}"),
         pane_id: format!("pane-{name}"),
         cwd: None,
+        destination_cwd: None,
         focused: false,
         status,
         timing_key: AgentTimingKey::Terminal(format!("{name}@terminal-{name}")),
@@ -433,6 +434,10 @@ fn parses_snapshot_and_tracks_workspace_and_agent_selection() {
     assert_eq!(panel.agents[0].status, AgentStatus::Blocked);
     assert_eq!(
         panel.agents[0].cwd.as_deref(),
+        Some(Path::new("/home/spoon/code/gitui"))
+    );
+    assert_eq!(
+        panel.agents[0].destination_cwd.as_deref(),
         Some(Path::new("/home/spoon/code/gitui"))
     );
     assert_eq!(panel.selected, Some(0));

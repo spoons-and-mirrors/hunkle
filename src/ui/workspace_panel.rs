@@ -9,8 +9,9 @@ use std::{path::Path, time::Duration};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AgentStatus, HitTarget, Settings, ShortcutAction, WorkspaceDropTarget, WorkspacePanel,
-    WorkspacePanelEntryState, WorkspacePanelHitTarget, WorkspacePanelRow,
+    AgentDestinationMetadata, AgentStatus, HitTarget, LinkedWorktreeCatalog, Settings,
+    ShortcutAction, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEntryState,
+    WorkspacePanelHitTarget, WorkspacePanelRow,
 };
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -50,6 +51,7 @@ pub(super) fn drawer_area(screen: Rect) -> Rect {
 pub(super) fn draw(
     frame: &mut Frame<'_>,
     panel: &mut WorkspacePanel,
+    linked_worktrees: &LinkedWorktreeCatalog,
     area: Rect,
     hovered: Option<WorkspacePanelHitTarget>,
     settings: &Settings,
@@ -95,7 +97,15 @@ pub(super) fn draw(
         loaded_workspace_path,
         &mut targets,
     );
-    draw_agent_section(frame, panel, agent_section, settings, hovered, &mut targets);
+    draw_agent_section(
+        frame,
+        panel,
+        linked_worktrees,
+        agent_section,
+        settings,
+        hovered,
+        &mut targets,
+    );
 
     draw_footer(frame, panel, area, settings);
 
@@ -467,6 +477,7 @@ fn draw_workspace_section(
 fn draw_agent_section(
     frame: &mut Frame<'_>,
     panel: &mut WorkspacePanel,
+    linked_worktrees: &LinkedWorktreeCatalog,
     section: Rect,
     settings: &Settings,
     hovered: Option<WorkspacePanelHitTarget>,
@@ -548,7 +559,15 @@ fn draw_agent_section(
                     .find(|workspace| workspace.id == agent.workspace_id);
                 let workspace_name =
                     workspace.map_or("unassigned", |workspace| workspace.label.as_str());
-                let branch = workspace.and_then(|workspace| workspace.branch.as_deref());
+                let destination = agent
+                    .destination_cwd
+                    .as_deref()
+                    .and_then(|path| linked_worktrees.agent_destination(path));
+                let destination = agent_card_destination(
+                    destination,
+                    workspace_name,
+                    workspace.and_then(|workspace| workspace.branch.as_deref()),
+                );
                 let elapsed = panel
                     .agent_elapsed(index, settings.agent_time_display)
                     .map(format_duration);
@@ -582,8 +601,9 @@ fn draw_agent_section(
                 draw_agent_card(
                     frame,
                     row_area,
-                    workspace_name,
-                    branch,
+                    destination.repository,
+                    destination.worktree,
+                    destination.branch,
                     session,
                     elapsed.as_deref(),
                     agent.status,
@@ -732,6 +752,7 @@ fn draw_footer(frame: &mut Frame<'_>, panel: &WorkspacePanel, area: Rect, settin
 pub(super) fn draw_agents_pane(
     frame: &mut Frame<'_>,
     panel: &mut WorkspacePanel,
+    linked_worktrees: &LinkedWorktreeCatalog,
     settings: &Settings,
     header: Rect,
     list: Rect,
@@ -807,9 +828,9 @@ pub(super) fn draw_agents_pane(
     let card_gap = 1;
     let top_padding = u16::from(list.height > card_height);
     let card_list = Rect::new(
-        list.x.saturating_add(1),
+        list.x,
         list.y.saturating_add(top_padding),
-        list.width.saturating_sub(2),
+        list.width.saturating_sub(1),
         list.height.saturating_sub(top_padding),
     );
     let item_step = card_height + card_gap;
@@ -838,7 +859,15 @@ pub(super) fn draw_agents_pane(
             .iter()
             .find(|workspace| workspace.id == agent.workspace_id);
         let workspace_name = workspace.map_or("unassigned", |workspace| workspace.label.as_str());
-        let branch = workspace.and_then(|workspace| workspace.branch.as_deref());
+        let destination = agent
+            .destination_cwd
+            .as_deref()
+            .and_then(|path| linked_worktrees.agent_destination(path));
+        let destination = agent_card_destination(
+            destination,
+            workspace_name,
+            workspace.and_then(|workspace| workspace.branch.as_deref()),
+        );
         let session = panel
             .agent_display_name(index)
             .unwrap_or("terminal session");
@@ -867,8 +896,9 @@ pub(super) fn draw_agents_pane(
         draw_agents_pane_row(
             frame,
             row_area,
-            workspace_name,
-            branch,
+            destination.repository,
+            destination.worktree,
+            destination.branch,
             session,
             elapsed.as_deref(),
             agent.status,
@@ -900,12 +930,167 @@ fn agents_pane_row_background(state: &WorkspacePanelEntryState, hovered: bool) -
     }
 }
 
+#[derive(Clone, Copy)]
+struct AgentCardDestination<'a> {
+    repository: &'a str,
+    worktree: &'a str,
+    branch: &'a str,
+}
+
+fn agent_card_destination<'a>(
+    destination: Option<AgentDestinationMetadata<'a>>,
+    fallback_repository: &'a str,
+    fallback_branch: Option<&'a str>,
+) -> AgentCardDestination<'a> {
+    destination.map_or(
+        AgentCardDestination {
+            repository: fallback_repository,
+            worktree: "basetree",
+            branch: fallback_branch.unwrap_or("unknown"),
+        },
+        |destination| AgentCardDestination {
+            repository: destination.repository(),
+            worktree: destination.worktree(),
+            branch: destination.branch(),
+        },
+    )
+}
+
+fn draw_agent_card_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    destination: AgentCardDestination<'_>,
+    elapsed: Option<&str>,
+    background: Color,
+    highlighted: bool,
+) {
+    if area.width < 2 || area.height == 0 {
+        return;
+    }
+    let time_width = elapsed
+        .map(|time| u16::try_from(UnicodeWidthStr::width(time)).unwrap_or(u16::MAX))
+        .unwrap_or(0)
+        .min(area.width.saturating_sub(1));
+    if let Some(elapsed) = elapsed {
+        frame.render_widget(
+            Paragraph::new(elapsed)
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(Style::default().fg(palette().soft).bg(background)),
+            Rect::new(
+                area.right().saturating_sub(time_width).saturating_sub(1),
+                area.y,
+                time_width,
+                1,
+            ),
+        );
+    }
+
+    let badge_width_available = area
+        .right()
+        .saturating_sub(time_width)
+        .saturating_sub(2)
+        .saturating_sub(area.x);
+    let mut widths = [
+        badge_width(destination.repository).min(20),
+        badge_width(destination.branch).min(20),
+    ];
+    while widths[0].saturating_add(widths[1]).saturating_add(1) > badge_width_available {
+        let index = usize::from(widths[1] > widths[0]);
+        if widths[index] <= 3 {
+            let other = 1 - index;
+            if widths[other] <= 3 {
+                break;
+            }
+            widths[other] -= 1;
+        } else {
+            widths[index] -= 1;
+        }
+    }
+    draw_half_padded_badge(
+        frame,
+        Rect::new(area.x, area.y, widths[0].min(badge_width_available), 1),
+        destination.repository,
+        if highlighted {
+            palette().yellow
+        } else {
+            palette().cyan
+        },
+        palette().raised,
+        background,
+    );
+    let branch_x = area.x.saturating_add(widths[0]).saturating_add(1);
+    draw_half_padded_badge(
+        frame,
+        Rect::new(
+            branch_x,
+            area.y,
+            widths[1].min(
+                area.x
+                    .saturating_add(badge_width_available)
+                    .saturating_sub(branch_x),
+            ),
+            1,
+        ),
+        destination.branch,
+        palette().accent,
+        palette().raised,
+        background,
+    );
+}
+
+fn draw_agent_card_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    session: &str,
+    worktree: &str,
+    background: Color,
+) {
+    if area.width < 2 || area.height == 0 {
+        return;
+    }
+    let worktree_width = if worktree == "basetree" {
+        0
+    } else {
+        badge_width(worktree)
+            .min(18)
+            .min(area.width.saturating_sub(4))
+    };
+    let worktree_area = Rect::new(
+        area.right().saturating_sub(worktree_width),
+        area.y,
+        worktree_width,
+        1,
+    );
+    let session_x = area.x.saturating_add(1);
+    let session_width = if worktree_width == 0 {
+        area.right().saturating_sub(session_x)
+    } else {
+        worktree_area.x.saturating_sub(session_x).saturating_sub(1)
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_width(session, usize::from(session_width)))
+            .style(Style::default().fg(palette().muted).bg(background)),
+        Rect::new(session_x, area.y, session_width, 1),
+    );
+    if worktree_width > 0 {
+        draw_half_padded_badge(
+            frame,
+            worktree_area,
+            worktree,
+            palette().yellow,
+            palette().raised,
+            background,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_agents_pane_row(
     frame: &mut Frame<'_>,
     area: Rect,
-    workspace: &str,
-    branch: Option<&str>,
+    repository: &str,
+    worktree: &str,
+    branch: &str,
     session: &str,
     elapsed: Option<&str>,
     status: AgentStatus,
@@ -917,15 +1102,9 @@ fn draw_agents_pane_row(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let highlighted = state.selected || hovered;
     let background = agents_pane_row_background(&state, hovered);
     fill(frame, area, background);
-    let content = Rect::new(
-        area.x.saturating_add(2),
-        area.y,
-        area.width.saturating_sub(2),
-        area.height,
-    );
+    let content = area;
     let status_area = draw_agent_status(
         frame,
         Rect::new(content.x, content.y, content.width, 1),
@@ -933,90 +1112,31 @@ fn draw_agents_pane_row(
         spinner_frame,
         background,
     );
-    let branch_area = (area.height > 1).then(|| branch).flatten().map(|branch| {
-        let width = badge_width(branch)
-            .min(20)
-            .min(status_area.x.saturating_sub(content.x).saturating_sub(4));
-        Rect::new(status_area.x.saturating_sub(width), content.y, width, 1)
-    });
-    if let (Some(branch), Some(branch_area)) = (branch, branch_area) {
-        draw_half_padded_badge(
-            frame,
-            branch_area,
+    draw_agent_card_header(
+        frame,
+        Rect::new(
+            content.x,
+            content.y,
+            status_area.x.saturating_sub(content.x),
+            1,
+        ),
+        AgentCardDestination {
+            repository,
+            worktree,
             branch,
-            palette().accent,
-            palette().raised,
-            background,
-        );
-    }
-    let name_area = Rect::new(
-        area.x,
-        content.y,
-        branch_area
-            .map_or(status_area.x, |area| area.x)
-            .saturating_sub(area.x.saturating_add(u16::from(branch_area.is_some()))),
-        1,
-    );
-    let name_color = if in_host_tab {
-        palette().yellow
-    } else {
-        palette().ink
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("●", Style::default().fg(status_color(status))),
-            Span::raw(" "),
-            Span::styled(
-                truncate_width(workspace, usize::from(name_area.width).saturating_sub(2)),
-                Style::default()
-                    .fg(name_color)
-                    .bg(background)
-                    .add_modifier(if highlighted {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ),
-        ])),
-        name_area,
+        },
+        elapsed,
+        background,
+        in_host_tab,
     );
     if area.height > 1 {
-        let session = truncate_session_name(session);
-        let session_text_width =
-            u16::try_from(UnicodeWidthStr::width(session.as_str())).unwrap_or(u16::MAX);
-        let time_width = elapsed
-            .map(|time| u16::try_from(UnicodeWidthStr::width(time)).unwrap_or(u16::MAX))
-            .unwrap_or(0)
-            .min(content.width);
-        let detail_width = content.width;
-        let show_time = elapsed.is_some()
-            && detail_width
-                >= session_text_width
-                    .saturating_add(time_width)
-                    .saturating_add(1);
-        let session_width = detail_width.saturating_sub(if show_time {
-            time_width.saturating_add(1)
-        } else {
-            0
-        });
-        frame.render_widget(
-            Paragraph::new(truncate_width(&session, usize::from(session_width)))
-                .style(Style::default().fg(palette().muted).bg(background)),
-            Rect::new(content.x, content.y.saturating_add(1), session_width, 1),
+        draw_agent_card_detail(
+            frame,
+            Rect::new(content.x, content.y.saturating_add(1), content.width, 1),
+            session,
+            worktree,
+            background,
         );
-        if show_time && let Some(elapsed) = elapsed {
-            frame.render_widget(
-                Paragraph::new(elapsed)
-                    .alignment(ratatui::layout::Alignment::Right)
-                    .style(Style::default().fg(palette().soft).bg(background)),
-                Rect::new(
-                    content.right().saturating_sub(time_width),
-                    content.y.saturating_add(1),
-                    time_width,
-                    1,
-                ),
-            );
-        }
     }
 }
 
@@ -1178,7 +1298,8 @@ fn draw_agent_card(
     frame: &mut Frame<'_>,
     area: Rect,
     repository: &str,
-    branch: Option<&str>,
+    worktree: &str,
+    branch: &str,
     session: &str,
     elapsed: Option<&str>,
     status: AgentStatus,
@@ -1202,84 +1323,31 @@ fn draw_agent_card(
         spinner_frame,
         background,
     );
-    let branch_area = (area.height > 1).then(|| branch).flatten().map(|branch| {
-        let width = badge_width(branch)
-            .min(20)
-            .min(status_area.x.saturating_sub(content.x).saturating_sub(4));
-        Rect::new(status_area.x.saturating_sub(width), content.y, width, 1)
-    });
-    if let (Some(branch), Some(branch_area)) = (branch, branch_area) {
-        draw_half_padded_badge(
-            frame,
-            branch_area,
-            branch,
-            palette().accent,
-            palette().raised,
-            background,
-        );
-    }
-    let name_area = Rect::new(
-        content.x,
-        content.y,
-        branch_area
-            .map_or(status_area.x, |area| area.x)
-            .saturating_sub(content.x.saturating_add(u16::from(branch_area.is_some()))),
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(truncate_width(repository, usize::from(name_area.width))).style(
-            Style::default()
-                .fg(if state.active {
-                    palette().accent
-                } else {
-                    palette().ink
-                })
-                .bg(background)
-                .add_modifier(if highlighted || state.active {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
+    draw_agent_card_header(
+        frame,
+        Rect::new(
+            content.x,
+            content.y,
+            status_area.x.saturating_sub(content.x),
+            1,
         ),
-        name_area,
+        AgentCardDestination {
+            repository,
+            worktree,
+            branch,
+        },
+        elapsed,
+        background,
+        highlighted || state.active,
     );
     if area.height > 1 {
-        let session = truncate_session_name(session);
-        let session_text_width =
-            u16::try_from(UnicodeWidthStr::width(session.as_str())).unwrap_or(u16::MAX);
-        let time_width = elapsed
-            .map(|time| u16::try_from(UnicodeWidthStr::width(time)).unwrap_or(u16::MAX))
-            .unwrap_or(0)
-            .min(content.width);
-        let detail_width = content.width;
-        let show_time = elapsed.is_some()
-            && detail_width
-                >= session_text_width
-                    .saturating_add(time_width)
-                    .saturating_add(1);
-        let session_width = detail_width.saturating_sub(if show_time {
-            time_width.saturating_add(1)
-        } else {
-            0
-        });
-        frame.render_widget(
-            Paragraph::new(truncate_width(&session, usize::from(session_width)))
-                .style(Style::default().fg(palette().muted).bg(background)),
-            Rect::new(content.x, content.y.saturating_add(1), session_width, 1),
+        draw_agent_card_detail(
+            frame,
+            Rect::new(content.x, content.y.saturating_add(1), content.width, 1),
+            session,
+            worktree,
+            background,
         );
-        if show_time && let Some(elapsed) = elapsed {
-            frame.render_widget(
-                Paragraph::new(elapsed)
-                    .alignment(ratatui::layout::Alignment::Right)
-                    .style(Style::default().fg(palette().soft).bg(background)),
-                Rect::new(
-                    content.right().saturating_sub(time_width),
-                    content.y.saturating_add(1),
-                    time_width,
-                    1,
-                ),
-            );
-        }
     }
 }
 
@@ -1301,16 +1369,6 @@ fn draw_agent_status(
         area,
     );
     area
-}
-
-fn truncate_session_name(session: &str) -> String {
-    let mut chars = session.chars();
-    let prefix = chars.by_ref().take(16).collect::<String>();
-    if chars.next().is_some() {
-        format!("{prefix}...")
-    } else {
-        prefix
-    }
 }
 
 fn badge_width(label: &str) -> u16 {

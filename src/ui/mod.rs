@@ -310,6 +310,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             for (target, rect) in workspace_panel::draw(
                 frame,
                 &mut app.workspace_panel,
+                &app.linked_worktrees,
                 panel_area,
                 workspace_panel_hover,
                 &app.settings,

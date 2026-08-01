@@ -349,6 +349,7 @@ mod tests {
             tab_id: "tab".to_owned(),
             pane_id: "pane".to_owned(),
             cwd: None,
+            destination_cwd: None,
             focused: false,
             status: AgentStatus::Idle,
             timing_key: agent_key.clone(),
