@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     path::{Path, PathBuf},
 };
 
@@ -19,6 +19,7 @@ struct Snapshot {
     cursor: usize,
     selection_anchor: Option<usize>,
     preferred_column: Option<usize>,
+    changed_lines: BTreeSet<usize>,
 }
 
 impl Snapshot {
@@ -39,9 +40,11 @@ pub(crate) struct FileEditor {
     undo: VecDeque<Snapshot>,
     redo: VecDeque<Snapshot>,
     history_bytes: usize,
+    changed_lines: BTreeSet<usize>,
     pub(crate) scroll_line: usize,
     pub(crate) scroll_column: usize,
     pub(crate) wrap_scroll_row: usize,
+    cursor_follow: bool,
     pub(crate) discard_armed: bool,
 }
 
@@ -80,9 +83,11 @@ impl FileEditor {
             undo: VecDeque::new(),
             redo: VecDeque::new(),
             history_bytes: 0,
+            changed_lines: BTreeSet::new(),
             scroll_line: 0,
             scroll_column: 0,
             wrap_scroll_row: 0,
+            cursor_follow: true,
             discard_armed: false,
         };
         editor.set_cursor(line.saturating_sub(1), column);
@@ -124,6 +129,10 @@ impl FileEditor {
             line_number_at(&self.text, start),
             line_number_at(&self.text, end),
         ))
+    }
+
+    pub(crate) fn locally_changed_lines(&self) -> &BTreeSet<usize> {
+        &self.changed_lines
     }
 
     pub(crate) fn select_all(&mut self) {
@@ -186,6 +195,7 @@ impl FileEditor {
 
     pub(crate) fn mark_saved(&mut self) {
         self.original = self.text.as_bytes().to_vec();
+        self.changed_lines.clear();
         self.discard_armed = false;
     }
 
@@ -205,6 +215,7 @@ impl FileEditor {
         self.original = bytes;
         self.text = text;
         self.line_ending = preferred_line_ending(&self.text);
+        self.changed_lines.clear();
         self.set_cursor(line, column);
         self.history_bytes = self
             .history_bytes
@@ -228,12 +239,17 @@ impl FileEditor {
         self.text.bytes().filter(|byte| *byte == b'\n').count() + 1
     }
 
+    pub(crate) fn should_follow_cursor(&self) -> bool {
+        self.cursor_follow
+    }
+
     pub(crate) fn set_cursor(&mut self, line: usize, column: usize) {
         let start = line_start_at(&self.text, line);
         let end = line_content_end(&self.text, start);
         self.cursor = closest_column(&self.text, start, end, column);
         self.selection_anchor = None;
         self.preferred_column = None;
+        self.cursor_follow = true;
         self.discard_armed = false;
     }
 
@@ -245,7 +261,20 @@ impl FileEditor {
         let end = line_content_end(&self.text, start);
         self.cursor = closest_column(&self.text, start, end, column);
         self.preferred_column = None;
+        self.cursor_follow = true;
         self.discard_armed = false;
+    }
+
+    pub(crate) fn scroll_viewport(&mut self, delta: isize, height: usize, wrapped: bool) {
+        self.cursor_follow = false;
+        if wrapped {
+            self.wrap_scroll_row = adjust_scroll(self.wrap_scroll_row, delta);
+            return;
+        }
+        let maximum = self
+            .visible_line_count()
+            .saturating_sub(height.max(1));
+        self.scroll_line = adjust_scroll(self.scroll_line, delta).min(maximum);
     }
 
     pub(crate) fn ensure_cursor_visible(&mut self, height: usize, width: usize) {
@@ -379,6 +408,70 @@ impl FileEditor {
             }
         }
         self.selection_anchor = None;
+        self.mark_changed_lines(first_line, last_line);
+        self.changed();
+        Ok(())
+    }
+
+    pub(crate) fn indent_lines(
+        &mut self,
+        first_line: usize,
+        last_line: usize,
+        outdent: bool,
+    ) -> Result<()> {
+        let last_line = last_line.min(self.visible_line_count().saturating_sub(1));
+        let mut edits = Vec::new();
+        for line in first_line.min(last_line)..=last_line {
+            let start = line_start_at(&self.text, line);
+            let end = line_content_end(&self.text, start);
+            if start == end {
+                continue;
+            }
+            if outdent {
+                let removed = if self.text.as_bytes().get(start) == Some(&b'\t') {
+                    1
+                } else {
+                    self.text[start..end]
+                        .bytes()
+                        .take_while(|byte| *byte == b' ')
+                        .count()
+                        .min(TAB_WIDTH)
+                };
+                if removed > 0 {
+                    edits.push((start, start + removed, 0));
+                }
+            } else {
+                edits.push((start, start, 1));
+            }
+        }
+        if edits.is_empty() {
+            return Ok(());
+        }
+        let added = edits.iter().map(|(_, _, inserted)| inserted).sum::<usize>();
+        let removed = edits
+            .iter()
+            .map(|(start, end, _)| end.saturating_sub(*start))
+            .sum::<usize>();
+        if self
+            .text
+            .len()
+            .saturating_sub(removed)
+            .saturating_add(added)
+            > MAX_EDITABLE_BYTES
+        {
+            bail!("file would exceed the 1 MiB inline editing limit");
+        }
+
+        self.record_edit();
+        for (start, end, inserted) in edits.into_iter().rev() {
+            let value = if inserted == 0 { "" } else { "\t" };
+            self.text.replace_range(start..end, value);
+            adjust_offset(&mut self.cursor, start, end, inserted);
+            if let Some(anchor) = &mut self.selection_anchor {
+                adjust_offset(anchor, start, end, inserted);
+            }
+        }
+        self.mark_changed_lines(first_line, last_line);
         self.changed();
         Ok(())
     }
@@ -425,10 +518,6 @@ impl FileEditor {
     pub(crate) fn move_document_end_with_selection(&mut self, extend: bool) {
         self.move_to(self.text.len(), extend);
         self.moved_horizontally();
-    }
-
-    pub(crate) fn move_vertical(&mut self, delta: isize) {
-        self.move_vertical_with_selection(delta, false);
     }
 
     pub(crate) fn move_vertical_with_selection(&mut self, delta: isize, extend: bool) {
@@ -480,6 +569,7 @@ impl FileEditor {
         let end = line_content_end(&self.text, start);
         self.cursor = closest_column(&self.text, start, end, column);
         self.preferred_column = None;
+        self.cursor_follow = true;
         self.discard_armed = false;
     }
 
@@ -504,10 +594,12 @@ impl FileEditor {
     }
 
     fn replace_range(&mut self, start: usize, end: usize, value: &str) {
+        let first_line = line_number_at(&self.text, start);
         self.record_edit();
         self.text.replace_range(start..end, value);
         self.cursor = start.saturating_add(value.len());
         self.selection_anchor = None;
+        self.mark_changed_lines(first_line, line_number_at(&self.text, self.cursor));
         self.changed();
     }
 
@@ -541,6 +633,7 @@ impl FileEditor {
             self.selection_anchor = None;
         }
         self.cursor = target;
+        self.cursor_follow = true;
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -549,6 +642,7 @@ impl FileEditor {
             cursor: self.cursor,
             selection_anchor: self.selection_anchor,
             preferred_column: self.preferred_column,
+            changed_lines: self.changed_lines.clone(),
         }
     }
 
@@ -559,6 +653,8 @@ impl FileEditor {
             .selection_anchor
             .filter(|anchor| *anchor <= self.text.len());
         self.preferred_column = snapshot.preferred_column;
+        self.changed_lines = snapshot.changed_lines;
+        self.cursor_follow = true;
         self.discard_armed = false;
     }
 
@@ -586,6 +682,12 @@ impl FileEditor {
     fn changed(&mut self) {
         self.preferred_column = None;
         self.discard_armed = false;
+    }
+
+    fn mark_changed_lines(&mut self, first_line: usize, last_line: usize) {
+        for line in first_line..=last_line.min(self.visible_line_count().saturating_sub(1)) {
+            self.changed_lines.insert(line);
+        }
     }
 
     fn moved_horizontally(&mut self) {
@@ -631,6 +733,24 @@ fn line_start(text: &str, cursor: usize) -> usize {
 
 fn line_number_at(text: &str, cursor: usize) -> usize {
     text[..cursor].bytes().filter(|byte| *byte == b'\n').count()
+}
+
+fn adjust_scroll(value: usize, delta: isize) -> usize {
+    if delta.is_negative() {
+        value.saturating_sub(delta.unsigned_abs())
+    } else {
+        value.saturating_add(delta as usize)
+    }
+}
+
+fn adjust_offset(offset: &mut usize, start: usize, end: usize, inserted: usize) {
+    if *offset >= end {
+        *offset = offset
+            .saturating_sub(end.saturating_sub(start))
+            .saturating_add(inserted);
+    } else if *offset >= start {
+        *offset = start.saturating_add(inserted);
+    }
 }
 
 fn line_start_at(text: &str, line: usize) -> usize {
@@ -801,6 +921,30 @@ mod tests {
         assert_eq!(second.text(), "changed other\n");
         assert!(first.redo());
         assert_eq!(first.text(), "one text\n");
+    }
+
+    #[test]
+    fn indenting_lines_is_one_undoable_edit() {
+        let (_directory, mut editor) = editor("one\n  two\nthree\n");
+
+        editor.indent_lines(0, 1, false).unwrap();
+        assert_eq!(editor.text(), "\tone\n\t  two\nthree\n");
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "one\n  two\nthree\n");
+
+        editor.indent_lines(1, 1, true).unwrap();
+        assert_eq!(editor.text(), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn scrolling_the_viewport_does_not_move_the_cursor() {
+        let (_directory, mut editor) = editor("one\ntwo\nthree\nfour\n");
+        editor.set_cursor(0, 1);
+
+        editor.scroll_viewport(3, 1, false);
+
+        assert_eq!(editor.cursor_position(), (0, 1));
+        assert_eq!(editor.scroll_line, 3);
     }
 
     #[test]

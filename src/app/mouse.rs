@@ -335,14 +335,24 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
                 self.last_file_editor_click = None;
+                let height = self
+                    .regions
+                    .preview_body
+                    .map_or(1, |body| usize::from(body.height).max(1));
+                let wrapped = self.changes.diff_wrap;
                 if let Some(editor) = &mut self.file_editor {
-                    editor.move_vertical(3);
+                    editor.scroll_viewport(3, height, wrapped);
                 }
             }
             MouseEventKind::ScrollUp => {
                 self.last_file_editor_click = None;
+                let height = self
+                    .regions
+                    .preview_body
+                    .map_or(1, |body| usize::from(body.height).max(1));
+                let wrapped = self.changes.diff_wrap;
                 if let Some(editor) = &mut self.file_editor {
-                    editor.move_vertical(-3);
+                    editor.scroll_viewport(-3, height, wrapped);
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {

@@ -9,6 +9,8 @@ mod workspace_panel;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeSet;
+
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -26,6 +28,7 @@ use crate::{
         HeaderPickerKind, HitTarget, LeftPane, Mode, Regions, ShortcutAction, TAB_WIDTH, View,
         WorkspacePanelHitTarget,
     },
+    repo_path::RepoPath,
     theme::{Palette, load_theme},
 };
 
@@ -386,6 +389,12 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     let Some(editor) = &mut app.file_editor else {
         return;
     };
+    let line_markers = editor_line_markers(
+        &app.changes.diff,
+        editor.path(),
+        editor.locally_changed_lines(),
+        editor.visible_line_count(),
+    );
     let (cursor_line, cursor_column) = editor.cursor_position();
     let path = editor.path().display();
     let dirty = if formatting {
@@ -411,7 +420,7 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
 
     let viewport_height = usize::from(editor_body.height);
     let viewport_width = usize::from(editor_body.width).max(1);
-    let (lines, line_numbers, cursor_row, rendered_cursor_column) = if wrapped {
+    let (lines, line_numbers, cursor_row, rendered_cursor_column, cursor_visible) = if wrapped {
         let (cursor_row, rendered_cursor_column) =
             wrapped_editor_cursor(editor.text(), viewport_width, cursor_line, cursor_column);
         if let Some(anchor) = app.file_editor_anchor.take() {
@@ -419,13 +428,16 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
                 .min(viewport_height.saturating_sub(1));
             editor.anchor_wrapped_cursor_at(cursor_row, row);
         }
-        editor.ensure_wrapped_cursor_visible(cursor_row, viewport_height);
+        if editor.should_follow_cursor() {
+            editor.ensure_wrapped_cursor_visible(cursor_row, viewport_height);
+        }
         let (lines, line_numbers, rows) = wrapped_editor_view(
             editor.text(),
             &path,
             viewport_width,
             editor.wrap_scroll_row,
             viewport_height,
+            &line_markers,
         );
         app.regions.editor_rows = rows;
         (
@@ -433,6 +445,8 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
             line_numbers,
             cursor_row.saturating_sub(editor.wrap_scroll_row),
             rendered_cursor_column,
+            cursor_row >= editor.wrap_scroll_row
+                && cursor_row < editor.wrap_scroll_row.saturating_add(viewport_height),
         )
     } else {
         if let Some(anchor) = app.file_editor_anchor.take() {
@@ -442,7 +456,9 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
                 .min(viewport_width.saturating_sub(1));
             editor.anchor_cursor_at(row, column);
         }
-        editor.ensure_cursor_visible(viewport_height, viewport_width);
+        if editor.should_follow_cursor() {
+            editor.ensure_cursor_visible(viewport_height, viewport_width);
+        }
         let lines = text::styled_source_window(
             editor.text(),
             &path,
@@ -458,7 +474,10 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         let line_numbers = (0..viewport_height)
             .map(|row| {
                 let line = editor.scroll_line.saturating_add(row);
-                editor_line_number((line < line_count).then_some(line))
+                editor_line_number(
+                    (line < line_count).then_some(line),
+                    line_markers.get(line).copied().flatten(),
+                )
             })
             .collect::<Vec<_>>();
         (
@@ -466,6 +485,8 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
             line_numbers,
             cursor_line.saturating_sub(editor.scroll_line),
             cursor_column.saturating_sub(editor.scroll_column),
+            cursor_line >= editor.scroll_line
+                && cursor_line < editor.scroll_line.saturating_add(viewport_height),
         )
     };
     frame.render_widget(Paragraph::new(line_numbers), gutter);
@@ -489,7 +510,7 @@ fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
     let cursor_y = editor_body
         .y
         .saturating_add(u16::try_from(cursor_row).unwrap_or(u16::MAX));
-    if cursor_x < editor_body.right() && cursor_y < editor_body.bottom() {
+    if cursor_visible && cursor_x < editor_body.right() && cursor_y < editor_body.bottom() {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
@@ -610,14 +631,52 @@ fn editor_display_width(value: &str) -> usize {
     column
 }
 
-fn editor_line_number(line: Option<usize>) -> Line<'static> {
+fn editor_line_markers(
+    diff: &str,
+    path: &RepoPath,
+    locally_changed_lines: &BTreeSet<usize>,
+    line_count: usize,
+) -> Vec<Option<char>> {
+    let mut markers = vec![None; line_count];
+    for (line, marker) in text::diff_new_line_markers(diff, path) {
+        if let Some(slot) = markers.get_mut(line) {
+            *slot = Some(marker);
+        }
+    }
+    for line in locally_changed_lines {
+        if let Some(slot) = markers.get_mut(*line) {
+            *slot = Some('~');
+        }
+    }
+    markers
+}
+
+fn editor_line_number(line: Option<usize>, marker: Option<char>) -> Line<'static> {
     line.map_or_else(
         || Line::default().style(Style::default().bg(palette().panel)),
         |line| {
-            Line::styled(
-                format!("{:>5}  ", line.saturating_add(1)),
+            let number = Span::styled(
+                format!("{:>5}", line.saturating_add(1)),
                 Style::default().fg(palette().faint).bg(palette().panel),
-            )
+            );
+            let marker = marker.map_or_else(
+                || Span::styled(" ", Style::default().bg(palette().panel)),
+                |marker| {
+                    let color = match marker {
+                        '+' => palette().green,
+                        '-' => palette().red,
+                        _ => palette().yellow,
+                    };
+                    Span::styled(
+                        marker.to_string(),
+                        Style::default()
+                            .fg(color)
+                            .bg(palette().panel)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                },
+            );
+            Line::from(vec![number, marker, Span::raw(" ")])
         },
     )
 }
@@ -655,6 +714,7 @@ fn wrapped_editor_view(
     width: usize,
     scroll: usize,
     height: usize,
+    line_markers: &[Option<char>],
 ) -> (
     Vec<Line<'static>>,
     Vec<Line<'static>>,
@@ -683,7 +743,10 @@ fn wrapped_editor_view(
                         .next()
                         .unwrap_or_default();
                 lines.push(rendered);
-                line_numbers.push(editor_line_number((index == 0).then_some(line_number)));
+                line_numbers.push(editor_line_number(
+                    (index == 0).then_some(line_number),
+                    line_markers.get(line_number).copied().flatten(),
+                ));
                 rendered_rows.push(crate::app::EditorRenderedRow {
                     line: line_number,
                     columns: row.columns(),
@@ -697,7 +760,7 @@ fn wrapped_editor_view(
     }
     while lines.len() < height {
         lines.push(Line::default().style(Style::default().bg(palette().panel)));
-        line_numbers.push(editor_line_number(None));
+        line_numbers.push(editor_line_number(None, None));
     }
     (lines, line_numbers, rendered_rows)
 }
@@ -1138,7 +1201,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         u16::try_from(row_count + if filtering { 4 } else { 1 }).unwrap_or(available_height),
     );
     frame.render_widget(Clear, area);
-    fill(frame, area, palette().raised);
+    fill(frame, area, palette().surface_alt);
     let title = match kind {
         HeaderPickerKind::Repositories => " RECENT REPOSITORIES".to_owned(),
         HeaderPickerKind::Worktrees => " WORKTREES".to_owned(),
@@ -1207,7 +1270,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             frame,
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
             '▀',
-            palette().raised,
+            palette().surface_alt,
             Color::Rgb(0, 0, 0),
         );
     }
@@ -1368,7 +1431,7 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         let background = if selected || hovered {
             palette().selected
         } else {
-            palette().raised
+            palette().surface_alt
         };
         if let Some(minimum_label_width) = minimum_label_width {
             fill(frame, rect, background);
@@ -1521,7 +1584,7 @@ fn draw_header_picker_search(frame: &mut Frame<'_>, app: &App, area: Rect, actio
         Rect::new(area.x, area.y.saturating_add(2), area.width, 1),
         '▀',
         palette().surface_alt,
-        palette().raised,
+        palette().surface_alt,
     );
 }
 

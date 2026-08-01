@@ -1860,6 +1860,37 @@ impl App {
             }
             return;
         }
+
+        let is_backtab = key.code == KeyCode::BackTab;
+        let is_tab = key.code == KeyCode::Tab;
+        if !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && (is_backtab
+                || (is_tab
+                    && (extend
+                        || self
+                            .file_editor
+                            .as_ref()
+                            .is_some_and(FileEditor::has_selection))))
+        {
+            let lines = self.selected_file_editor_lines().or_else(|| {
+                self.file_editor
+                    .as_ref()
+                    .map(|editor| editor.cursor_position().0)
+                    .map(|line| (line, line))
+            });
+            if let (Some((first, last)), Some(editor)) = (lines, &mut self.file_editor) {
+                let outdent = is_backtab || extend;
+                if let Err(error) = editor.indent_lines(first, last, outdent) {
+                    self.notice = Some(format!("Could not indent text: {error}"));
+                } else {
+                    editor.clear_selection();
+                    self.notice = None;
+                }
+            }
+            return;
+        }
         if self.file_editor_viewport_too_small() {
             self.notice = Some("Resize the terminal before editing".to_owned());
             return;
@@ -1905,7 +1936,7 @@ impl App {
             KeyCode::PageDown => editor.move_vertical_with_selection(viewport as isize, extend),
             KeyCode::Backspace => editor.backspace(),
             KeyCode::Delete => editor.delete(),
-            KeyCode::Enter | KeyCode::Tab | KeyCode::Char(_) => {}
+            KeyCode::BackTab | KeyCode::Enter | KeyCode::Tab | KeyCode::Char(_) => {}
             _ => {}
         }
     }

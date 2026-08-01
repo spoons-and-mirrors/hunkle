@@ -340,10 +340,10 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let search_bottom = &terminal.backend().buffer()[(picker.x, picker.y + 2)];
     assert_eq!(search_bottom.symbol(), "▀");
     assert_eq!(search_bottom.fg, super::palette().surface_alt);
-    assert_eq!(search_bottom.bg, super::palette().raised);
+    assert_eq!(search_bottom.bg, super::palette().surface_alt);
     let list_bottom = &terminal.backend().buffer()[(picker.x, picker.bottom() - 1)];
     assert_eq!(list_bottom.symbol(), "▀");
-    assert_eq!(list_bottom.fg, super::palette().raised);
+    assert_eq!(list_bottom.fg, super::palette().surface_alt);
     assert_eq!(list_bottom.bg, Color::Rgb(0, 0, 0));
     let current_index = app
         .header_picker
@@ -359,6 +359,20 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|x| terminal.backend().buffer()[(x, current_row.y)].symbol())
         .collect::<String>();
     assert!(current_text.trim_end().ends_with("current"));
+    let unselected_index = app
+        .header_picker
+        .items
+        .iter()
+        .position(|item| matches!(item, HeaderPickerItem::Branch(branch) if !branch.current))
+        .unwrap();
+    let unselected_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(unselected_index))
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(unselected_row.x, unselected_row.y)].bg,
+        super::palette().surface_alt
+    );
     let new_branch = app
         .regions
         .hit_target_rect(HitTarget::HeaderPickerNewBranch)
@@ -3988,6 +4002,100 @@ fn inline_editor_keeps_line_numbers_in_a_fixed_gutter() {
         .collect::<String>();
     assert_eq!(first_gutter, "    1  ");
     assert_eq!(second_gutter, "    2  ");
+}
+
+#[test]
+fn inline_editor_wheel_scroll_keeps_the_cursor_in_place() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(
+        root.join("notes.txt"),
+        (0..40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor = Some(
+        crate::app::FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap(),
+    );
+    app.mode = Mode::FileEdit;
+    app.changes.diff_wrap = false;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let body = app.regions.preview_body.unwrap();
+
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        body.x,
+        body.y,
+    ));
+    assert_eq!(app.file_editor.as_ref().unwrap().cursor_position(), (0, 0));
+    assert_eq!(app.file_editor.as_ref().unwrap().scroll_line, 3);
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.file_editor.as_ref().unwrap().scroll_line, 3);
+}
+
+#[test]
+fn inline_editor_tabs_indent_and_outdent_selected_lines() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("code.rs"), "first\nsecond\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor = Some(
+        crate::app::FileEditor::open(root, RepoPath::from("code.rs"), 1, 0).unwrap(),
+    );
+    app.mode = Mode::FileEdit;
+    {
+        let editor = app.file_editor.as_mut().unwrap();
+        editor.begin_selection();
+        editor.extend_cursor(1, 6);
+    }
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.file_editor.as_ref().unwrap().text(), "\tfirst\n\tsecond\n");
+
+    {
+        let editor = app.file_editor.as_mut().unwrap();
+        editor.set_cursor(0, 0);
+        editor.begin_selection();
+        editor.extend_cursor(1, 7);
+    }
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.file_editor.as_ref().unwrap().text(), "first\nsecond\n");
+}
+
+#[test]
+fn inline_editor_gutter_shows_live_changed_lines() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("notes.txt"), "context\nnew\nmore\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor = Some(
+        crate::app::FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap(),
+    );
+    app.changes.diff = concat!(
+        "@@ -1,3 +1,4 @@\n",
+        " context\n",
+        "-old\n",
+        "+new\n",
+        "+more\n",
+    )
+    .to_owned();
+    app.mode = Mode::FileEdit;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let body = app.regions.preview_body.unwrap();
+
+    assert_eq!(terminal.backend().buffer()[(body.x - 2, body.y + 1)].symbol(), "~");
+    assert_eq!(terminal.backend().buffer()[(body.x - 2, body.y + 2)].symbol(), "+");
+
+    app.file_editor.as_mut().unwrap().set_cursor(0, 0);
+    app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(terminal.backend().buffer()[(body.x - 2, body.y)].symbol(), "~");
 }
 
 #[test]

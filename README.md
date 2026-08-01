@@ -66,6 +66,7 @@ emergency quit command elsewhere.
 | `Ctrl+Enter` in the inline editor | Save and close the inline editor                                                                                                                                                    |
 | `Ctrl+A`, `Ctrl+C`, `Ctrl+X`      | Select all, copy, or cut text in the inline editor                                                                                                                                  |
 | `Ctrl+Z`, `Ctrl+Shift+Z`, `Ctrl+Y` | Undo or redo the active file's inline edits                                                                                                                                          |
+| `Tab`, `Shift+Tab` in the inline editor | Indent or outdent the selected lines as one undoable edit                                                                                                                        |
 | `Esc` in the inline editor        | Collapse a selection, close the editor, or press twice to discard unsaved edits                                                                                                     |
 | `h`, `l`, `Left`, `Right`         | Navigate the tree; Right enters/stages in hunk mode and Left exits it                                                                                                                |
 | `Enter`                           | Toggle the selected directory                                                                                                                                                        |
@@ -185,9 +186,12 @@ worktree from disk.
    repository file previews its contents. Click plain source, or an added/context
    line in an unstaged diff, to edit the working file inline.
 - In the inline editor, drag to select source text, double-click a word, and use
-  `Shift` with navigation keys to extend a selection. Typing, paste, and delete
-  replace the selected text; editor selection is separate from review-pane copy
-  selection.
+   `Shift` with navigation keys to extend a selection. Typing, paste, and delete
+   replace the selected text; editor selection is separate from review-pane copy
+   selection. `Tab` and `Shift+Tab` indent or outdent selected lines, and the
+   mouse wheel scrolls the editor viewport without moving the cursor.
+- Inline editor gutters show added, removed, and modified lines from the current
+  diff, plus unsaved lines changed during the current editing session.
 - Markdown files in Files show a top-right `Preview` button for switching
   between rendered Markdown and source.
 - Click `+` in the Files header to create a file or folder. Drag a Files entry
