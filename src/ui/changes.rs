@@ -1161,10 +1161,15 @@ fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> Rect {
         return Rect::new(content.x, list_y, content.width, available);
     }
 
+    let agent_count = app.workspace_panel.agents.len();
+    if app.agents_height_fit_for != Some(agent_count) {
+        app.agents_height_fit_for = Some(agent_count);
+        app.settings.agents_height = (3 * agent_count).saturating_add(2).clamp(5, 256) as u16;
+    }
     let agents_height = app
         .settings
         .agents_height
-        .clamp(3, available.saturating_sub(2));
+        .clamp(5, available.saturating_sub(2).max(5));
     let agents_area = Rect::new(
         content.x,
         content.bottom().saturating_sub(agents_height),
