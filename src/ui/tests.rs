@@ -307,25 +307,26 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert!(picker_search.contains("▌Search branch..."));
     let footer_y = terminal.backend().buffer().area.height - 1;
     let background = &terminal.backend().buffer()[(0, footer_y)];
-    assert_eq!(background.bg, super::palette().canvas);
+    assert_eq!(background.bg, Color::Rgb(0, 0, 0));
     assert!(background.modifier.contains(Modifier::DIM));
-    for target in [
-        HitTarget::HeaderRepository,
-        HitTarget::HeaderWorktrees,
-        HitTarget::HeaderBranch,
-        HitTarget::HeaderDiff,
+    for (target, undimmed) in [
+        (HitTarget::HeaderRepository, false),
+        (HitTarget::HeaderWorktrees, false),
+        (HitTarget::HeaderBranch, true),
+        (HitTarget::HeaderDiff, false),
     ] {
         let control = app.regions.hit_target_rect(target).unwrap();
-        assert!(
+        assert_eq!(
             !terminal.backend().buffer()[(control.x, control.y)]
                 .modifier
-                .contains(Modifier::DIM)
+                .contains(Modifier::DIM),
+            undimmed
         );
     }
     let search_top = &terminal.backend().buffer()[(picker.x, picker.y)];
     assert_eq!(search_top.symbol(), "▄");
     assert_eq!(search_top.fg, super::palette().surface_alt);
-    assert_eq!(search_top.bg, super::palette().canvas);
+    assert_eq!(search_top.bg, Color::Rgb(0, 0, 0));
     let search_bottom = &terminal.backend().buffer()[(picker.x, picker.y + 2)];
     assert_eq!(search_bottom.symbol(), "▀");
     assert_eq!(search_bottom.fg, super::palette().surface_alt);
@@ -333,7 +334,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let list_bottom = &terminal.backend().buffer()[(picker.x, picker.bottom() - 1)];
     assert_eq!(list_bottom.symbol(), "▀");
     assert_eq!(list_bottom.fg, super::palette().raised);
-    assert_eq!(list_bottom.bg, super::palette().canvas);
+    assert_eq!(list_bottom.bg, Color::Rgb(0, 0, 0));
     let current_index = app
         .header_picker
         .items
@@ -3955,6 +3956,59 @@ fn inline_editor_keeps_line_numbers_in_a_fixed_gutter() {
         .collect::<String>();
     assert_eq!(first_gutter, "    1  ");
     assert_eq!(second_gutter, "    2  ");
+}
+
+#[test]
+fn inline_editor_copies_and_comments_explicit_selections() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("code.rs"), "first();\nsecond();\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor =
+        Some(crate::app::FileEditor::open(root, RepoPath::from("code.rs"), 1, 0).unwrap());
+    app.mode = Mode::FileEdit;
+    app.settings.format_on_save = false;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let body = app.regions.preview_body.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        body.x,
+        body.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        body.x + 6,
+        body.y + 1,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        body.x + 6,
+        body.y + 1,
+    ));
+    assert!(app.take_copy_request().is_none());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(
+        app.take_copy_request().as_deref(),
+        Some("first();\nsecond(")
+    );
+    assert!(!app.should_quit);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL));
+    assert_eq!(
+        app.file_editor.as_ref().unwrap().text(),
+        "// first();\n// second();\n"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(
+        fs::read_to_string(root.join("code.rs")).unwrap(),
+        "// first();\n// second();\n"
+    );
 }
 
 #[test]

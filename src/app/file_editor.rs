@@ -199,6 +199,61 @@ impl FileEditor {
         self.changed();
     }
 
+    pub(crate) fn toggle_line_comments(
+        &mut self,
+        first_line: usize,
+        last_line: usize,
+    ) -> Result<()> {
+        let marker = line_comment_marker(self.path.as_path()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "line comments are not supported for {}",
+                self.path.display()
+            )
+        })?;
+        let last_line = last_line.min(self.visible_line_count().saturating_sub(1));
+        let mut lines = Vec::new();
+        for line in first_line.min(last_line)..=last_line {
+            let start = line_start_at(&self.text, line);
+            let end = line_content_end(&self.text, start);
+            let indent = self.text[start..end]
+                .bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            if start + indent < end {
+                lines.push((start + indent, end));
+            }
+        }
+        if lines.is_empty() {
+            return Ok(());
+        }
+
+        let uncomment = lines
+            .iter()
+            .all(|(start, end)| self.text[*start..*end].starts_with(marker));
+        let insertion = format!("{marker} ");
+        if !uncomment {
+            self.validate_insertion(&insertion.repeat(lines.len()))?;
+        }
+        for (start, end) in lines.into_iter().rev() {
+            if uncomment {
+                let marker_end = start + marker.len();
+                let remove_end =
+                    marker_end + usize::from(self.text.as_bytes().get(marker_end) == Some(&b' '));
+                self.text.replace_range(start..remove_end.min(end), "");
+                if start < self.cursor {
+                    self.cursor -= (remove_end - start).min(self.cursor - start);
+                }
+            } else {
+                self.text.insert_str(start, &insertion);
+                if start <= self.cursor {
+                    self.cursor += insertion.len();
+                }
+            }
+        }
+        self.changed();
+        Ok(())
+    }
+
     pub(crate) fn move_left(&mut self) {
         self.cursor = previous_cursor(&self.text, self.cursor);
         self.moved_horizontally();
@@ -266,6 +321,31 @@ impl FileEditor {
     fn moved_horizontally(&mut self) {
         self.preferred_column = None;
         self.discard_armed = false;
+    }
+}
+
+fn line_comment_marker(path: &Path) -> Option<&'static str> {
+    let file_name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if matches!(file_name.as_str(), "dockerfile" | "makefile" | "rakefile") {
+        return Some("#");
+    }
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "c" | "cc" | "cpp" | "cs" | "dart" | "go" | "h" | "hpp" | "java" | "js" | "jsx" | "kt"
+        | "kts" | "m" | "mm" | "php" | "proto" | "rs" | "scala" | "swift" | "ts" | "tsx"
+        | "zig" => Some("//"),
+        "bash" | "conf" | "ex" | "exs" | "fish" | "ini" | "jl" | "nix" | "pl" | "pm"
+        | "properties" | "py" | "pyi" | "r" | "rb" | "sh" | "toml" | "yaml" | "yml" | "zsh" => {
+            Some("#")
+        }
+        "hs" | "lua" | "sql" => Some("--"),
+        "clj" | "cljs" | "cljc" | "el" | "lisp" | "scm" => Some(";"),
+        "tex" => Some("%"),
+        _ => None,
     }
 }
 
@@ -437,6 +517,31 @@ mod tests {
             fs::read_to_string(directory.path().join("file.txt")).unwrap(),
             "first\nsecond\n"
         );
+    }
+
+    #[test]
+    fn toggles_language_aware_line_comments() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("code.rs"),
+            "fn main() {\n    first();\n\n    second();\n}\n",
+        )
+        .unwrap();
+        let mut editor = FileEditor::open(directory.path(), "code.rs".into(), 2, 4).unwrap();
+
+        editor.toggle_line_comments(1, 3).unwrap();
+        assert_eq!(
+            editor.text(),
+            "fn main() {\n    // first();\n\n    // second();\n}\n"
+        );
+        assert_eq!(editor.cursor_position(), (1, 7));
+
+        editor.toggle_line_comments(1, 3).unwrap();
+        assert_eq!(
+            editor.text(),
+            "fn main() {\n    first();\n\n    second();\n}\n"
+        );
+        assert_eq!(editor.cursor_position(), (1, 4));
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub struct SelectionState {
     active: bool,
     dragged: bool,
     screen: Option<ScreenSnapshot>,
+    selected: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -55,6 +56,7 @@ impl SelectionState {
         self.region = Some(region);
         self.active = true;
         self.dragged = false;
+        self.selected = None;
     }
 
     pub fn is_active(&self) -> bool {
@@ -80,7 +82,8 @@ impl SelectionState {
             self.clear();
             return SelectionOutcome::Click;
         }
-        SelectionOutcome::Selected(self.selected_text().filter(|text| !text.is_empty()))
+        self.selected = self.selected_text().filter(|text| !text.is_empty());
+        SelectionOutcome::Selected(self.selected.clone())
     }
 
     pub fn clear(&mut self) {
@@ -89,6 +92,24 @@ impl SelectionState {
         self.region = None;
         self.active = false;
         self.dragged = false;
+        self.selected = None;
+    }
+
+    pub fn copy_text(&self) -> Option<String> {
+        self.selected.clone()
+    }
+
+    pub fn selected_rows(&self) -> Option<(u16, u16)> {
+        if !self.dragged {
+            return None;
+        }
+        let anchor = self.anchor?;
+        let cursor = self.cursor?;
+        Some(if anchor.y <= cursor.y {
+            (anchor.y, cursor.y)
+        } else {
+            (cursor.y, anchor.y)
+        })
     }
 
     pub fn render(&self, buffer: &mut Buffer, style: Style) {

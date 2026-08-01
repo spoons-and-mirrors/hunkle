@@ -647,15 +647,14 @@ fn dim(frame: &mut Frame<'_>) {
 
 fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
     let mut preserved = Vec::new();
-    for target in [
-        HitTarget::HeaderRepository,
-        HitTarget::HeaderWorktrees,
-        HitTarget::HeaderBranch,
-        HitTarget::HeaderDiff,
-    ] {
-        let Some(rect) = app.regions.hit_target_rect(target) else {
-            continue;
-        };
+    let target = match app.header_picker.kind {
+        Some(HeaderPickerKind::Repositories) => HitTarget::HeaderRepository,
+        Some(HeaderPickerKind::Worktrees) => HitTarget::HeaderWorktrees,
+        Some(HeaderPickerKind::Branches) => HitTarget::HeaderBranch,
+        Some(HeaderPickerKind::DiffTargets) => HitTarget::HeaderDiff,
+        None => return,
+    };
+    if let Some(rect) = app.regions.hit_target_rect(target) {
         for y in rect.y..rect.bottom() {
             for x in rect.x..rect.right() {
                 if let Some(cell) = frame.buffer_mut().cell((x, y)).cloned() {
@@ -1027,10 +1026,8 @@ fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             ),
             action_row,
         );
-        app.regions.register_hit_target(
-            HitTarget::HeaderPickerNewBranch,
-            action_row,
-        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerNewBranch, action_row);
     }
     if filtering {
         draw_half_padding(

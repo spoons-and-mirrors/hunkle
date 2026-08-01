@@ -765,15 +765,15 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.mode == Mode::FileEdit {
+            self.handle_file_editor(key);
+            return;
+        }
         if self.selection.has_selection() {
             self.selection.clear();
             if key.code == KeyCode::Esc {
                 return;
             }
-        }
-        if self.mode == Mode::FileEdit {
-            self.handle_file_editor(key);
-            return;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -890,6 +890,7 @@ impl App {
         }
         match self.mode {
             Mode::FileEdit => {
+                self.selection.clear();
                 if self.file_editor_viewport_too_small() {
                     self.notice = Some("Resize the terminal before editing".to_owned());
                 } else if let Some(editor) = &mut self.file_editor
@@ -1715,15 +1716,35 @@ impl App {
             return;
         }
         if control && key.code == KeyCode::Char('c') {
-            if self.file_editor.as_ref().is_some_and(FileEditor::dirty) {
-                self.notice = Some("Save or press Esc twice before quitting".to_owned());
+            if let Some(text) = self.selection.copy_text() {
+                self.copy_request = Some(text);
             } else {
-                self.should_quit = true;
+                self.notice = Some("Select text to copy".to_owned());
             }
+            return;
+        }
+        if control && key.code == KeyCode::Char('/') {
+            let lines = self.selected_file_editor_lines().or_else(|| {
+                self.file_editor
+                    .as_ref()
+                    .map(|editor| editor.cursor_position().0)
+                    .map(|line| (line, line))
+            });
+            if let (Some((first, last)), Some(editor)) = (lines, &mut self.file_editor) {
+                match editor.toggle_line_comments(first, last) {
+                    Ok(()) => self.notice = None,
+                    Err(error) => self.notice = Some(format!("Could not toggle comments: {error}")),
+                }
+            }
+            self.selection.clear();
             return;
         }
 
         if key.code == KeyCode::Esc {
+            if self.selection.has_selection() {
+                self.selection.clear();
+                return;
+            }
             let Some(editor) = &mut self.file_editor else {
                 self.mode = Mode::Normal;
                 return;
@@ -1740,6 +1761,7 @@ impl App {
             self.notice = None;
             return;
         }
+        self.selection.clear();
         if self.file_editor_viewport_too_small() {
             self.notice = Some("Resize the terminal before editing".to_owned());
             return;
@@ -1796,6 +1818,32 @@ impl App {
             .is_some_and(|screen| screen.width < 60 || screen.height < 16)
     }
 
+    fn selected_file_editor_lines(&self) -> Option<(usize, usize)> {
+        let body = self.regions.preview_body?;
+        if body.is_empty() {
+            return None;
+        }
+        let (first, last) = self.selection.selected_rows()?;
+        let source_line = |screen_row: u16| {
+            let rendered_row = usize::from(
+                screen_row
+                    .clamp(body.y, body.bottom().saturating_sub(1))
+                    .saturating_sub(body.y),
+            );
+            if self.changes.diff_wrap {
+                self.regions.editor_rows.get(
+                    rendered_row.min(self.regions.editor_rows.len().saturating_sub(1)),
+                )
+                .map(|row| row.line)
+            } else {
+                self.file_editor
+                    .as_ref()
+                    .map(|editor| editor.scroll_line.saturating_add(rendered_row))
+            }
+        };
+        Some((source_line(first)?, source_line(last)?))
+    }
+
     fn start_file_editor(
         &mut self,
         path: RepoPath,
@@ -1842,6 +1890,7 @@ impl App {
         }
         let root = editor.root().to_owned();
         let path = editor.path().clone();
+        self.selection.clear();
         self.file_editor = None;
         self.file_editor_anchor = None;
         self.mode = Mode::Normal;

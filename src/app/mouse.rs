@@ -334,18 +334,23 @@ impl App {
     fn handle_file_editor_mouse(&mut self, mouse: MouseEvent, point: Position) {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
+                self.selection.clear();
                 if let Some(editor) = &mut self.file_editor {
                     editor.move_vertical(3);
                 }
             }
             MouseEventKind::ScrollUp => {
+                self.selection.clear();
                 if let Some(editor) = &mut self.file_editor {
                     editor.move_vertical(-3);
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection.clear();
-                let region = self.selection_region(point);
+                let region = self
+                    .regions
+                    .preview_body
+                    .unwrap_or_else(|| self.selection_region(point));
                 self.selection.begin(point, region);
             }
             MouseEventKind::Drag(MouseButton::Left) if self.selection.is_active() => {
@@ -354,7 +359,7 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) if self.selection.is_active() => {
                 match self.selection.finish(point) {
                     SelectionOutcome::Click => self.place_file_editor_cursor(point),
-                    SelectionOutcome::Selected(Some(text)) => self.copy_request = Some(text),
+                    SelectionOutcome::Selected(Some(_)) => {}
                     SelectionOutcome::Selected(None) => {}
                 }
             }
