@@ -1,11 +1,16 @@
 use std::{
+    path::Path,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::{Duration, Instant},
 };
 
-use super::{TextInput, workspace_panel};
+use super::{HerdrPaneLayout, TextInput, workspace_panel};
+
+pub(crate) struct HerdrPromptPoll {
+    pub(crate) changed: bool,
+    pub(crate) completion: Option<Result<String, String>>,
+}
 
 pub(crate) struct HerdrPrompt {
     pub(crate) input: TextInput,
@@ -13,8 +18,8 @@ pub(crate) struct HerdrPrompt {
     pub(crate) sending: bool,
     sender: Sender<Result<String, String>>,
     receiver: Receiver<Result<String, String>>,
-    focus_sender: Sender<(u64, Result<Option<(String, String)>, String>)>,
-    focus_receiver: Receiver<(u64, Result<Option<(String, String)>, String>)>,
+    layout_sender: Sender<(u64, Result<HerdrPaneLayout, String>)>,
+    layout_receiver: Receiver<(u64, Result<HerdrPaneLayout, String>)>,
     next_agent_request_id: u64,
     pending_agent: Option<PendingAgent>,
 }
@@ -22,24 +27,23 @@ pub(crate) struct HerdrPrompt {
 struct PendingAgent {
     request_id: u64,
     path: PathBuf,
-    workspace_id: String,
+    branch: String,
     host_pane_id: String,
-    probing: bool,
-    next_probe: Instant,
+    layout: Option<HerdrPaneLayout>,
 }
 
 impl Default for HerdrPrompt {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel();
-        let (focus_sender, focus_receiver) = mpsc::channel();
+        let (layout_sender, layout_receiver) = mpsc::channel();
         Self {
             input: TextInput::default(),
             error: None,
             sending: false,
             sender,
             receiver,
-            focus_sender,
-            focus_receiver,
+            layout_sender,
+            layout_receiver,
             next_agent_request_id: 0,
             pending_agent: None,
         }
@@ -47,6 +51,24 @@ impl Default for HerdrPrompt {
 }
 
 impl HerdrPrompt {
+    #[cfg(test)]
+    pub(crate) fn show_agent_pane_picker(
+        &mut self,
+        path: PathBuf,
+        branch: String,
+        host_pane_id: String,
+        layout: HerdrPaneLayout,
+    ) {
+        self.next_agent_request_id = self.next_agent_request_id.wrapping_add(1);
+        self.pending_agent = Some(PendingAgent {
+            request_id: self.next_agent_request_id,
+            path,
+            branch,
+            host_pane_id,
+            layout: Some(layout),
+        });
+    }
+
     pub(crate) fn open(&mut self) {
         self.input.clear();
         self.input.focus();
@@ -77,7 +99,7 @@ impl HerdrPrompt {
         });
     }
 
-    pub(crate) fn prepare_agent(&mut self, path: PathBuf) -> Result<(), String> {
+    pub(crate) fn prepare_agent(&mut self, path: PathBuf, branch: String) -> Result<(), String> {
         if self.sending {
             return Err("Another Herdr command is still running".to_owned());
         }
@@ -86,27 +108,69 @@ impl HerdrPrompt {
         }
         let host_pane_id = std::env::var("HERDR_PANE_ID")
             .map_err(|_| "Herdr did not identify Hunkle's pane".to_owned())?;
-        let workspace_id = std::env::var("HERDR_WORKSPACE_ID")
-            .map_err(|_| "Herdr did not identify Hunkle's workspace".to_owned())?;
-
         self.error = None;
         self.next_agent_request_id = self.next_agent_request_id.wrapping_add(1);
+        let request_id = self.next_agent_request_id;
         self.pending_agent = Some(PendingAgent {
-            request_id: self.next_agent_request_id,
+            request_id,
             path,
-            workspace_id,
-            host_pane_id,
-            probing: false,
-            next_probe: Instant::now(),
+            branch,
+            host_pane_id: host_pane_id.clone(),
+            layout: None,
+        });
+        let sender = self.layout_sender.clone();
+        thread::spawn(move || {
+            let _ = sender.send((request_id, workspace_panel::pane_layout(host_pane_id)));
         });
         Ok(())
+    }
+
+    pub(crate) fn agent_pane_picker_open(&self) -> bool {
+        self.pending_agent.is_some()
+    }
+
+    pub(crate) fn agent_pane_layout(&self) -> Option<&HerdrPaneLayout> {
+        self.pending_agent.as_ref()?.layout.as_ref()
+    }
+
+    pub(crate) fn agent_destination(&self) -> Option<&Path> {
+        self.pending_agent.as_ref().map(|pending| pending.path.as_path())
+    }
+
+    pub(crate) fn agent_destination_branch(&self) -> Option<&str> {
+        self.pending_agent
+            .as_ref()
+            .map(|pending| pending.branch.as_str())
+    }
+
+    pub(crate) fn agent_host_pane_id(&self) -> Option<&str> {
+        self.pending_agent
+            .as_ref()
+            .map(|pending| pending.host_pane_id.as_str())
     }
 
     pub(crate) fn cancel_pending_agent(&mut self) -> bool {
         self.pending_agent.take().is_some()
     }
 
-    fn launch_agent_in_pane(&mut self, workspace_id: String, pane_id: String) {
+    pub(crate) fn select_agent_pane(&mut self, index: usize) -> Result<(), String> {
+        let pending = self
+            .pending_agent
+            .as_ref()
+            .ok_or_else(|| "Agent pane selection is no longer open".to_owned())?;
+        let layout = pending
+            .layout
+            .as_ref()
+            .ok_or_else(|| "Herdr pane layout is still loading".to_owned())?;
+        let pane = layout
+            .panes
+            .get(index)
+            .ok_or_else(|| "That Herdr pane is no longer available".to_owned())?;
+        if pane.pane_id == pending.host_pane_id {
+            return Err("Hunkle cannot replace its own pane".to_owned());
+        }
+        let workspace_id = layout.workspace_id.clone();
+        let pane_id = pane.pane_id.clone();
         let pending = self.pending_agent.take().expect("pending agent checked");
         let sender = self.sender.clone();
         self.error = None;
@@ -120,57 +184,46 @@ impl HerdrPrompt {
                 .map(|pane_id| format!("Started agent in Herdr pane {pane_id}"));
             let _ = sender.send(result);
         });
+        Ok(())
     }
 
-    pub(crate) fn poll(&mut self) -> Option<Result<String, String>> {
-        if let Some(result) = self.poll_agent_pane() {
-            return Some(result);
-        }
-        let result = self.receiver.try_recv().ok()?;
-        self.sending = false;
-        if result.is_ok() {
-            self.input.clear();
-        }
-        Some(result)
-    }
-
-    fn poll_agent_pane(&mut self) -> Option<Result<String, String>> {
-        while let Ok((request_id, result)) = self.focus_receiver.try_recv() {
-            let Some(pending) = self
+    pub(crate) fn poll(&mut self) -> HerdrPromptPoll {
+        let mut changed = false;
+        let mut completion = None;
+        while let Ok((request_id, result)) = self.layout_receiver.try_recv() {
+            if !self
                 .pending_agent
-                .as_mut()
-                .filter(|pending| pending.request_id == request_id)
-            else {
+                .as_ref()
+                .is_some_and(|pending| pending.request_id == request_id)
+            {
                 continue;
-            };
-            pending.probing = false;
+            }
+            changed = true;
             match result {
-                Ok(Some((workspace_id, pane_id))) if pane_id != pending.host_pane_id => {
-                    self.launch_agent_in_pane(workspace_id, pane_id);
-                    return None;
+                Ok(layout) => {
+                    if let Some(pending) = self.pending_agent.as_mut() {
+                        pending.layout = Some(layout);
+                    }
                 }
-                Ok(_) => pending.next_probe = Instant::now() + Duration::from_millis(100),
                 Err(error) => {
                     self.pending_agent = None;
-                    return Some(Err(error));
+                    completion = Some(Err(error));
                 }
             }
         }
-
-        let Some(pending) = self
-            .pending_agent
-            .as_mut()
-            .filter(|pending| !pending.probing && Instant::now() >= pending.next_probe)
-        else {
-            return None;
-        };
-        pending.probing = true;
-        let request_id = pending.request_id;
-        let workspace_id = pending.workspace_id.clone();
-        let sender = self.focus_sender.clone();
-        thread::spawn(move || {
-            let _ = sender.send((request_id, workspace_panel::focused_pane(workspace_id)));
-        });
-        None
+        if completion.is_none()
+            && let Ok(result) = self.receiver.try_recv()
+        {
+            changed = true;
+            self.sending = false;
+            if result.is_ok() {
+                self.input.clear();
+            }
+            completion = Some(result);
+        }
+        HerdrPromptPoll {
+            changed,
+            completion,
+        }
     }
 }

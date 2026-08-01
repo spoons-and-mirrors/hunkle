@@ -41,10 +41,12 @@ pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use settings::{SettingsStore, valid_opencode_model};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
 pub(crate) use workspace_panel::{
-    AgentStatus, SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
+    AgentStatus, HerdrPaneLayout, SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
     WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect, WorkspacePanelEntryState,
     WorkspacePanelRow, WorkspaceRenameDialog, WorkspaceRenameTarget,
 };
+#[cfg(test)]
+pub(crate) use workspace_panel::HerdrPaneRect;
 pub(crate) use worktree_manager::{
     WorktreeCandidate, WorktreeCreateDialog, WorktreeCreateField, WorktreeManager,
     WorktreeManagerEffect, WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
@@ -172,6 +174,8 @@ pub(crate) enum HitTarget {
     HeaderBranch,
     HeaderDiff,
     HeaderAgent,
+    AgentPanePickerOverlay,
+    AgentPane(usize),
     HeaderPickerOverlay,
     HeaderPickerNewBranch,
     HeaderPickerItem(usize),
@@ -776,6 +780,15 @@ impl App {
             self.handle_file_editor(key);
             return;
         }
+        if self.herdr_prompt.agent_pane_picker_open() {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                self.should_quit = true;
+            } else if key.code == KeyCode::Esc {
+                self.herdr_prompt.cancel_pending_agent();
+                self.notice = Some("Agent pane selection cancelled".to_owned());
+            }
+            return;
+        }
         if self.selection.has_selection() {
             self.selection.clear();
             if key.code == KeyCode::Esc {
@@ -784,13 +797,6 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
-            return;
-        }
-        if key.code == KeyCode::Esc
-            && !self.header_picker.is_open()
-            && self.herdr_prompt.cancel_pending_agent()
-        {
-            self.notice = Some("Agent pane selection cancelled".to_owned());
             return;
         }
         if self.header_picker.is_open() {
@@ -1055,8 +1061,9 @@ impl App {
             .herdr_prompt
             .input
             .poll_blink(self.mode == Mode::HerdrPrompt && !self.herdr_prompt.sending);
-        if let Some(completion) = self.herdr_prompt.poll() {
-            changed = true;
+        let herdr_poll = self.herdr_prompt.poll();
+        changed |= herdr_poll.changed;
+        if let Some(completion) = herdr_poll.completion {
             match completion {
                 Ok(message) => {
                     if self.mode == Mode::HerdrPrompt {
@@ -3158,9 +3165,19 @@ impl App {
                 .trim_end_matches(".git")
                 .to_owned();
             for worktree in worktrees.into_iter().filter(|worktree| !worktree.is_bare) {
+                let branch = worktree
+                    .branch
+                    .map(|branch| {
+                        branch
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(&branch)
+                            .to_owned()
+                    })
+                    .unwrap_or_else(|| "detached HEAD".to_owned());
                 items.push(HeaderPickerItem::AgentDestination {
                     path: worktree.path,
                     repository: repository.clone(),
+                    branch,
                     kind: if worktree.is_main {
                         AgentDestinationKind::Repository
                     } else {
@@ -3384,11 +3401,11 @@ impl App {
                     target_revision,
                 );
             }
-            HeaderPickerItem::AgentDestination { path, .. } => {
-                if let Err(error) = self.herdr_prompt.prepare_agent(path) {
+            HeaderPickerItem::AgentDestination { path, branch, .. } => {
+                if let Err(error) = self.herdr_prompt.prepare_agent(path, branch) {
                     self.notice = Some(error);
                 } else {
-                    self.notice = Some("Focus the pane to replace · Esc cancels".to_owned());
+                    self.notice = Some("Loading active Herdr tab layout".to_owned());
                 }
             }
         }

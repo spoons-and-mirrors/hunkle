@@ -20,6 +20,17 @@ impl App {
         if mouse.kind == MouseEventKind::Moved {
             self.hovered_hit_target = self.regions.hit_target_at(point);
         }
+        if self.herdr_prompt.agent_pane_picker_open() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && let Some(HitTarget::AgentPane(index)) = self.regions.hit_target_at(point)
+            {
+                match self.herdr_prompt.select_agent_pane(index) {
+                    Ok(()) => self.notice = Some("Starting agent in selected pane".to_owned()),
+                    Err(error) => self.notice = Some(error),
+                }
+            }
+            return;
+        }
         if self.dragging_splitter {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => self.resize_worktree(mouse.column),
@@ -1151,6 +1162,8 @@ impl App {
                     | HitTarget::HeaderBranch
                     | HitTarget::HeaderDiff
                     | HitTarget::HeaderAgent
+                    | HitTarget::AgentPanePickerOverlay
+                    | HitTarget::AgentPane(_)
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),
@@ -1211,6 +1224,8 @@ impl App {
                     | HitTarget::HeaderBranch
                     | HitTarget::HeaderDiff
                     | HitTarget::HeaderAgent
+                    | HitTarget::AgentPanePickerOverlay
+                    | HitTarget::AgentPane(_)
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
                     | HitTarget::HeaderPickerItem(_),

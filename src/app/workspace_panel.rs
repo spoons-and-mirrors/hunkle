@@ -22,6 +22,9 @@ mod presets;
 mod timings;
 
 use focus::{WorkspaceFocusCompletion, WorkspaceFocusState};
+pub(crate) use herdr::HerdrPaneLayout;
+#[cfg(test)]
+pub(crate) use herdr::HerdrPaneRect;
 
 pub(super) fn send_command_below(command: String) -> Result<String, String> {
     herdr::send_command_below(command)
@@ -35,8 +38,8 @@ pub(super) fn replace_pane_with_agent(
     herdr::replace_pane_with_agent(path, workspace_id, pane_id)
 }
 
-pub(super) fn focused_pane(workspace_id: String) -> Result<Option<(String, String)>, String> {
-    herdr::focused_pane(workspace_id)
+pub(super) fn pane_layout(pane_id: String) -> Result<HerdrPaneLayout, String> {
+    herdr::pane_layout(pane_id)
 }
 
 pub(crate) fn create_managed_worktree(

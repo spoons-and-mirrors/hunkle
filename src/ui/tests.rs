@@ -11,14 +11,83 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, ExplorerTab,
-    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode,
-    PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore,
-    ShortcutAction, SqliteFocus, View, WorkspaceDropTarget, WorkspacePanel,
+    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect,
+    HitTarget, LeftPane, Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings,
+    SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, View, WorkspaceDropTarget, WorkspacePanel,
     WorkspacePanelHitTarget, WorktreeManagerHitTarget, WorktreeManagerRow,
 };
 use crate::repo_path::RepoPath;
 
 use super::draw;
+
+#[test]
+fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::opening(directory.path().to_path_buf());
+    app.herdr_prompt.show_agent_pane_picker(
+        directory.path().to_path_buf(),
+        "feature/modal".to_owned(),
+        "w0:p2".to_owned(),
+        HerdrPaneLayout {
+            workspace_id: "w0".to_owned(),
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+            panes: vec![
+                HerdrPaneRect {
+                    pane_id: "w0:p1".to_owned(),
+                    x: 0,
+                    y: 0,
+                    width: 72,
+                    height: 40,
+                },
+                HerdrPaneRect {
+                    pane_id: "w0:p2".to_owned(),
+                    x: 72,
+                    y: 0,
+                    width: 48,
+                    height: 20,
+                },
+                HerdrPaneRect {
+                    pane_id: "w0:p3".to_owned(),
+                    x: 72,
+                    y: 20,
+                    width: 48,
+                    height: 20,
+                },
+            ],
+        },
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert_eq!(
+        app.regions.hit_target_rect(HitTarget::AgentPanePickerOverlay),
+        Some(ratatui::layout::Rect::new(0, 0, 100, 30))
+    );
+    let left = app.regions.hit_target_rect(HitTarget::AgentPane(0)).unwrap();
+    let bottom_right = app.regions.hit_target_rect(HitTarget::AgentPane(2)).unwrap();
+    assert!(left.width > bottom_right.width);
+    assert!(left.height > bottom_right.height);
+    assert_eq!(left.right(), bottom_right.x);
+    assert!(app.regions.hit_target_rect(HitTarget::AgentPane(1)).is_none());
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("START AGENT"));
+    assert!(screen.contains("feature/modal"));
+    assert!(screen.contains("HUNKLE"));
+    assert!(screen.contains("CLICK A PANE TO REPLACE"));
+    assert!(!screen.contains("w0:p1"));
+    assert!(!screen.contains("w0:p3"));
+    assert!(!screen.contains("w0:t1"));
+}
 
 fn assert_black_underlay(terminal: &Terminal<TestBackend>) {
     let background = &terminal.backend().buffer()[(0, 0)];
@@ -106,27 +175,35 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert_eq!(branch.right().saturating_add(1), diff.x);
     assert_eq!(diff.right().saturating_add(1), agent.x);
     assert_eq!(
-        terminal.backend().buffer()[(repository.x, repository.y)].bg,
+        terminal.backend().buffer()[(repository.x, repository.y)].symbol(),
+        "▌"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x, repository.y)].fg,
         super::palette().yellow
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x, repository.y)].bg,
+        super::palette().surface_alt
     );
     assert_eq!(
         terminal.backend().buffer()[(repository.x + 1, repository.y)].bg,
         super::palette().surface_alt
     );
     assert_eq!(
-        terminal.backend().buffer()[(worktrees.x, worktrees.y)].bg,
+        terminal.backend().buffer()[(worktrees.x, worktrees.y)].fg,
         super::palette().orange
     );
     assert_eq!(
-        terminal.backend().buffer()[(branch.x, branch.y)].bg,
+        terminal.backend().buffer()[(branch.x, branch.y)].fg,
         super::palette().accent
     );
     assert_eq!(
-        terminal.backend().buffer()[(diff.x, diff.y)].bg,
+        terminal.backend().buffer()[(diff.x, diff.y)].fg,
         super::palette().purple
     );
     assert_eq!(
-        terminal.backend().buffer()[(agent.x, agent.y)].bg,
+        terminal.backend().buffer()[(agent.x, agent.y)].fg,
         super::palette().green
     );
     for card in [repository, worktrees, branch, diff, agent] {
@@ -154,11 +231,11 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let worktree_text = (worktrees.x..worktrees.right())
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())
         .collect::<String>();
-    assert_eq!(worktree_text, " worktree ");
+    assert_eq!(worktree_text, "▌worktree ");
     let branch_text = (branch.x..branch.right())
         .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
         .collect::<String>();
-    assert_eq!(branch_text, format!(" {long_branch} "));
+    assert_eq!(branch_text, format!("▌{long_branch} "));
 
     click(&mut app, agent.x, agent.y);
     assert_eq!(
@@ -168,8 +245,14 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert_eq!(app.header_picker.items.len(), 2);
     assert!(app.header_picker.items.iter().any(|item| matches!(
         item,
-        HeaderPickerItem::AgentDestination { path, kind, .. }
-            if path == &linked && *kind == super::AgentDestinationKind::Worktree
+        HeaderPickerItem::AgentDestination {
+            path,
+            branch,
+            kind,
+            ..
+        } if path == &linked
+            && branch == "linked"
+            && *kind == super::AgentDestinationKind::Worktree
     )));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let picker = app
@@ -501,7 +584,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let linked_text = (linked_card.x..linked_card.right())
         .map(|x| terminal.backend().buffer()[(x, linked_card.y)].symbol())
         .collect::<String>();
-    assert_eq!(linked_text, " linked ");
+    assert_eq!(linked_text, "▌linked ");
 }
 
 #[test]

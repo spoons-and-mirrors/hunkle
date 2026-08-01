@@ -37,6 +37,7 @@ pub(crate) enum HeaderPickerItem {
     AgentDestination {
         path: PathBuf,
         repository: String,
+        branch: String,
         kind: AgentDestinationKind,
     },
 }
@@ -372,6 +373,7 @@ mod tests {
             .map(|index| HeaderPickerItem::AgentDestination {
                 path: PathBuf::from(format!("/tmp/repository-{index}")),
                 repository: format!("repository-{index}"),
+                branch: "main".to_owned(),
                 kind: AgentDestinationKind::Repository,
             })
             .collect();

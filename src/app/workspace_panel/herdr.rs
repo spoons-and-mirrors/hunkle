@@ -24,6 +24,25 @@ pub(super) struct Environment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HerdrPaneLayout {
+    pub(crate) workspace_id: String,
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) panes: Vec<HerdrPaneRect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HerdrPaneRect {
+    pub(crate) pane_id: String,
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FocusEvent {
     pub(super) workspace_id: String,
     pub(super) pane_id: String,
@@ -235,32 +254,80 @@ fn parse_event(value: &Value) -> Option<Event> {
     }
 }
 
-pub(super) fn focused_pane(
-    workspace_id: String,
-) -> Result<Option<(String, String)>, String> {
-    focused_pane_with(workspace_id, run)
+pub(super) fn pane_layout(pane_id: String) -> Result<HerdrPaneLayout, String> {
+    if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
+        return Err("Pane layouts are only available inside Herdr".to_owned());
+    }
+    pane_layout_with(pane_id, run)
 }
 
-fn focused_pane_with(
-    workspace_id: String,
+fn pane_layout_with(
+    pane_id: String,
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
-) -> Result<Option<(String, String)>, String> {
+) -> Result<HerdrPaneLayout, String> {
     let value = runner(&[
         "pane".to_owned(),
-        "list".to_owned(),
-        "--workspace".to_owned(),
-        workspace_id.clone(),
+        "layout".to_owned(),
+        "--pane".to_owned(),
+        pane_id,
     ])?;
-    let panes = value
-        .pointer("/result/panes")
+    parse_pane_layout(
+        value
+            .pointer("/result/layout")
+            .ok_or_else(|| "Herdr did not return the tab layout".to_owned())?,
+    )
+}
+
+fn parse_pane_layout(layout: &Value) -> Result<HerdrPaneLayout, String> {
+    fn text(value: &Value, field: &str) -> Result<String, String> {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Herdr layout is missing {field}"))
+    }
+    fn coordinate(value: &Value, field: &str) -> Result<u16, String> {
+        value
+            .get(field)
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or_else(|| format!("Herdr layout has an invalid {field}"))
+    }
+
+    let area = layout
+        .get("area")
+        .ok_or_else(|| "Herdr layout is missing its area".to_owned())?;
+    let panes = layout
+        .get("panes")
         .and_then(Value::as_array)
-        .ok_or_else(|| "Herdr did not return the workspace panes".to_owned())?;
-    let focused = panes
+        .ok_or_else(|| "Herdr layout is missing its panes".to_owned())?
         .iter()
-        .find(|pane| pane.get("focused").and_then(Value::as_bool) == Some(true));
-    Ok(focused
-        .and_then(|pane| pane.get("pane_id").and_then(Value::as_str))
-        .map(|pane_id| (workspace_id, pane_id.to_owned())))
+        .map(|pane| {
+            let rect = pane
+                .get("rect")
+                .ok_or_else(|| "Herdr pane is missing its rectangle".to_owned())?;
+            Ok(HerdrPaneRect {
+                pane_id: text(pane, "pane_id")?,
+                x: coordinate(rect, "x")?,
+                y: coordinate(rect, "y")?,
+                width: coordinate(rect, "width")?,
+                height: coordinate(rect, "height")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let width = coordinate(area, "width")?;
+    let height = coordinate(area, "height")?;
+    if width == 0 || height == 0 || panes.is_empty() {
+        return Err("Herdr returned an empty tab layout".to_owned());
+    }
+    Ok(HerdrPaneLayout {
+        workspace_id: text(layout, "workspace_id")?,
+        x: coordinate(area, "x")?,
+        y: coordinate(area, "y")?,
+        width,
+        height,
+        panes,
+    })
 }
 
 pub(super) fn restore(request: RestoreRequest) -> Result<Option<String>, String> {
@@ -291,6 +358,24 @@ fn replace_pane_with_agent_with(
     pane_id: String,
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
 ) -> Result<String, String> {
+    let tabs = runner(&[
+        "tab".to_owned(),
+        "list".to_owned(),
+        "--workspace".to_owned(),
+        workspace_id.clone(),
+    ])?;
+    let background_tab_id = tabs
+        .pointer("/result/tabs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Herdr did not return the workspace tabs".to_owned())?
+        .iter()
+        .find(|tab| {
+            tab.get("label").and_then(Value::as_str) == Some("background")
+                && tab.get("focused").and_then(Value::as_bool) != Some(true)
+        })
+        .and_then(|tab| tab.get("tab_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let split = runner(&[
         "pane".to_owned(),
         "split".to_owned(),
@@ -308,12 +393,9 @@ fn replace_pane_with_agent_with(
         .ok_or_else(|| "Herdr did not identify the new pane".to_owned())?;
     if let Err(error) = runner(&[
         "pane".to_owned(),
-        "move".to_owned(),
-        pane_id.clone(),
-        "--new-tab".to_owned(),
-        "--workspace".to_owned(),
-        workspace_id,
-        "--no-focus".to_owned(),
+        "run".to_owned(),
+        replacement_pane_id.clone(),
+        "opencode".to_owned(),
     ]) {
         let _ = runner(&[
             "pane".to_owned(),
@@ -322,33 +404,30 @@ fn replace_pane_with_agent_with(
         ]);
         return Err(error);
     }
-    if let Err(error) = runner(&[
-        "agent".to_owned(),
-        "start".to_owned(),
-        "opencode".to_owned(),
-        "--kind".to_owned(),
-        "opencode".to_owned(),
-        "--pane".to_owned(),
-        replacement_pane_id.clone(),
-    ]) {
-        if runner(&[
-            "pane".to_owned(),
-            "move".to_owned(),
-            pane_id,
-            "--target-pane".to_owned(),
-            replacement_pane_id.clone(),
+    let mut move_args = vec!["pane".to_owned(), "move".to_owned(), pane_id.clone()];
+    if let Some(background_tab_id) = background_tab_id {
+        move_args.extend([
+            "--tab".to_owned(),
+            background_tab_id,
             "--split".to_owned(),
             "right".to_owned(),
-            "--no-focus".to_owned(),
-        ])
-        .is_ok()
-        {
-            let _ = runner(&[
-                "pane".to_owned(),
-                "close".to_owned(),
-                replacement_pane_id,
-            ]);
-        }
+        ]);
+    } else {
+        move_args.extend([
+            "--new-tab".to_owned(),
+            "--workspace".to_owned(),
+            workspace_id,
+            "--label".to_owned(),
+            "background".to_owned(),
+        ]);
+    }
+    move_args.push("--no-focus".to_owned());
+    if let Err(error) = runner(&move_args) {
+        let _ = runner(&[
+            "pane".to_owned(),
+            "close".to_owned(),
+            replacement_pane_id,
+        ]);
         return Err(error);
     }
     Ok(replacement_pane_id)
@@ -813,28 +892,43 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_globally_focused_pane() {
+    fn reads_a_pane_layout() {
         let mut calls = Vec::new();
-        let focused = focused_pane_with(
-            "w2".to_owned(),
+        let layout = pane_layout_with(
+            "w2:p3".to_owned(),
             |args| {
                 calls.push(args.to_vec());
                 Ok(serde_json::json!({
                     "result": {
-                        "panes": [
-                            { "pane_id": "w2:p1", "focused": false },
-                            { "pane_id": "w2:p3", "focused": true }
-                        ]
+                        "layout": {
+                            "area": { "x": 4, "y": 1, "width": 120, "height": 40 },
+                            "panes": [
+                                {
+                                    "pane_id": "w2:p1",
+                                    "rect": { "x": 4, "y": 1, "width": 72, "height": 40 }
+                                },
+                                {
+                                    "pane_id": "w2:p3",
+                                    "rect": { "x": 76, "y": 1, "width": 48, "height": 40 }
+                                }
+                            ],
+                            "tab_id": "w2:t4",
+                            "workspace_id": "w2"
+                        }
                     }
                 }))
             },
         )
         .unwrap();
 
-        assert_eq!(focused, Some(("w2".to_owned(), "w2:p3".to_owned())));
+        assert_eq!(layout.workspace_id, "w2");
+        assert_eq!((layout.width, layout.height), (120, 40));
+        assert_eq!(layout.panes.len(), 2);
+        assert_eq!(layout.panes[1].pane_id, "w2:p3");
+        assert_eq!((layout.panes[1].x, layout.panes[1].width), (76, 48));
         assert_eq!(
             calls,
-            vec![["pane", "list", "--workspace", "w2"]
+            vec![["pane", "layout", "--pane", "w2:p3"]
                 .map(str::to_owned)
                 .to_vec()]
         );
@@ -1030,10 +1124,12 @@ mod tests {
             "w1:p2".to_owned(),
             |args| {
                 calls.push(args.to_vec());
-                Ok(if calls.len() == 1 {
-                    serde_json::json!({ "result": { "pane": { "pane_id": "w1:p4" } } })
-                } else {
-                    Value::Null
+                Ok(match calls.len() {
+                    1 => serde_json::json!({ "result": { "tabs": [] } }),
+                    2 => {
+                        serde_json::json!({ "result": { "pane": { "pane_id": "w1:p4" } } })
+                    }
+                    _ => Value::Null,
                 })
             },
         )
@@ -1043,6 +1139,9 @@ mod tests {
         assert_eq!(
             calls,
             vec![
+                ["tab", "list", "--workspace", "w1"]
+                    .map(str::to_owned)
+                    .to_vec(),
                 [
                     "pane",
                     "split",
@@ -1055,6 +1154,9 @@ mod tests {
                 ]
                 .map(str::to_owned)
                 .to_vec(),
+                ["pane", "run", "w1:p4", "opencode"]
+                    .map(str::to_owned)
+                    .to_vec(),
                 [
                     "pane",
                     "move",
@@ -1062,12 +1164,9 @@ mod tests {
                     "--new-tab",
                     "--workspace",
                     "w1",
+                    "--label",
+                    "background",
                     "--no-focus",
-                ]
-                .map(str::to_owned)
-                .to_vec(),
-                [
-                    "agent", "start", "opencode", "--kind", "opencode", "--pane", "w1:p4",
                 ]
                 .map(str::to_owned)
                 .to_vec(),
@@ -1076,7 +1175,57 @@ mod tests {
     }
 
     #[test]
-    fn restores_the_focused_pane_when_agent_startup_fails() {
+    fn reuses_the_background_tab_for_displaced_panes() {
+        let mut calls = Vec::new();
+        replace_pane_with_agent_with(
+            PathBuf::from("/tmp/feature"),
+            "w1".to_owned(),
+            "w1:p2".to_owned(),
+            |args| {
+                calls.push(args.to_vec());
+                Ok(match calls.len() {
+                    1 => serde_json::json!({
+                        "result": { "tabs": [
+                            {
+                                "tab_id": "w1:t1",
+                                "label": "1",
+                                "focused": true
+                            },
+                            {
+                                "tab_id": "w1:t8",
+                                "label": "background",
+                                "focused": false
+                            }
+                        ] }
+                    }),
+                    2 => {
+                        serde_json::json!({ "result": { "pane": { "pane_id": "w1:p4" } } })
+                    }
+                    _ => Value::Null,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls[3],
+            [
+                "pane",
+                "move",
+                "w1:p2",
+                "--tab",
+                "w1:t8",
+                "--split",
+                "right",
+                "--no-focus",
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        );
+    }
+
+    #[test]
+    fn leaves_the_focused_pane_in_place_when_agent_dispatch_fails() {
         let mut calls = Vec::new();
         let error = replace_pane_with_agent_with(
             PathBuf::from("/tmp/feature"),
@@ -1085,7 +1234,8 @@ mod tests {
             |args| {
                 calls.push(args.to_vec());
                 match calls.len() {
-                    1 => Ok(serde_json::json!({
+                    1 => Ok(serde_json::json!({ "result": { "tabs": [] } })),
+                    2 => Ok(serde_json::json!({
                         "result": { "pane": { "pane_id": "w1:p4" } }
                     })),
                     3 => Err("agent failed".to_owned()),
@@ -1098,21 +1248,6 @@ mod tests {
         assert_eq!(error, "agent failed");
         assert_eq!(
             calls[3],
-            [
-                "pane",
-                "move",
-                "w1:p2",
-                "--target-pane",
-                "w1:p4",
-                "--split",
-                "right",
-                "--no-focus",
-            ]
-            .map(str::to_owned)
-            .to_vec()
-        );
-        assert_eq!(
-            calls[4],
             ["pane", "close", "w1:p4"].map(str::to_owned).to_vec()
         );
     }
