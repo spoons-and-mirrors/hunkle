@@ -20,7 +20,8 @@ pub(super) use crate::app::{
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    BranchPickerStep, draw, lighter, palette, selected_display_range, text, wrapped_editor_cursor,
+    BranchPickerStep, display_path, draw, lighter, palette, selected_display_range, text,
+    wrapped_editor_cursor,
 };
 
 mod agents;
@@ -34,6 +35,15 @@ fn assert_black_underlay(terminal: &Terminal<TestBackend>) {
     let background = &terminal.backend().buffer()[(0, 0)];
     assert_eq!(background.bg, Color::Rgb(0, 0, 0));
     assert!(background.modifier.contains(Modifier::DIM));
+}
+
+#[test]
+fn footer_abbreviates_paths_under_home() {
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        return;
+    };
+    let path = std::path::PathBuf::from(home).join("project");
+    assert_eq!(display_path(&path), "~/project");
 }
 
 #[test]
