@@ -1920,6 +1920,7 @@ impl App {
                     | HitTarget::AgentPreviewPickerItem(_)
                     | HitTarget::AgentPreviewPrevious(_)
                     | HitTarget::AgentPreviewNext(_)
+                    | HitTarget::AgentPreviewPlacement(_)
                     | HitTarget::AgentTooltip { .. }
                     | HitTarget::AgentMessage { .. }
             )

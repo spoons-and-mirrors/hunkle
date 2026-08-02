@@ -93,6 +93,65 @@ fn graph_replacement_clears_hidden_diff_targets() {
 }
 
 #[test]
+fn decoupled_sidebar_passes_clear_inactive_content_and_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Sidebar Test"]);
+    run_git(root, &["config", "user.email", "sidebar@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+    fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(100, 35)).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.changes.preview_pane, LeftPane::Worktree);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Changes(ChangesHitTarget::StageAll))
+            .is_none()
+    );
+    assert!(app.regions.files_add.is_some());
+    let sidebar = app.regions.worktree.unwrap();
+    let mut sidebar_text = String::new();
+    for y in sidebar.y..sidebar.bottom() {
+        for x in sidebar.x..sidebar.right() {
+            sidebar_text.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    assert!(!sidebar_text.contains("STAGE ALL"));
+
+    let explorer = app.regions.explorer_list.unwrap();
+    let file_row = app
+        .changes
+        .explorer_rows()
+        .iter()
+        .position(|row| row.file_path.is_some())
+        .unwrap();
+    click(&mut app, explorer.x + 2, explorer.y + file_row as u16);
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    assert_eq!(app.changes.preview_pane, LeftPane::Files);
+    assert!(app.regions.files_add.is_none());
+    assert!(app.regions.files_root.is_none());
+    let mut sidebar_text = String::new();
+    for y in sidebar.y..sidebar.bottom() {
+        for x in sidebar.x..sidebar.right() {
+            sidebar_text.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    assert!(!sidebar_text.contains("NEW  +"));
+}
+
+#[test]
 fn renders_colored_file_type_icons_in_the_files_view() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

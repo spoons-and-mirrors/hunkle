@@ -74,6 +74,14 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
     app.regions.diff = Some(columns[1]);
     app.regions.split_bounds = Some(area);
     app.regions.splitter = Some(Rect::new(columns[0].right(), area.y, 1, area.height));
+    frame.render_widget(Clear, columns[0]);
+    app.regions.clear_hit_targets_in(columns[0]);
+    app.regions.worktree_list = None;
+    app.regions.explorer_list = None;
+    app.regions.commit = None;
+    app.regions.actions = None;
+    app.regions.files_add = None;
+    app.regions.files_root = None;
     fill(frame, columns[0], palette().panel);
     if draw_details {
         fill(frame, columns[1], palette().panel);

@@ -472,6 +472,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     ]);
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&snapshot);
+    app.herdr.set_host_for_test("w1", "w1:t1", "w1:p0");
     app.herdr
         .set_agent_user_messages_for_test(0, &[("First request", Some("First reply"), 1, 0)]);
     app.herdr
@@ -491,8 +492,18 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(header_text.contains("first-repo"));
+    assert!(header_text.contains("BACKGROUND"));
     assert!(!header_text.contains("1/2"));
     assert!(app.agents_pane_pinned);
+    let placement = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPlacement(0))
+        .unwrap();
+    assert_eq!(placement.width, 12);
+    assert_eq!(
+        terminal.backend().buffer()[(placement.x, placement.y)].bg,
+        super::palette().raised
+    );
 
     let next = app
         .regions
@@ -554,6 +565,17 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .collect();
     assert!(second_header.contains("second-repo"));
     assert!(!second_header.contains("first-repo"));
+
+    app.herdr.agents[1].tab_id = "w1:t2".to_owned();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let background_header: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(background_header.contains("FOREGROUND"));
 
     let viewer = app.regions.diff.unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));

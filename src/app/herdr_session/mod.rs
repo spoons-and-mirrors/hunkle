@@ -281,6 +281,10 @@ enum Completion {
         outgoing_key: Option<AgentTimingKey>,
         reopen_path: Option<PathBuf>,
     },
+    AgentPlacement {
+        result: Result<(), String>,
+        background: bool,
+    },
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     LatestUserMessage {
         identity: AgentSessionIdentity,
@@ -320,6 +324,7 @@ pub(crate) struct HerdrSession {
     host_pane_id: Option<String>,
     cross_workspace_agents: bool,
     agent_display_running: bool,
+    agent_placement_running: bool,
     agent_change_stats: HashMap<PathBuf, (u64, u64)>,
     agent_change_stats_loading: bool,
     next_agent_change_stats: Instant,
@@ -380,6 +385,7 @@ impl HerdrSession {
             host_pane_id: None,
             cross_workspace_agents: false,
             agent_display_running: false,
+            agent_placement_running: false,
             agent_change_stats: HashMap::new(),
             agent_change_stats_loading: false,
             next_agent_change_stats: Instant::now(),
@@ -477,6 +483,15 @@ impl HerdrSession {
                         }
                         Err(error) => poll.notice = Some(error),
                     }
+                }
+                Completion::AgentPlacement { result, background } => {
+                    self.agent_placement_running = false;
+                    self.next_refresh = Instant::now();
+                    poll.notice = Some(match result {
+                        Ok(()) if background => "Agent moved to background tab".to_owned(),
+                        Ok(()) => "Agent returned to foreground".to_owned(),
+                        Err(error) => error,
+                    });
                 }
                 Completion::AgentChangeStats(stats) => {
                     self.agent_change_stats_loading = false;
@@ -688,6 +703,47 @@ impl HerdrSession {
         })
     }
 
+    pub(crate) fn agent_placement_running(&self) -> bool {
+        self.agent_placement_running
+    }
+
+    pub(crate) fn toggle_agent_placement(&mut self, index: usize) -> Result<(), String> {
+        if self.agent_display_running || self.agent_placement_running {
+            return Err("Another agent layout change is still in progress".to_owned());
+        }
+        let agent = self
+            .agents
+            .get(index)
+            .ok_or_else(|| "Agent is no longer available".to_owned())?;
+        let (Some(host_workspace_id), Some(host_tab_id), Some(host_pane_id)) = (
+            self.host_workspace_id.clone(),
+            self.host_tab_id.clone(),
+            self.host_pane_id.clone(),
+        ) else {
+            return Err("Hunkle is not attached to a Herdr pane".to_owned());
+        };
+        if agent.pane_id == host_pane_id {
+            return Err("Hunkle cannot move its own pane".to_owned());
+        }
+        let background = self.agent_is_in_host_tab(index);
+        let pane_id = agent.pane_id.clone();
+        let label = self
+            .agent_repository_name(index)
+            .unwrap_or("agent")
+            .to_owned();
+        self.agent_placement_running = true;
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = if background {
+                client::background_agent(pane_id, host_workspace_id, label)
+            } else {
+                client::foreground_agent(pane_id, host_tab_id, host_pane_id)
+            };
+            let _ = sender.send(Completion::AgentPlacement { result, background });
+        });
+        Ok(())
+    }
+
     pub(crate) fn agent_repository_name(&self, index: usize) -> Option<&str> {
         let agent = self.agents.get(index)?;
         if let Some(repository) = agent
@@ -711,7 +767,7 @@ impl HerdrSession {
     }
 
     pub(crate) fn display_agent(&mut self, pane_id: String) {
-        if self.agent_display_running {
+        if self.agent_display_running || self.agent_placement_running {
             return;
         }
         let Some(agent) = self.agents.iter().find(|agent| agent.pane_id == pane_id) else {
@@ -873,6 +929,13 @@ impl HerdrSession {
         session.workspaces = workspaces;
         session.apply_agent_snapshot_at(agents, unix_time_ms());
         session
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_host_for_test(&mut self, workspace: &str, tab: &str, pane: &str) {
+        self.host_workspace_id = Some(workspace.to_owned());
+        self.host_tab_id = Some(tab.to_owned());
+        self.host_pane_id = Some(pane.to_owned());
     }
 
     #[cfg(test)]

@@ -272,6 +272,78 @@ pub(super) fn display_agent(request: DisplayAgentRequest) -> Result<DisplayAgent
     display_agent_with(request, run, api_request)
 }
 
+pub(super) fn background_agent(
+    pane_id: String,
+    workspace_id: String,
+    label: String,
+) -> Result<(), String> {
+    background_agent_with(pane_id, workspace_id, label, run)
+}
+
+fn background_agent_with(
+    pane_id: String,
+    workspace_id: String,
+    label: String,
+    runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<(), String> {
+    move_agent_with(
+        &[
+            "pane".to_owned(),
+            "move".to_owned(),
+            pane_id,
+            "--new-tab".to_owned(),
+            "--workspace".to_owned(),
+            workspace_id,
+            "--label".to_owned(),
+            label,
+            "--no-focus".to_owned(),
+        ],
+        runner,
+    )
+}
+
+pub(super) fn foreground_agent(
+    pane_id: String,
+    host_tab_id: String,
+    host_pane_id: String,
+) -> Result<(), String> {
+    foreground_agent_with(pane_id, host_tab_id, host_pane_id, run)
+}
+
+fn foreground_agent_with(
+    pane_id: String,
+    host_tab_id: String,
+    host_pane_id: String,
+    runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<(), String> {
+    move_agent_with(
+        &[
+            "pane".to_owned(),
+            "move".to_owned(),
+            pane_id,
+            "--tab".to_owned(),
+            host_tab_id,
+            "--target-pane".to_owned(),
+            host_pane_id,
+            "--split".to_owned(),
+            "right".to_owned(),
+            "--ratio".to_owned(),
+            "0.5".to_owned(),
+            "--no-focus".to_owned(),
+        ],
+        runner,
+    )
+}
+
+fn move_agent_with(
+    args: &[String],
+    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<(), String> {
+    let value = runner(args)?;
+    require_changed(&value, "/result/move_result", "pane move")?;
+    Ok(())
+}
+
 fn display_agent_with<F, A>(
     request: DisplayAgentRequest,
     mut runner: F,
@@ -2567,6 +2639,70 @@ mod tests {
         assert_eq!(
             calls[3],
             ["pane", "close", "w1:p4"].map(str::to_owned).to_vec()
+        );
+    }
+
+    #[test]
+    fn moves_agents_between_background_and_host_tabs_without_focus() {
+        let mut calls = Vec::new();
+        background_agent_with(
+            "w1:p2".to_owned(),
+            "w1".to_owned(),
+            "hunkle".to_owned(),
+            |args| {
+                calls.push(args.to_vec());
+                Ok(serde_json::json!({
+                    "result": { "move_result": { "changed": true } }
+                }))
+            },
+        )
+        .unwrap();
+        foreground_agent_with(
+            "w1:p2".to_owned(),
+            "w1:t1".to_owned(),
+            "w1:p1".to_owned(),
+            |args| {
+                calls.push(args.to_vec());
+                Ok(serde_json::json!({
+                    "result": { "move_result": { "changed": true } }
+                }))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls,
+            vec![
+                [
+                    "pane",
+                    "move",
+                    "w1:p2",
+                    "--new-tab",
+                    "--workspace",
+                    "w1",
+                    "--label",
+                    "hunkle",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                [
+                    "pane",
+                    "move",
+                    "w1:p2",
+                    "--tab",
+                    "w1:t1",
+                    "--target-pane",
+                    "w1:p1",
+                    "--split",
+                    "right",
+                    "--ratio",
+                    "0.5",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            ]
         );
     }
 

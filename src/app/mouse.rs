@@ -34,6 +34,7 @@ impl App {
                     | HitTarget::AgentPreviewPickerItem(agent)
                     | HitTarget::AgentPreviewPrevious(agent)
                     | HitTarget::AgentPreviewNext(agent)
+                    | HitTarget::AgentPreviewPlacement(agent)
                     | HitTarget::AgentTooltip { agent, .. }
                     | HitTarget::AgentMessage { agent, .. } => Some(agent),
                     _ => None,
@@ -609,6 +610,12 @@ impl App {
             }
             Some(HitTarget::AgentPreviewNext(index)) => {
                 self.cycle_agent_preview(index, true);
+                return;
+            }
+            Some(HitTarget::AgentPreviewPlacement(index)) => {
+                if let Err(error) = self.herdr.toggle_agent_placement(index) {
+                    self.notice = Some(error);
+                }
                 return;
             }
             Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => return,

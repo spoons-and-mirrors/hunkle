@@ -99,6 +99,7 @@ pub(crate) enum HitTarget {
     AgentPreviewPickerItem(usize),
     AgentPreviewPrevious(usize),
     AgentPreviewNext(usize),
+    AgentPreviewPlacement(usize),
     AgentTooltip { agent: usize, message: usize },
     AgentMessage { agent: usize, message: usize },
 }
