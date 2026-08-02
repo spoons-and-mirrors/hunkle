@@ -1928,7 +1928,8 @@ impl App {
 
     fn stash_agent(&mut self, index: usize) {
         let Some(path) = self.herdr.agent_destination(index).map(Path::to_path_buf) else {
-            self.notice = Some("Agent has not reported its working directory".to_owned());
+            self.notice =
+                Some("Could not stash agent: working directory was not reported".to_owned());
             return;
         };
         let destination = self.linked_worktrees.agent_destination(&path);
@@ -1953,7 +1954,7 @@ impl App {
             .stash_agent(index, repository_root, repository, branch)
         {
             Ok(()) => self.notice = Some("Closing and stashing agent".to_owned()),
-            Err(error) => self.notice = Some(error),
+            Err(error) => self.notice = Some(format!("Could not stash agent: {error}")),
         }
     }
 
@@ -1968,7 +1969,7 @@ impl App {
             agent.session_id,
         ) {
             Ok(()) => self.notice = Some("Loading active Herdr tab layout".to_owned()),
-            Err(error) => self.notice = Some(error),
+            Err(error) => self.notice = Some(format!("Could not restore agent: {error}")),
         }
     }
 

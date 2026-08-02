@@ -723,28 +723,37 @@ impl HerdrSession {
         let agent = self
             .agents
             .get(index)
+            .cloned()
             .ok_or_else(|| "Agent is no longer available".to_owned())?;
-        let AgentTimingKey::Session(identity) = agent
-            .session_timing_key
-            .as_ref()
-            .ok_or_else(|| "Agent has not reported a resumable session".to_owned())?
-        else {
-            return Err("Agent has not reported a resumable session".to_owned());
-        };
-        if identity.agent != "opencode" {
-            return Err(format!("{} sessions cannot be restored yet", agent.name));
-        }
         let worktree = agent
             .destination_cwd
             .clone()
             .or_else(|| agent.cwd.clone())
             .ok_or_else(|| "Agent has not reported its working directory".to_owned())?;
+        let identity = match agent.session_timing_key.as_ref() {
+            Some(AgentTimingKey::Session(identity)) => identity.clone(),
+            _ if agent.name == "opencode" => {
+                let title = agent.session_name.as_deref().ok_or_else(|| {
+                    "OpenCode session could not be identified without its title".to_owned()
+                })?;
+                AgentSessionIdentity {
+                    source: "hunkle:opencode".to_owned(),
+                    agent: "opencode".to_owned(),
+                    kind: "id".to_owned(),
+                    value: latest_message::resolve_session_id(&worktree, title)?,
+                }
+            }
+            _ => return Err("Agent has not reported a resumable session".to_owned()),
+        };
+        if identity.agent != "opencode" {
+            return Err(format!("{} sessions cannot be restored yet", agent.name));
+        }
         let record = StashedAgent {
-            harness: identity.agent.clone(),
+            harness: identity.agent,
             agent_name: agent.name.clone(),
-            session_source: identity.source.clone(),
-            session_kind: identity.kind.clone(),
-            session_id: identity.value.clone(),
+            session_source: identity.source,
+            session_kind: identity.kind,
+            session_id: identity.value,
             session_name: agent.session_name.clone(),
             repository,
             repository_label,

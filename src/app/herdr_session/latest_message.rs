@@ -1,4 +1,4 @@
-use std::{process::Command, time::Duration};
+use std::{path::Path, process::Command, time::Duration};
 
 use serde_json::Value;
 
@@ -88,6 +88,53 @@ pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
         return Err(error.trim().to_owned());
     }
     parse(&output.stdout)
+}
+
+pub(super) fn resolve_session_id(directory: &Path, title: &str) -> Result<String, String> {
+    let directory = sql_string(&directory.to_string_lossy());
+    let title = sql_string(title);
+    let query = format!(
+        "SELECT id FROM session \
+         WHERE directory = {directory} AND title = {title} \
+           AND parent_id IS NULL AND time_archived IS NULL"
+    );
+    let output = process::run(
+        Command::new("opencode").args(["db", &query, "--format", "json", "--pure"]),
+        QUERY_LIMITS,
+    )
+    .map_err(|error| format!("Could not query OpenCode sessions: {error}"))?;
+    if output.timed_out {
+        return Err("OpenCode session lookup timed out".to_owned());
+    }
+    if output.stdout_truncated {
+        return Err("OpenCode returned too many matching sessions".to_owned());
+    }
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("OpenCode session lookup failed: {}", error.trim()));
+    }
+    parse_session_id(&output.stdout)
+}
+
+fn sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn parse_session_id(output: &[u8]) -> Result<String, String> {
+    let rows: Value = serde_json::from_slice(output)
+        .map_err(|error| format!("OpenCode returned invalid session data: {error}"))?;
+    let mut ids = rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("id").and_then(Value::as_str));
+    let Some(id) = ids.next() else {
+        return Err("OpenCode session could not be identified".to_owned());
+    };
+    if ids.next().is_some() {
+        return Err("Multiple OpenCode sessions match this agent".to_owned());
+    }
+    Ok(id.to_owned())
 }
 
 fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
@@ -199,7 +246,7 @@ fn reasoning_active(row: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentActivityPreview, parse};
+    use super::{AgentActivityPreview, parse, parse_session_id, sql_string};
 
     #[test]
     fn extracts_text_from_the_latest_user_message() {
@@ -277,5 +324,16 @@ mod tests {
             ]
         );
         assert!(messages[1].reasoning_active);
+    }
+
+    #[test]
+    fn resolves_only_an_unambiguous_session() {
+        assert_eq!(sql_string("it's here"), "'it''s here'");
+        assert_eq!(
+            parse_session_id(br#"[{"id":"ses_exact"}]"#).unwrap(),
+            "ses_exact"
+        );
+        assert!(parse_session_id(b"[]").is_err());
+        assert!(parse_session_id(br#"[{"id":"one"},{"id":"two"}]"#).is_err());
     }
 }
