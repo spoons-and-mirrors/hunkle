@@ -351,6 +351,8 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
     let naming_branch = app.header_picker.naming_branch();
+    let cloning_repository = app.header_picker.cloning_repository();
+    let creating_worktree = app.header_picker.creating_worktree();
     let filtering = app.header_picker.filtering();
     let destination_title = filtering && kind == HeaderPickerKind::AgentDestinations;
     let picker_chrome = if filtering {
@@ -365,7 +367,9 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     };
     let visible_items =
         header_picker_visible_items(frame.area().height, available_height, picker_chrome);
-    let row_count = if naming_branch {
+    let row_count = if cloning_repository || creating_worktree {
+        5
+    } else if naming_branch {
         2
     } else if app.header_picker.items.is_empty() {
         1
@@ -396,8 +400,14 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(Clear, area);
     fill(frame, area, palette().surface_alt);
     let title = match kind {
-        HeaderPickerKind::Repositories => " RECENT REPOSITORIES".to_owned(),
-        HeaderPickerKind::Worktrees => " WORKTREES".to_owned(),
+        HeaderPickerKind::Repositories => match app.header_picker.repository_step {
+            RepositoryPickerStep::Repositories => " RECENT REPOSITORIES".to_owned(),
+            RepositoryPickerStep::Clone => " CLONE REPOSITORY".to_owned(),
+        },
+        HeaderPickerKind::Worktrees => match app.header_picker.worktree_step {
+            WorktreePickerStep::Worktrees => " WORKTREES".to_owned(),
+            WorktreePickerStep::Create => " NEW WORKTREE".to_owned(),
+        },
         HeaderPickerKind::Branches => match app.header_picker.branch_step {
             BranchPickerStep::Branches => " BRANCHES".to_owned(),
             BranchPickerStep::Base => " NEW BRANCH · SELECT BASE".to_owned(),
@@ -414,8 +424,22 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     };
     let new_branch_action = kind == HeaderPickerKind::Branches
         && app.header_picker.branch_step == BranchPickerStep::Branches;
-    let action_width = if new_branch_action { 11 } else { 0 };
-    let action_space = action_width + u16::from(new_branch_action);
+    let clone_action = kind == HeaderPickerKind::Repositories
+        && app.header_picker.repository_step == RepositoryPickerStep::Repositories;
+    let new_worktree_action = kind == HeaderPickerKind::Worktrees
+        && app.header_picker.worktree_step == WorktreePickerStep::Worktrees
+        && filtering;
+    let action_width = if new_branch_action {
+        11
+    } else if clone_action {
+        7
+    } else if new_worktree_action {
+        10
+    } else {
+        0
+    };
+    let has_action = new_branch_action || clone_action || new_worktree_action;
+    let action_space = action_width + u16::from(has_action);
     if filtering {
         if destination_title {
             let title_width = area.width.min(14);
@@ -486,6 +510,62 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         );
         app.regions
             .register_hit_target(HitTarget::HeaderPickerNewBranch, action_row);
+    } else if clone_action {
+        let action_row = Rect::new(
+            area.right().saturating_sub(action_space),
+            area.y.saturating_add(1),
+            action_width,
+            1,
+        );
+        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerClone);
+        let background = if hovered {
+            palette().selected
+        } else {
+            palette().green
+        };
+        frame.render_widget(
+            Paragraph::new(" Clone ").style(
+                Style::default()
+                    .fg(palette().canvas)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            action_row,
+        );
+        frame.render_widget(
+            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
+            Rect::new(action_row.right(), action_row.y, 1, 1),
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerClone, action_row);
+    } else if new_worktree_action {
+        let action_row = Rect::new(
+            area.right().saturating_sub(action_space),
+            area.y.saturating_add(1),
+            action_width,
+            1,
+        );
+        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerNewWorktree);
+        let background = if hovered {
+            palette().selected
+        } else {
+            palette().green
+        };
+        frame.render_widget(
+            Paragraph::new(" New tree ").style(
+                Style::default()
+                    .fg(palette().canvas)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            action_row,
+        );
+        frame.render_widget(
+            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
+            Rect::new(action_row.right(), action_row.y, 1, 1),
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerNewWorktree, action_row);
     }
     if filtering {
         draw_half_padding(
@@ -521,6 +601,84 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             Paragraph::new(truncate_width(hint, usize::from(area.width)))
                 .style(Style::default().fg(color)),
             Rect::new(area.x, area.y.saturating_add(2), area.width, 1),
+        );
+        return;
+    }
+
+    if cloning_repository {
+        frame.render_widget(
+            Paragraph::new(" DIRECTORY").style(Style::default().fg(palette().muted)),
+            Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        );
+        let directory_row = Rect::new(area.x, area.y.saturating_add(2), area.width, 1);
+        draw_picker_input(
+            frame,
+            &app.header_picker.clone_directory,
+            directory_row,
+            app.header_picker.clone_field == CloneField::Directory,
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerCloneDirectory, directory_row);
+        frame.render_widget(
+            Paragraph::new(" GIT URL").style(Style::default().fg(palette().muted)),
+            Rect::new(area.x, area.y.saturating_add(3), area.width, 1),
+        );
+        let url_row = Rect::new(area.x, area.y.saturating_add(4), area.width, 1);
+        draw_picker_input(
+            frame,
+            &app.header_picker.clone_url,
+            url_row,
+            app.header_picker.clone_field == CloneField::Url,
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerCloneUrl, url_row);
+        let (hint, color) = app.header_picker.message.as_ref().map_or(
+            (" Enter clone · Tab switch · Esc back", palette().muted),
+            |message| (message.as_str(), palette().red),
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_width(hint, usize::from(area.width)))
+                .style(Style::default().fg(color)),
+            Rect::new(area.x, area.y.saturating_add(5), area.width, 1),
+        );
+        return;
+    }
+
+    if creating_worktree {
+        frame.render_widget(
+            Paragraph::new(" NAME").style(Style::default().fg(palette().muted)),
+            Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        );
+        let name_row = Rect::new(area.x, area.y.saturating_add(2), area.width, 1);
+        draw_picker_input(
+            frame,
+            &app.header_picker.worktree_name,
+            name_row,
+            app.header_picker.worktree_field == WorktreePickerField::Name,
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerWorktreeName, name_row);
+        frame.render_widget(
+            Paragraph::new(" START FROM").style(Style::default().fg(palette().muted)),
+            Rect::new(area.x, area.y.saturating_add(3), area.width, 1),
+        );
+        let base_row = Rect::new(area.x, area.y.saturating_add(4), area.width, 1);
+        draw_picker_input(
+            frame,
+            &app.header_picker.worktree_base,
+            base_row,
+            app.header_picker.worktree_field == WorktreePickerField::Base,
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerWorktreeBase, base_row);
+        let (hint, color) = app.header_picker.message.as_ref().map_or(
+            (" Enter create · Tab switch · Esc back", palette().muted),
+            |message| (message.as_str(), palette().red),
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_width(hint, usize::from(area.width)))
+                .style(Style::default().fg(color)),
+            Rect::new(area.x, area.y.saturating_add(5), area.width, 1),
         );
         return;
     }
@@ -880,6 +1038,25 @@ pub(super) fn header_picker_label_line(
         ]);
     }
     Line::from(spans)
+}
+
+fn draw_picker_input(frame: &mut Frame<'_>, input: &TextInput, area: Rect, active: bool) {
+    let mut text = input.text().to_owned();
+    if input.cursor_visible() {
+        text.insert(input.cursor(), '▌');
+    }
+    frame.render_widget(
+        Paragraph::new(truncate_start_width(
+            &format!(" {text}"),
+            usize::from(area.width),
+        ))
+        .style(Style::default().fg(palette().ink).bg(if active {
+            palette().selected
+        } else {
+            palette().panel
+        })),
+        area,
+    );
 }
 
 pub(super) fn draw_header_picker_search(

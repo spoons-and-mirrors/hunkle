@@ -137,17 +137,16 @@ Hunkle opens that destination as its active repository. The displaced pane is
 parked in its own tab, named after its starting directory, so it cannot be
 merged into another agent's saved layout.
 
-The Agents section acts as a live layout switcher. Each Herdr tab is a saved
-agent layout, shared by every agent in that tab. Clicking an agent restores its
-complete pane layout immediately to Hunkle's right, keeps keyboard focus in
-Hunkle, and opens the selected agent's working directory. The currently visible
-layout is parked in the selected layout's former tab. Existing terminals move
-between tabs without restarting their processes or losing scrollback. Additional
-panes in Hunkle's left frame, including panes below Hunkle, remain in place. By
-default, the section lists and operates on agents in Hunkle's Herdr workspace
-only; enable **Cross-workspace agents** in Settings to include agents from other
-Herdr workspaces. Zoomed tabs must be unzoomed before their layouts can be
-exchanged.
+The Agents section acts as a live per-agent layout switcher. Clicking an agent
+restores its complete pane layout around the fixed Hunkle pane, keeps keyboard
+focus in Hunkle, and opens the selected agent's working directory. The currently
+visible layout is parked in the selected layout's former tab. Existing terminals
+move between tabs without restarting their processes or losing scrollback. Every
+pane other than Hunkle belongs to the displayed agent, including panes beside or
+below Hunkle. Hunkle remembers each agent's geometry across restarts. By default,
+the section lists and operates on agents in Hunkle's Herdr workspace only; enable
+**Cross-workspace agents** in Settings to include agents from other Herdr
+workspaces. Zoomed tabs must be unzoomed before their layouts can be exchanged.
 
 Hunkle remembers the last repository opened in each Herdr pane. Relaunching it
 from the same shell directory restores that repository; changing the shell

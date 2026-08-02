@@ -70,8 +70,7 @@ struct RemovalCompletion {
 }
 
 struct CreationCompletion {
-    path: PathBuf,
-    result: Result<(), String>,
+    result: Result<PathBuf, String>,
 }
 
 enum Completion {
@@ -158,7 +157,7 @@ impl WorktreeManager {
     pub(crate) fn start_create(
         &mut self,
         cwd: PathBuf,
-        path: PathBuf,
+        path: Option<PathBuf>,
         branch: String,
         start_point: String,
     ) -> bool {
@@ -169,13 +168,9 @@ impl WorktreeManager {
         self.pending_create = self.create_dialog.take();
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = super::herdr_session::create_managed_worktree(
-                cwd,
-                path.clone(),
-                branch,
-                start_point,
-            );
-            let _ = sender.send(Completion::Creation(CreationCompletion { path, result }));
+            let result =
+                super::herdr_session::create_managed_worktree(cwd, path, branch, start_point);
+            let _ = sender.send(Completion::Creation(CreationCompletion { result }));
         });
         true
     }
@@ -188,11 +183,10 @@ impl WorktreeManager {
                 Completion::Creation(completion) => {
                     self.create_running = false;
                     match completion.result {
-                        Ok(()) => {
+                        Ok(path) => {
                             self.pending_create = None;
-                            result.notice =
-                                Some(format!("Created worktree {}", completion.path.display()));
-                            result.open_path = Some(completion.path);
+                            result.notice = Some(format!("Created worktree {}", path.display()));
+                            result.open_path = Some(path);
                             result.refresh_catalog = true;
                         }
                         Err(error) => {
