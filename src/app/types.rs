@@ -94,6 +94,7 @@ pub(crate) enum HitTarget {
     HeaderPickerItem(usize),
     Changes(ChangesHitTarget),
     CommitMessageGenerate,
+    MagicCommit,
     MarkdownPreviewToggle,
     Graph(GraphHitTarget),
     Explorer(ExplorerHitTarget),

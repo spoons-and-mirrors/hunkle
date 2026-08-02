@@ -250,12 +250,12 @@ fn generate_message(root: &Path, model: &str, variant: Option<&str>) -> Result<S
     clean_message(&message)
 }
 
-struct OpenCodeEvents {
-    session_id: Option<String>,
+pub(super) struct OpenCodeEvents {
+    pub(super) session_id: Option<String>,
     result: Result<String, String>,
 }
 
-fn parse_opencode_events(output: &[u8]) -> OpenCodeEvents {
+pub(super) fn parse_opencode_events(output: &[u8]) -> OpenCodeEvents {
     let mut session_id = None;
     let mut text = Vec::new();
     let mut parse_error = None;
@@ -297,7 +297,7 @@ fn parse_opencode_events(output: &[u8]) -> OpenCodeEvents {
     OpenCodeEvents { session_id, result }
 }
 
-fn delete_opencode_session(directory: &Path, session_id: &str) -> Result<(), String> {
+pub(super) fn delete_opencode_session(directory: &Path, session_id: &str) -> Result<(), String> {
     let output = process::run(
         Command::new("opencode")
             .args(["session", "delete", session_id, "--pure"])
@@ -315,7 +315,7 @@ fn delete_opencode_session(directory: &Path, session_id: &str) -> Result<(), Str
     }
 }
 
-fn opencode_working_directory() -> Result<PathBuf, String> {
+pub(super) fn opencode_working_directory() -> Result<PathBuf, String> {
     let directory = isolated_working_directory(
         env::var_os("XDG_CACHE_HOME").map(PathBuf::from),
         env::var_os("HOME").map(PathBuf::from),
@@ -440,7 +440,7 @@ fn clean_message(output: &str) -> Result<String, String> {
     Ok(message.trim().to_owned())
 }
 
-fn concise_error(stderr: &[u8]) -> String {
+pub(super) fn concise_error(stderr: &[u8]) -> String {
     String::from_utf8_lossy(stderr)
         .lines()
         .find(|line| !line.trim().is_empty())

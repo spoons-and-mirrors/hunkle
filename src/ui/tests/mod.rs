@@ -14,8 +14,8 @@ pub(super) use unicode_width::UnicodeWidthStr;
 pub(super) use crate::app::{
     AgentActivityPreview, AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator,
     ExplorerHitTarget, GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind,
-    HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget, LeftPane, Mode, Settings,
-    SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, StashedAgent, View,
+    HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget, LeftPane, MagicCommitRunner, Mode,
+    Settings, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, StashedAgent, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
@@ -146,6 +146,7 @@ fn renders_every_primary_surface() {
     app.settings.graph_author_width = 16;
     app.settings.graph_commit_width = 7;
     app.commit_message_generator = CommitMessageGenerator::ready_for_test();
+    app.magic_commit_runner = MagicCommitRunner::ready_for_test();
     let settings_path = root.join(".git/hunkle-test-config");
     app.settings_store = SettingsStore::at(settings_path.clone());
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
@@ -235,6 +236,11 @@ fn renders_every_primary_surface() {
     assert!(
         app.regions
             .hit_target_rect(HitTarget::CommitMessageGenerate)
+            .is_some()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::MagicCommit)
             .is_some()
     );
     click(&mut app, graph_toggle.x, graph_toggle.y);
@@ -640,6 +646,14 @@ fn renders_every_primary_surface() {
         }
     }));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let magic_commit = app.regions.hit_target_rect(HitTarget::MagicCommit).unwrap();
+    assert_eq!(magic_commit.width, 4);
+    assert_eq!(magic_commit.x, app.regions.commit.unwrap().x + 3);
+    assert_eq!(magic_commit.y, app.regions.commit.unwrap().bottom());
+    assert_eq!(
+        terminal.backend().buffer()[(magic_commit.x + 1, magic_commit.y)].symbol(),
+        "M"
+    );
     let agents = app.regions.agents_list.unwrap();
     click(&mut app, agents.x + 2, agents.y);
     assert_eq!(app.mode, Mode::Normal);

@@ -199,6 +199,13 @@ terminal, are shared between Hunkle processes, and persist across restarts in
   file-attachment or tool-output truncation, deletes the one-shot OpenCode
   session after generation, uses `openai/gpt-5.6-sol` with low reasoning, and
   never overwrites a message edited while generation is running.
+- When `opencode` is installed, click `MC` below the commit editor to run Magic
+  Commit in the background. Its one-shot OpenCode task organizes current
+  changes into logical commits using selected index patches. Hunkle denies the
+  task access to file-editing tools and unrelated shell commands, so it cannot
+  edit worktree files or perform unrelated Git operations. The task remains
+  scoped to its originating repository when you switch workspaces; click its
+  spinning `MC` control again to cancel it.
 - In Explorer, click the path field to type, a row to select it, or a preview to
   continue completing. Drag the divider between AROUND HERE and CONTENTS to
   resize the panes; its exact width persists across launches. AROUND HERE shows
