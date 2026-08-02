@@ -21,7 +21,7 @@ pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandRecord, CommandStatu
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub(crate) use changes::{ChangesHitTarget, SqliteFocus, SqlitePage};
 pub use changes::{ChangesState, LeftPane};
-pub(crate) use commit_message::CommitMessageGenerator;
+pub(crate) use commit_message::{CommitMessageCompletion, CommitMessageGenerator};
 pub(crate) use commit_summary::CommitSummaryCache;
 pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use explorer::{ExplorerHitTarget, SurroundingEntry};
@@ -796,30 +796,7 @@ impl App {
         }
         if let Some(completion) = self.commit_message_generator.poll() {
             changed = true;
-            if !self
-                .repository()
-                .is_some_and(|repo| same_path(&repo.root, &completion.root))
-            {
-                self.notice = Some(
-                    "Generated commit message ignored because the workspace changed".to_owned(),
-                );
-            } else if self.commit_input.text() != completion.baseline {
-                self.notice = Some(
-                    "Generated commit message ignored because the message was edited".to_owned(),
-                );
-            } else {
-                match completion.result {
-                    Ok(message) => {
-                        self.commit_input.set(message);
-                        self.commit_scroll = None;
-                        self.commit_input.focus();
-                        self.mode = Mode::Commit;
-                        self.schedule_commit_draft();
-                        self.notice = Some("Commit message generated with OpenCode".to_owned());
-                    }
-                    Err(error) => self.notice = Some(error),
-                }
-            }
+            self.receive_generated_commit_message(completion);
         }
         changed |= self.commit_message_generator.poll_spinner(Instant::now());
         changed |= {

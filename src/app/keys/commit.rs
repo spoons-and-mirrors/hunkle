@@ -129,6 +129,80 @@ impl App {
         }
     }
 
+    pub(crate) fn receive_generated_commit_message(&mut self, completion: CommitMessageCompletion) {
+        let active = self
+            .repository()
+            .is_some_and(|repository| same_path(&repository.root, &completion.root));
+        let message = match completion.result {
+            Ok(message) => message,
+            Err(error) => {
+                self.notice = Some(if active {
+                    error
+                } else {
+                    format!(
+                        "Could not generate a commit message for {}: {error}",
+                        completion.root.display()
+                    )
+                });
+                return;
+            }
+        };
+        let draft_path = match git::commit_draft_path(&completion.root) {
+            Ok(path) => path,
+            Err(error) => {
+                self.notice = Some(format!(
+                    "Could not save the generated commit message for {}: {error}",
+                    completion.root.display()
+                ));
+                return;
+            }
+        };
+        let current_message = if active {
+            self.commit_input.text().to_owned()
+        } else {
+            match fs::read_to_string(&draft_path) {
+                Ok(message) => message,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => {
+                    self.notice = Some(format!(
+                        "Could not read the commit draft for {}: {error}",
+                        completion.root.display()
+                    ));
+                    return;
+                }
+            }
+        };
+        if current_message != completion.baseline {
+            self.notice = Some(format!(
+                "Generated commit message for {} was not applied because its draft was edited",
+                completion.root.display()
+            ));
+            return;
+        }
+        if let Err(error) = atomic_write(&draft_path, message.as_bytes()) {
+            self.notice = Some(format!(
+                "Could not save the generated commit message for {}: {error}",
+                completion.root.display()
+            ));
+            return;
+        }
+
+        if active {
+            self.commit_input.set(message);
+            self.commit_scroll = None;
+            self.commit_input.focus();
+            self.commit_draft_path = Some(draft_path);
+            self.commit_draft_due = None;
+            self.mode = Mode::Commit;
+            self.notice = Some("Commit message generated with OpenCode".to_owned());
+        } else {
+            self.notice = Some(format!(
+                "Commit message generated for {}",
+                completion.root.display()
+            ));
+        }
+    }
+
     pub(crate) fn focus_commit(&mut self) {
         if !self.require_git_repository() {
             return;

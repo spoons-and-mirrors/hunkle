@@ -903,6 +903,84 @@ fn failed_draft_save_blocks_workspace_switch_and_keeps_retry_pending() {
 }
 
 #[test]
+fn generated_commit_message_returns_to_its_repository_during_a_workspace_switch() {
+    let directory = tempfile::tempdir().unwrap();
+    let requested = directory.path().join("requested");
+    let other = directory.path().join("other");
+    fs::create_dir(&requested).unwrap();
+    fs::create_dir(&other).unwrap();
+    initialize_repository(&requested);
+    initialize_repository(&other);
+    let mut app = App::new(requested.clone());
+    wait_for_state(&mut app, |app| {
+        app.commit_draft_path.is_some()
+            && app
+                .repository()
+                .is_some_and(|repository| repository.details_ready)
+    });
+    app.commit_input.set("message before generation");
+    app.schedule_commit_draft();
+    app.flush_commit_draft();
+    let requested_draft = git::commit_draft_path(&requested).unwrap();
+    assert_eq!(
+        fs::read_to_string(&requested_draft).unwrap(),
+        "message before generation"
+    );
+
+    assert!(app.start_repository_open(other.clone(), false));
+    app.receive_generated_commit_message(CommitMessageCompletion {
+        root: requested.clone(),
+        baseline: "message before generation".to_owned(),
+        result: Ok("generated subject\n\ngenerated body".to_owned()),
+    });
+    assert_eq!(
+        fs::read_to_string(&requested_draft).unwrap(),
+        "generated subject\n\ngenerated body"
+    );
+
+    wait_for_state(&mut app, |app| {
+        app.repository()
+            .is_some_and(|repository| repository.root == other && repository.details_ready)
+    });
+    assert!(app.start_repository_open(requested.clone(), false));
+    wait_for_state(&mut app, |app| {
+        app.repository()
+            .is_some_and(|repository| repository.root == requested)
+            && app.commit_input.text() == "generated subject\n\ngenerated body"
+    });
+}
+
+#[test]
+fn generated_commit_message_does_not_overwrite_an_edited_inactive_draft() {
+    let directory = tempfile::tempdir().unwrap();
+    let active = directory.path().join("active");
+    let requested = directory.path().join("requested");
+    fs::create_dir(&active).unwrap();
+    fs::create_dir(&requested).unwrap();
+    initialize_repository(&active);
+    initialize_repository(&requested);
+    let mut app = App::new(active);
+    let requested_draft = git::commit_draft_path(&requested).unwrap();
+    fs::write(&requested_draft, "edited while generation ran").unwrap();
+
+    app.receive_generated_commit_message(CommitMessageCompletion {
+        root: requested.clone(),
+        baseline: "original draft".to_owned(),
+        result: Ok("generated message".to_owned()),
+    });
+
+    assert_eq!(
+        fs::read_to_string(requested_draft).unwrap(),
+        "edited while generation ran"
+    );
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("draft was edited"))
+    );
+}
+
+#[test]
 fn commit_action_submits_an_existing_message() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
