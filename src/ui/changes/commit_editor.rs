@@ -214,9 +214,13 @@ pub(super) fn draw_commit_message_action(
             .add_modifier(Modifier::BOLD)
     };
     frame.render_widget(
-        Paragraph::new(if running { " … " } else { " ✦ " })
-            .alignment(Alignment::Center)
-            .style(style),
+        Paragraph::new(if running {
+            format!(" {} ", app.commit_message_spinner())
+        } else {
+            " ✦ ".to_owned()
+        })
+        .alignment(Alignment::Center)
+        .style(style),
         button,
     );
 }

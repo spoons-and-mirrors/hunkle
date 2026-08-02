@@ -437,6 +437,10 @@ impl App {
         self.commit_message_generator.is_running()
     }
 
+    pub(crate) fn commit_message_spinner(&self) -> &'static str {
+        self.commit_message_generator.spinner()
+    }
+
     pub(crate) fn fetch_running(&self) -> bool {
         self.session.fetch_running()
     }
@@ -827,6 +831,7 @@ impl App {
                 }
             }
         }
+        changed |= self.commit_message_generator.poll_spinner(Instant::now());
         changed |= {
             let _activity = diagnostics::activity("poll-commit-draft", "");
             self.flush_commit_draft_if_due()

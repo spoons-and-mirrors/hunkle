@@ -22,6 +22,8 @@ const MAX_DIFF_BYTES: usize = 1024 * 1024;
 const MAX_OPENCODE_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 256 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DIFF_START: &str = "--- BEGIN GIT DIFF ---\n";
 const DIFF_END: &str = "\n--- END GIT DIFF ---\n";
 
@@ -49,6 +51,8 @@ pub(crate) struct CommitMessageCompletion {
 pub(crate) struct CommitMessageGenerator {
     available: bool,
     running: bool,
+    spinner_frame: usize,
+    next_spinner: Instant,
     sender: Sender<CommitMessageCompletion>,
     receiver: Receiver<CommitMessageCompletion>,
 }
@@ -69,6 +73,8 @@ impl CommitMessageGenerator {
         Self {
             available,
             running: false,
+            spinner_frame: 0,
+            next_spinner: Instant::now(),
             sender,
             receiver,
         }
@@ -85,6 +91,24 @@ impl CommitMessageGenerator {
 
     pub(crate) fn is_running(&self) -> bool {
         self.running
+    }
+
+    pub(crate) fn spinner(&self) -> &'static str {
+        SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()]
+    }
+
+    pub(crate) fn poll_spinner(&mut self, now: Instant) -> bool {
+        if !self.running {
+            self.spinner_frame = 0;
+            self.next_spinner = now;
+            return false;
+        }
+        if now < self.next_spinner {
+            return false;
+        }
+        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+        self.next_spinner = now + SPINNER_INTERVAL;
+        true
     }
 
     pub(crate) fn start(
@@ -119,6 +143,8 @@ impl CommitMessageGenerator {
             .map_err(|error| format!("Could not start OpenCode: {error}"))?;
 
         self.running = true;
+        self.spinner_frame = 0;
+        self.next_spinner = Instant::now() + SPINNER_INTERVAL;
         diagnostics::event(format!(
             "commit message generation requested root={}",
             root.display()
@@ -437,6 +463,25 @@ mod tests {
             result.unwrap_err(),
             "OpenCode commit message generation panicked"
         );
+    }
+
+    #[test]
+    fn animates_the_braille_spinner_only_while_generating() {
+        let now = Instant::now();
+        let mut generator = CommitMessageGenerator::new(true);
+        generator.running = true;
+        generator.next_spinner = now;
+
+        assert_eq!(generator.spinner(), "⠋");
+        assert!(generator.poll_spinner(now));
+        assert_eq!(generator.spinner(), "⠙");
+        assert!(!generator.poll_spinner(now));
+        assert!(generator.poll_spinner(now + SPINNER_INTERVAL));
+        assert_eq!(generator.spinner(), "⠹");
+
+        generator.running = false;
+        assert!(!generator.poll_spinner(now + SPINNER_INTERVAL * 2));
+        assert_eq!(generator.spinner(), "⠋");
     }
 
     #[test]
