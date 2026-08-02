@@ -13,6 +13,7 @@ mod selection;
 mod theme;
 mod tree;
 mod ui;
+mod workspace_state;
 
 use std::{
     io::{self, Write},
@@ -50,10 +51,11 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui_image::picker::Picker;
 
 fn main() -> Result<()> {
-    let path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir()?);
+    let startup = workspace_state::WorkspaceState::resolve(
+        std::env::args_os().nth(1).map(PathBuf::from),
+        std::env::current_dir()?,
+    );
+    let path = startup.path;
 
     if let Ok(log_path) = diagnostics::init() {
         diagnostics::event(format!(
@@ -76,6 +78,7 @@ fn main() -> Result<()> {
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
     let mut app = App::opening(path.clone());
+    app.set_workspace_state(startup.state);
     let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     if std::env::var_os("HERDR_ENV").is_some() {
         picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);

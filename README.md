@@ -153,6 +153,10 @@ only; enable **Cross-workspace agents** in Settings to include agents from other
 Herdr workspaces. Zoomed tabs must be unzoomed before their layouts can be
 exchanged.
 
+Hunkle remembers the last repository opened in each Herdr pane. Relaunching it
+from the same shell directory restores that repository; changing the shell
+directory or passing an explicit path starts from the requested location instead.
+
 When hunkle runs inside Herdr, press `w` to open the Workspace Manager, a
 responsive modal backed by Herdr's session snapshot. It presents workspace
 hierarchy and agent activity without reducing the width of the main repository

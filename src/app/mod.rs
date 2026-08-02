@@ -84,6 +84,7 @@ pub(super) use crate::{
     repo_path::RepoPath,
     repository_session::{LoadKind, Mutation, RefreshRequest, RepositorySession, WorkerOutcome},
     selection::SelectionState,
+    workspace_state::WorkspaceState,
 };
 
 use actions::{ActionId, action_command, display_git_command, parse_command_args, parse_git_args};
@@ -163,6 +164,7 @@ pub struct App {
     pending_file_selection: Option<RepoPath>,
     workspace_focus_restore_path: Option<PathBuf>,
     pending_workspace_restore: Option<PathBuf>,
+    workspace_state: Option<WorkspaceState>,
     initial_pane_pending: bool,
     recent_fetches: HashMap<PathBuf, Instant>,
     workspace_fetch_pending: bool,
@@ -318,6 +320,7 @@ impl App {
             pending_file_selection: None,
             workspace_focus_restore_path: None,
             pending_workspace_restore: None,
+            workspace_state: None,
             initial_pane_pending,
             recent_fetches: HashMap::new(),
             workspace_fetch_pending: false,
@@ -328,6 +331,10 @@ impl App {
 
     pub(crate) fn repository(&self) -> Option<&RepositoryData> {
         self.session.data()
+    }
+
+    pub(crate) fn set_workspace_state(&mut self, state: Option<WorkspaceState>) {
+        self.workspace_state = state;
     }
 
     pub(crate) fn workspace_loading_initial_state(&self) -> bool {
@@ -1013,6 +1020,15 @@ impl App {
             let follow_up_refresh = done.follow_up_refresh;
             match (done.kind, done.result) {
                 (LoadKind::Open, Ok(())) => {
+                    if let (Some(state), Some(repository)) =
+                        (&self.workspace_state, self.session.data())
+                        && let Err(error) = state.save(&repository.root)
+                    {
+                        diagnostics::event(format!(
+                            "workspace state save failed path={} error={error}",
+                            repository.root.display()
+                        ));
+                    }
                     self.linked_worktrees.set_active_path(
                         self.session
                             .data()
