@@ -465,9 +465,10 @@ pub(super) fn explorer_item(
     let color = change_code
         .map(explorer_file_color)
         .unwrap_or(palette().soft);
+    let icon_color = change_code.map(explorer_file_color).unwrap_or(icon.1);
     ListItem::new(Line::from(vec![
         Span::styled(prefix, Style::default().fg(palette().faint)),
-        Span::styled(format!("{} ", icon.0), Style::default().fg(icon.1)),
+        Span::styled(format!("{} ", icon.0), Style::default().fg(icon_color)),
         Span::styled(label, Style::default().fg(color)),
     ]))
 }

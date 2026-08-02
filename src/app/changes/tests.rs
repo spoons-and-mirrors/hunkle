@@ -205,7 +205,7 @@ fn repository_refresh_preserves_an_active_branch_comparison() {
     );
 
     let selection = state.capture_selection(&repo);
-    state.restore_selection(&repo, selection);
+    state.restore_selection(&repo, selection, true);
 
     assert_eq!(
         state
@@ -216,7 +216,7 @@ fn repository_refresh_preserves_an_active_branch_comparison() {
 
     let stale_selection = state.capture_selection(&repo);
     state.refresh_diff(Some(&repo));
-    state.restore_selection(&repo, stale_selection);
+    state.restore_selection(&repo, stale_selection, true);
     assert!(state.branch_comparison().is_none());
 }
 

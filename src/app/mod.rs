@@ -978,6 +978,9 @@ impl App {
             changed = true;
             let prepared_file_tree = done.prepared_file_tree;
             let follow_up_refresh = done.follow_up_refresh;
+            let refresh_filesystem = done
+                .refresh_scope
+                .is_some_and(RefreshScope::includes_inventory);
             match (done.kind, done.result) {
                 (LoadKind::Open, Ok(())) => {
                     if let (Some(state), Some(repository)) =
@@ -1087,7 +1090,8 @@ impl App {
                         self.graph_state
                             .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
                         self.graph_scroll_to_selection = true;
-                        self.changes.restore_selection(repo, selection);
+                        self.changes
+                            .restore_selection(repo, selection, refresh_filesystem);
                         if let Some(path) = self.pending_file_selection.take() {
                             let viewport = self
                                 .regions

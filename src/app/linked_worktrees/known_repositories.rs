@@ -68,7 +68,6 @@ impl KnownRepositoryStore {
         self.insert(common_dir.clone());
         self.recent.retain(|recent| recent.common_dir != common_dir);
         self.recent.insert(0, RecentRepository { common_dir, root });
-        self.recent.truncate(10);
         if self.repositories == previous_repositories && self.recent == previous_recent {
             return Ok(());
         }
@@ -204,9 +203,6 @@ fn load(path: &Path) -> Result<StoredRepositories, String> {
         })
         .transpose()?
         .unwrap_or_default();
-    if recent.len() > 10 {
-        return Err("Known repositories contain more than 10 recent entries".to_owned());
-    }
     Ok(StoredRepositories {
         repositories,
         recent,

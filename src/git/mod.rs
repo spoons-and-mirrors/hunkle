@@ -132,7 +132,11 @@ impl RefreshScope {
         Self(self.0 | other.0)
     }
 
-    fn includes(self, facet: Self) -> bool {
+    pub(crate) const fn includes_inventory(self) -> bool {
+        self.includes(Self::INVENTORY)
+    }
+
+    const fn includes(self, facet: Self) -> bool {
         self.0 & facet.0 != 0
     }
 }

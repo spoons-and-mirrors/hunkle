@@ -272,11 +272,41 @@ impl LinkedWorktreeCatalog {
         self.snapshot.removal_plan(path)
     }
 
-    pub(crate) fn recent_repositories(&self) -> impl Iterator<Item = (&Path, &Path)> {
-        self.store
-            .recent
+    pub(crate) fn recent_repository_picker_items(
+        &self,
+    ) -> impl Iterator<Item = (&Path, &Path, String, Option<String>)> {
+        let repositories = self
+            .snapshot
+            .repositories
             .iter()
-            .map(|recent| (recent.common_dir.as_path(), recent.root.as_path()))
+            .map(|repository| (repository.common_dir.as_path(), repository))
+            .collect::<HashMap<_, _>>();
+        self.store.recent.iter().map(move |recent| {
+            let repository = repositories.get(recent.common_dir.as_path()).copied();
+            let label = repository
+                .map(|repository| repository.label.clone())
+                .unwrap_or_else(|| repository_label(&recent.common_dir, &[]));
+            let branch = repository
+                .and_then(|repository| {
+                    repository
+                        .worktrees
+                        .iter()
+                        .find(|worktree| worktree.path == recent.root)
+                })
+                .and_then(|worktree| worktree.branch.as_deref())
+                .map(|branch| {
+                    branch
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(branch)
+                        .to_owned()
+                });
+            (
+                recent.common_dir.as_path(),
+                recent.root.as_path(),
+                label,
+                branch,
+            )
+        })
     }
 
     pub(crate) fn remember_repository(

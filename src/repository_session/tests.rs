@@ -115,6 +115,7 @@ fn ignores_superseded_repository_loads() {
         .send(LoadResult {
             generation: 1,
             kind: LoadKind::Open,
+            scope: RefreshScope::ALL,
             fetch_interval: Duration::ZERO,
             result: Ok((LoadPayload::Open(stale_data), Some(signature(99, 1)), None)),
         })
@@ -359,6 +360,7 @@ fn successful_open_automatically_starts_initial_hydration() {
         .send(LoadResult {
             generation: 1,
             kind: LoadKind::Open,
+            scope: RefreshScope::ALL,
             fetch_interval: Duration::ZERO,
             result: Ok((LoadPayload::Open(bootstrap), None, None)),
         })
@@ -466,6 +468,7 @@ fn send_failed_load(session: &RepositorySession, kind: LoadKind) {
         .send(LoadResult {
             generation: session.load_generation,
             kind,
+            scope: session.active_refresh_scope.unwrap_or(RefreshScope::ALL),
             fetch_interval: Duration::ZERO,
             result: Err("load failed".to_owned()),
         })

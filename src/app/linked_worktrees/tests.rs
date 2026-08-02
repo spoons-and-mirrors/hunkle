@@ -188,7 +188,7 @@ fn persists_repository_identity_and_recent_order() {
         .unwrap();
 
     let restored = LinkedWorktreeCatalog::new(Some(path));
-    assert_eq!(restored.store.recent.len(), 10);
+    assert_eq!(restored.store.recent.len(), 12);
     assert_eq!(
         restored.store.recent[0].common_dir,
         Path::new("/repo-5/.git")

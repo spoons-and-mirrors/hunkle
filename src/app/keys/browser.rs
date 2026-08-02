@@ -103,33 +103,27 @@ impl App {
             .unwrap_or_default();
         let items = self
             .linked_worktrees
-            .recent_repositories()
-            .map(|(common_dir, root)| HeaderPickerItem::Repository {
-                path: root.to_owned(),
-                common_dir: common_dir.to_owned(),
-                stats: if current_common_dir
-                    .as_deref()
-                    .is_some_and(|current| same_path(current, common_dir))
-                {
-                    current_stats
-                } else {
-                    None
-                },
-                branch: if current_common_dir
-                    .as_deref()
-                    .is_some_and(|current| same_path(current, common_dir))
-                {
-                    current_branch.clone()
-                } else {
-                    None
-                },
+            .recent_repository_picker_items()
+            .map(|(common_dir, root, label, known_branch)| {
+                let current = current_common_dir.as_deref() == Some(common_dir);
+                HeaderPickerItem::Repository {
+                    path: root.to_owned(),
+                    common_dir: common_dir.to_owned(),
+                    label,
+                    stats: if current { current_stats } else { None },
+                    branch: if current {
+                        current_branch.clone()
+                    } else {
+                        known_branch
+                    },
+                }
             })
             .collect::<Vec<_>>();
         let selected = current_common_dir
             .as_deref()
             .and_then(|current| {
                 items.iter().position(|item| {
-                    matches!(item, HeaderPickerItem::Repository { common_dir, .. } if same_path(common_dir, current))
+                    matches!(item, HeaderPickerItem::Repository { common_dir, .. } if common_dir == current)
                 })
             })
             .unwrap_or(0);

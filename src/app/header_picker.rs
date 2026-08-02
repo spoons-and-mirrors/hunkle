@@ -28,6 +28,7 @@ pub(crate) enum HeaderPickerItem {
     Repository {
         common_dir: PathBuf,
         path: PathBuf,
+        label: String,
         stats: Option<(u64, u64)>,
         branch: Option<String>,
     },
@@ -48,6 +49,7 @@ pub(crate) enum HeaderPickerItem {
 
 #[derive(Debug)]
 struct ChangeDetailsCompletion {
+    index: usize,
     path: PathBuf,
     stats: Option<(u64, u64)>,
     branch: Option<String>,
@@ -66,6 +68,7 @@ pub(crate) struct HeaderPicker {
     pub(crate) kind: Option<HeaderPickerKind>,
     pub(crate) items: Vec<HeaderPickerItem>,
     all_items: Vec<HeaderPickerItem>,
+    searchable_items: Vec<String>,
     default_selected: usize,
     searchable: bool,
     pub(crate) selected: usize,
@@ -95,6 +98,10 @@ impl HeaderPicker {
         self.scroll = 0;
         self.viewport_rows = 0;
         self.scroll_follows_selection = true;
+        self.searchable_items = items
+            .iter()
+            .map(HeaderPickerItem::normalized_search_text)
+            .collect();
         self.items.clone_from(&items);
         self.all_items = items;
         self.message = None;
@@ -110,6 +117,7 @@ impl HeaderPicker {
         self.kind = Some(kind);
         self.items.clear();
         self.all_items.clear();
+        self.searchable_items.clear();
         self.default_selected = 0;
         self.searchable = false;
         self.selected = 0;
@@ -133,6 +141,10 @@ impl HeaderPicker {
         self.scroll = 0;
         self.viewport_rows = 0;
         self.scroll_follows_selection = true;
+        self.searchable_items = items
+            .iter()
+            .map(HeaderPickerItem::normalized_search_text)
+            .collect();
         self.items.clone_from(&items);
         self.all_items = items;
         self.message = None;
@@ -152,6 +164,7 @@ impl HeaderPicker {
         self.scroll_follows_selection = true;
         self.items.clear();
         self.all_items.clear();
+        self.searchable_items.clear();
         self.default_selected = 0;
         self.searchable = false;
         self.message = None;
@@ -167,6 +180,7 @@ impl HeaderPicker {
         self.kind = None;
         self.items.clear();
         self.all_items.clear();
+        self.searchable_items.clear();
         self.default_selected = 0;
         self.searchable = false;
         self.selected = 0;
@@ -192,8 +206,15 @@ impl HeaderPicker {
             .all_items
             .iter()
             .filter_map(|item| match item {
-                HeaderPickerItem::Repository { path, .. } => Some((path.clone(), true)),
-                HeaderPickerItem::Worktree { worktree, .. } => Some((worktree.path.clone(), false)),
+                HeaderPickerItem::Repository {
+                    path,
+                    stats,
+                    branch,
+                    ..
+                } => Some((path.clone(), stats.is_none(), branch.is_none())),
+                HeaderPickerItem::Worktree { worktree, stats } => {
+                    Some((worktree.path.clone(), stats.is_none(), false))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -206,11 +227,14 @@ impl HeaderPicker {
         let _ = thread::Builder::new()
             .name("header-picker-change-details".to_owned())
             .spawn(move || {
-                for (path, load_branch) in paths {
-                    let stats = git::load_change_line_counts(&path).ok();
+                for (index, (path, load_stats, load_branch)) in paths.into_iter().enumerate() {
+                    let stats = load_stats
+                        .then(|| git::load_change_line_counts(&path).ok())
+                        .flatten();
                     let branch = load_branch.then(|| git::branch_name(&path).ok()).flatten();
                     if sender
                         .send(ChangeDetailsCompletion {
+                            index,
                             path,
                             stats,
                             branch,
@@ -243,19 +267,39 @@ impl HeaderPicker {
         let mut changed = false;
         let mut searchable_changed = false;
         for completion in completions {
-            let (all_changed, all_searchable_changed) = Self::update_change_details(
+            let (_, all_searchable_changed) = Self::update_change_details_at(
                 &mut self.all_items,
+                completion.index,
                 &completion.path,
                 completion.stats,
                 completion.branch.as_deref(),
             );
-            let (visible_changed, visible_searchable_changed) = Self::update_change_details(
-                &mut self.items,
-                &completion.path,
-                completion.stats,
-                completion.branch.as_deref(),
-            );
-            changed |= all_changed || visible_changed;
+            if all_searchable_changed
+                && let Some(item) = self.all_items.get(completion.index)
+                && let Some(searchable) = self.searchable_items.get_mut(completion.index)
+            {
+                *searchable = item.normalized_search_text();
+            }
+            let (visible_changed, visible_searchable_changed) = if self.query.is_empty() {
+                Self::update_change_details_at(
+                    &mut self.items,
+                    completion.index,
+                    &completion.path,
+                    completion.stats,
+                    completion.branch.as_deref(),
+                )
+            } else {
+                Self::update_change_details(
+                    &mut self.items,
+                    &completion.path,
+                    completion.stats,
+                    completion.branch.as_deref(),
+                )
+            };
+            let completion_is_visible = !self.query.is_empty()
+                || (completion.index >= self.scroll
+                    && completion.index < self.scroll.saturating_add(self.viewport_rows));
+            changed |= visible_changed && completion_is_visible;
             searchable_changed |= all_searchable_changed || visible_searchable_changed;
         }
         if disconnected {
@@ -263,6 +307,7 @@ impl HeaderPicker {
         }
         if searchable_changed && !self.query.is_empty() {
             self.apply_filter();
+            changed = true;
         }
         changed
     }
@@ -314,6 +359,19 @@ impl HeaderPicker {
         (changed, searchable_changed)
     }
 
+    fn update_change_details_at(
+        items: &mut [HeaderPickerItem],
+        index: usize,
+        path: &Path,
+        stats: Option<(u64, u64)>,
+        branch: Option<&str>,
+    ) -> (bool, bool) {
+        let Some(item) = items.get_mut(index) else {
+            return (false, false);
+        };
+        Self::update_change_details(std::slice::from_mut(item), path, stats, branch)
+    }
+
     pub(crate) fn is_open(&self) -> bool {
         self.kind.is_some()
     }
@@ -346,10 +404,9 @@ impl HeaderPicker {
         self.items = self
             .all_items
             .iter()
-            .filter(|item| {
-                let searchable = item.searchable_text().to_lowercase();
-                terms.iter().all(|term| searchable.contains(term))
-            })
+            .zip(&self.searchable_items)
+            .filter(|(_, searchable)| terms.iter().all(|term| searchable.contains(term)))
+            .map(|(item, _)| item)
             .cloned()
             .collect();
         self.selected = 0;
@@ -410,11 +467,20 @@ impl HeaderPicker {
 }
 
 impl HeaderPickerItem {
+    fn normalized_search_text(&self) -> String {
+        self.searchable_text().to_lowercase()
+    }
+
     fn searchable_text(&self) -> String {
         match self {
-            Self::Repository { path, branch, .. } => {
+            Self::Repository {
+                path,
+                label,
+                branch,
+                ..
+            } => {
                 format!(
-                    "{} {}",
+                    "{label} {} {}",
                     path.display(),
                     branch.as_deref().unwrap_or_default()
                 )
@@ -478,6 +544,26 @@ mod tests {
             0,
         );
         picker.query.insert("topic");
+        picker.apply_filter();
+
+        assert_eq!(picker.items.len(), 1);
+    }
+
+    #[test]
+    fn filters_repositories_by_precomputed_label() {
+        let mut picker = HeaderPicker::default();
+        picker.open(
+            HeaderPickerKind::Repositories,
+            vec![HeaderPickerItem::Repository {
+                common_dir: PathBuf::from("/tmp/catalog/.git"),
+                path: PathBuf::from("/tmp/catalog"),
+                label: "project-catalog".to_owned(),
+                stats: None,
+                branch: Some("main".to_owned()),
+            }],
+            0,
+        );
+        picker.query.insert("project-catalog");
         picker.apply_filter();
 
         assert_eq!(picker.items.len(), 1);

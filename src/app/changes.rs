@@ -247,10 +247,17 @@ impl ChangesState {
         }
     }
 
-    pub(super) fn restore_selection(&mut self, repo: &RepositoryData, selection: ChangesSelection) {
+    pub(super) fn restore_selection(
+        &mut self,
+        repo: &RepositoryData,
+        selection: ChangesSelection,
+        refresh_filesystem: bool,
+    ) {
         let branch_comparison = self.branch_comparison.clone();
         self.rebuild_worktree_rows(Some(repo));
-        self.refresh_explorer_directories(repo);
+        if refresh_filesystem {
+            self.refresh_explorer_directories(repo);
+        }
         self.rebuild_explorer_rows(Some(repo));
 
         let change_index = selection.change.and_then(|(path, staged)| {
@@ -1343,6 +1350,9 @@ impl ChangesState {
     pub(super) fn poll_directories(&mut self, repo: Option<&RepositoryData>) -> bool {
         let mut changed = false;
         let mut directories_changed = false;
+        let mut selected_index = None;
+        let mut selected_offset = None;
+        let mut selected = None;
         while let Some(completion) = self.directory_loader.poll() {
             let Some(repo) = repo else {
                 continue;
@@ -1379,13 +1389,19 @@ impl ChangesState {
                 }
             };
             self.failed_directories.remove(&completion.directory);
-            let selected_index = self.explorer_state.selected();
-            let selected_offset =
-                selected_index.map(|index| index.saturating_sub(self.explorer_scroll));
-            let selected = selected_index.and_then(|index| self.explorer_entry(repo, index));
+            if !directories_changed {
+                selected_index = self.explorer_state.selected();
+                selected_offset =
+                    selected_index.map(|index| index.saturating_sub(self.explorer_scroll));
+                selected = selected_index.and_then(|index| self.explorer_entry(repo, index));
+            }
             if let Some(tree) = &mut self.file_tree {
                 tree.replace_directory(completion.directory, entries);
             }
+            changed = true;
+            directories_changed = true;
+        }
+        if directories_changed {
             self.rebuild_explorer_rows(None);
             if let Some(selected) = selected {
                 let row = self.explorer_rows().iter().position(|row| {
@@ -1401,8 +1417,6 @@ impl ChangesState {
                 self.explorer_state.select(self.initial_explorer_row());
                 self.explorer_scroll = 0;
             }
-            changed = true;
-            directories_changed = true;
         }
         if directories_changed && self.branch_comparison.is_some() {
             return changed;
@@ -1430,7 +1444,10 @@ impl ChangesState {
     }
 
     fn rebuild_explorer_rows(&mut self, repo: Option<&RepositoryData>) {
-        self.sync_repository_caches(repo);
+        // Directory completions do not carry repository data and must not clear Git status.
+        if repo.is_some() {
+            self.sync_repository_caches(repo);
+        }
         let rows = self.file_tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.rows_expanded(&self.expanded_explorer_directories)
         });

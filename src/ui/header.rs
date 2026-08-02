@@ -363,11 +363,8 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         1
     };
-    let visible_items = usize::from(
-        available_height
-            .saturating_sub(u16::try_from(picker_chrome).unwrap_or(u16::MAX))
-            .min(10),
-    );
+    let visible_items =
+        header_picker_visible_items(frame.area().height, available_height, picker_chrome);
     let row_count = if naming_branch {
         2
     } else if app.header_picker.items.is_empty() {
@@ -559,22 +556,13 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             let (label, detail, branch, current, minimum_label_width, stats, columnar) = match item
             {
                 HeaderPickerItem::Repository {
-                    common_dir,
                     path,
+                    label,
                     stats,
                     branch,
+                    common_dir,
                 } => (
-                    app.linked_worktrees
-                        .repository(common_dir)
-                        .map(|repository| repository.label.clone())
-                        .unwrap_or_else(|| {
-                            common_dir
-                                .file_name()
-                                .filter(|name| *name != ".git")
-                                .or_else(|| common_dir.parent().and_then(|path| path.file_name()))
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| "repository".to_owned())
-                        }),
+                    label.clone(),
                     path.display().to_string(),
                     Some(branch.clone().unwrap_or_default()),
                     current_common_dir.is_some_and(|current| current == common_dir),
@@ -763,6 +751,15 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         app.regions
             .register_hit_target(HitTarget::HeaderPickerItem(index), rect);
     }
+}
+
+fn header_picker_visible_items(screen_height: u16, available_height: u16, chrome: usize) -> usize {
+    let maximum_height = screen_height.saturating_mul(4) / 5;
+    usize::from(
+        available_height
+            .min(maximum_height)
+            .saturating_sub(u16::try_from(chrome).unwrap_or(u16::MAX)),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -966,4 +963,15 @@ pub(super) fn draw_half_padding(
             .style(Style::default().fg(foreground).bg(background)),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::header_picker_visible_items;
+
+    #[test]
+    fn header_pickers_use_at_most_eighty_percent_of_the_screen() {
+        assert_eq!(header_picker_visible_items(40, 39, 4), 28);
+        assert_eq!(header_picker_visible_items(40, 20, 4), 16);
+    }
 }

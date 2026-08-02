@@ -278,10 +278,100 @@ fn colors_changed_files_in_the_files_view() {
             .position(|row| row.file_path.as_ref().is_some_and(|file| file == path))
             .unwrap();
         let row = &rows[row_index];
-        let x = list.x + row.prefix.chars().count() as u16 + 2;
+        let icon_x = list.x + row.prefix.chars().count() as u16;
+        let x = icon_x + 2;
         let y = list.y + row_index.saturating_sub(app.changes.explorer_scroll) as u16;
+        assert_eq!(
+            terminal.backend().buffer()[(icon_x, y)].fg,
+            expected,
+            "{path} icon"
+        );
         assert_eq!(terminal.backend().buffer()[(x, y)].fg, expected, "{path}");
     }
+}
+
+#[test]
+fn refreshes_file_and_folder_colors_after_the_worktree_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Refresh Test"]);
+    run_git(root, &["config", "user.email", "refresh@example.com"]);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+
+    let mut app = App::new(root.to_path_buf());
+    app.changes.pane = LeftPane::Files;
+    app.agents_visible = false;
+    fs::write(
+        root.join("src/main.rs"),
+        "fn main() { println!(\"changed\"); }\n",
+    )
+    .unwrap();
+    app.session.schedule_status_check_now();
+    wait_for(&mut app, |app| {
+        app.repository().is_some_and(|repo| {
+            repo.changes
+                .iter()
+                .any(|change| change.path == "src/main.rs" && change.code == 'M')
+        })
+    });
+
+    let src = app
+        .changes
+        .explorer_rows()
+        .iter()
+        .position(|row| {
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "src")
+        })
+        .unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.explorer_list.unwrap();
+    let row = &app.changes.explorer_rows()[src];
+    let folder_x = list.x + UnicodeWidthStr::width(row.prefix.as_str()) as u16;
+    let folder_y = list.y + src.saturating_sub(app.changes.explorer_scroll) as u16;
+    assert_eq!(
+        terminal.backend().buffer()[(folder_x, folder_y)].fg,
+        super::palette().yellow
+    );
+
+    app.changes.explorer_state.select(Some(src));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for(&mut app, |app| {
+        app.changes.explorer_rows().iter().any(|row| {
+            row.file_path
+                .as_ref()
+                .is_some_and(|path| path == "src/main.rs")
+        })
+    });
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.explorer_list.unwrap();
+    let rows = app.changes.explorer_rows();
+    let main = rows
+        .iter()
+        .position(|row| {
+            row.file_path
+                .as_ref()
+                .is_some_and(|path| path == "src/main.rs")
+        })
+        .unwrap();
+    let row = &rows[main];
+    let icon_x = list.x + UnicodeWidthStr::width(row.prefix.as_str()) as u16;
+    let label_x = icon_x + 2;
+    let y = list.y + main.saturating_sub(app.changes.explorer_scroll) as u16;
+    assert_eq!(
+        terminal.backend().buffer()[(icon_x, y)].fg,
+        super::palette().yellow
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(label_x, y)].fg,
+        super::palette().yellow
+    );
 }
 
 #[test]
