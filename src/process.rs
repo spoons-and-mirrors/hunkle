@@ -1,7 +1,11 @@
 use std::{
     io::{self, Read, Write},
     process::{Command, ExitStatus, Stdio},
-    sync::mpsc::{self, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, TryRecvError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -38,10 +42,19 @@ pub(crate) struct Output {
     pub(crate) stdout_truncated: bool,
     pub(crate) stderr_truncated: bool,
     pub(crate) timed_out: bool,
+    pub(crate) cancelled: bool,
 }
 
 pub(crate) fn run(command: &mut Command, limits: Limits) -> io::Result<Output> {
-    run_inner(command, None, limits)
+    run_inner(command, None, limits, None)
+}
+
+pub(crate) fn run_cancellable(
+    command: &mut Command,
+    limits: Limits,
+    cancel: Arc<AtomicBool>,
+) -> io::Result<Output> {
+    run_inner(command, None, limits, Some(cancel))
 }
 
 pub(crate) fn run_with_input(
@@ -49,10 +62,15 @@ pub(crate) fn run_with_input(
     input: Vec<u8>,
     limits: Limits,
 ) -> io::Result<Output> {
-    run_inner(command, Some(input), limits)
+    run_inner(command, Some(input), limits, None)
 }
 
-fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> io::Result<Output> {
+fn run_inner(
+    command: &mut Command,
+    input: Option<Vec<u8>>,
+    limits: Limits,
+    cancel: Option<Arc<AtomicBool>>,
+) -> io::Result<Output> {
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -103,7 +121,7 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
         let mut stdout_result = None;
         let mut stderr_result = None;
         let mut input_finished = input_receiver.is_none();
-        let timed_out = loop {
+        let (timed_out, cancelled) = loop {
             if status.is_none() {
                 status = child.try_wait()?;
             }
@@ -127,7 +145,21 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
                 && stderr_result.is_some()
                 && input_finished
             {
-                break false;
+                break (false, false);
+            }
+            if cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+            {
+                match child.start_kill() {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                if status.is_none() {
+                    status = Some(child.wait()?);
+                }
+                break (false, true);
             }
             if started.elapsed() >= limits.timeout {
                 match child.start_kill() {
@@ -138,12 +170,12 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
                 if status.is_none() {
                     status = Some(child.wait()?);
                 }
-                break true;
+                break (true, false);
             }
             thread::sleep(Duration::from_millis(10));
         };
 
-        if timed_out {
+        if timed_out || cancelled {
             let deadline = Instant::now() + Duration::from_secs(1);
             while (stdout_result.is_none() || stderr_result.is_none() || !input_finished)
                 && Instant::now() < deadline
@@ -184,6 +216,7 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
             stdout_truncated,
             stderr_truncated,
             timed_out,
+            cancelled,
         })
     })();
     if result.is_err() {
@@ -230,7 +263,10 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<(Vec<u8>, boo
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{
+        io::Cursor,
+        sync::{Arc, atomic::AtomicBool},
+    };
 
     use super::read_bounded;
 
@@ -257,6 +293,25 @@ mod tests {
         .unwrap();
 
         assert!(output.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_terminates_the_process_group() {
+        use std::{process::Command, time::Duration};
+
+        use super::{Limits, run_cancellable};
+
+        let started = std::time::Instant::now();
+        let output = run_cancellable(
+            Command::new("sh").args(["-c", "sleep 10 & wait"]),
+            Limits::new(1024, 1024, Duration::from_secs(30)),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+
+        assert!(output.cancelled);
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
