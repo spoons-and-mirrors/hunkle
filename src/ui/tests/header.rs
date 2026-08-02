@@ -1,6 +1,58 @@
 use super::*;
 
 #[test]
+fn repository_picker_labels_linked_worktrees_by_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("hunkle");
+    fs::create_dir(&root).unwrap();
+    run_git(&root, &["init", "-b", "main"]);
+    run_git(&root, &["config", "user.name", "Header Test"]);
+    run_git(&root, &["config", "user.email", "header@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(&root, &["add", "tracked.txt"]);
+    run_git(&root, &["commit", "-m", "initial"]);
+    let linked = directory.path().join("hunkle-restructure");
+    run_git(
+        &root,
+        &["worktree", "add", "-b", "dev", linked.to_str().unwrap()],
+    );
+
+    let mut app = App::new(linked.clone());
+    wait_for(&mut app, |app| {
+        app.repository().is_some_and(|repository| {
+            repository.details_ready
+                && repository.root == linked
+                && app
+                    .linked_worktrees
+                    .repository(repository.common_dir.as_deref().unwrap())
+                    .is_some()
+        })
+    });
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let repository = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderRepository)
+        .unwrap();
+    click(&mut app, repository.x, repository.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(0))
+        .unwrap();
+    let label = (row.x..row.x.saturating_add(24).min(row.right()))
+        .map(|x| terminal.backend().buffer()[(x, row.y)].symbol())
+        .collect::<String>();
+    let rendered = (row.x..row.right())
+        .map(|x| terminal.backend().buffer()[(x, row.y)].symbol())
+        .collect::<String>();
+    assert!(label.contains("hunkle"));
+    assert!(!label.contains("hunkle-restructure"));
+    assert!(rendered.contains("hunkle-restructure"));
+}
+
+#[test]
 fn header_cards_open_pickers_and_checkout_branches() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("repository");

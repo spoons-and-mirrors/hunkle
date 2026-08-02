@@ -564,10 +564,17 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     stats,
                     branch,
                 } => (
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("repository")
-                        .to_owned(),
+                    app.linked_worktrees
+                        .repository(common_dir)
+                        .map(|repository| repository.label.clone())
+                        .unwrap_or_else(|| {
+                            common_dir
+                                .file_name()
+                                .filter(|name| *name != ".git")
+                                .or_else(|| common_dir.parent().and_then(|path| path.file_name()))
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "repository".to_owned())
+                        }),
                     path.display().to_string(),
                     Some(branch.clone().unwrap_or_default()),
                     current_common_dir.is_some_and(|current| current == common_dir),
