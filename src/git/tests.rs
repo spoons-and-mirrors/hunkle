@@ -764,6 +764,50 @@ fn scoped_refresh_updates_only_requested_facets() {
 }
 
 #[test]
+fn external_content_changes_do_not_refresh_the_inventory() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.name", "Test Author"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    fs::write(root.join("tracked.txt"), "base\n").unwrap();
+    git(root, &["add", "tracked.txt"]);
+    git(root, &["commit", "-m", "base"]);
+
+    let clean = worktree_signature(root).unwrap();
+    fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+    let modified = worktree_signature(root).unwrap();
+    assert_eq!(modified.refresh_scope_since(clean), RefreshScope::WORKTREE);
+}
+
+#[test]
+fn external_path_changes_refresh_the_inventory() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-b", "main"]);
+
+    let clean = worktree_signature(root).unwrap();
+    fs::write(root.join("new.txt"), "new\n").unwrap();
+    let added = worktree_signature(root).unwrap();
+    assert_eq!(
+        added.refresh_scope_since(clean),
+        RefreshScope::WORKTREE_AND_INVENTORY
+    );
+}
+
+#[test]
+fn inventory_changes_identify_only_affected_parent_directories() {
+    let mut directories = HashSet::new();
+    collect_changed_parents(
+        &["README.md".into(), "src/old.rs".into()],
+        &["README.md".into(), "src/new.rs".into()],
+        &mut directories,
+    );
+
+    assert_eq!(directories, HashSet::from([RepoPath::from("src")]));
+}
+
+#[test]
 fn parses_batched_commit_change_summaries() {
     let summaries = parse_commit_summaries(
             b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0\0\n12\t3\tsrc/app.rs\0-\t-\tassets/logo\x1e.png\0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\0\0\n4\t0\tREADME.md\0",

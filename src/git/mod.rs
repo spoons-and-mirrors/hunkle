@@ -2,7 +2,7 @@ mod graph;
 mod inventory;
 
 pub(super) use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fs::{self, OpenOptions},
     hash::{Hash, Hasher},
     io::{BufRead, BufReader, Read},
@@ -110,7 +110,16 @@ pub struct RepositoryData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WorktreeSignature {
     state: u64,
+    inventory: u64,
     branch: u64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) enum InventoryRefresh {
+    #[default]
+    Unchanged,
+    All,
+    Directories(Vec<RepoPath>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,10 +141,6 @@ impl RefreshScope {
         Self(self.0 | other.0)
     }
 
-    pub(crate) const fn includes_inventory(self) -> bool {
-        self.includes(Self::INVENTORY)
-    }
-
     const fn includes(self, facet: Self) -> bool {
         self.0 & facet.0 != 0
     }
@@ -143,16 +148,22 @@ impl RefreshScope {
 
 impl WorktreeSignature {
     pub(crate) fn refresh_scope_since(self, previous: Self) -> RefreshScope {
-        if self.branch == previous.branch {
+        if self.branch != previous.branch {
+            RefreshScope::ALL
+        } else if self.inventory != previous.inventory {
             RefreshScope::WORKTREE_AND_INVENTORY
         } else {
-            RefreshScope::ALL
+            RefreshScope::WORKTREE
         }
     }
 
     #[cfg(test)]
     pub(crate) const fn for_test(state: u64, branch: u64) -> Self {
-        Self { state, branch }
+        Self {
+            state,
+            inventory: state,
+            branch,
+        }
     }
 }
 
@@ -243,6 +254,67 @@ impl RepositoryData {
 impl RepositoryUpdate {
     pub(crate) fn worktree_signature(&self) -> Option<WorktreeSignature> {
         self.worktree.as_ref().map(|worktree| worktree.signature)
+    }
+
+    pub(crate) fn inventory_refresh(&self, repository: &RepositoryData) -> InventoryRefresh {
+        let Some(inventory) = &self.inventory else {
+            return InventoryRefresh::Unchanged;
+        };
+        if inventory.fingerprint == repository.files_fingerprint {
+            return InventoryRefresh::Unchanged;
+        }
+        if inventory.truncated || repository.inventory_truncated {
+            return InventoryRefresh::All;
+        }
+
+        let mut directories = HashSet::new();
+        collect_changed_parents(&repository.files, &inventory.files, &mut directories);
+        collect_changed_parents(
+            &repository.directories,
+            &inventory.directories,
+            &mut directories,
+        );
+        let mut directories: Vec<_> = directories.into_iter().collect();
+        directories.sort_unstable();
+        InventoryRefresh::Directories(directories)
+    }
+}
+
+fn collect_changed_parents(
+    previous: &[RepoPath],
+    current: &[RepoPath],
+    directories: &mut HashSet<RepoPath>,
+) {
+    let mut previous_index = 0;
+    let mut current_index = 0;
+    while previous_index < previous.len() || current_index < current.len() {
+        let changed = match (previous.get(previous_index), current.get(current_index)) {
+            (Some(previous), Some(current)) => match previous.cmp(current) {
+                std::cmp::Ordering::Less => {
+                    previous_index += 1;
+                    previous
+                }
+                std::cmp::Ordering::Greater => {
+                    current_index += 1;
+                    current
+                }
+                std::cmp::Ordering::Equal => {
+                    previous_index += 1;
+                    current_index += 1;
+                    continue;
+                }
+            },
+            (Some(previous), None) => {
+                previous_index += 1;
+                previous
+            }
+            (None, Some(current)) => {
+                current_index += 1;
+                current
+            }
+            (None, None) => break,
+        };
+        directories.insert(changed.parent().unwrap_or_default());
     }
 }
 

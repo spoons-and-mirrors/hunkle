@@ -12,7 +12,7 @@ use image::DynamicImage;
 use ratatui::widgets::ListState;
 
 use crate::{
-    git::{Branch, Change, Commit, RepositoryData},
+    git::{Branch, Change, Commit, InventoryRefresh, RepositoryData},
     repo_path::RepoPath,
     tree::{ExplorerRow, FileTree, PreparedFileTree, WorktreeRow, WorktreeSection, WorktreeTree},
     ui::preview::PreviewPresentation,
@@ -251,14 +251,11 @@ impl ChangesState {
         &mut self,
         repo: &RepositoryData,
         selection: ChangesSelection,
-        refresh_filesystem: bool,
+        inventory_refresh: InventoryRefresh,
     ) {
         let branch_comparison = self.branch_comparison.clone();
         self.rebuild_worktree_rows(Some(repo));
-        if refresh_filesystem {
-            self.refresh_explorer_directories(repo);
-        }
-        self.rebuild_explorer_rows(Some(repo));
+        self.refresh_explorer_directories(repo, inventory_refresh);
 
         let change_index = selection.change.and_then(|(path, staged)| {
             repo.changes
@@ -1389,14 +1386,18 @@ impl ChangesState {
                 }
             };
             self.failed_directories.remove(&completion.directory);
+            let replaced = self
+                .file_tree
+                .as_mut()
+                .is_some_and(|tree| tree.replace_directory(completion.directory, entries));
+            if !replaced {
+                continue;
+            }
             if !directories_changed {
                 selected_index = self.explorer_state.selected();
                 selected_offset =
                     selected_index.map(|index| index.saturating_sub(self.explorer_scroll));
                 selected = selected_index.and_then(|index| self.explorer_entry(repo, index));
-            }
-            if let Some(tree) = &mut self.file_tree {
-                tree.replace_directory(completion.directory, entries);
             }
             changed = true;
             directories_changed = true;
@@ -1471,13 +1472,21 @@ impl ChangesState {
             .file_tree
             .as_ref()
             .is_some_and(|tree| tree.has_directory(&directory));
-        if (loaded && !self.failed_directories.remove(&directory))
-            || !self.loading_directories.insert(directory.clone())
-        {
+        let retry_failed = self.failed_directories.remove(&directory);
+        if loaded && !retry_failed {
+            if self.loading_directories.contains(&directory) {
+                self.directory_loader
+                    .prioritize(self.directory_generation, &directory);
+            }
+            return;
+        }
+        if !self.loading_directories.insert(directory.clone()) {
+            self.directory_loader
+                .prioritize(self.directory_generation, &directory);
             return;
         }
         self.directory_loader
-            .request(self.directory_generation, &repo.root, directory);
+            .request_interactive(self.directory_generation, &repo.root, directory);
     }
 
     fn request_explorer_ancestors(&mut self, repo: &RepositoryData, path: &RepoPath) {
@@ -1493,20 +1502,38 @@ impl ChangesState {
         }
     }
 
-    fn refresh_explorer_directories(&mut self, repo: &RepositoryData) {
-        self.directory_generation = self.directory_generation.wrapping_add(1);
-        self.loading_directories.clear();
-        let mut directories = self
-            .file_tree
-            .as_ref()
-            .map_or_else(Vec::new, FileTree::loaded_directories);
-        if !directories.iter().any(RepoPath::is_empty) {
+    fn refresh_explorer_directories(&mut self, repo: &RepositoryData, refresh: InventoryRefresh) {
+        if refresh == InventoryRefresh::Unchanged {
+            return;
+        }
+        let pending: Vec<_> = self.loading_directories.drain().collect();
+        let tree = self.file_tree.as_ref();
+        let refresh_all = refresh == InventoryRefresh::All;
+        let mut directories = match refresh {
+            InventoryRefresh::Unchanged => unreachable!(),
+            InventoryRefresh::All => tree.map_or_else(Vec::new, FileTree::loaded_directories),
+            InventoryRefresh::Directories(directories) => directories
+                .into_iter()
+                .filter(|directory| tree.is_some_and(|tree| tree.has_directory(directory)))
+                .collect(),
+        };
+        directories.extend(pending);
+        directories.sort_unstable();
+        directories.dedup();
+        if refresh_all && !directories.iter().any(RepoPath::is_empty) {
             directories.push(RepoPath::default());
         }
+        if directories.is_empty() {
+            return;
+        }
+        self.directory_generation = self.directory_generation.wrapping_add(1);
         for directory in directories {
             self.loading_directories.insert(directory.clone());
-            self.directory_loader
-                .request(self.directory_generation, &repo.root, directory);
+            self.directory_loader.request_background(
+                self.directory_generation,
+                &repo.root,
+                directory,
+            );
         }
     }
 

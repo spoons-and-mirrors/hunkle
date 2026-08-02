@@ -12,7 +12,8 @@ use crate::{
     filesystem::{self, FileOperation},
     formatter::{self, FormatCommand},
     git::{
-        self, Change, CommandOutput, RefreshScope, RepositoryData, RepositoryKind, RepositoryUpdate,
+        self, Change, CommandOutput, InventoryRefresh, RefreshScope, RepositoryData,
+        RepositoryKind, RepositoryUpdate,
     },
     repo_path::RepoPath,
     tree::PreparedFileTree,
@@ -131,7 +132,7 @@ pub(crate) enum RefreshRequest {
 
 pub(crate) struct LoadCompletion {
     pub(crate) kind: LoadKind,
-    pub(crate) refresh_scope: Option<RefreshScope>,
+    pub(crate) inventory_refresh: InventoryRefresh,
     pub(crate) result: Result<(), String>,
     pub(crate) prepared_file_tree: Option<PreparedFileTree>,
     pub(crate) follow_up_refresh: Option<RefreshRequest>,
@@ -177,7 +178,6 @@ struct StatusResult {
 struct LoadResult {
     generation: u64,
     kind: LoadKind,
-    scope: RefreshScope,
     fetch_interval: Duration,
     result: Result<
         (
@@ -397,6 +397,7 @@ impl RepositorySession {
             if done.kind == LoadKind::Reload {
                 self.active_refresh_scope = None;
             }
+            let mut inventory_refresh = InventoryRefresh::Unchanged;
             let (result, prepared_file_tree) = match done.result {
                 Ok((payload, signature, prepared_file_tree)) => {
                     if done.kind == LoadKind::Open {
@@ -412,11 +413,14 @@ impl RepositorySession {
                                 diagnostics::drop_in_background("repository-data", previous);
                             }
                         }
-                        LoadPayload::Refresh(update) => self
-                            .data
-                            .as_mut()
-                            .expect("refresh completed without repository data")
-                            .apply(update),
+                        LoadPayload::Refresh(update) => {
+                            let repository = self
+                                .data
+                                .as_mut()
+                                .expect("refresh completed without repository data");
+                            inventory_refresh = update.inventory_refresh(repository);
+                            repository.apply(update);
+                        }
                     }
                     (Ok(()), prepared_file_tree)
                 }
@@ -449,7 +453,7 @@ impl RepositorySession {
                 follow_up_scope.and_then(|scope| self.request_refresh(scope, done.fetch_interval));
             return Some(LoadCompletion {
                 kind: done.kind,
-                refresh_scope: (done.kind == LoadKind::Reload).then_some(done.scope),
+                inventory_refresh,
                 result,
                 prepared_file_tree,
                 follow_up_refresh,
@@ -1039,7 +1043,6 @@ impl RepositorySession {
             let _ = sender.send(LoadResult {
                 generation,
                 kind,
-                scope,
                 fetch_interval,
                 result,
             });

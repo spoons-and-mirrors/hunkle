@@ -74,12 +74,19 @@ impl FileTree {
             directories: HashMap::new(),
         };
         if let Ok(entries) = read_workspace_directory(root, &RepoPath::default()) {
-            tree.replace_directory(RepoPath::default(), entries);
+            let _ = tree.replace_directory(RepoPath::default(), entries);
         }
         tree
     }
 
-    pub(crate) fn replace_directory(&mut self, directory: RepoPath, entries: Vec<WorkspaceEntry>) {
+    pub(crate) fn replace_directory(
+        &mut self,
+        directory: RepoPath,
+        entries: Vec<WorkspaceEntry>,
+    ) -> bool {
+        if self.directories.get(&directory) == Some(&entries) {
+            return false;
+        }
         let child_directories: Vec<_> = entries
             .iter()
             .filter(|entry| entry.is_directory)
@@ -93,6 +100,7 @@ impl FileTree {
                     .any(|child| path == child || path.as_path().starts_with(child.as_path()))
         });
         self.directories.insert(directory, entries);
+        true
     }
 
     pub(crate) fn has_directory(&self, directory: &RepoPath) -> bool {
@@ -455,14 +463,22 @@ mod tests {
         let mut tree = FileTree {
             directories: HashMap::new(),
         };
-        tree.replace_directory(
+        assert!(tree.replace_directory(
             RepoPath::default(),
             vec![
                 entry("src", true),
                 entry("empty", true),
                 entry("README.md", false),
             ],
-        );
+        ));
+        assert!(!tree.replace_directory(
+            RepoPath::default(),
+            vec![
+                entry("src", true),
+                entry("empty", true),
+                entry("README.md", false),
+            ],
+        ));
         let rows = tree.rows_expanded(&HashSet::new());
         let labels: Vec<_> = rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(labels, ["src", "empty", "README.md"]);
@@ -475,7 +491,7 @@ mod tests {
 
         let expanded = HashSet::from([RepoPath::from("src")]);
         assert_eq!(tree.rows_expanded(&expanded).len(), 3);
-        tree.replace_directory(
+        let _ = tree.replace_directory(
             "src".into(),
             vec![entry("src/app", true), entry("src/main.rs", false)],
         );
@@ -490,9 +506,9 @@ mod tests {
         );
         assert_eq!(rows[1].directory_expanded, Some(false));
 
-        tree.replace_directory("src/app".into(), vec![entry("src/app/lib.rs", false)]);
+        let _ = tree.replace_directory("src/app".into(), vec![entry("src/app/lib.rs", false)]);
         assert!(tree.has_directory(&"src/app".into()));
-        tree.replace_directory("src".into(), vec![entry("src/main.rs", false)]);
+        let _ = tree.replace_directory("src".into(), vec![entry("src/main.rs", false)]);
         assert!(!tree.has_directory(&"src/app".into()));
     }
 

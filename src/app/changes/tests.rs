@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf, thread, time::Duration};
 
-use crate::git::{Change, RepositoryKind};
+use crate::git::{Change, InventoryRefresh, RepositoryKind};
 
 use super::*;
 
@@ -205,7 +205,7 @@ fn repository_refresh_preserves_an_active_branch_comparison() {
     );
 
     let selection = state.capture_selection(&repo);
-    state.restore_selection(&repo, selection, true);
+    state.restore_selection(&repo, selection, InventoryRefresh::All);
 
     assert_eq!(
         state
@@ -216,8 +216,47 @@ fn repository_refresh_preserves_an_active_branch_comparison() {
 
     let stale_selection = state.capture_selection(&repo);
     state.refresh_diff(Some(&repo));
-    state.restore_selection(&repo, stale_selection, true);
+    state.restore_selection(&repo, stale_selection, InventoryRefresh::All);
     assert!(state.branch_comparison().is_none());
+}
+
+#[test]
+fn worktree_only_refresh_keeps_explorer_rows_allocated() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("README.md"), "readme").unwrap();
+    let mut repo = repository_data();
+    repo.root = directory.path().to_owned();
+    let mut state = ChangesState::new(Some(&repo));
+    let rows = state.explorer_rows().as_ptr();
+    let selection = state.capture_selection(&repo);
+
+    repo.changes_fingerprint += 1;
+    state.restore_selection(&repo, selection, InventoryRefresh::Unchanged);
+
+    assert_eq!(state.explorer_rows().as_ptr(), rows);
+}
+
+#[test]
+fn inventory_refresh_requests_only_loaded_affected_directories() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("src")).unwrap();
+    fs::create_dir_all(directory.path().join("docs")).unwrap();
+    let mut repo = repository_data();
+    repo.root = directory.path().to_owned();
+    let mut state = ChangesState::new(Some(&repo));
+    let tree = state.file_tree.as_mut().unwrap();
+    let _ = tree.replace_directory("src".into(), Vec::new());
+    let _ = tree.replace_directory("docs".into(), Vec::new());
+
+    state.refresh_explorer_directories(
+        &repo,
+        InventoryRefresh::Directories(vec!["src".into(), "unloaded".into()]),
+    );
+
+    assert_eq!(
+        state.loading_directories,
+        HashSet::from([RepoPath::from("src")])
+    );
 }
 
 #[test]

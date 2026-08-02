@@ -43,8 +43,51 @@ fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> WorktreeS
         .split(|byte| *byte == 0)
         .find(|field| field.starts_with(b"## "))
         .hash(&mut branch);
+    let mut inventory = DefaultHasher::new();
+    let mut path_states = Vec::new();
+    for change in changes {
+        match change.code {
+            '?' | 'A' => {
+                path_states.push((&change.path, true));
+            }
+            'D' => {
+                path_states.push((&change.path, false));
+            }
+            'R' => {
+                path_states.push((&change.path, true));
+                if let Some(original) = &change.original_path {
+                    path_states.push((original, false));
+                }
+            }
+            'C' => {
+                path_states.push((&change.path, true));
+            }
+            _ => {}
+        }
+        if change
+            .path
+            .file_name()
+            .is_some_and(|name| name == ".gitignore")
+        {
+            change.path.hash(&mut inventory);
+            let path = root.join(&change.path);
+            if let Ok(metadata) = fs::symlink_metadata(path) {
+                metadata.len().hash(&mut inventory);
+                metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos())
+                    .hash(&mut inventory);
+            }
+        }
+    }
+    path_states.sort_unstable();
+    path_states.dedup();
+    path_states.hash(&mut inventory);
     WorktreeSignature {
         state: state.finish(),
+        inventory: inventory.finish(),
         branch: branch.finish(),
     }
 }
