@@ -14,13 +14,14 @@ pub(super) use unicode_width::UnicodeWidthStr;
 pub(super) use crate::app::{
     AgentActivityPreview, AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator,
     ExplorerHitTarget, GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind,
-    HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget, LeftPane, Mode, Settings,
-    SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, StashedAgent, View,
+    HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget, LeftPane, MagicCommitRunner, Mode,
+    Settings, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, StashedAgent, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    BranchPickerStep, draw, lighter, palette, selected_display_range, text, wrapped_editor_cursor,
+    BranchPickerStep, display_path, draw, lighter, palette, selected_display_range, text,
+    wrapped_editor_cursor,
 };
 
 mod agents;
@@ -34,6 +35,15 @@ fn assert_black_underlay(terminal: &Terminal<TestBackend>) {
     let background = &terminal.backend().buffer()[(0, 0)];
     assert_eq!(background.bg, Color::Rgb(0, 0, 0));
     assert!(background.modifier.contains(Modifier::DIM));
+}
+
+#[test]
+fn footer_abbreviates_paths_under_home() {
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        return;
+    };
+    let path = std::path::PathBuf::from(home).join("project");
+    assert_eq!(display_path(&path), "~/project");
 }
 
 #[test]
@@ -82,6 +92,16 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.graph_commit_open);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("COMMIT"));
+    assert!(screen.contains("MESSAGE"));
 
     fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
     let mut dirty_app = App::new(root.to_path_buf());
@@ -146,6 +166,7 @@ fn renders_every_primary_surface() {
     app.settings.graph_author_width = 16;
     app.settings.graph_commit_width = 7;
     app.commit_message_generator = CommitMessageGenerator::ready_for_test();
+    app.magic_commit_runner = MagicCommitRunner::ready_for_test();
     let settings_path = root.join(".git/hunkle-test-config");
     app.settings_store = SettingsStore::at(settings_path.clone());
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
@@ -235,6 +256,11 @@ fn renders_every_primary_surface() {
     assert!(
         app.regions
             .hit_target_rect(HitTarget::CommitMessageGenerate)
+            .is_some()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::MagicCommit)
             .is_some()
     );
     click(&mut app, graph_toggle.x, graph_toggle.y);
@@ -644,6 +670,14 @@ fn renders_every_primary_surface() {
         }
     }));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let magic_commit = app.regions.hit_target_rect(HitTarget::MagicCommit).unwrap();
+    assert_eq!(magic_commit.width, 4);
+    assert_eq!(magic_commit.x, app.regions.commit.unwrap().x + 3);
+    assert_eq!(magic_commit.y, app.regions.commit.unwrap().bottom());
+    assert_eq!(
+        terminal.backend().buffer()[(magic_commit.x + 1, magic_commit.y)].symbol(),
+        "M"
+    );
     let agents = app.regions.agents_list.unwrap();
     click(&mut app, agents.x + 2, agents.y);
     assert_eq!(app.mode, Mode::Normal);

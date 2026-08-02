@@ -1350,8 +1350,9 @@ fn split_pane_with_agent_with(
     pane_id: String,
     direction: AgentPaneDirection,
     session_id: Option<String>,
-    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+    runner: impl FnMut(&[String]) -> Result<Value, String>,
 ) -> Result<String, String> {
+    let mut runner = runner;
     let command = opencode_command(session_id.as_deref())?;
     let split = runner(&[
         "pane".to_owned(),
@@ -1386,8 +1387,9 @@ fn replace_pane_with_agent_with(
     workspace_id: String,
     pane_id: String,
     session_id: Option<String>,
-    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+    runner: impl FnMut(&[String]) -> Result<Value, String>,
 ) -> Result<String, String> {
+    let mut runner = runner;
     let command = opencode_command(session_id.as_deref())?;
     let pane = runner(&["pane".to_owned(), "get".to_owned(), pane_id.clone()])?;
     let parked_tab_label = pane
@@ -1441,17 +1443,19 @@ fn replace_pane_with_agent_with(
 }
 
 fn opencode_command(session_id: Option<&str>) -> Result<String, String> {
-    let Some(session_id) = session_id else {
-        return Ok("opencode".to_owned());
-    };
-    if session_id.is_empty()
-        || !session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err("OpenCode reported an invalid session ID".to_owned());
+    let mut command = String::from("opencode");
+    if let Some(session_id) = session_id {
+        if session_id.is_empty()
+            || !session_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err("OpenCode reported an invalid session ID".to_owned());
+        }
+        command.push_str(" --session ");
+        command.push_str(session_id);
     }
-    Ok(format!("opencode --session {session_id}"))
+    Ok(command)
 }
 
 fn send_command_below_with(

@@ -12,6 +12,7 @@ mod header_picker;
 mod herdr_prompt;
 mod herdr_session;
 mod linked_worktrees;
+mod magic_commit;
 mod mouse;
 mod settings;
 mod shortcuts;
@@ -42,6 +43,7 @@ pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
     LinkedWorktreeObservation, RepositoryPickerItem,
 };
+pub(crate) use magic_commit::{MagicCommitCompletion, MagicCommitRunner};
 pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use settings::{SettingsStore, valid_opencode_model};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
@@ -100,6 +102,7 @@ pub struct App {
     pub(crate) commit_input: TextInput,
     pub(crate) commit_scroll: Option<usize>,
     pub(crate) commit_message_generator: CommitMessageGenerator,
+    pub(crate) magic_commit_runner: MagicCommitRunner,
     commit_draft_path: Option<PathBuf>,
     commit_draft_due: Option<Instant>,
     commit_draft_rx: Option<Receiver<CommitDraftResult>>,
@@ -250,6 +253,7 @@ impl App {
             commit_input: TextInput::default(),
             commit_scroll: None,
             commit_message_generator: CommitMessageGenerator::detect(),
+            magic_commit_runner: MagicCommitRunner::detect(),
             commit_draft_path: None,
             commit_draft_due: None,
             commit_draft_rx: None,
@@ -454,6 +458,31 @@ impl App {
         self.commit_message_generator.spinner()
     }
 
+    pub(crate) fn magic_commit_available(&self) -> bool {
+        self.magic_commit_runner.is_available()
+    }
+
+    pub(crate) fn magic_commit_running(&self) -> bool {
+        self.magic_commit_runner.is_running()
+    }
+
+    pub(crate) fn magic_commit_running_for_active_repository(&self) -> bool {
+        self.repository()
+            .is_some_and(|repository| self.magic_commit_runner.is_running_for(&repository.root))
+    }
+
+    pub(crate) fn magic_commit_elapsed(&self) -> Duration {
+        self.magic_commit_runner.elapsed()
+    }
+
+    pub(crate) fn magic_commit_cancelling(&self) -> bool {
+        self.magic_commit_runner.is_cancelling()
+    }
+
+    pub(crate) fn magic_commit_spinner(&self) -> &'static str {
+        self.magic_commit_runner.spinner()
+    }
+
     pub(crate) fn fetch_running(&self) -> bool {
         self.session.fetch_running()
     }
@@ -465,6 +494,7 @@ impl App {
     pub(crate) fn can_restart(&self) -> bool {
         self.session.can_restart()
             && !self.commit_message_running()
+            && !self.magic_commit_running()
             && !self.file_editor.as_ref().is_some_and(FileEditor::dirty)
     }
 
@@ -824,6 +854,11 @@ impl App {
             self.receive_generated_commit_message(completion);
         }
         changed |= self.commit_message_generator.poll_spinner(Instant::now());
+        if let Some(completion) = self.magic_commit_runner.poll() {
+            changed = true;
+            self.receive_magic_commit(completion);
+        }
+        changed |= self.magic_commit_runner.poll_spinner(Instant::now());
         changed |= {
             let _activity = diagnostics::activity("poll-commit-draft", "");
             self.flush_commit_draft_if_due()
@@ -1362,7 +1397,11 @@ impl App {
             ShortcutAction::Quit if self.format_running() => {
                 self.notice = Some("A formatter is still running".to_owned());
             }
-            ShortcutAction::Quit if self.commit_running() || self.session.command_running() => {
+            ShortcutAction::Quit
+                if self.commit_running()
+                    || self.session.command_running()
+                    || self.magic_commit_running() =>
+            {
                 self.notice = Some("A Git operation is still running".to_owned());
             }
             ShortcutAction::Quit => self.should_quit = true,

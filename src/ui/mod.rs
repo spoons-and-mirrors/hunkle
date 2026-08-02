@@ -19,6 +19,8 @@ pub(super) use ratatui::{
 pub(super) use unicode_segmentation::UnicodeSegmentation;
 pub(super) use unicode_width::UnicodeWidthStr;
 
+use std::{env, path::Path};
+
 pub(super) use crate::{
     app::{
         App, BranchPickerStep, CloneField, FileDialogKind, GraphHitTarget, HeaderPickerItem,
@@ -408,7 +410,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let start_x = area.right().saturating_sub(total_width).max(area.x);
     if start_x > area.x
         && let Some(path) = app.repository().map(|repository| {
-            let path = repository.root.display().to_string();
+            let path = display_path(&repository.root);
             if repository.is_local() || repository.branch.is_empty() {
                 path
             } else {
@@ -503,6 +505,20 @@ fn notice_is_error(notice: &str) -> bool {
         || [" failed", " error", " unavailable", " disconnected"]
             .iter()
             .any(|marker| notice.contains(marker))
+}
+
+fn display_path(path: &Path) -> String {
+    let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) else {
+        return path.display().to_string();
+    };
+    let Some(relative) = path.strip_prefix(Path::new(&home)).ok() else {
+        return path.display().to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        "~".to_owned()
+    } else {
+        format!("~/{}", relative.display())
+    }
 }
 
 fn truncate_width(value: &str, width: usize) -> String {

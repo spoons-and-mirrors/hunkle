@@ -161,15 +161,14 @@ fn creates_a_linked_worktree_without_a_runtime_workspace() {
     let created = create_worktree_in(&root, "feature/direct", "main", &storage).unwrap();
 
     assert_eq!(created.parent().unwrap().parent().unwrap(), storage);
-    assert!(
-        created
-            .parent()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("main repository-")
-    );
+    let repository_directory = created
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy();
+    assert!(repository_directory.starts_with("main repository-"));
+    assert_eq!(repository_directory.len(), "main repository-".len() + 5);
     assert_eq!(created.file_name().unwrap(), "feature-direct");
     assert_eq!(
         fs::read_to_string(created.join("tracked.txt")).unwrap(),

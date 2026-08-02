@@ -158,6 +158,10 @@ impl App {
     }
 
     pub(crate) fn open_git_command(&mut self) {
+        if self.magic_commit_running_for_active_repository() {
+            self.notice = Some("Magic Commit is still running".to_owned());
+            return;
+        }
         if self.require_git_repository() {
             self.actions.begin_input();
             self.mode = Mode::Command;
@@ -185,6 +189,11 @@ impl App {
     }
 
     pub(crate) fn start_git_command(&mut self, label: String, args: Vec<String>) {
+        if self.magic_commit_running_for_active_repository() {
+            self.mode = Mode::Normal;
+            self.notice = Some("Magic Commit is still running".to_owned());
+            return;
+        }
         if !self.require_git_repository() {
             self.mode = Mode::Normal;
             return;

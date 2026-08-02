@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 
 pub(super) fn draw_commit_editor(
@@ -10,7 +12,18 @@ pub(super) fn draw_commit_editor(
     details_ready: bool,
 ) {
     if !local_workspace && details_ready {
-        draw_commit_message_action(frame, actions_row, app, has_changes);
+        let message_action_width = draw_commit_message_action(frame, actions_row, app, has_changes);
+        draw_magic_commit_action(
+            frame,
+            Rect::new(
+                actions_row.x.saturating_add(message_action_width),
+                actions_row.y,
+                actions_row.width.saturating_sub(message_action_width),
+                actions_row.height,
+            ),
+            app,
+            has_changes,
+        );
     }
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
@@ -36,6 +49,22 @@ pub(super) fn draw_commit_editor(
             Text::from(Line::styled(
                 "Loading Git status…",
                 Style::default().fg(palette().faint),
+            )),
+            1,
+        )
+    } else if app.magic_commit_running_for_active_repository() {
+        (
+            Text::from(Line::styled(
+                if app.magic_commit_cancelling() {
+                    format!("{} Cancelling Magic Commit...", app.magic_commit_spinner())
+                } else {
+                    format!(
+                        "{} Magic Commit {} (click MC to cancel)",
+                        app.magic_commit_spinner(),
+                        format_elapsed(app.magic_commit_elapsed())
+                    )
+                },
+                Style::default().fg(palette().yellow),
             )),
             1,
         )
@@ -188,9 +217,14 @@ pub(super) fn draw_commit_message_action(
     area: Rect,
     app: &mut App,
     has_changes: bool,
-) {
-    if app.commit_running() || !app.commit_message_available() || !has_changes || area.width < 3 {
-        return;
+) -> u16 {
+    if app.commit_running()
+        || app.magic_commit_running_for_active_repository()
+        || !app.commit_message_available()
+        || !has_changes
+        || area.width < 3
+    {
+        return 0;
     }
 
     let button = Rect::new(area.x, area.y, 3, 1);
@@ -223,6 +257,60 @@ pub(super) fn draw_commit_message_action(
         .style(style),
         button,
     );
+    3
+}
+
+pub(super) fn draw_magic_commit_action(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    has_changes: bool,
+) {
+    let running = app.magic_commit_running_for_active_repository();
+    if app.mode != Mode::Normal
+        || app.commit_running()
+        || !app.magic_commit_available()
+        || (app.magic_commit_running() && !running)
+        || (!has_changes && !running)
+        || area.width < 4
+    {
+        return;
+    }
+
+    let button = Rect::new(area.x, area.y, 4, 1);
+    app.regions
+        .register_hit_target(HitTarget::MagicCommit, button);
+    let hovered = app.hovered_hit_target == Some(HitTarget::MagicCommit);
+    let style = if hovered && !running {
+        Style::default()
+            .fg(palette().canvas)
+            .bg(palette().accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(if running {
+                palette().yellow
+            } else {
+                palette().accent
+            })
+            .bg(palette().raised)
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(
+        Paragraph::new(if running {
+            format!(" {} ", app.magic_commit_spinner())
+        } else {
+            " MC ".to_owned()
+        })
+        .alignment(Alignment::Center)
+        .style(style),
+        button,
+    );
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 pub(super) fn commit_message_text(message: &str) -> Text<'static> {
