@@ -94,6 +94,23 @@ fn renders_and_targets_agents_in_the_normal_view() {
 
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 2, area.y));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
+    assert!(!app.agents_pane_visible());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(area.x + 2, area.y + 1)].bg,
+        super::palette().selected
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentTooltip {
+                agent: 0,
+                message: 4,
+            })
+            .is_none()
+    );
+    assert!(!app.poll_agent_hover(std::time::Instant::now()));
+    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     assert_eq!(
@@ -304,7 +321,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(!app.agents_pane_visible());
 
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
-    assert_eq!(app.hovered_hit_target, None);
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     assert!(!app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
@@ -318,6 +335,9 @@ fn renders_and_targets_agents_in_the_normal_view() {
 
     app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
+    assert!(!app.agents_pane_visible());
+    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -380,6 +400,14 @@ fn hovering_another_agent_replaces_the_open_history() {
     app.handle_mouse(mouse(MouseEventKind::Moved, 3, 26));
 
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(1)));
+    assert!(app.agents_pane_visible());
+    assert!(!app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
+    app.handle_mouse(mouse(MouseEventKind::Moved, 50, 5));
+    app.handle_mouse(mouse(MouseEventKind::Moved, 3, 26));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(1)));
+    assert!(!app.agents_pane_visible());
+    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(1)));
 }
 
 #[test]
@@ -413,6 +441,7 @@ fn conversation_timeline_uses_its_full_height_and_tracks_selection() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let agent = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, agent.x + 2, agent.y));
+    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.herdr.agent_user_messages(0).unwrap().len(), 50);

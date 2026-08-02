@@ -119,6 +119,7 @@ pub struct App {
     pub(crate) agents_pane_pinned: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     suppressed_agent_hover: Option<usize>,
+    pending_agent_hover: Option<(usize, Position, Instant)>,
     pub settings: Settings,
     pub settings_selection: usize,
     pub(crate) settings_page: SettingsPage,
@@ -263,6 +264,7 @@ impl App {
             agents_pane_pinned: false,
             hovered_hit_target: None,
             suppressed_agent_hover: None,
+            pending_agent_hover: None,
             settings,
             settings_selection: 0,
             settings_page: SettingsPage::General,
@@ -333,19 +335,16 @@ impl App {
 
     pub(crate) fn agents_pane_visible(&self) -> bool {
         self.agents_pane_pinned
-            || matches!(
-                self.hovered_hit_target,
-                Some(
-                    HitTarget::Agent(_)
-                        | HitTarget::AgentTooltip { .. }
-                        | HitTarget::AgentMessage { .. }
-                )
-            )
+            || match self.hovered_hit_target {
+                Some(HitTarget::Agent(index)) => !self.agent_preview_blocked(index),
+                Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => true,
+                _ => false,
+            }
     }
 
     pub(crate) fn agents_pane_index(&self) -> Option<usize> {
         match self.hovered_hit_target {
-            Some(HitTarget::Agent(index)) => Some(index),
+            Some(HitTarget::Agent(index)) if !self.agent_preview_blocked(index) => Some(index),
             Some(HitTarget::AgentTooltip { agent, .. } | HitTarget::AgentMessage { agent, .. }) => {
                 Some(agent)
             }
@@ -354,6 +353,13 @@ impl App {
                 .or((!self.herdr.agents.is_empty()).then_some(0)),
             _ => None,
         }
+    }
+
+    fn agent_preview_blocked(&self, index: usize) -> bool {
+        self.suppressed_agent_hover == Some(index)
+            || self
+                .pending_agent_hover
+                .is_some_and(|(pending, _, _)| pending == index)
     }
 
     pub(crate) fn diagnostic_context(&self) -> String {
@@ -642,7 +648,8 @@ impl App {
     }
 
     pub fn poll_worker(&mut self) -> bool {
-        let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
+        let mut changed = self.poll_agent_hover(Instant::now());
+        changed |= self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
         if self.herdr.is_enabled() {
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");

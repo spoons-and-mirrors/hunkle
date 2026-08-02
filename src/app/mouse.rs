@@ -11,55 +11,92 @@ use super::{
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+const AGENT_HOVER_DELAY: Duration = Duration::from_millis(500);
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         if mouse.kind == MouseEventKind::Moved {
+            let preview_was_visible = self.agents_pane_visible();
             let target = self.regions.hit_target_at(point);
-            let suppress_agent_hover = self.suppressed_agent_hover.is_some_and(|index| {
+            let suppressed_agent = self.suppressed_agent_hover.filter(|index| {
                 self.regions
-                    .hit_target_rect(HitTarget::Agent(index))
+                    .hit_target_rect(HitTarget::Agent(*index))
                     .is_some_and(|card| card.contains(point))
             });
-            if suppress_agent_hover {
-                self.hovered_hit_target = None;
+            if let Some(index) = suppressed_agent {
+                self.pending_agent_hover = None;
+                self.hovered_hit_target = Some(HitTarget::Agent(index));
             } else {
                 self.suppressed_agent_hover = None;
-                let open_message = match self.hovered_hit_target {
-                    Some(HitTarget::Agent(agent)) => self
+                let pending_agent = self.pending_agent_hover.map(|(index, _, _)| index);
+                let open_agent = match self.hovered_hit_target {
+                    Some(HitTarget::Agent(index)) => Some(index),
+                    Some(
+                        HitTarget::AgentTooltip { agent, .. }
+                        | HitTarget::AgentMessage { agent, .. },
+                    ) => Some(agent),
+                    _ => None,
+                };
+                let open_message = match (pending_agent, self.hovered_hit_target) {
+                    (Some(_), _) => None,
+                    (None, Some(HitTarget::Agent(agent))) => self
                         .herdr
                         .agent_user_messages(agent)
                         .filter(|messages| !messages.is_empty())
                         .map(|messages| (agent, messages.len() - 1)),
-                    Some(
-                        HitTarget::AgentTooltip { agent, message }
-                        | HitTarget::AgentMessage { agent, message },
+                    (
+                        None,
+                        Some(
+                            HitTarget::AgentTooltip { agent, message }
+                            | HitTarget::AgentMessage { agent, message },
+                        ),
                     ) => Some((agent, message)),
                     _ => None,
                 };
-                self.hovered_hit_target = match (target, open_message) {
-                    (
-                        Some(
-                            target @ (HitTarget::AgentTooltip { .. }
-                            | HitTarget::AgentMessage { .. }),
-                        ),
-                        _,
-                    ) => Some(target),
-                    (Some(HitTarget::Agent(index)), Some((agent, message))) if index == agent => {
-                        Some(HitTarget::AgentTooltip { agent, message })
-                    }
-                    (Some(target @ HitTarget::Agent(_)), _) => Some(target),
-                    (_, Some((agent, message)))
-                        if self
-                            .regions
-                            .worktree
-                            .is_some_and(|sidebar| sidebar.contains(point)) =>
+                let delayed_agent = match target {
+                    Some(HitTarget::Agent(index))
+                        if pending_agent == Some(index)
+                            || (!preview_was_visible && open_agent != Some(index)) =>
                     {
-                        Some(HitTarget::AgentTooltip { agent, message })
+                        Some(index)
                     }
-                    _ => target,
+                    _ => None,
                 };
+                if let Some(index) = delayed_agent {
+                    let deadline = match self.pending_agent_hover {
+                        Some((pending, _, deadline)) if pending == index => deadline,
+                        _ => Instant::now() + AGENT_HOVER_DELAY,
+                    };
+                    self.pending_agent_hover = Some((index, point, deadline));
+                    self.hovered_hit_target = Some(HitTarget::Agent(index));
+                } else {
+                    self.pending_agent_hover = None;
+                    self.hovered_hit_target = match (target, open_message) {
+                        (
+                            Some(
+                                target @ (HitTarget::AgentTooltip { .. }
+                                | HitTarget::AgentMessage { .. }),
+                            ),
+                            _,
+                        ) => Some(target),
+                        (Some(HitTarget::Agent(index)), Some((agent, message)))
+                            if index == agent =>
+                        {
+                            Some(HitTarget::AgentTooltip { agent, message })
+                        }
+                        (Some(target @ HitTarget::Agent(_)), _) => Some(target),
+                        (_, Some((agent, message)))
+                            if self
+                                .regions
+                                .worktree
+                                .is_some_and(|sidebar| sidebar.contains(point)) =>
+                        {
+                            Some(HitTarget::AgentTooltip { agent, message })
+                        }
+                        _ => target,
+                    };
+                }
             }
             if let Some(target) = self.hovered_hit_target {
                 let agent = match target {
@@ -72,6 +109,8 @@ impl App {
                     self.herdr.request_agent_latest_user_message(index);
                 }
             }
+        } else {
+            self.pending_agent_hover = None;
         }
         if self.herdr_prompt.agent_pane_picker_open() {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -920,10 +959,31 @@ impl App {
             .map(|agent| agent.pane_id.clone())
         {
             self.suppressed_agent_hover = Some(index);
+            self.pending_agent_hover = None;
             self.hovered_hit_target = None;
             self.agents_pane_pinned = false;
             self.herdr.display_agent(pane_id);
         }
+    }
+
+    pub(crate) fn poll_agent_hover(&mut self, now: Instant) -> bool {
+        let Some((index, point, deadline)) = self.pending_agent_hover else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.pending_agent_hover = None;
+        if !self
+            .regions
+            .hit_target_rect(HitTarget::Agent(index))
+            .is_some_and(|card| card.contains(point))
+        {
+            return false;
+        }
+        self.hovered_hit_target = Some(HitTarget::Agent(index));
+        self.herdr.request_agent_latest_user_message(index);
+        true
     }
 
     fn handle_action_mouse(&mut self, mouse: MouseEvent) {
