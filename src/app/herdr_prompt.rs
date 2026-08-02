@@ -220,6 +220,9 @@ impl HerdrPrompt {
         let workspace_id = layout.workspace_id.clone();
         let pane_id = pane.pane_id.clone();
         let pending = self.pending_agent.take().expect("pending agent checked");
+        let PendingAgent {
+            path, session_id, ..
+        } = pending;
         let sender = self.sender.clone();
         self.error = None;
         self.sending = true;
@@ -227,19 +230,19 @@ impl HerdrPrompt {
             crate::diagnostics::event(format!(
                 "new agent replacing pane={} path={}",
                 pane_id,
-                pending.path.display()
+                path.display()
             ));
-            let reopen_path = pending.path.clone();
+            let reopen_path = path.clone();
             let result = herdr_session::replace_pane_with_agent(
-                pending.path,
+                path,
                 workspace_id,
                 pane_id,
-                pending.session_id.clone(),
+                session_id.clone(),
             )
             .map(|pane_id| HerdrPromptCompletion {
                 message: format!("Started agent in Herdr pane {pane_id}"),
                 reopen_path: Some(reopen_path),
-                restored_session_id: pending.session_id,
+                restored_session_id: session_id,
             });
             let _ = sender.send(result);
         });
@@ -265,6 +268,9 @@ impl HerdrPrompt {
             .pane_id
             .clone();
         let pending = self.pending_agent.take().expect("pending agent checked");
+        let PendingAgent {
+            path, session_id, ..
+        } = pending;
         let sender = self.sender.clone();
         self.error = None;
         self.sending = true;
@@ -273,20 +279,16 @@ impl HerdrPrompt {
                 "new agent splitting pane={} direction={} path={}",
                 pane_id,
                 direction.as_str(),
-                pending.path.display()
+                path.display()
             ));
-            let reopen_path = pending.path.clone();
-            let result = herdr_session::split_pane_with_agent(
-                pending.path,
-                pane_id,
-                direction,
-                pending.session_id.clone(),
-            )
-            .map(|pane_id| HerdrPromptCompletion {
-                message: format!("Started agent in new Herdr pane {pane_id}"),
-                reopen_path: Some(reopen_path),
-                restored_session_id: pending.session_id,
-            });
+            let reopen_path = path.clone();
+            let result =
+                herdr_session::split_pane_with_agent(path, pane_id, direction, session_id.clone())
+                    .map(|pane_id| HerdrPromptCompletion {
+                        message: format!("Started agent in new Herdr pane {pane_id}"),
+                        reopen_path: Some(reopen_path),
+                        restored_session_id: session_id,
+                    });
             let _ = sender.send(result);
         });
         Ok(())
