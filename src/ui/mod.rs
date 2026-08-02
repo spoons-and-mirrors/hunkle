@@ -350,10 +350,12 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
 
     let compact = area.width < 100;
-    let left_pane_label = if app.changes.pane == LeftPane::Worktree {
+    let left_pane_label = if app.agents_pane_visible() {
+        "Changes"
+    } else if app.changes.pane == LeftPane::Worktree {
         "Files"
     } else {
-        "Changes"
+        "Agents"
     };
     let mut labels = vec![
         (

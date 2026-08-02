@@ -23,7 +23,6 @@ pub(crate) enum ShortcutAction {
     ConfigureEditor,
     FocusCommit,
     ToggleAgents,
-    ShowAgents,
     UnstageAll,
     StageSelection,
     DiscardChanges,
@@ -197,7 +196,7 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
     shortcut!(
         TogglePane,
         "toggle-pane",
-        "Changes / files",
+        "Cycle sidebar panes",
         "Navigation",
         MAIN | COMMIT,
         KeyCode::Tab
@@ -341,15 +340,6 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         "Changes / files",
         MAIN,
         KeyCode::Char('a')
-    ),
-    shortcut!(
-        ShowAgents,
-        "show-agents",
-        "Open agents pane",
-        "Changes / files",
-        MAIN | COMMIT,
-        KeyCode::Char('a'),
-        KeyModifiers::SHIFT
     ),
     shortcut!(
         UnstageAll,

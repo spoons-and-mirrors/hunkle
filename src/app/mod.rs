@@ -323,7 +323,7 @@ impl App {
         if self.view == View::Graph
             || self.graph_commit_open
             || (self.view == View::Changes
-                && self.changes.pane == LeftPane::Worktree
+                && self.changes.preview_pane == LeftPane::Worktree
                 && self.changes.branch_comparison().is_none()
                 && self.repository().is_some_and(|repo| {
                     repo.details_ready && !repo.is_local() && repo.changes.is_empty()
@@ -1884,7 +1884,6 @@ impl App {
         match self.settings.shortcuts.main_action(key) {
             Some(ShortcutAction::TogglePane) => self.toggle_left_pane(),
             Some(ShortcutAction::ToggleGraph) if self.mode == Mode::Normal => self.toggle_graph(),
-            Some(ShortcutAction::ShowAgents) => self.show_agents_pane(),
             _ => return false,
         }
         true
@@ -1900,6 +1899,12 @@ impl App {
         self.dismiss_agent_preview();
         self.changes.set_pane(pane, self.session.data());
         self.show_main_pane();
+    }
+
+    fn show_sidebar_pane(&mut self, pane: LeftPane) {
+        self.initial_pane_pending = false;
+        self.dismiss_agent_preview();
+        self.changes.set_pane_preserving_preview(pane);
     }
 
     fn dismiss_agent_preview(&mut self) {
@@ -1941,7 +1946,6 @@ impl App {
         self.agents_visible = true;
         self.agents_pane_pinned = true;
         self.agent_preview_selection = selection;
-        self.show_main_pane();
     }
 
     fn show_graph(&mut self) {
@@ -1951,12 +1955,13 @@ impl App {
 
     fn toggle_left_pane(&mut self) {
         if self.agents_pane_pinned {
-            self.dismiss_agent_preview();
+            self.show_sidebar_pane(LeftPane::Worktree);
+            return;
         }
-        self.show_left_pane(match self.changes.pane {
-            LeftPane::Worktree => LeftPane::Files,
-            LeftPane::Files => LeftPane::Worktree,
-        });
+        match self.changes.pane {
+            LeftPane::Worktree => self.show_sidebar_pane(LeftPane::Files),
+            LeftPane::Files => self.show_agents_pane(),
+        }
     }
 
     fn toggle_graph(&mut self) {

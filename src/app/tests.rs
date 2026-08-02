@@ -551,14 +551,19 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     assert_eq!(app.view, View::Graph);
     app.graph_commit_open = true;
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.agents_pane_visible());
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.view, View::Graph);
+    assert!(app.graph_commit_open);
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.changes.pane, LeftPane::Worktree);
-    assert_eq!(app.view, View::Changes);
-    assert!(!app.graph_commit_open);
+    assert_eq!(app.view, View::Graph);
+    assert!(app.graph_commit_open);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    assert_eq!(app.view, View::Graph);
-    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
     assert_eq!(app.view, View::Changes);
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    assert_eq!(app.view, View::Graph);
     assert_eq!(app.changes.pane, LeftPane::Worktree);
     app.mode = Mode::Commit;
     app.commit_input.clear();
@@ -568,6 +573,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.view, View::Graph);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Settings);
@@ -641,6 +647,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     assert_eq!(app.settings_store.load(), app.settings);
 
     app.mode = Mode::Normal;
+    app.view = View::Changes;
     app.changes.diff_scroll = 37;
     assert!(app.changes.diff_wrap);
     app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));

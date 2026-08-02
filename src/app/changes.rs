@@ -51,6 +51,7 @@ pub(crate) enum ChangesHitTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ChangesEffect {
     PaneActivated,
+    SidebarPaneActivated,
     AgentsPaneActivated,
     WorktreeDirectoryActivated,
     ToggleAllStaging,
@@ -68,6 +69,7 @@ pub(super) struct ExplorerEntry {
 
 pub struct ChangesState {
     pub(crate) pane: LeftPane,
+    pub(crate) preview_pane: LeftPane,
     pub(crate) worktree_state: ListState,
     pub(crate) explorer_state: ListState,
     pub(crate) worktree_scroll: usize,
@@ -137,8 +139,10 @@ impl ChangesState {
 
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
         let file_tree = repo.map(|repo| FileTree::from_root(&repo.root));
+        let initial_pane = Self::initial_pane(repo);
         let mut state = Self {
-            pane: Self::initial_pane(repo),
+            pane: initial_pane,
+            preview_pane: initial_pane,
             worktree_state: ListState::default(),
             explorer_state: ListState::default(),
             worktree_scroll: 0,
@@ -194,6 +198,7 @@ impl ChangesState {
         prepared_file_tree: Option<PreparedFileTree>,
     ) {
         self.pane = Self::initial_pane(repo);
+        self.preview_pane = self.pane;
         self.worktree_state = ListState::default();
         self.explorer_state = ListState::default();
         self.worktree_scroll = 0;
@@ -421,6 +426,7 @@ impl ChangesState {
             }
             self.pending_explorer_selection = Some((path.clone(), viewport));
             if repo.files.iter().any(|candidate| candidate == path) {
+                self.preview_pane = LeftPane::Files;
                 self.preview_loader.invalidate();
                 self.set_diff("Loading preview…".to_owned());
             }
@@ -428,6 +434,7 @@ impl ChangesState {
         };
         self.pending_explorer_selection = None;
         self.explorer_state.select(Some(row));
+        self.preview_pane = LeftPane::Files;
         ensure_selection_visible(&mut self.explorer_scroll, Some(row), viewport);
         self.explorer_scroll = self
             .explorer_scroll
@@ -437,6 +444,16 @@ impl ChangesState {
     }
 
     pub(super) fn set_pane(&mut self, pane: LeftPane, repo: Option<&RepositoryData>) -> bool {
+        let changed = self.set_pane_preserving_preview(pane);
+        if !changed && self.preview_pane == pane {
+            return false;
+        }
+        self.preview_pane = pane;
+        self.refresh_diff(repo);
+        true
+    }
+
+    pub(super) fn set_pane_preserving_preview(&mut self, pane: LeftPane) -> bool {
         if self.pane == pane {
             return false;
         }
@@ -444,7 +461,6 @@ impl ChangesState {
         if pane == LeftPane::Files && self.explorer_state.selected().is_none() {
             self.explorer_state.select(self.initial_explorer_row());
         }
-        self.refresh_diff(repo);
         true
     }
 
@@ -456,6 +472,7 @@ impl ChangesState {
             return false;
         }
         self.worktree_state.select(Some(index));
+        self.preview_pane = LeftPane::Worktree;
         self.refresh_diff(Some(repo));
         true
     }
@@ -467,12 +484,12 @@ impl ChangesState {
     ) -> Option<ChangesEffect> {
         match target {
             ChangesHitTarget::WorktreeTab => {
-                self.set_pane(LeftPane::Worktree, Some(repo));
-                Some(ChangesEffect::PaneActivated)
+                self.set_pane_preserving_preview(LeftPane::Worktree);
+                Some(ChangesEffect::SidebarPaneActivated)
             }
             ChangesHitTarget::FilesTab => {
-                self.set_pane(LeftPane::Files, Some(repo));
-                Some(ChangesEffect::PaneActivated)
+                self.set_pane_preserving_preview(LeftPane::Files);
+                Some(ChangesEffect::SidebarPaneActivated)
             }
             ChangesHitTarget::AgentsTab => Some(ChangesEffect::AgentsPaneActivated),
             ChangesHitTarget::StageAll => {
@@ -766,7 +783,8 @@ impl ChangesState {
 
     fn current_sqlite_target(&mut self, generation: u64) -> Option<&mut SqliteBrowser> {
         let browser = self.sqlite_browser.as_mut()?;
-        (self.pane == LeftPane::Files && browser.generation == generation).then_some(browser)
+        (self.preview_pane == LeftPane::Files && browser.generation == generation)
+            .then_some(browser)
     }
 
     fn request_sqlite_page(&mut self, repo: &RepositoryData, key: SqlitePageKey) {
@@ -791,6 +809,7 @@ impl ChangesState {
         }
         self.pending_explorer_selection = None;
         self.explorer_state.select(Some(index));
+        self.preview_pane = LeftPane::Files;
         self.refresh_diff(Some(repo));
         true
     }
@@ -840,6 +859,7 @@ impl ChangesState {
             );
         }
         if self.preview_selection() != previous {
+            self.preview_pane = self.pane;
             self.refresh_diff(Some(repo));
         }
     }
@@ -872,6 +892,7 @@ impl ChangesState {
             );
         }
         if self.preview_selection() != previous {
+            self.preview_pane = self.pane;
             self.refresh_diff(Some(repo));
         }
     }
@@ -904,6 +925,7 @@ impl ChangesState {
             );
         }
         if self.preview_selection() != previous {
+            self.preview_pane = self.pane;
             self.refresh_diff(Some(repo));
         }
     }
@@ -1083,6 +1105,7 @@ impl ChangesState {
     }
 
     pub(super) fn toggle_selected_explorer_directory(&mut self, repo: Option<&RepositoryData>) {
+        self.preview_pane = LeftPane::Files;
         self.pending_explorer_selection = None;
         let Some(path) = self.selected_explorer_directory_path() else {
             return;
@@ -1099,6 +1122,7 @@ impl ChangesState {
     }
 
     pub(super) fn expand_or_descend_explorer(&mut self, repo: Option<&RepositoryData>) {
+        self.preview_pane = LeftPane::Files;
         self.pending_explorer_selection = None;
         let Some(index) = self.explorer_state.selected() else {
             return;
@@ -1129,6 +1153,7 @@ impl ChangesState {
     }
 
     pub(super) fn collapse_or_ascend_explorer(&mut self, repo: Option<&RepositoryData>) {
+        self.preview_pane = LeftPane::Files;
         self.pending_explorer_selection = None;
         let Some(index) = self.explorer_state.selected() else {
             return;
@@ -1157,6 +1182,7 @@ impl ChangesState {
     }
 
     pub(super) fn toggle_selected_directory(&mut self, repo: Option<&RepositoryData>) {
+        self.preview_pane = LeftPane::Worktree;
         let Some(repo) = repo else {
             return;
         };
@@ -1175,6 +1201,7 @@ impl ChangesState {
     }
 
     pub(super) fn expand_or_descend_worktree(&mut self, repo: Option<&RepositoryData>) {
+        self.preview_pane = LeftPane::Worktree;
         let Some(repo) = repo else {
             return;
         };
@@ -1206,6 +1233,7 @@ impl ChangesState {
     }
 
     pub(super) fn collapse_or_ascend_worktree(&mut self, repo: Option<&RepositoryData>) {
+        self.preview_pane = LeftPane::Worktree;
         let Some(repo) = repo else {
             return;
         };
@@ -1259,7 +1287,7 @@ impl ChangesState {
             self.set_diff(String::new());
             return;
         };
-        if self.pane == LeftPane::Files {
+        if self.preview_pane == LeftPane::Files {
             let Some(row) = self
                 .explorer_state
                 .selected()
@@ -1651,12 +1679,12 @@ impl ChangesState {
     }
 
     fn preview_selection(&self) -> (LeftPane, Option<usize>) {
-        let selected = if self.pane == LeftPane::Files {
+        let selected = if self.preview_pane == LeftPane::Files {
             self.explorer_state.selected()
         } else {
             self.worktree_state.selected()
         };
-        (self.pane, selected)
+        (self.preview_pane, selected)
     }
 }
 

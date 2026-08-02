@@ -292,12 +292,12 @@ fn owns_semantic_worktree_target_transitions() {
 
     assert_eq!(
         state.activate_target(ChangesHitTarget::FilesTab, &repo),
-        Some(ChangesEffect::PaneActivated)
+        Some(ChangesEffect::SidebarPaneActivated)
     );
     assert_eq!(state.pane, LeftPane::Files);
     assert_eq!(
         state.activate_target(ChangesHitTarget::WorktreeTab, &repo),
-        Some(ChangesEffect::PaneActivated)
+        Some(ChangesEffect::SidebarPaneActivated)
     );
     assert_eq!(state.pane, LeftPane::Worktree);
 }

@@ -50,7 +50,7 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
         ),
-        shortcut_help(shortcuts, ShortcutAction::TogglePane, "Changes / files"),
+        shortcut_help(shortcuts, ShortcutAction::TogglePane, "Cycle sidebar panes"),
         shortcut_help(
             shortcuts,
             ShortcutAction::ToggleGraph,
@@ -111,7 +111,6 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
             ShortcutAction::ToggleAgents,
             "Show / hide agents",
         ),
-        shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Open agents pane"),
         shortcut_help(shortcuts, ShortcutAction::UnstageAll, "Unstage all"),
         shortcut_help(
             shortcuts,

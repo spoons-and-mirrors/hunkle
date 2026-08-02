@@ -24,6 +24,16 @@ fn agent_snapshot() -> serde_json::Value {
     })
 }
 
+fn open_agents_pane(app: &mut App) {
+    for _ in 0..3 {
+        if app.agents_pane_visible() {
+            return;
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    assert!(app.agents_pane_visible());
+}
+
 #[test]
 fn renders_and_targets_agents_in_the_normal_view() {
     let directory = tempfile::tempdir().unwrap();
@@ -108,9 +118,13 @@ fn renders_and_targets_agents_in_the_normal_view() {
             })
             .is_none()
     );
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+    let viewer_before_sidebar_cycle = app.changes.diff.clone();
+    let view_before_sidebar_cycle = app.view;
+    open_agents_pane(&mut app);
     assert!(app.agents_pane_pinned);
     assert!(app.agents_pane_visible());
+    assert_eq!(app.changes.diff, viewer_before_sidebar_cycle);
+    assert_eq!(app.view, view_before_sidebar_cycle);
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
@@ -360,7 +374,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     assert!(!app.agents_pane_visible());
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+    open_agents_pane(&mut app);
     assert!(app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let preview = app
@@ -385,7 +399,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
             })
             .is_none()
     );
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+    open_agents_pane(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.agents_pane_pinned);
     assert!(
@@ -467,7 +481,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     let card = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, card.x + 2, card.y));
     assert!(!app.agents_pane_visible());
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+    open_agents_pane(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let header_text: String = terminal
         .backend()
@@ -660,7 +674,7 @@ fn conversation_timeline_uses_its_full_height_and_tracks_selection() {
     let agent = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, agent.x + 2, agent.y));
     assert!(!app.agents_pane_visible());
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+    open_agents_pane(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.herdr.agent_user_messages(0).unwrap().len(), 50);

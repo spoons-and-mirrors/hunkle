@@ -72,8 +72,8 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
 
     let mut app = App::new(root.to_path_buf());
     assert_eq!(app.changes.pane, LeftPane::Files);
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.view, View::Changes);
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    assert_eq!(app.view, View::Graph);
     assert_eq!(app.visible_view(), View::Graph);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();

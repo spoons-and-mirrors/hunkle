@@ -827,6 +827,11 @@ impl App {
 
     fn apply_changes_effect(&mut self, effect: Option<ChangesEffect>) {
         match effect {
+            Some(ChangesEffect::SidebarPaneActivated) => {
+                self.dismiss_agent_preview();
+                self.last_worktree_file_click = None;
+                self.mode = Mode::Normal;
+            }
             Some(ChangesEffect::PaneActivated) => {
                 self.dismiss_agent_preview();
                 self.last_worktree_file_click = None;

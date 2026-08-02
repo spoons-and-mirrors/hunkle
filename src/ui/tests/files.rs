@@ -582,7 +582,7 @@ fn opens_plain_directories_as_file_workspaces() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(screen.contains("Working tree clean"));
+    assert!(!screen.contains("Working tree clean"));
     assert!(screen.contains("LOCAL WORKSPACE"));
     assert!(screen.contains("Local file workspace"));
 }
@@ -765,6 +765,8 @@ fn double_clicking_worktree_files_opens_them_in_files() {
         assert_eq!(app.changes.diff, content);
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(app.agents_pane_visible());
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.changes.pane, LeftPane::Worktree);
     }
 }
@@ -785,6 +787,10 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     let mut app = App::new(root.to_path_buf());
     app.settings.worktree_width = 48;
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let explorer = app.regions.explorer_list.unwrap();
+    click(&mut app, explorer.x + 1, explorer.y);
     wait_for_preview(&mut app);
     assert_eq!(app.changes.pane, LeftPane::Files);
     assert_eq!(
@@ -792,7 +798,6 @@ fn renders_markdown_files_and_toggles_back_to_source() {
         Some("README.md".to_owned())
     );
 
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     let preview_button = (0..30)

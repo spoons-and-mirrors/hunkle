@@ -39,6 +39,19 @@ mod metadata;
 use metadata::*;
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
+    let sidebar_pane = app.changes.pane;
+    let preview_pane = app.changes.preview_pane;
+    if draw_details && sidebar_pane != preview_pane {
+        app.changes.pane = preview_pane;
+        draw_pane(frame, app, area, true);
+        app.changes.pane = sidebar_pane;
+        draw_pane(frame, app, area, false);
+        return;
+    }
+    draw_pane(frame, app, area, draw_details);
+}
+
+fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
     if app.repository().is_none() {
         super::draw_empty(frame, area, "Open a repository to inspect its changes");
         return;
@@ -611,7 +624,7 @@ pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect
             ChangesHitTarget::FilesTab,
             !agents_active && app.changes.pane == LeftPane::Files,
         ),
-        ("AGENT", ChangesHitTarget::AgentsTab, agents_active),
+        ("AGENTS", ChangesHitTarget::AgentsTab, agents_active),
     ];
     let mut spans = Vec::new();
     let mut x = area.x;
