@@ -5,16 +5,16 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AgentDestinationMetadata, AgentEntryState, AgentStatus, HerdrSession, HitTarget,
-    LinkedWorktreeCatalog, Settings,
+    AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentStatus, HerdrSession,
+    HitTarget, LinkedWorktreeCatalog, Settings,
 };
 
-use super::{fill, palette, text::word_wrapped_height, truncate_width};
+use super::{fill, palette, truncate_width};
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -185,89 +185,104 @@ pub(super) fn draw(
     targets
 }
 
-pub(super) fn draw_tooltip(
+pub(super) fn draw_history(
     frame: &mut Frame<'_>,
     herdr: &HerdrSession,
     index: usize,
     selected_message: Option<usize>,
-    anchor: Rect,
+    area: Rect,
 ) -> Vec<(HitTarget, Rect)> {
-    let Some(messages) = herdr
-        .agent_user_messages(index)
-        .filter(|messages| !messages.is_empty())
-    else {
+    if area.width < 24 || area.height < 10 {
         return Vec::new();
+    }
+    fill(frame, area, palette().panel);
+    let messages = herdr.agent_user_messages(index).unwrap_or_default();
+    let status = herdr
+        .agents
+        .get(index)
+        .map_or(AgentStatus::Unknown, |agent| agent.status);
+    let (phase, phase_color) = match status {
+        AgentStatus::Working => ("LIVE", palette().orange),
+        AgentStatus::Blocked => ("PAUSED", palette().red),
+        AgentStatus::Done => ("COMPLETE", palette().green),
+        AgentStatus::Idle => ("IDLE", palette().cyan),
+        AgentStatus::Unknown => ("UNKNOWN", palette().faint),
     };
+    let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
+    frame.render_widget(
+        Paragraph::new("CONVERSATION LOG").style(
+            Style::default()
+                .fg(palette().cyan)
+                .bg(palette().panel)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(
+            area.x,
+            area.y,
+            area.width.saturating_sub(phase_width).saturating_sub(1),
+            1,
+        ),
+    );
+    frame.render_widget(
+        Paragraph::new(phase)
+            .alignment(ratatui::layout::Alignment::Right)
+            .style(
+                Style::default()
+                    .fg(phase_color)
+                    .bg(palette().panel)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        Rect::new(
+            area.right().saturating_sub(phase_width),
+            area.y,
+            phase_width,
+            1,
+        ),
+    );
+    if messages.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Waiting for conversation history…")
+                .style(Style::default().fg(palette().faint).bg(palette().panel))
+                .wrap(Wrap { trim: true }),
+            Rect::new(
+                area.x,
+                area.y.saturating_add(2),
+                area.width,
+                area.height.saturating_sub(2),
+            ),
+        );
+        return Vec::new();
+    }
     let selected_message = selected_message
         .unwrap_or_else(|| messages.len().saturating_sub(1))
         .min(messages.len().saturating_sub(1));
     let message = &messages[selected_message];
-    let screen = frame.area();
-    let desired_width = u16::try_from(UnicodeWidthStr::width(message.as_str()).saturating_add(6))
-        .unwrap_or(u16::MAX)
-        .clamp(32, 50)
-        .min(screen.width.saturating_sub(2));
-    if desired_width < 6 || screen.height < 3 {
-        return Vec::new();
-    }
-
-    let right_space = screen.right().saturating_sub(anchor.right());
-    let (x, width) = if right_space >= 28 {
-        (anchor.right(), desired_width.min(right_space))
-    } else if anchor.x > desired_width {
-        (anchor.x.saturating_sub(desired_width), desired_width)
-    } else {
-        (screen.right().saturating_sub(desired_width), desired_width)
-    };
-    let content_width = usize::from(width.saturating_sub(4).max(1));
-    let y = anchor.y.saturating_sub(1);
-    let available_height = screen.bottom().saturating_sub(y);
-    let height = u16::try_from(word_wrapped_height(message, content_width).saturating_add(5))
-        .unwrap_or(u16::MAX)
-        .clamp(4, 10)
-        .min(available_height);
-    if height < 4 {
-        return Vec::new();
-    }
-    let area = Rect::new(x, y, width, height);
-    let panel = Rect::new(
-        area.x,
-        area.y.saturating_add(1),
-        area.width,
-        area.height.saturating_sub(1),
+    let turn = format!(
+        "TURN {} OF {}  ·  TEXT SNAPSHOT",
+        selected_message + 1,
+        messages.len()
     );
-    frame.render_widget(Clear, panel);
     frame.render_widget(
-        Paragraph::new("▄".repeat(usize::from(area.width))).style(
-            Style::default()
-                .fg(palette().surface_alt)
-                .remove_modifier(Modifier::DIM),
-        ),
-        Rect::new(area.x, area.y, area.width, 1),
+        Paragraph::new(truncate_width(&turn, usize::from(area.width)))
+            .style(Style::default().fg(palette().faint).bg(palette().panel)),
+        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
     );
-    fill(frame, panel, palette().panel);
-    let header = Rect::new(panel.x, panel.y, panel.width, 1);
-    fill(frame, header, palette().surface_alt);
-    let counter = format!("{} / {}", selected_message + 1, messages.len());
-    let counter_width = u16::try_from(UnicodeWidthStr::width(counter.as_str())).unwrap_or(u16::MAX);
-    let marker_count = messages.len().min(5);
-    let marker_width =
-        u16::try_from(marker_count.saturating_mul(2).saturating_sub(1)).unwrap_or(u16::MAX);
-    let counter_x = area.right().saturating_sub(counter_width).saturating_sub(2);
-    let marker_x = counter_x.saturating_sub(marker_width).saturating_sub(2);
     frame.render_widget(
-        Paragraph::new("USER MESSAGE").style(
-            Style::default()
-                .fg(palette().cyan)
-                .bg(palette().surface_alt)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Rect::new(
-            area.x.saturating_add(2),
-            header.y,
-            marker_x.saturating_sub(area.x).saturating_sub(3),
-            1,
-        ),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                message.request_count.to_string(),
+                Style::default().fg(palette().yellow),
+            ),
+            Span::styled(" REQUESTS", Style::default().fg(palette().muted)),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                message.tool_call_count.to_string(),
+                Style::default().fg(palette().cyan),
+            ),
+            Span::styled(" TOOLS", Style::default().fg(palette().muted)),
+        ]))
+        .style(Style::default().bg(palette().panel)),
+        Rect::new(area.x, area.y.saturating_add(2), area.width, 1),
     );
     let mut targets = vec![(
         HitTarget::AgentTooltip {
@@ -276,23 +291,49 @@ pub(super) fn draw_tooltip(
         },
         area,
     )];
-    for message_index in 0..marker_count {
+    let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+    let main = Rect::new(
+        area.x,
+        area.y.saturating_add(4),
+        area.width,
+        footer.y.saturating_sub(area.y.saturating_add(4)),
+    );
+    let timeline = Rect::new(main.x, main.y, 2.min(main.width), main.height);
+    let marker_count = messages.len().min(usize::from(timeline.height));
+    let marker_start = selected_message
+        .saturating_sub(marker_count / 2)
+        .min(messages.len().saturating_sub(marker_count));
+    if timeline.width > 0 {
+        frame.render_widget(
+            Paragraph::new("│\n".repeat(usize::from(timeline.height)))
+                .style(Style::default().fg(palette().faint).bg(palette().panel)),
+            Rect::new(timeline.x, timeline.y, 1, timeline.height),
+        );
+    }
+    for visible_index in 0..marker_count {
+        let message_index = marker_start + visible_index;
+        let offset = if marker_count <= 1 {
+            0
+        } else {
+            u16::try_from(visible_index)
+                .unwrap_or(0)
+                .saturating_mul(timeline.height.saturating_sub(1))
+                / u16::try_from(marker_count - 1).unwrap_or(1)
+        };
         let marker = Rect::new(
-            marker_x.saturating_add(u16::try_from(message_index).unwrap_or(0).saturating_mul(2)),
-            header.y,
-            1,
+            timeline.x,
+            timeline.y.saturating_add(offset),
+            timeline.width,
             1,
         );
         let color = if message_index == selected_message {
             palette().yellow
-        } else if message_index + 1 == marker_count {
-            palette().cyan
         } else {
             palette().muted
         };
         frame.render_widget(
-            Paragraph::new("■").style(Style::default().fg(color).bg(palette().surface_alt)),
-            marker,
+            Paragraph::new("■").style(Style::default().fg(color).bg(palette().panel)),
+            Rect::new(marker.x, marker.y, 1, 1),
         );
         targets.push((
             HitTarget::AgentMessage {
@@ -302,29 +343,203 @@ pub(super) fn draw_tooltip(
             marker,
         ));
     }
+    let cards = Rect::new(
+        main.x.saturating_add(2),
+        main.y,
+        main.width.saturating_sub(2),
+        main.height,
+    );
+    let activity_count = message
+        .activities
+        .len()
+        .min(2)
+        .min(usize::from(cards.height.saturating_sub(8) / 3));
+    let activity_height = u16::try_from(activity_count).unwrap_or(0).saturating_mul(3);
+    let message_height = cards.height.saturating_sub(activity_height);
+    let agent_height = 5
+        .min(message_height.saturating_sub(3))
+        .max(3)
+        .min(message_height);
+    let user_height = message_height.saturating_sub(agent_height);
+    let user_card = Rect::new(cards.x, cards.y, cards.width, user_height);
+    let user_body = draw_half_cell_card(frame, user_card, palette().surface_alt, palette().panel);
     frame.render_widget(
-        Paragraph::new(counter)
-            .alignment(ratatui::layout::Alignment::Right)
+        Paragraph::new("YOU").style(
+            Style::default()
+                .fg(palette().yellow)
+                .bg(palette().surface_alt)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(user_body.x, user_body.y, user_body.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(message.text.as_str())
             .style(
                 Style::default()
-                    .fg(palette().accent)
+                    .fg(palette().soft)
                     .bg(palette().surface_alt),
-            ),
-        Rect::new(counter_x, header.y, counter_width, 1),
-    );
-    let body_offset = u16::from(panel.height >= 5) + 1;
-    frame.render_widget(
-        Paragraph::new(message.as_str())
-            .style(Style::default().fg(palette().soft).bg(palette().panel))
+            )
             .wrap(Wrap { trim: true }),
         Rect::new(
-            area.x.saturating_add(2),
-            panel.y.saturating_add(body_offset),
-            area.width.saturating_sub(4),
-            panel.height.saturating_sub(body_offset).saturating_sub(1),
+            user_body.x,
+            user_body.y.saturating_add(1),
+            user_body.width,
+            user_body.height.saturating_sub(1),
         ),
     );
+    let agent_card = Rect::new(cards.x, user_card.bottom(), cards.width, agent_height);
+    let agent_body = draw_half_cell_card(frame, agent_card, palette().surface_alt, palette().panel);
+    let agent_text = message
+        .latest_agent_text
+        .as_deref()
+        .unwrap_or("Waiting for agent output...");
+    frame.render_widget(
+        Paragraph::new("AGENT").style(
+            Style::default()
+                .fg(palette().cyan)
+                .bg(palette().surface_alt)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(agent_body.x, agent_body.y, agent_body.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(agent_text)
+            .style(
+                Style::default()
+                    .fg(if message.latest_agent_text.is_some() {
+                        palette().accent
+                    } else {
+                        palette().faint
+                    })
+                    .bg(palette().surface_alt),
+            )
+            .wrap(Wrap { trim: true }),
+        Rect::new(
+            agent_body.x,
+            agent_body.y.saturating_add(1),
+            agent_body.width,
+            agent_body.height.saturating_sub(1),
+        ),
+    );
+    let activity_start = message.activities.len().saturating_sub(activity_count);
+    for (position, activity) in message.activities[activity_start..].iter().enumerate() {
+        let activity_card = Rect::new(
+            cards.x,
+            agent_card
+                .bottom()
+                .saturating_add(u16::try_from(position).unwrap_or(0).saturating_mul(3)),
+            cards.width,
+            3,
+        );
+        let activity_body =
+            draw_half_cell_card(frame, activity_card, palette().surface_alt, palette().panel);
+        let newest = position + 1 == activity_count;
+        let live =
+            status == AgentStatus::Working && selected_message == messages.len().saturating_sub(1);
+        let spinner = SPINNER_FRAMES[herdr.spinner_frame() % SPINNER_FRAMES.len()];
+        let spans = match activity {
+            AgentActivityPreview::Reasoning => vec![
+                Span::styled(
+                    if newest && live && message.reasoning_active {
+                        spinner
+                    } else {
+                        "·"
+                    },
+                    Style::default().fg(palette().orange),
+                ),
+                Span::styled(
+                    "  REASONING",
+                    Style::default()
+                        .fg(palette().orange)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ],
+            AgentActivityPreview::Tool {
+                name,
+                title,
+                running,
+            } => {
+                let mut spans = vec![
+                    Span::styled(
+                        if *running && newest && live {
+                            spinner
+                        } else {
+                            "·"
+                        },
+                        Style::default().fg(palette().cyan),
+                    ),
+                    Span::styled(
+                        "  TOOL  ",
+                        Style::default()
+                            .fg(palette().cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(name.as_str(), Style::default().fg(palette().accent)),
+                ];
+                if let Some(title) = title {
+                    spans.push(Span::styled("  ·  ", Style::default().fg(palette().faint)));
+                    spans.push(Span::styled(
+                        title.as_str(),
+                        Style::default().fg(palette().soft),
+                    ));
+                }
+                spans
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().surface_alt)),
+            activity_body,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(if status == AgentStatus::Working {
+            "LIVE · REFRESHING"
+        } else {
+            "FINAL SNAPSHOT"
+        })
+        .style(Style::default().fg(phase_color).bg(palette().panel)),
+        footer,
+    );
     targets
+}
+
+fn draw_half_cell_card(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    background: Color,
+    outer_background: Color,
+) -> Rect {
+    if area.width < 3 || area.height < 3 {
+        return area;
+    }
+    let edge_style = Style::default()
+        .fg(background)
+        .bg(outer_background)
+        .remove_modifier(Modifier::DIM);
+    frame.render_widget(
+        Paragraph::new("▄".repeat(usize::from(area.width))).style(edge_style),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("▀".repeat(usize::from(area.width))).style(edge_style),
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+    );
+    let inner = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    frame.render_widget(
+        Paragraph::new("▐\n".repeat(usize::from(inner.height))).style(edge_style),
+        Rect::new(area.x, inner.y, 1, inner.height),
+    );
+    frame.render_widget(
+        Paragraph::new("▌\n".repeat(usize::from(inner.height))).style(edge_style),
+        Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height),
+    );
+    fill(frame, inner, background);
+    inner
 }
 
 fn row_background(state: &AgentEntryState, hovered: bool) -> Color {

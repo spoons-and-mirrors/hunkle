@@ -17,11 +17,37 @@ impl App {
         let point = Position::new(mouse.column, mouse.row);
         if mouse.kind == MouseEventKind::Moved {
             let target = self.regions.hit_target_at(point);
-            self.hovered_hit_target = match (target, self.hovered_hit_target) {
+            let open_message = match self.hovered_hit_target {
+                Some(HitTarget::Agent(agent)) => self
+                    .herdr
+                    .agent_user_messages(agent)
+                    .filter(|messages| !messages.is_empty())
+                    .map(|messages| (agent, messages.len() - 1)),
+                Some(
+                    HitTarget::AgentTooltip { agent, message }
+                    | HitTarget::AgentMessage { agent, message },
+                ) => Some((agent, message)),
+                _ => None,
+            };
+            self.hovered_hit_target = match (target, open_message) {
                 (
-                    Some(HitTarget::Agent(index)),
-                    Some(HitTarget::AgentTooltip { agent, message }),
-                ) if index == agent => Some(HitTarget::AgentTooltip { agent, message }),
+                    Some(
+                        target @ (HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }),
+                    ),
+                    _,
+                ) => Some(target),
+                (Some(HitTarget::Agent(index)), Some((agent, message))) if index == agent => {
+                    Some(HitTarget::AgentTooltip { agent, message })
+                }
+                (Some(target @ HitTarget::Agent(_)), _) => Some(target),
+                (_, Some((agent, message)))
+                    if self
+                        .regions
+                        .worktree
+                        .is_some_and(|sidebar| sidebar.contains(point)) =>
+                {
+                    Some(HitTarget::AgentTooltip { agent, message })
+                }
                 _ => target,
             };
             if let Some(target) = self.hovered_hit_target {
@@ -207,7 +233,7 @@ impl App {
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-        ) && self.cycle_agent_message(point, mouse.kind == MouseEventKind::ScrollDown)
+        ) && self.cycle_agent_message(point, mouse.kind == MouseEventKind::ScrollUp)
         {
             return;
         }
@@ -804,7 +830,13 @@ impl App {
     fn apply_changes_effect(&mut self, effect: Option<ChangesEffect>) {
         match effect {
             Some(ChangesEffect::PaneActivated) => {
+                self.agents_pane_pinned = false;
                 self.last_worktree_file_click = None;
+                self.mode = Mode::Normal;
+                self.show_main_pane();
+            }
+            Some(ChangesEffect::AgentsPaneActivated) => {
+                self.agents_pane_pinned = true;
                 self.mode = Mode::Normal;
                 self.show_main_pane();
             }
@@ -1245,7 +1277,7 @@ impl App {
         let Some(message_count) = self
             .herdr
             .agent_user_messages(agent)
-            .map(<[String]>::len)
+            .map(|messages| messages.len())
             .filter(|count| *count > 0)
         else {
             self.herdr.request_agent_latest_user_message(agent);

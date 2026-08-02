@@ -33,6 +33,7 @@ pub enum LeftPane {
 pub(crate) enum ChangesHitTarget {
     WorktreeTab,
     FilesTab,
+    AgentsTab,
     StageAll,
     WorktreeBackground(u64),
     WorktreeRow { generation: u64, index: usize },
@@ -50,6 +51,7 @@ pub(crate) enum ChangesHitTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ChangesEffect {
     PaneActivated,
+    AgentsPaneActivated,
     WorktreeDirectoryActivated,
     ToggleAllStaging,
     ToggleSelectedStage,
@@ -472,6 +474,7 @@ impl ChangesState {
                 self.set_pane(LeftPane::Files, Some(repo));
                 Some(ChangesEffect::PaneActivated)
             }
+            ChangesHitTarget::AgentsTab => Some(ChangesEffect::AgentsPaneActivated),
             ChangesHitTarget::StageAll => {
                 if self.pane != LeftPane::Worktree {
                     return None;

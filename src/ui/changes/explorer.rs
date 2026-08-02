@@ -10,37 +10,35 @@ pub(super) fn draw_explorer_changes(
     app.regions.commit = None;
     let content = columns[0].inner(Margin::new(1, 0));
     let header = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);
-    let list_area = layout_agents_pane(app, content, header.y.saturating_add(2));
-    let files_title = "FILES";
-    let add_width = 5.min(header.width);
+    let controls = Rect::new(
+        content.x,
+        header.bottom().saturating_add(1),
+        content.width,
+        1,
+    );
+    let list_area = layout_agents_pane(app, content, controls.bottom());
+    let add_width = 7.min(controls.width);
     let add_button = Rect::new(
-        header.right().saturating_sub(add_width),
-        header.y,
+        controls.right().saturating_sub(add_width),
+        controls.y,
         add_width,
         1,
     );
     let root_target = Rect::new(
-        header.x,
-        header.y,
-        header.width.saturating_sub(add_width),
+        controls.x,
+        controls.y,
+        controls.width.saturating_sub(add_width),
         1,
     );
     let drop_target = app.file_drop_target().cloned();
+    draw_sidebar_tabs(frame, app, header);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("CHANGES", Style::default().fg(palette().faint)),
-            Span::raw("  "),
-            Span::styled(
-                files_title,
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
+        Paragraph::new(format!("{} FILES", app.changes.explorer_rows().len()))
+            .style(Style::default().fg(palette().faint)),
         root_target,
     );
     frame.render_widget(
-        Paragraph::new(" + ")
+        Paragraph::new("NEW  +")
             .alignment(Alignment::Center)
             .style(Style::default().fg(palette().accent).bg(palette().raised)),
         add_button,
@@ -51,24 +49,10 @@ pub(super) fn draw_explorer_changes(
             root_target,
         );
         frame.render_widget(
-            Paragraph::new(format!("CHANGES  {files_title}"))
-                .style(Style::default().fg(palette().ink)),
+            Paragraph::new("DROP FILES HERE").style(Style::default().fg(palette().ink)),
             root_target,
         );
     }
-    app.regions.register_hit_target(
-        HitTarget::Changes(ChangesHitTarget::WorktreeTab),
-        Rect::new(header.x, header.y, 7, 1),
-    );
-    app.regions.register_hit_target(
-        HitTarget::Changes(ChangesHitTarget::FilesTab),
-        Rect::new(
-            header.x.saturating_add(9),
-            header.y,
-            UnicodeWidthStr::width(files_title) as u16,
-            1,
-        ),
-    );
     app.regions.explorer_list = Some(list_area);
     app.regions.files_add = Some(add_button);
     app.regions.files_root = Some(root_target);
@@ -110,6 +94,7 @@ pub(super) fn draw_explorer_changes(
     };
     frame.render_widget(List::new(items), list_area);
     draw_agents_section(frame, app);
+    draw_agent_history_pane(frame, app, content);
     if !draw_details {
         return;
     }

@@ -28,6 +28,7 @@ pub(crate) use client::HerdrPaneRect;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const AGENT_CHANGE_STATS_INTERVAL: Duration = Duration::from_secs(5);
+const AGENT_MESSAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
 const LAYOUT_INDEX_VERSION: u8 = 1;
@@ -283,8 +284,28 @@ enum Completion {
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     LatestUserMessage {
         identity: AgentSessionIdentity,
-        result: Result<Vec<String>, String>,
+        result: Result<Vec<AgentUserMessage>, String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentActivityPreview {
+    Reasoning,
+    Tool {
+        name: String,
+        title: Option<String>,
+        running: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentUserMessage {
+    pub(crate) text: String,
+    pub(crate) latest_agent_text: Option<String>,
+    pub(crate) activities: Vec<AgentActivityPreview>,
+    pub(crate) reasoning_active: bool,
+    pub(crate) request_count: u64,
+    pub(crate) tool_call_count: u64,
 }
 
 pub(crate) struct HerdrSession {
@@ -302,8 +323,10 @@ pub(crate) struct HerdrSession {
     agent_change_stats: HashMap<PathBuf, (u64, u64)>,
     agent_change_stats_loading: bool,
     next_agent_change_stats: Instant,
-    latest_user_messages: HashMap<AgentSessionIdentity, Vec<String>>,
+    latest_user_messages: HashMap<AgentSessionIdentity, Vec<AgentUserMessage>>,
     latest_user_message_requests: HashSet<AgentSessionIdentity>,
+    latest_user_message_refreshes: HashMap<AgentSessionIdentity, Instant>,
+    latest_user_message_statuses: HashMap<AgentSessionIdentity, AgentStatus>,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
     next_refresh: Instant,
@@ -362,6 +385,8 @@ impl HerdrSession {
             next_agent_change_stats: Instant::now(),
             latest_user_messages: HashMap::new(),
             latest_user_message_requests: HashSet::new(),
+            latest_user_message_refreshes: HashMap::new(),
+            latest_user_message_statuses: HashMap::new(),
             sender,
             receiver,
             next_refresh: Instant::now(),
@@ -462,6 +487,7 @@ impl HerdrSession {
                         .collect();
                 }
                 Completion::LatestUserMessage { identity, result } => {
+                    self.latest_user_message_requests.remove(&identity);
                     if let Ok(message) = result {
                         self.latest_user_messages.insert(identity, message);
                     }
@@ -540,7 +566,7 @@ impl HerdrSession {
         self.agents.get(index)?.session_name.as_deref()
     }
 
-    pub(crate) fn agent_user_messages(&self, index: usize) -> Option<&[String]> {
+    pub(crate) fn agent_user_messages(&self, index: usize) -> Option<&[AgentUserMessage]> {
         let AgentTimingKey::Session(identity) =
             self.agents.get(index)?.session_timing_key.as_ref()?
         else {
@@ -550,21 +576,37 @@ impl HerdrSession {
     }
 
     pub(crate) fn request_agent_latest_user_message(&mut self, index: usize) {
-        let Some(AgentTimingKey::Session(identity)) = self
-            .agents
-            .get(index)
-            .and_then(|agent| agent.session_timing_key.as_ref())
+        let Some((AgentTimingKey::Session(identity), status)) =
+            self.agents.get(index).and_then(|agent| {
+                agent
+                    .session_timing_key
+                    .as_ref()
+                    .map(|key| (key, agent.status))
+            })
         else {
             return;
         };
+        let identity = identity.clone();
+        let now = Instant::now();
+        let needs_refresh = !self.latest_user_messages.contains_key(&identity)
+            || self.latest_user_message_statuses.get(&identity) != Some(&status)
+            || status == AgentStatus::Working;
         if identity.agent != "opencode"
-            || self.latest_user_messages.contains_key(identity)
-            || !self.latest_user_message_requests.insert(identity.clone())
+            || !needs_refresh
+            || self.latest_user_message_requests.contains(&identity)
+            || self
+                .latest_user_message_refreshes
+                .get(&identity)
+                .is_some_and(|refresh| now < *refresh)
         {
             return;
         }
 
-        let identity = identity.clone();
+        self.latest_user_message_requests.insert(identity.clone());
+        self.latest_user_message_refreshes
+            .insert(identity.clone(), now + AGENT_MESSAGE_REFRESH_INTERVAL);
+        self.latest_user_message_statuses
+            .insert(identity.clone(), status);
         let session_id = identity.value.clone();
         let sender = self.sender.clone();
         let _ = thread::Builder::new()
@@ -817,7 +859,11 @@ impl HerdrSession {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_agent_user_messages_for_test(&mut self, index: usize, messages: &[&str]) {
+    pub(crate) fn set_agent_user_messages_for_test(
+        &mut self,
+        index: usize,
+        messages: &[(&str, Option<&str>, u64, u64)],
+    ) {
         let Some(AgentTimingKey::Session(identity)) = self
             .agents
             .get(index)
@@ -825,13 +871,52 @@ impl HerdrSession {
         else {
             panic!("test agent has no session identity");
         };
+        let identity = identity.clone();
+        let status = self.agents[index].status;
         self.latest_user_messages.insert(
             identity.clone(),
             messages
                 .iter()
-                .map(|message| (*message).to_owned())
+                .map(
+                    |(text, latest_agent_text, request_count, tool_call_count)| AgentUserMessage {
+                        text: (*text).to_owned(),
+                        latest_agent_text: latest_agent_text.map(str::to_owned),
+                        activities: Vec::new(),
+                        reasoning_active: false,
+                        request_count: *request_count,
+                        tool_call_count: *tool_call_count,
+                    },
+                )
                 .collect(),
         );
+        self.latest_user_message_refreshes.insert(
+            identity.clone(),
+            Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
+        );
+        self.latest_user_message_statuses.insert(identity, status);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_agent_message_activity_for_test(
+        &mut self,
+        index: usize,
+        message: usize,
+        activities: &[AgentActivityPreview],
+        reasoning_active: bool,
+    ) {
+        let AgentTimingKey::Session(identity) = self.agents[index]
+            .session_timing_key
+            .as_ref()
+            .expect("test agent has no session identity")
+        else {
+            panic!("test agent has no session identity");
+        };
+        let message = &mut self
+            .latest_user_messages
+            .get_mut(identity)
+            .expect("test agent has no messages")[message];
+        message.activities = activities.to_vec();
+        message.reasoning_active = reasoning_active;
     }
 }
 

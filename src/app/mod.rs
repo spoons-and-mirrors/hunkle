@@ -35,7 +35,9 @@ pub(crate) use header_picker::{
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 #[cfg(test)]
 pub(crate) use herdr_session::HerdrPaneRect;
-pub(crate) use herdr_session::{AgentEntryState, AgentStatus, HerdrPaneLayout, HerdrSession};
+pub(crate) use herdr_session::{
+    AgentActivityPreview, AgentEntryState, AgentStatus, HerdrPaneLayout, HerdrSession,
+};
 pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
     LinkedWorktreeObservation, RepositoryPickerItem,
@@ -114,6 +116,7 @@ pub struct App {
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) herdr: HerdrSession,
     pub(crate) agents_visible: bool,
+    pub(crate) agents_pane_pinned: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
     pub settings_selection: usize,
@@ -256,6 +259,7 @@ impl App {
             linked_worktrees,
             herdr,
             agents_visible: true,
+            agents_pane_pinned: false,
             hovered_hit_target: None,
             settings,
             settings_selection: 0,
@@ -322,6 +326,31 @@ impl App {
             View::Graph
         } else {
             View::Changes
+        }
+    }
+
+    pub(crate) fn agents_pane_visible(&self) -> bool {
+        self.agents_pane_pinned
+            || matches!(
+                self.hovered_hit_target,
+                Some(
+                    HitTarget::Agent(_)
+                        | HitTarget::AgentTooltip { .. }
+                        | HitTarget::AgentMessage { .. }
+                )
+            )
+    }
+
+    pub(crate) fn agents_pane_index(&self) -> Option<usize> {
+        match self.hovered_hit_target {
+            Some(HitTarget::Agent(index)) => Some(index),
+            Some(HitTarget::AgentTooltip { agent, .. } | HitTarget::AgentMessage { agent, .. }) => {
+                Some(agent)
+            }
+            _ if self.agents_pane_pinned => (0..self.herdr.agents.len())
+                .find(|index| self.herdr.agent_entry_state(*index).selected)
+                .or((!self.herdr.agents.is_empty()).then_some(0)),
+            _ => None,
         }
     }
 
@@ -1846,6 +1875,7 @@ impl App {
         match self.settings.shortcuts.main_action(key) {
             Some(ShortcutAction::TogglePane) => self.toggle_left_pane(),
             Some(ShortcutAction::ToggleGraph) if self.mode == Mode::Normal => self.toggle_graph(),
+            Some(ShortcutAction::ShowAgents) => self.show_agents_pane(),
             _ => return false,
         }
         true
@@ -1858,7 +1888,15 @@ impl App {
 
     fn show_left_pane(&mut self, pane: LeftPane) {
         self.initial_pane_pending = false;
+        self.agents_pane_pinned = false;
         self.changes.set_pane(pane, self.session.data());
+        self.show_main_pane();
+    }
+
+    fn show_agents_pane(&mut self) {
+        self.initial_pane_pending = false;
+        self.agents_visible = true;
+        self.agents_pane_pinned = true;
         self.show_main_pane();
     }
 
@@ -1868,6 +1906,11 @@ impl App {
     }
 
     fn toggle_left_pane(&mut self) {
+        if self.agents_pane_pinned {
+            self.agents_pane_pinned = false;
+            self.show_main_pane();
+            return;
+        }
         self.show_left_pane(match self.changes.pane {
             LeftPane::Worktree => LeftPane::Files,
             LeftPane::Files => LeftPane::Worktree,

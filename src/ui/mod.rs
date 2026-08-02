@@ -128,27 +128,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     draw_main_top_padding(frame, app, layout[1]);
     draw_navigation(frame, app, layout[2]);
-    let hovered_agent_message = match app.hovered_hit_target {
-        Some(HitTarget::Agent(index)) => Some((index, None)),
-        Some(
-            HitTarget::AgentTooltip { agent, message } | HitTarget::AgentMessage { agent, message },
-        ) => Some((agent, Some(message))),
-        _ => None,
-    };
-    if let Some((index, message)) = hovered_agent_message
-        && let Some(anchor) = app.regions.hit_target_rect(HitTarget::Agent(index))
-        && app
-            .herdr
-            .agent_user_messages(index)
-            .is_some_and(|messages| !messages.is_empty())
-    {
-        if let Some(viewer) = app.regions.diff {
-            dim_area(frame, viewer);
-        }
-        for (target, rect) in agents::draw_tooltip(frame, &app.herdr, index, message, anchor) {
-            app.regions.register_hit_target(target, rect);
-        }
-    }
     match app.mode {
         Mode::FileSearch => {
             dim(frame);
@@ -322,15 +301,6 @@ fn finish_selection(frame: &mut Frame<'_>, app: &mut App) {
 
 fn dim(frame: &mut Frame<'_>) {
     let area = frame.area();
-    frame.buffer_mut().set_style(
-        area,
-        Style::default()
-            .bg(Color::Rgb(0, 0, 0))
-            .add_modifier(Modifier::DIM),
-    );
-}
-
-fn dim_area(frame: &mut Frame<'_>, area: Rect) {
     frame.buffer_mut().set_style(
         area,
         Style::default()
