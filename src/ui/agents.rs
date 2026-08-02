@@ -24,7 +24,6 @@ pub(super) fn draw(
     herdr: &mut HerdrSession,
     linked_worktrees: &LinkedWorktreeCatalog,
     settings: &Settings,
-    controls: Rect,
     header: Rect,
     list: Rect,
     dragging: bool,
@@ -41,32 +40,14 @@ pub(super) fn draw(
     };
     let toggle_width = u16::try_from(UnicodeWidthStr::width(toggle_label)).unwrap_or(0);
     let toggle = Rect::new(
-        controls
+        header
             .right()
             .saturating_sub(toggle_width)
             .saturating_sub(1),
-        controls.y,
-        toggle_width.min(controls.width),
+        header.y,
+        toggle_width.min(header.width),
         1,
     );
-    frame.render_widget(
-        Paragraph::new(toggle_label).style(
-            Style::default()
-                .fg(if hovered == Some(HitTarget::AgentStashToggle) {
-                    palette().canvas
-                } else {
-                    palette().cyan
-                })
-                .bg(if hovered == Some(HitTarget::AgentStashToggle) {
-                    palette().selected
-                } else {
-                    palette().raised
-                })
-                .add_modifier(Modifier::BOLD),
-        ),
-        toggle,
-    );
-    targets.push((HitTarget::AgentStashToggle, toggle));
     if header.height == 0 || list.height == 0 {
         return targets;
     }
@@ -75,7 +56,12 @@ pub(super) fn draw(
     } else {
         herdr.agents.len()
     };
-    let section_header = header;
+    let section_header = Rect::new(
+        header.x,
+        header.y,
+        toggle.x.saturating_sub(header.x).saturating_sub(1),
+        1,
+    );
     let title = truncate_width(
         &format!(
             "{} {count}",
@@ -107,6 +93,24 @@ pub(super) fn draw(
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(header_spans)), section_header);
+    frame.render_widget(
+        Paragraph::new(toggle_label).style(
+            Style::default()
+                .fg(if hovered == Some(HitTarget::AgentStashToggle) {
+                    palette().canvas
+                } else {
+                    palette().cyan
+                })
+                .bg(if hovered == Some(HitTarget::AgentStashToggle) {
+                    palette().selected
+                } else {
+                    palette().raised
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        toggle,
+    );
+    targets.push((HitTarget::AgentStashToggle, toggle));
     if herdr.showing_stash {
         draw_stashed_agents(frame, herdr, list, hovered, &mut targets);
         return targets;

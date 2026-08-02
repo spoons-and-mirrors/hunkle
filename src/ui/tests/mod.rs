@@ -171,7 +171,7 @@ fn renders_every_primary_surface() {
     assert!(app.regions.graph.unwrap().x > 0);
     assert_eq!(app.regions.help.unwrap().right(), 120);
     let buffer = terminal.backend().buffer();
-    let agents = app.regions.agents_controls.unwrap();
+    let agents = app.regions.agents_splitter.unwrap();
     let agents_offset = usize::from(agents.y) * 120 + usize::from(agents.x);
     assert_eq!(buffer.content[0].bg, super::palette().surface_alt);
     assert_eq!(
@@ -193,12 +193,8 @@ fn renders_every_primary_surface() {
             .chain(stash_toggle.right()..agents.right())
             .all(|x| { terminal.backend().buffer()[(x, agents.y)].bg == super::palette().panel })
     );
-    let agents_splitter = app.regions.agents_splitter.unwrap();
-    let agents_title: String = (agents_splitter.x..agents_splitter.right())
-        .map(|x| terminal.backend().buffer()[(x, agents_splitter.y)].symbol())
-        .collect();
-    assert!(agents_title.contains("AGENTS "));
-    assert!(agents_title.contains('─'));
+    assert!(agents_header.contains("AGENTS "));
+    assert!(agents_header.contains('─'));
     let header: String = terminal.backend().buffer().content[..120]
         .iter()
         .map(|cell| cell.symbol())
@@ -603,19 +599,20 @@ fn renders_every_primary_surface() {
     let agents_bounds = app.regions.agents_bounds.unwrap();
     assert_eq!(agents_bounds.y, worktree.y.saturating_add(1));
     let agents_target = agents_bounds.bottom().saturating_sub(9);
+    let agents_resize_x = agents_splitter.x;
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
-        agents_splitter.right().saturating_sub(2),
+        agents_resize_x,
         agents_splitter.y,
     ));
     app.handle_mouse(mouse(
         MouseEventKind::Drag(MouseButton::Left),
-        agents_splitter.right().saturating_sub(2),
+        agents_resize_x,
         agents_target,
     ));
     app.handle_mouse(mouse(
         MouseEventKind::Up(MouseButton::Left),
-        agents_splitter.right().saturating_sub(2),
+        agents_resize_x,
         agents_target,
     ));
     assert_eq!(app.settings.agents_height, 9);

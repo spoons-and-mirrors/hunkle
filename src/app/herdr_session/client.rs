@@ -1331,6 +1331,7 @@ fn split_pane_with_agent_with(
     session_id: Option<String>,
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
 ) -> Result<String, String> {
+    let command = opencode_command(session_id.as_deref())?;
     let split = runner(&[
         "pane".to_owned(),
         "split".to_owned(),
@@ -1346,15 +1347,12 @@ fn split_pane_with_agent_with(
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| "Herdr did not identify the new pane".to_owned())?;
-    let mut run_args = vec![
+    let run_args = vec![
         "pane".to_owned(),
         "run".to_owned(),
         pane_id.clone(),
-        "opencode".to_owned(),
+        command,
     ];
-    if let Some(session_id) = session_id {
-        run_args.extend(["--session".to_owned(), session_id]);
-    }
     if let Err(error) = runner(&run_args) {
         let _ = runner(&["pane".to_owned(), "close".to_owned(), pane_id]);
         return Err(error);
@@ -1369,6 +1367,7 @@ fn replace_pane_with_agent_with(
     session_id: Option<String>,
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
 ) -> Result<String, String> {
+    let command = opencode_command(session_id.as_deref())?;
     let pane = runner(&["pane".to_owned(), "get".to_owned(), pane_id.clone()])?;
     let parked_tab_label = pane
         .pointer("/result/pane/cwd")
@@ -1392,15 +1391,12 @@ fn replace_pane_with_agent_with(
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| "Herdr did not identify the new pane".to_owned())?;
-    let mut run_args = vec![
+    let run_args = vec![
         "pane".to_owned(),
         "run".to_owned(),
         replacement_pane_id.clone(),
-        "opencode".to_owned(),
+        command,
     ];
-    if let Some(session_id) = session_id {
-        run_args.extend(["--session".to_owned(), session_id]);
-    }
     if let Err(error) = runner(&run_args) {
         let _ = runner(&["pane".to_owned(), "close".to_owned(), replacement_pane_id]);
         return Err(error);
@@ -1421,6 +1417,20 @@ fn replace_pane_with_agent_with(
         return Err(error);
     }
     Ok(replacement_pane_id)
+}
+
+fn opencode_command(session_id: Option<&str>) -> Result<String, String> {
+    let Some(session_id) = session_id else {
+        return Ok("opencode".to_owned());
+    };
+    if session_id.is_empty()
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("OpenCode reported an invalid session ID".to_owned());
+    }
+    Ok(format!("opencode --session {session_id}"))
 }
 
 fn send_command_below_with(
@@ -2596,13 +2606,13 @@ mod tests {
     }
 
     #[test]
-    fn replaces_a_focused_pane_with_an_opencode_agent() {
+    fn replaces_a_focused_pane_with_a_resumed_opencode_agent() {
         let mut calls = Vec::new();
         let pane_id = replace_pane_with_agent_with(
             PathBuf::from("/tmp/feature"),
             "w1".to_owned(),
             "w1:p2".to_owned(),
-            None,
+            Some("ses_123".to_owned()),
             |args| {
                 calls.push(args.to_vec());
                 Ok(match calls.len() {
@@ -2635,7 +2645,7 @@ mod tests {
                 ]
                 .map(str::to_owned)
                 .to_vec(),
-                ["pane", "run", "w1:p4", "opencode"]
+                ["pane", "run", "w1:p4", "opencode --session ses_123"]
                     .map(str::to_owned)
                     .to_vec(),
                 [
@@ -2690,11 +2700,30 @@ mod tests {
                 ]
                 .map(str::to_owned)
                 .to_vec(),
-                ["pane", "run", "w1:p4", "opencode", "--session", "ses_123"]
+                ["pane", "run", "w1:p4", "opencode --session ses_123"]
                     .map(str::to_owned)
                     .to_vec(),
             ]
         );
+    }
+
+    #[test]
+    fn rejects_unsafe_opencode_session_ids_before_changing_the_layout() {
+        let mut called = false;
+        let error = split_pane_with_agent_with(
+            PathBuf::from("/tmp/feature"),
+            "w1:p2".to_owned(),
+            AgentPaneDirection::Up,
+            Some("ses_123; rm -rf /".to_owned()),
+            |_| {
+                called = true;
+                Ok(Value::Null)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "OpenCode reported an invalid session ID");
+        assert!(!called);
     }
 
     #[test]

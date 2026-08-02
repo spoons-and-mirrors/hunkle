@@ -2,24 +2,28 @@ use super::*;
 
 pub(super) fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> Rect {
     app.regions.agents_list = None;
-    app.regions.agents_controls = None;
     app.regions.agents_splitter = None;
     app.regions.agents_bounds = None;
 
     let available = content.bottom().saturating_sub(list_y);
-    if !app.agents_visible || available < 6 {
+    if !app.agents_visible || available < 5 {
         return Rect::new(content.x, list_y, content.width, available);
     }
 
-    let agent_count = app.herdr.agents.len();
+    let live_count = app.herdr.agents.len();
+    let agent_count = if app.herdr.showing_stash {
+        live_count.max(app.herdr.stashed_agents().len())
+    } else {
+        live_count
+    };
     if app.agents_height_fit_for != Some(agent_count) {
         app.agents_height_fit_for = Some(agent_count);
-        app.settings.agents_height = (3 * agent_count).saturating_add(3).clamp(6, 256) as u16;
+        app.settings.agents_height = (3 * agent_count).saturating_add(2).clamp(5, 256) as u16;
     }
     let agents_height = app
         .settings
         .agents_height
-        .clamp(6, available.saturating_sub(1).max(6));
+        .clamp(5, available.saturating_sub(1).max(5));
     let agents_area = Rect::new(
         content.x,
         content.bottom().saturating_sub(agents_height),
@@ -32,23 +36,17 @@ pub(super) fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> R
         content.width,
         available.saturating_sub(1),
     ));
-    app.regions.agents_controls = Some(Rect::new(
+    app.regions.agents_splitter = Some(Rect::new(
         agents_area.x,
         agents_area.y,
         agents_area.width,
         1,
     ));
-    app.regions.agents_splitter = Some(Rect::new(
-        agents_area.x,
-        agents_area.y.saturating_add(1),
-        agents_area.width,
-        1,
-    ));
     app.regions.agents_list = Some(Rect::new(
         agents_area.x.saturating_sub(1),
-        agents_area.y.saturating_add(2),
+        agents_area.y.saturating_add(1),
         agents_area.width.saturating_add(2),
-        agents_area.height.saturating_sub(2),
+        agents_area.height.saturating_sub(1),
     ));
     Rect::new(
         content.x,
@@ -59,11 +57,7 @@ pub(super) fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> R
 }
 
 pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
-    let (Some(controls), Some(header), Some(list)) = (
-        app.regions.agents_controls,
-        app.regions.agents_splitter,
-        app.regions.agents_list,
-    ) else {
+    let (Some(header), Some(list)) = (app.regions.agents_splitter, app.regions.agents_list) else {
         return;
     };
     let hovered = app.hovered_hit_target.filter(|target| {
@@ -87,7 +81,6 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
         &mut app.herdr,
         &app.linked_worktrees,
         &app.settings,
-        controls,
         header,
         list,
         app.dragging_agents,

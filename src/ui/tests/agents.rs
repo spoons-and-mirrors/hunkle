@@ -71,13 +71,15 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let live_height = app.settings.agents_height;
+    assert_eq!(live_height, 5);
     let live_card = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
-    let controls = app.regions.agents_controls.unwrap();
+    let header = app.regions.agents_splitter.unwrap();
     let toggle = app
         .regions
         .hit_target_rect(HitTarget::AgentStashToggle)
         .unwrap();
-    assert_eq!(toggle.right().saturating_add(1), controls.right());
+    assert_eq!(toggle.right().saturating_add(1), header.right());
+    assert_eq!(toggle.y, header.y);
     let toggle_text = (toggle.x..toggle.right())
         .map(|x| terminal.backend().buffer()[(x, toggle.y)].symbol())
         .collect::<String>();
@@ -91,13 +93,20 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert!(app.herdr.showing_stash);
-    assert_eq!(app.settings.agents_height, live_height);
+    assert_eq!(app.settings.agents_height, 8);
+    assert!(app.settings.agents_height > live_height);
     assert!(app.regions.hit_target_rect(HitTarget::Agent(0)).is_none());
     let stashed_card = app
         .regions
         .hit_target_rect(HitTarget::StashedAgent(0))
         .unwrap();
-    assert_eq!(stashed_card, live_card);
+    assert_eq!(stashed_card.width, live_card.width);
+    assert_eq!(stashed_card.height, live_card.height);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::StashedAgent(1))
+            .is_some()
+    );
     let screen = terminal
         .backend()
         .buffer()
@@ -108,6 +117,9 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     assert!(screen.contains("STASHED 2"));
     assert!(screen.contains("Pick this up next week"));
     assert!(screen.contains("feature/s"));
+
+    click(&mut app, stashed_card.x, stashed_card.y);
+    assert!(!app.herdr.showing_stash);
 }
 
 #[test]
@@ -853,14 +865,14 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
 
     app.herdr = HerdrSession::ready_for_test(&snapshot(1));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.settings.agents_height, 6);
+    assert_eq!(app.settings.agents_height, 5);
     app.herdr = HerdrSession::ready_for_test(&snapshot(2));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.settings.agents_height, 9);
+    assert_eq!(app.settings.agents_height, 8);
 
     let splitter = app.regions.agents_splitter.unwrap();
     let bounds = app.regions.agents_bounds.unwrap();
-    let column = splitter.right().saturating_sub(2);
+    let column = splitter.x;
     let target = bounds.bottom().saturating_sub(10);
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
@@ -893,7 +905,7 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
         column,
         bounds.bottom(),
     ));
-    assert_eq!(app.settings.agents_height, 6);
+    assert_eq!(app.settings.agents_height, 5);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let list = app.regions.agents_list.unwrap();

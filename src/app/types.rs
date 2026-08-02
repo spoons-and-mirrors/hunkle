@@ -209,7 +209,6 @@ pub struct Regions {
     pub worktree: Option<Rect>,
     pub worktree_list: Option<Rect>,
     pub explorer_list: Option<Rect>,
-    pub agents_controls: Option<Rect>,
     pub agents_list: Option<Rect>,
     pub agents_splitter: Option<Rect>,
     pub agents_bounds: Option<Rect>,

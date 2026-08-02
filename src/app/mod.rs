@@ -1963,6 +1963,7 @@ impl App {
             self.notice = Some("Stashed agent is no longer available".to_owned());
             return;
         };
+        self.herdr.show_live_agents();
         match self.herdr_prompt.prepare_stashed_agent(
             agent.worktree,
             agent.branch,

@@ -291,11 +291,23 @@ enum Completion {
         name: String,
         result: Result<(), String>,
     },
+    AgentStashIdentity {
+        result: Result<AgentSessionIdentity, String>,
+    },
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     LatestUserMessage {
         identity: AgentSessionIdentity,
         result: Result<Vec<AgentUserMessage>, String>,
     },
+}
+
+struct PendingAgentStash {
+    agent: HerdrAgent,
+    index: usize,
+    repository: PathBuf,
+    repository_label: String,
+    worktree: PathBuf,
+    branch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,6 +364,8 @@ pub(crate) struct HerdrSession {
     pub(crate) showing_stash: bool,
     pub(crate) stash_scroll: usize,
     agent_stash_running: bool,
+    pending_agent_stash: Option<PendingAgentStash>,
+    stashed_pane_ids: HashSet<String>,
 }
 
 impl HerdrSession {
@@ -422,6 +436,8 @@ impl HerdrSession {
             showing_stash: false,
             stash_scroll: 0,
             agent_stash_running: false,
+            pending_agent_stash: None,
+            stashed_pane_ids: HashSet::new(),
         }
     }
 
@@ -583,21 +599,32 @@ impl HerdrSession {
                     self.next_refresh = Instant::now();
                     poll.notice = Some(match result {
                         Ok(()) => {
-                            self.agents.retain(|agent| {
-                                agent.session_timing_key.as_ref().is_none_or(|key| {
-                                    !matches!(key, AgentTimingKey::Session(identity) if identity.value == session_id)
-                                })
-                            });
+                            if let Some(pending) = self.pending_agent_stash.take() {
+                                self.stashed_pane_ids.insert(pending.agent.pane_id);
+                            }
                             format!("Stashed agent {name}")
                         }
                         Err(error) => {
                             let rollback = self.stash.remove(&session_id).err();
+                            self.restore_pending_agent_stash();
                             rollback.map_or_else(
                                 || format!("Could not stash agent: {error}"),
                                 |rollback| format!("Could not stash agent: {error}; {rollback}"),
                             )
                         }
                     });
+                }
+                Completion::AgentStashIdentity { result } => {
+                    match result.and_then(|identity| self.close_pending_agent_stash(identity)) {
+                        Ok(()) => {
+                            poll.notice = Some("Closing and stashing agent".to_owned());
+                        }
+                        Err(error) => {
+                            self.agent_stash_running = false;
+                            self.restore_pending_agent_stash();
+                            poll.notice = Some(format!("Could not stash agent: {error}"));
+                        }
+                    }
                 }
                 Completion::AgentChangeStats(stats) => {
                     self.agent_change_stats_loading = false;
@@ -625,6 +652,23 @@ impl HerdrSession {
     }
 
     fn apply_agent_snapshot_at(&mut self, agents: Vec<HerdrAgent>, now_ms: u64) {
+        let observed_panes = agents
+            .iter()
+            .map(|agent| agent.pane_id.as_str())
+            .collect::<HashSet<_>>();
+        self.stashed_pane_ids
+            .retain(|pane_id| observed_panes.contains(pane_id.as_str()));
+        let pending_pane = self
+            .pending_agent_stash
+            .as_ref()
+            .map(|pending| pending.agent.pane_id.as_str());
+        let agents = agents
+            .into_iter()
+            .filter(|agent| {
+                pending_pane != Some(agent.pane_id.as_str())
+                    && !self.stashed_pane_ids.contains(&agent.pane_id)
+            })
+            .collect::<Vec<_>>();
         let agents = if self.cross_workspace_agents || self.host_workspace_id.is_none() {
             agents
         } else {
@@ -710,6 +754,12 @@ impl HerdrSession {
         self.agent_scroll = 0;
     }
 
+    pub(crate) fn show_live_agents(&mut self) {
+        self.showing_stash = false;
+        self.stash_scroll = 0;
+        self.agent_scroll = 0;
+    }
+
     pub(crate) fn stash_agent(
         &mut self,
         index: usize,
@@ -717,6 +767,26 @@ impl HerdrSession {
         repository_label: String,
         branch: String,
     ) -> Result<(), String> {
+        self.stash_agent_with_resolver(
+            index,
+            repository,
+            repository_label,
+            branch,
+            latest_message::resolve_session_id,
+        )
+    }
+
+    fn stash_agent_with_resolver<F>(
+        &mut self,
+        index: usize,
+        repository: PathBuf,
+        repository_label: String,
+        branch: String,
+        resolver: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(&Path, &str) -> Result<String, String> + Send + 'static,
+    {
         if self.agent_stash_running || self.agent_layout_running() {
             return Err("Another agent operation is still in progress".to_owned());
         }
@@ -731,47 +801,85 @@ impl HerdrSession {
             .or_else(|| agent.cwd.clone())
             .ok_or_else(|| "Agent has not reported its working directory".to_owned())?;
         let identity = match agent.session_timing_key.as_ref() {
-            Some(AgentTimingKey::Session(identity)) => identity.clone(),
+            Some(AgentTimingKey::Session(identity)) => Some(identity.clone()),
             _ if agent.name == "opencode" => {
-                let title = agent.session_name.as_deref().ok_or_else(|| {
+                agent.session_name.as_deref().ok_or_else(|| {
                     "OpenCode session could not be identified without its title".to_owned()
                 })?;
-                AgentSessionIdentity {
-                    source: "hunkle:opencode".to_owned(),
-                    agent: "opencode".to_owned(),
-                    kind: "id".to_owned(),
-                    value: latest_message::resolve_session_id(&worktree, title)?,
-                }
+                None
             }
             _ => return Err("Agent has not reported a resumable session".to_owned()),
         };
-        if identity.agent != "opencode" {
+        if identity
+            .as_ref()
+            .is_some_and(|identity| identity.agent != "opencode")
+        {
             return Err(format!("{} sessions cannot be restored yet", agent.name));
         }
+        let title = agent.session_name.clone();
+        self.pending_agent_stash = Some(PendingAgentStash {
+            agent,
+            index,
+            repository,
+            repository_label,
+            worktree: worktree.clone(),
+            branch,
+        });
+        self.agents.remove(index);
+        self.agent_scroll = self.agent_scroll.min(self.agents.len().saturating_sub(1));
+        self.agent_stash_running = true;
+
+        if let Some(identity) = identity {
+            if let Err(error) = self.close_pending_agent_stash(identity) {
+                self.agent_stash_running = false;
+                self.restore_pending_agent_stash();
+                return Err(error);
+            }
+            return Ok(());
+        }
+
+        let title = title.expect("fallback session title was validated");
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = resolver(&worktree, &title).map(|value| AgentSessionIdentity {
+                source: "hunkle:opencode".to_owned(),
+                agent: "opencode".to_owned(),
+                kind: "id".to_owned(),
+                value,
+            });
+            let _ = sender.send(Completion::AgentStashIdentity { result });
+        });
+        Ok(())
+    }
+
+    fn close_pending_agent_stash(&mut self, identity: AgentSessionIdentity) -> Result<(), String> {
+        let pending = self
+            .pending_agent_stash
+            .as_ref()
+            .ok_or_else(|| "Agent stash is no longer pending".to_owned())?;
         let record = StashedAgent {
             harness: identity.agent,
-            agent_name: agent.name.clone(),
+            agent_name: pending.agent.name.clone(),
             session_source: identity.source,
             session_kind: identity.kind,
             session_id: identity.value,
-            session_name: agent.session_name.clone(),
-            repository,
-            repository_label,
-            worktree,
-            branch,
-            workspace_id: agent.workspace_id.clone(),
-            tab_id: agent.tab_id.clone(),
-            pane_id: agent.pane_id.clone(),
-            cwd: agent.cwd.clone(),
-            destination_cwd: agent.destination_cwd.clone(),
-            focused: agent.focused,
-            status: agent.status,
+            session_name: pending.agent.session_name.clone(),
+            repository: pending.repository.clone(),
+            repository_label: pending.repository_label.clone(),
+            worktree: pending.worktree.clone(),
+            branch: pending.branch.clone(),
+            workspace_id: pending.agent.workspace_id.clone(),
+            tab_id: pending.agent.tab_id.clone(),
+            pane_id: pending.agent.pane_id.clone(),
+            cwd: pending.agent.cwd.clone(),
+            destination_cwd: pending.agent.destination_cwd.clone(),
+            focused: pending.agent.focused,
+            status: pending.agent.status,
             stashed_at_ms: unix_time_ms(),
         };
         self.stash.add(record.clone())?;
-        let pane_id = agent.pane_id.clone();
+        let pane_id = pending.agent.pane_id.clone();
         let sender = self.sender.clone();
-        self.agent_stash_running = true;
         thread::spawn(move || {
             let result = client::close_pane(pane_id);
             let _ = sender.send(Completion::AgentStash {
@@ -781,6 +889,14 @@ impl HerdrSession {
             });
         });
         Ok(())
+    }
+
+    fn restore_pending_agent_stash(&mut self) {
+        let Some(pending) = self.pending_agent_stash.take() else {
+            return;
+        };
+        let index = pending.index.min(self.agents.len());
+        self.agents.insert(index, pending.agent);
     }
 
     pub(crate) fn restored_stash(&mut self, session_id: &str) -> Result<(), String> {
@@ -1352,6 +1468,71 @@ fn branch_from_head(path: &Path) -> Option<String> {
         .strip_prefix("ref: refs/heads/")
         .filter(|branch| !branch.is_empty())
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod stash_flow_tests {
+    use super::*;
+
+    fn unresolved_agent() -> HerdrAgent {
+        HerdrAgent {
+            name: "opencode".to_owned(),
+            session_name: Some("Resume this later".to_owned()),
+            workspace_id: "w1".to_owned(),
+            tab_id: "w1:t1".to_owned(),
+            pane_id: "w1:p2".to_owned(),
+            cwd: Some(PathBuf::from("/code/hunkle")),
+            destination_cwd: Some(PathBuf::from("/code/hunkle")),
+            focused: false,
+            status: AgentStatus::Idle,
+            timing_key: AgentTimingKey::Pane("opencode@w1:p2".to_owned()),
+            session_timing_key: None,
+            state_change_seq: 1,
+        }
+    }
+
+    #[test]
+    fn fallback_stash_hides_the_agent_immediately_and_restores_it_on_failure() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.next_refresh = Instant::now() + Duration::from_secs(60);
+        let agent = unresolved_agent();
+        session.agents.push(agent.clone());
+        let (release, wait) = mpsc::channel();
+
+        session
+            .stash_agent_with_resolver(
+                0,
+                PathBuf::from("/code/hunkle"),
+                "hunkle".to_owned(),
+                "main".to_owned(),
+                move |_, _| {
+                    wait.recv().unwrap();
+                    Err("session lookup failed".to_owned())
+                },
+            )
+            .unwrap();
+
+        assert!(session.agents.is_empty());
+        session.apply_agent_snapshot_at(vec![agent.clone()], unix_time_ms());
+        assert!(session.agents.is_empty());
+
+        release.send(()).unwrap();
+        let notice = (0..100).find_map(|_| {
+            let poll = session.poll();
+            if poll.notice.is_none() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            poll.notice
+        });
+
+        assert_eq!(
+            notice.as_deref(),
+            Some("Could not stash agent: session lookup failed")
+        );
+        assert_eq!(session.agents, vec![agent]);
+        assert!(!session.agent_stash_running);
+        assert!(session.stashed_agents().is_empty());
+    }
 }
 
 #[cfg(test)]
