@@ -18,6 +18,17 @@ impl App {
         let point = Position::new(mouse.column, mouse.row);
         if mouse.kind == MouseEventKind::Moved {
             self.hovered_hit_target = self.regions.hit_target_at(point);
+            if let Some(target) = self.hovered_hit_target {
+                let agent = match target {
+                    HitTarget::Agent(index) => Some(index),
+                    HitTarget::AgentTooltip { agent, .. }
+                    | HitTarget::AgentMessage { agent, .. } => Some(agent),
+                    _ => None,
+                };
+                if let Some(index) = agent {
+                    self.herdr.request_agent_latest_user_message(index);
+                }
+            }
         }
         if self.herdr_prompt.agent_pane_picker_open() {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -573,6 +584,7 @@ impl App {
                 self.activate_agent(index);
                 return;
             }
+            Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => return,
             _ => {}
         }
         if self
@@ -980,7 +992,11 @@ impl App {
                 Some(HitTarget::WorktreeManager(_)) => {}
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::Explorer(_)) => {}
-                Some(HitTarget::Agent(_)) => {}
+                Some(
+                    HitTarget::Agent(_)
+                    | HitTarget::AgentTooltip { .. }
+                    | HitTarget::AgentMessage { .. },
+                ) => {}
                 Some(HitTarget::Changes(_)) => {}
                 Some(HitTarget::CommitMessageGenerate) => {}
                 Some(HitTarget::MarkdownPreviewToggle) => {}
@@ -1043,7 +1059,11 @@ impl App {
                 Some(HitTarget::RepositoryBrowser(_)) => {}
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::Explorer(_)) => {}
-                Some(HitTarget::Agent(_)) => {}
+                Some(
+                    HitTarget::Agent(_)
+                    | HitTarget::AgentTooltip { .. }
+                    | HitTarget::AgentMessage { .. },
+                ) => {}
                 Some(HitTarget::Changes(_)) => {}
                 Some(HitTarget::CommitMessageGenerate) => {}
                 Some(HitTarget::MarkdownPreviewToggle) => {}

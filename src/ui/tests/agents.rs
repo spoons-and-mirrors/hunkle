@@ -7,11 +7,17 @@ fn agent_snapshot() -> serde_json::Value {
             "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE", "focused": true }],
             "agents": [{
                 "agent": "opencode",
+                "agent_session": {
+                    "source": "env",
+                    "agent": "opencode",
+                    "kind": "session_id",
+                    "value": "ses_test"
+                },
                 "agent_status": "working",
                 "focused": true,
                 "pane_id": "w1:p1",
                 "tab_id": "w1:t1",
-                "terminal_title_stripped": "OC | Refine agent timers",
+                "terminal_title_stripped": "OC | Refine agent timers across every workspace",
                 "workspace_id": "w1"
             }]
         } }
@@ -31,6 +37,16 @@ fn renders_and_targets_agents_in_the_normal_view() {
     app.herdr.agents[0].destination_cwd = Some(stats_path.clone());
     app.herdr
         .set_agent_change_stats_for_test(stats_path, (128, 34));
+    app.herdr.set_agent_user_messages_for_test(
+        0,
+        &[
+            "First request",
+            "Second request",
+            "Third request",
+            "Fourth request",
+            "Please refine the agent timers across every workspace",
+        ],
+    );
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -49,13 +65,86 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(detail.contains("Refine agent timers"));
     assert!(detail.contains("+128"));
     assert!(detail.contains("-34"));
+    let idle_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(!idle_screen.contains("Please refine"));
 
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 2, area.y));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
+    assert_eq!(
+        app.herdr.agent_user_messages(0).map(<[String]>::len),
+        Some(5)
+    );
     assert_eq!(
         terminal.backend().buffer()[(area.x + 2, area.y + 1)].bg,
         super::palette().selected
     );
+    let hovered_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(hovered_screen.contains("USER MESSAGE"));
+    assert!(hovered_screen.contains("5 / 5"));
+    assert!(hovered_screen.contains("Please refine"));
+    let tooltip = app
+        .regions
+        .hit_target_rect(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 4,
+        })
+        .unwrap();
+    assert_eq!(tooltip.y + 1, area.y);
+    assert_eq!(
+        terminal.backend().buffer()[(tooltip.x, tooltip.y)].symbol(),
+        "▄"
+    );
+    let viewer = app.regions.diff.unwrap();
+    assert!(
+        terminal.backend().buffer()[(viewer.x, viewer.y)]
+            .modifier
+            .contains(Modifier::DIM)
+    );
+    app.handle_mouse(mouse(MouseEventKind::Moved, tooltip.x + 2, tooltip.y + 3));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        app.hovered_hit_target,
+        Some(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 4
+        })
+    );
+    let second_message = app
+        .regions
+        .hit_target_rect(HitTarget::AgentMessage {
+            agent: 0,
+            message: 1,
+        })
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        second_message.x,
+        second_message.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let historical_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(historical_screen.contains("2 / 5"));
+    assert!(historical_screen.contains("Second request"));
     click(&mut app, area.x + 2, area.y);
     assert_eq!(app.mode, Mode::Normal);
 }

@@ -161,7 +161,9 @@ terminal, are shared between Hunkle processes, and persist across restarts in
 
 - Click header controls to switch views, refresh, open Explorer, or open help.
 - Drag the divider between Changes and Diff to resize either panel.
-- Click an agent to display its Herdr tab layout beside Hunkle.
+- Hover an agent to preview its latest user message, or hover the history
+  squares in the preview header to inspect any of the last five; click the card
+  to display its Herdr tab layout beside Hunkle.
 - Drag the History section header vertically to resize the current-branch commit
   shelf.
 - Click `x ACTIONS` above History to push, fetch, pull with rebase, or run a

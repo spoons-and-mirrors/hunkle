@@ -35,20 +35,18 @@ fn repository() -> LinkedWorktreeRepository {
 }
 
 #[test]
-fn resolves_agent_destination_labels_from_its_worktree() {
+fn resolves_agent_destination_metadata_from_its_worktree() {
     let snapshot =
         LinkedWorktreeCatalogSnapshot::for_test(vec![repository()], None, HerdrOwnership::Disabled);
 
     let basetree = snapshot.agent_destination(Path::new("/repo")).unwrap();
     assert_eq!(basetree.repository(), "repo");
-    assert_eq!(basetree.worktree(), "basetree");
     assert_eq!(basetree.branch(), "feature");
 
     let linked = snapshot
         .agent_destination(Path::new("/repo-feature"))
         .unwrap();
     assert_eq!(linked.repository(), "repo");
-    assert_eq!(linked.worktree(), "repo-feature");
     assert_eq!(linked.branch(), "feature");
 }
 

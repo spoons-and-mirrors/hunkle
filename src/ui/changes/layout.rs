@@ -55,10 +55,12 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
     let (Some(header), Some(list)) = (app.regions.agents_splitter, app.regions.agents_list) else {
         return;
     };
-    let hovered = match &app.hovered_hit_target {
-        Some(HitTarget::Agent(index)) => Some(*index),
-        _ => None,
-    };
+    let hovered = app.hovered_hit_target.filter(|target| {
+        matches!(
+            target,
+            HitTarget::Agent(_) | HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }
+        )
+    });
     for (target, rect) in agents::draw(
         frame,
         &mut app.herdr,

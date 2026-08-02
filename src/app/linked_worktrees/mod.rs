@@ -44,18 +44,6 @@ impl<'a> AgentDestinationMetadata<'a> {
         &self.repository.label
     }
 
-    pub(crate) fn worktree(&self) -> &'a str {
-        if self.worktree.is_main {
-            "basetree"
-        } else {
-            self.worktree
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("worktree")
-        }
-    }
-
     pub(crate) fn branch(&self) -> &'a str {
         self.worktree
             .branch

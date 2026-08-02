@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -14,7 +14,7 @@ use crate::app::{
     LinkedWorktreeCatalog, Settings,
 };
 
-use super::{fill, palette, truncate_width};
+use super::{fill, palette, text::word_wrapped_height, truncate_width};
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -27,7 +27,7 @@ pub(super) fn draw(
     header: Rect,
     list: Rect,
     dragging: bool,
-    hovered: Option<usize>,
+    hovered: Option<HitTarget>,
 ) -> Vec<(HitTarget, Rect)> {
     let mut targets = Vec::new();
     if header.width == 0 || header.height == 0 {
@@ -98,6 +98,13 @@ pub(super) fn draw(
     let scroll = herdr
         .agent_scroll
         .min(herdr.agents.len().saturating_sub(viewport));
+    let hovered_agent = match hovered {
+        Some(HitTarget::Agent(index)) => Some(index),
+        Some(HitTarget::AgentTooltip { agent, .. } | HitTarget::AgentMessage { agent, .. }) => {
+            Some(agent)
+        }
+        _ => None,
+    };
     let mut last_card = None;
     for (screen_row, index) in (scroll..herdr.agents.len()).enumerate() {
         if screen_row >= viewport {
@@ -111,6 +118,7 @@ pub(super) fn draw(
             card_height.min(card_list.height.saturating_sub(offset)),
         );
         let full_row_area = Rect::new(list.x, row_area.y, list.width, row_area.height);
+        herdr.request_agent_latest_user_message(index);
         let agent = &herdr.agents[index];
         let state = herdr.agent_entry_state(index);
         let in_host_tab = herdr.agent_is_in_host_tab(index);
@@ -135,12 +143,13 @@ pub(super) fn draw(
             .agent_elapsed(index, settings.agent_time_display)
             .map(format_duration);
         let change_stats = herdr.agent_change_stats(index);
-        let background = row_background(&state, hovered == Some(index));
+        let is_hovered = hovered_agent == Some(index);
+        let background = row_background(&state, is_hovered);
         if row_area.y > list.y {
             let previous_background = index.checked_sub(1).map(|previous| {
                 row_background(
                     &herdr.agent_entry_state(previous),
-                    hovered == Some(previous),
+                    hovered_agent == Some(previous),
                 )
             });
             draw_agent_gap(
@@ -162,7 +171,7 @@ pub(super) fn draw(
             herdr.spinner_frame(),
             state,
             in_host_tab,
-            hovered == Some(index),
+            is_hovered,
         );
         last_card = Some((full_row_area, background));
         targets.push((HitTarget::Agent(index), full_row_area));
@@ -173,6 +182,148 @@ pub(super) fn draw(
             draw_agent_gap(frame, gap, background, palette().panel);
         }
     }
+    targets
+}
+
+pub(super) fn draw_tooltip(
+    frame: &mut Frame<'_>,
+    herdr: &HerdrSession,
+    index: usize,
+    selected_message: Option<usize>,
+    anchor: Rect,
+) -> Vec<(HitTarget, Rect)> {
+    let Some(messages) = herdr
+        .agent_user_messages(index)
+        .filter(|messages| !messages.is_empty())
+    else {
+        return Vec::new();
+    };
+    let selected_message = selected_message
+        .unwrap_or_else(|| messages.len().saturating_sub(1))
+        .min(messages.len().saturating_sub(1));
+    let message = &messages[selected_message];
+    let screen = frame.area();
+    let desired_width = u16::try_from(UnicodeWidthStr::width(message.as_str()).saturating_add(6))
+        .unwrap_or(u16::MAX)
+        .clamp(32, 50)
+        .min(screen.width.saturating_sub(2));
+    if desired_width < 6 || screen.height < 3 {
+        return Vec::new();
+    }
+
+    let right_space = screen.right().saturating_sub(anchor.right());
+    let (x, width) = if right_space >= 28 {
+        (anchor.right(), desired_width.min(right_space))
+    } else if anchor.x > desired_width {
+        (anchor.x.saturating_sub(desired_width), desired_width)
+    } else {
+        (screen.right().saturating_sub(desired_width), desired_width)
+    };
+    let content_width = usize::from(width.saturating_sub(4).max(1));
+    let y = anchor.y.saturating_sub(1);
+    let available_height = screen.bottom().saturating_sub(y);
+    let height = u16::try_from(word_wrapped_height(message, content_width).saturating_add(5))
+        .unwrap_or(u16::MAX)
+        .clamp(4, 10)
+        .min(available_height);
+    if height < 4 {
+        return Vec::new();
+    }
+    let area = Rect::new(x, y, width, height);
+    let panel = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
+    frame.render_widget(Clear, panel);
+    frame.render_widget(
+        Paragraph::new("▄".repeat(usize::from(area.width))).style(
+            Style::default()
+                .fg(palette().surface_alt)
+                .remove_modifier(Modifier::DIM),
+        ),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    fill(frame, panel, palette().panel);
+    let header = Rect::new(panel.x, panel.y, panel.width, 1);
+    fill(frame, header, palette().surface_alt);
+    let counter = format!("{} / {}", selected_message + 1, messages.len());
+    let counter_width = u16::try_from(UnicodeWidthStr::width(counter.as_str())).unwrap_or(u16::MAX);
+    let marker_count = messages.len().min(5);
+    let marker_width =
+        u16::try_from(marker_count.saturating_mul(2).saturating_sub(1)).unwrap_or(u16::MAX);
+    let counter_x = area.right().saturating_sub(counter_width).saturating_sub(2);
+    let marker_x = counter_x.saturating_sub(marker_width).saturating_sub(2);
+    frame.render_widget(
+        Paragraph::new("USER MESSAGE").style(
+            Style::default()
+                .fg(palette().cyan)
+                .bg(palette().surface_alt)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(
+            area.x.saturating_add(2),
+            header.y,
+            marker_x.saturating_sub(area.x).saturating_sub(3),
+            1,
+        ),
+    );
+    let mut targets = vec![(
+        HitTarget::AgentTooltip {
+            agent: index,
+            message: selected_message,
+        },
+        area,
+    )];
+    for message_index in 0..marker_count {
+        let marker = Rect::new(
+            marker_x.saturating_add(u16::try_from(message_index).unwrap_or(0).saturating_mul(2)),
+            header.y,
+            1,
+            1,
+        );
+        let color = if message_index == selected_message {
+            palette().yellow
+        } else if message_index + 1 == marker_count {
+            palette().cyan
+        } else {
+            palette().muted
+        };
+        frame.render_widget(
+            Paragraph::new("■").style(Style::default().fg(color).bg(palette().surface_alt)),
+            marker,
+        );
+        targets.push((
+            HitTarget::AgentMessage {
+                agent: index,
+                message: message_index,
+            },
+            marker,
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(counter)
+            .alignment(ratatui::layout::Alignment::Right)
+            .style(
+                Style::default()
+                    .fg(palette().accent)
+                    .bg(palette().surface_alt),
+            ),
+        Rect::new(counter_x, header.y, counter_width, 1),
+    );
+    let body_offset = u16::from(panel.height >= 5) + 1;
+    frame.render_widget(
+        Paragraph::new(message.as_str())
+            .style(Style::default().fg(palette().soft).bg(palette().panel))
+            .wrap(Wrap { trim: true }),
+        Rect::new(
+            area.x.saturating_add(2),
+            panel.y.saturating_add(body_offset),
+            area.width.saturating_sub(4),
+            panel.height.saturating_sub(body_offset).saturating_sub(1),
+        ),
+    );
     targets
 }
 
@@ -187,7 +338,6 @@ fn row_background(state: &AgentEntryState, hovered: bool) -> Color {
 #[derive(Clone, Copy)]
 struct AgentCardDestination<'a> {
     repository: &'a str,
-    worktree: &'a str,
     branch: &'a str,
 }
 
@@ -199,12 +349,10 @@ fn agent_card_destination<'a>(
     destination.map_or(
         AgentCardDestination {
             repository: fallback_repository,
-            worktree: "basetree",
             branch: fallback_branch.unwrap_or("unknown"),
         },
         |destination| AgentCardDestination {
             repository: destination.repository(),
-            worktree: destination.worktree(),
             branch: destination.branch(),
         },
     )
@@ -243,7 +391,6 @@ fn draw_row(
             frame,
             Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
             session,
-            destination.worktree,
             change_stats,
             background,
         );
@@ -265,24 +412,17 @@ fn draw_agent_card_header(
         .map(|time| u16::try_from(UnicodeWidthStr::width(time)).unwrap_or(u16::MAX))
         .unwrap_or(0)
         .min(area.width.saturating_sub(1));
+    let elapsed_x = area.right().saturating_sub(time_width).saturating_sub(1);
     if let Some(elapsed) = elapsed {
         frame.render_widget(
             Paragraph::new(elapsed)
                 .alignment(ratatui::layout::Alignment::Right)
                 .style(Style::default().fg(palette().soft).bg(background)),
-            Rect::new(
-                area.right().saturating_sub(time_width).saturating_sub(1),
-                area.y,
-                time_width,
-                1,
-            ),
+            Rect::new(elapsed_x, area.y, time_width, 1),
         );
     }
-    let available = area
-        .right()
-        .saturating_sub(time_width)
-        .saturating_sub(2)
-        .saturating_sub(area.x);
+    let marker_right = elapsed_x.saturating_sub(u16::from(time_width > 0));
+    let available = marker_right.saturating_sub(area.x).saturating_sub(1);
     let mut widths = [
         badge_width(destination.repository).min(20),
         badge_width(destination.branch).min(20),
@@ -329,7 +469,6 @@ fn draw_agent_card_detail(
     frame: &mut Frame<'_>,
     area: Rect,
     session: &str,
-    worktree: &str,
     change_stats: Option<(u64, u64)>,
     background: Color,
 ) {
@@ -354,45 +493,20 @@ fn draw_agent_card_detail(
         1,
     );
     let stats_gap = u16::from(stats_width > 0);
-    let worktree_width = if worktree == "basetree" {
-        0
-    } else {
-        badge_width(worktree).min(18).min(
-            stats_area
-                .x
-                .saturating_sub(area.x)
-                .saturating_sub(stats_gap)
-                .saturating_sub(4),
-        )
-    };
-    let worktree_area = Rect::new(
-        stats_area
-            .x
-            .saturating_sub(stats_gap)
-            .saturating_sub(worktree_width),
-        area.y,
-        worktree_width,
-        1,
-    );
     let session_x = area.x.saturating_add(1);
-    let trailing_x = if worktree_width > 0 {
-        worktree_area.x
-    } else if stats_width > 0 {
+    let trailing_x = if stats_width > 0 {
         stats_area.x
     } else {
         area.right()
     };
     let session_width = trailing_x
         .saturating_sub(session_x)
-        .saturating_sub(u16::from(worktree_width > 0 || stats_width > 0));
+        .saturating_sub(stats_gap);
     frame.render_widget(
         Paragraph::new(truncate_width(session, usize::from(session_width)))
             .style(Style::default().fg(palette().muted).bg(background)),
         Rect::new(session_x, area.y, session_width, 1),
     );
-    if worktree_width > 0 {
-        draw_badge(frame, worktree_area, worktree, palette().yellow, background);
-    }
     if let Some((additions, deletions)) = stats {
         frame.render_widget(
             Paragraph::new(Line::from(vec![

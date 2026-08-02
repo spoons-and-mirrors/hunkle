@@ -19,6 +19,7 @@ use super::{
 use crate::git;
 
 mod client;
+mod latest_message;
 mod timings;
 
 pub(crate) use client::HerdrPaneLayout;
@@ -273,6 +274,10 @@ enum Completion {
         reopen_path: Option<PathBuf>,
     },
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
+    LatestUserMessage {
+        identity: AgentSessionIdentity,
+        result: Result<Vec<String>, String>,
+    },
 }
 
 pub(crate) struct HerdrSession {
@@ -291,6 +296,8 @@ pub(crate) struct HerdrSession {
     agent_change_stats: HashMap<PathBuf, (u64, u64)>,
     agent_change_stats_loading: bool,
     next_agent_change_stats: Instant,
+    latest_user_messages: HashMap<AgentSessionIdentity, Vec<String>>,
+    latest_user_message_requests: HashSet<AgentSessionIdentity>,
     destructive_actions_running: usize,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
@@ -339,6 +346,8 @@ impl HerdrSession {
             agent_change_stats: HashMap::new(),
             agent_change_stats_loading: false,
             next_agent_change_stats: Instant::now(),
+            latest_user_messages: HashMap::new(),
+            latest_user_message_requests: HashSet::new(),
             destructive_actions_running: 0,
             sender,
             receiver,
@@ -468,6 +477,11 @@ impl HerdrSession {
                         .filter_map(|(path, stats)| stats.map(|stats| (path, stats)))
                         .collect();
                 }
+                Completion::LatestUserMessage { identity, result } => {
+                    if let Ok(message) = result {
+                        self.latest_user_messages.insert(identity, message);
+                    }
+                }
             }
         }
         if !self.loading && Instant::now() >= self.next_refresh {
@@ -523,6 +537,41 @@ impl HerdrSession {
 
     pub(crate) fn agent_display_name(&self, index: usize) -> Option<&str> {
         self.agents.get(index)?.session_name.as_deref()
+    }
+
+    pub(crate) fn agent_user_messages(&self, index: usize) -> Option<&[String]> {
+        let AgentTimingKey::Session(identity) =
+            self.agents.get(index)?.session_timing_key.as_ref()?
+        else {
+            return None;
+        };
+        self.latest_user_messages.get(identity).map(Vec::as_slice)
+    }
+
+    pub(crate) fn request_agent_latest_user_message(&mut self, index: usize) {
+        let Some(AgentTimingKey::Session(identity)) = self
+            .agents
+            .get(index)
+            .and_then(|agent| agent.session_timing_key.as_ref())
+        else {
+            return;
+        };
+        if identity.agent != "opencode"
+            || self.latest_user_messages.contains_key(identity)
+            || !self.latest_user_message_requests.insert(identity.clone())
+        {
+            return;
+        }
+
+        let identity = identity.clone();
+        let session_id = identity.value.clone();
+        let sender = self.sender.clone();
+        let _ = thread::Builder::new()
+            .name("agent-latest-message".to_owned())
+            .spawn(move || {
+                let result = latest_message::fetch(&session_id);
+                let _ = sender.send(Completion::LatestUserMessage { identity, result });
+            });
     }
 
     pub(crate) fn clear_agent_timing_history(&mut self) -> Result<(), String> {
@@ -786,6 +835,24 @@ impl HerdrSession {
     #[cfg(test)]
     pub(crate) fn set_agent_change_stats_for_test(&mut self, path: PathBuf, stats: (u64, u64)) {
         self.agent_change_stats.insert(path, stats);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_agent_user_messages_for_test(&mut self, index: usize, messages: &[&str]) {
+        let Some(AgentTimingKey::Session(identity)) = self
+            .agents
+            .get(index)
+            .and_then(|agent| agent.session_timing_key.as_ref())
+        else {
+            panic!("test agent has no session identity");
+        };
+        self.latest_user_messages.insert(
+            identity.clone(),
+            messages
+                .iter()
+                .map(|message| (*message).to_owned())
+                .collect(),
+        );
     }
 }
 

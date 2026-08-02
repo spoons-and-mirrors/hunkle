@@ -103,6 +103,8 @@ pub(crate) enum HitTarget {
     RepositoryBrowser(RepositoryBrowserHitTarget),
     WorktreeManager(WorktreeManagerHitTarget),
     Agent(usize),
+    AgentTooltip { agent: usize, message: usize },
+    AgentMessage { agent: usize, message: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
