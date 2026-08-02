@@ -108,8 +108,9 @@ fn renders_and_targets_agents_in_the_normal_view() {
             })
             .is_none()
     );
-    assert!(!app.poll_agent_hover(std::time::Instant::now()));
-    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+    assert!(app.agents_pane_pinned);
+    assert!(app.agents_pane_visible());
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
@@ -359,8 +360,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     assert!(!app.agents_pane_visible());
-    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+    assert!(app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let preview = app
         .regions
@@ -411,6 +412,14 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(!app.agents_pane_pinned);
     assert_eq!(app.hovered_hit_target, None);
     assert!(!app.agents_pane_visible());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let agents_tab = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::AgentsTab))
+        .unwrap();
+    click(&mut app, agents_tab.x, agents_tab.y);
+    assert!(app.agents_pane_pinned);
+    assert!(app.agents_pane_visible());
 }
 
 #[test]
@@ -457,7 +466,8 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let card = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, card.x + 2, card.y));
-    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
+    assert!(!app.agents_pane_visible());
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let header_text: String = terminal
         .backend()
@@ -468,7 +478,6 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .collect();
     assert!(header_text.contains("first-repo"));
     assert!(!header_text.contains("1/2"));
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
     assert!(app.agents_pane_pinned);
 
     let next = app
@@ -581,7 +590,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
 }
 
 #[test]
-fn hovering_another_agent_replaces_the_open_history() {
+fn hovering_agent_cards_does_not_open_history() {
     let directory = tempfile::tempdir().unwrap();
     let mut snapshot = agent_snapshot();
     snapshot["result"]["snapshot"]["agents"]
@@ -612,14 +621,11 @@ fn hovering_another_agent_replaces_the_open_history() {
     app.handle_mouse(mouse(MouseEventKind::Moved, 3, 26));
 
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(1)));
-    assert!(app.agents_pane_visible());
-    assert!(!app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
+    assert!(!app.agents_pane_visible());
     app.handle_mouse(mouse(MouseEventKind::Moved, 50, 5));
     app.handle_mouse(mouse(MouseEventKind::Moved, 3, 26));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(1)));
     assert!(!app.agents_pane_visible());
-    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(1)));
 }
 
 #[test]
@@ -653,7 +659,8 @@ fn conversation_timeline_uses_its_full_height_and_tracks_selection() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let agent = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, agent.x + 2, agent.y));
-    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
+    assert!(!app.agents_pane_visible());
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.herdr.agent_user_messages(0).unwrap().len(), 50);
