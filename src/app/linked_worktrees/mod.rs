@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
 };
 
@@ -20,6 +23,15 @@ pub(crate) struct LinkedWorktreeRepository {
     pub(crate) label: String,
     pub(crate) worktrees: Vec<LinkedWorktree>,
     pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RepositoryPickerItem {
+    pub(crate) common_dir: PathBuf,
+    pub(crate) root: PathBuf,
+    pub(crate) label: String,
+    pub(crate) stats: Option<(u64, u64)>,
+    pub(crate) branch: Option<String>,
 }
 
 pub(crate) struct AgentDestinationMetadata<'a> {
@@ -224,6 +236,11 @@ struct InventoryCompletion {
     pruned: Vec<PathBuf>,
 }
 
+struct RepositoryStatsCompletion {
+    generation: u64,
+    stats: Vec<(PathBuf, (u64, u64))>,
+}
+
 #[derive(Default)]
 pub(crate) struct LinkedWorktreeCatalogPoll {
     pub(crate) changed: bool,
@@ -237,11 +254,14 @@ pub(crate) struct LinkedWorktreeCatalog {
     generation: u64,
     sender: Sender<InventoryCompletion>,
     receiver: Receiver<InventoryCompletion>,
+    stats_sender: Sender<RepositoryStatsCompletion>,
+    stats_receiver: Receiver<RepositoryStatsCompletion>,
 }
 
 impl LinkedWorktreeCatalog {
     pub(crate) fn new(store_path: Option<PathBuf>) -> Self {
         let (sender, receiver) = mpsc::channel();
+        let (stats_sender, stats_receiver) = mpsc::channel();
         Self {
             snapshot: LinkedWorktreeCatalogSnapshot::default(),
             candidates: Vec::new(),
@@ -249,6 +269,8 @@ impl LinkedWorktreeCatalog {
             generation: 0,
             sender,
             receiver,
+            stats_sender,
+            stats_receiver,
         }
     }
 
@@ -272,41 +294,44 @@ impl LinkedWorktreeCatalog {
         self.snapshot.removal_plan(path)
     }
 
-    pub(crate) fn recent_repository_picker_items(
-        &self,
-    ) -> impl Iterator<Item = (&Path, &Path, String, Option<String>)> {
+    pub(crate) fn recent_repository_picker_items(&self) -> Vec<RepositoryPickerItem> {
         let repositories = self
             .snapshot
             .repositories
             .iter()
             .map(|repository| (repository.common_dir.as_path(), repository))
             .collect::<HashMap<_, _>>();
-        self.store.recent.iter().map(move |recent| {
-            let repository = repositories.get(recent.common_dir.as_path()).copied();
-            let label = repository
-                .map(|repository| repository.label.clone())
-                .unwrap_or_else(|| repository_label(&recent.common_dir, &[]));
-            let branch = repository
-                .and_then(|repository| {
-                    repository
-                        .worktrees
-                        .iter()
-                        .find(|worktree| worktree.path == recent.root)
-                })
-                .and_then(|worktree| worktree.branch.as_deref())
-                .map(|branch| {
-                    branch
-                        .strip_prefix("refs/heads/")
-                        .unwrap_or(branch)
-                        .to_owned()
-                });
-            (
-                recent.common_dir.as_path(),
-                recent.root.as_path(),
-                label,
-                branch,
-            )
-        })
+        self.store
+            .recent
+            .iter()
+            .map(|recent| {
+                let repository = repositories.get(recent.common_dir.as_path()).copied();
+                let label = repository
+                    .map(|repository| repository.label.clone())
+                    .unwrap_or_else(|| repository_label(&recent.common_dir, &[]));
+                let branch = repository
+                    .and_then(|repository| {
+                        repository
+                            .worktrees
+                            .iter()
+                            .find(|worktree| worktree.path == recent.root)
+                    })
+                    .and_then(|worktree| worktree.branch.as_deref())
+                    .map(|branch| {
+                        branch
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(branch)
+                            .to_owned()
+                    });
+                RepositoryPickerItem {
+                    common_dir: recent.common_dir.clone(),
+                    root: recent.root.clone(),
+                    label,
+                    stats: recent.stats,
+                    branch,
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn remember_repository(
@@ -341,8 +366,10 @@ impl LinkedWorktreeCatalog {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         let known = self.store.repositories.clone();
+        let recent = self.store.recent.clone();
         let candidates = self.candidates.clone();
         let sender = self.sender.clone();
+        let stats_sender = self.stats_sender.clone();
         self.snapshot.loading = true;
         self.bump_revision();
         thread::spawn(move || {
@@ -399,6 +426,12 @@ impl LinkedWorktreeCatalog {
                 pruned,
             });
         });
+        if !recent.is_empty() {
+            thread::spawn(move || {
+                let stats = load_repository_stats(recent);
+                let _ = stats_sender.send(RepositoryStatsCompletion { generation, stats });
+            });
+        }
     }
 
     pub(crate) fn poll(&mut self) -> LinkedWorktreeCatalogPoll {
@@ -422,12 +455,67 @@ impl LinkedWorktreeCatalog {
             self.bump_revision();
             result.changed = true;
         }
+        while let Ok(completion) = self.stats_receiver.try_recv() {
+            if completion.generation != self.generation {
+                continue;
+            }
+            match self.store.update_stats_and_save(&completion.stats) {
+                Ok(true) => {
+                    self.bump_revision();
+                    result.changed = true;
+                }
+                Ok(false) => {}
+                Err(error) => result.notice = Some(error),
+            }
+        }
         result
     }
 
     fn bump_revision(&mut self) {
         self.snapshot.revision = self.snapshot.revision.wrapping_add(1);
     }
+}
+
+fn load_repository_stats(
+    recent: Vec<known_repositories::RecentRepository>,
+) -> Vec<(PathBuf, (u64, u64))> {
+    let roots = recent
+        .into_iter()
+        .map(|recent| recent.root)
+        .collect::<Vec<_>>();
+    let worker_count = roots.len().min(
+        thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(4),
+    );
+    let next = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel();
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next = &next;
+            let roots = &roots;
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(root) = roots.get(index) else {
+                        break;
+                    };
+                    if let Ok(stats) = git::load_change_line_counts(root) {
+                        let _ = sender.send((index, root.clone(), stats));
+                    }
+                }
+            });
+        }
+    });
+    drop(sender);
+    let mut stats = receiver.into_iter().collect::<Vec<_>>();
+    stats.sort_by_key(|(index, _, _)| *index);
+    stats
+        .into_iter()
+        .map(|(_, root, stats)| (root, stats))
+        .collect()
 }
 
 fn repository_label(common_dir: &Path, worktrees: &[LinkedWorktree]) -> String {

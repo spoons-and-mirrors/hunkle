@@ -89,38 +89,20 @@ impl App {
     }
 
     pub(crate) fn open_header_repositories(&mut self) {
-        let (current_common_dir, current_stats, current_branch) = self
-            .git_repository()
-            .map(|repository| {
-                (
-                    repository.common_dir.clone(),
-                    repository
-                        .details_ready
-                        .then(|| git::change_line_counts(&repository.changes)),
-                    repository.details_ready.then(|| repository.branch.clone()),
-                )
-            })
-            .unwrap_or_default();
-        let items = self
-            .linked_worktrees
-            .recent_repository_picker_items()
-            .map(|(common_dir, root, label, known_branch)| {
-                let current = current_common_dir.as_deref() == Some(common_dir);
-                HeaderPickerItem::Repository {
-                    path: root.to_owned(),
-                    common_dir: common_dir.to_owned(),
-                    label,
-                    stats: if current { current_stats } else { None },
-                    branch: if current {
-                        current_branch.clone()
-                    } else {
-                        known_branch
-                    },
-                }
+        let details = self.repository_picker_details();
+        let items = details
+            .iter()
+            .map(|detail| HeaderPickerItem::Repository {
+                path: detail.root.clone(),
+                common_dir: detail.common_dir.clone(),
+                label: detail.label.clone(),
+                stats: detail.stats,
+                branch: detail.branch.clone(),
             })
             .collect::<Vec<_>>();
-        let selected = current_common_dir
-            .as_deref()
+        let selected = self
+            .git_repository()
+            .and_then(|repository| repository.common_dir.as_deref())
             .and_then(|current| {
                 items.iter().position(|item| {
                     matches!(item, HeaderPickerItem::Repository { common_dir, .. } if common_dir == current)
@@ -135,8 +117,28 @@ impl App {
         } else {
             self.header_picker
                 .open(HeaderPickerKind::Repositories, items, selected);
-            self.header_picker.start_change_details();
         }
+    }
+
+    pub(crate) fn repository_picker_details(&self) -> Vec<RepositoryPickerItem> {
+        let mut details = self.linked_worktrees.recent_repository_picker_items();
+        let Some(repository) = self
+            .git_repository()
+            .filter(|repository| repository.details_ready)
+        else {
+            return details;
+        };
+        let Some(common_dir) = repository.common_dir.as_deref() else {
+            return details;
+        };
+        if let Some(current) = details
+            .iter_mut()
+            .find(|detail| detail.common_dir == common_dir)
+        {
+            current.stats = Some(git::change_line_counts(&repository.changes));
+            current.branch = Some(repository.branch.clone());
+        }
+        details
     }
 
     pub(crate) fn open_header_worktrees(&mut self) {

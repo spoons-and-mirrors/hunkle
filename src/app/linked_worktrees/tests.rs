@@ -201,6 +201,28 @@ fn persists_repository_identity_and_recent_order() {
 }
 
 #[test]
+fn persists_repository_stats_for_an_instant_picker_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("known-repositories.json");
+    let mut catalog = LinkedWorktreeCatalog::new(Some(path.clone()));
+    catalog
+        .remember_repository(Path::new("/repo/.git"), Path::new("/repo"))
+        .unwrap();
+    assert!(
+        catalog
+            .store
+            .update_stats_and_save(&[(PathBuf::from("/repo"), (21, 8))])
+            .unwrap()
+    );
+
+    let restored = LinkedWorktreeCatalog::new(Some(path));
+    assert_eq!(
+        restored.recent_repository_picker_items()[0].stats,
+        Some((21, 8))
+    );
+}
+
+#[test]
 fn malformed_inventory_is_not_overwritten() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("known-repositories.json");

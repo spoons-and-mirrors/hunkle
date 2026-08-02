@@ -40,7 +40,7 @@ pub(crate) use herdr_session::{AgentEntryState, AgentStatus, HerdrPaneLayout, He
 pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate,
     LinkedWorktreeCatalog, LinkedWorktreeCatalogSnapshot, LinkedWorktreeObservation,
-    LinkedWorktreeRemovalPlan, LinkedWorktreeRepository,
+    LinkedWorktreeRemovalPlan, LinkedWorktreeRepository, RepositoryPickerItem,
 };
 pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, Issue, PullRequest, RemoteItems, RepositoryBrowser,
@@ -683,6 +683,10 @@ impl App {
             let _activity = diagnostics::activity("poll-worktree-catalog", "");
             self.linked_worktrees.poll()
         };
+        if catalog_poll.changed {
+            let details = self.repository_picker_details();
+            self.header_picker.sync_repository_details(&details);
+        }
         changed |= catalog_poll.changed;
         if let Some(notice) = catalog_poll.notice {
             self.notice = Some(notice);

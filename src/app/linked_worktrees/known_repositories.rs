@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -24,6 +25,7 @@ pub(super) struct KnownRepositoryStore {
 pub(super) struct RecentRepository {
     pub(super) common_dir: PathBuf,
     pub(super) root: PathBuf,
+    pub(super) stats: Option<(u64, u64)>,
 }
 
 struct StoredRepositories {
@@ -65,9 +67,21 @@ impl KnownRepositoryStore {
     ) -> Result<(), String> {
         let previous_repositories = self.repositories.clone();
         let previous_recent = self.recent.clone();
+        let stats = self
+            .recent
+            .iter()
+            .find(|recent| recent.common_dir == common_dir && recent.root == root)
+            .and_then(|recent| recent.stats);
         self.insert(common_dir.clone());
         self.recent.retain(|recent| recent.common_dir != common_dir);
-        self.recent.insert(0, RecentRepository { common_dir, root });
+        self.recent.insert(
+            0,
+            RecentRepository {
+                common_dir,
+                root,
+                stats,
+            },
+        );
         if self.repositories == previous_repositories && self.recent == previous_recent {
             return Ok(());
         }
@@ -129,6 +143,30 @@ impl KnownRepositoryStore {
         Ok(())
     }
 
+    pub(super) fn update_stats_and_save(
+        &mut self,
+        stats: &[(PathBuf, (u64, u64))],
+    ) -> Result<bool, String> {
+        let previous = self.recent.clone();
+        let stats = stats
+            .iter()
+            .map(|(root, stats)| (root.as_path(), *stats))
+            .collect::<HashMap<_, _>>();
+        for recent in &mut self.recent {
+            if let Some(stats) = stats.get(recent.root.as_path()) {
+                recent.stats = Some(*stats);
+            }
+        }
+        if self.recent == previous {
+            return Ok(false);
+        }
+        if let Err(error) = self.save() {
+            self.recent = previous;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     fn save(&self) -> Result<(), String> {
         if let Some(error) = self.load_error.as_deref() {
             return Err(format!(
@@ -154,6 +192,10 @@ impl KnownRepositoryStore {
                 serde_json::json!({
                     "common_dir": stored_path_value(&recent.common_dir),
                     "root": stored_path_value(&recent.root),
+                    "stats": recent.stats.map(|(additions, deletions)| serde_json::json!({
+                        "additions": additions,
+                        "deletions": deletions,
+                    })),
                 })
             })
             .collect::<Vec<_>>();
@@ -254,6 +296,7 @@ fn recent_repository(value: &Value) -> Result<RecentRepository, String> {
         return Ok(RecentRepository {
             common_dir: stored_path(common_dir)?,
             root: stored_path(root)?,
+            stats: stored_stats(value.get("stats"))?,
         });
     }
     let common_dir = repository_path(value)?;
@@ -262,7 +305,26 @@ fn recent_repository(value: &Value) -> Result<RecentRepository, String> {
     } else {
         common_dir.clone()
     };
-    Ok(RecentRepository { common_dir, root })
+    Ok(RecentRepository {
+        common_dir,
+        root,
+        stats: None,
+    })
+}
+
+fn stored_stats(value: Option<&Value>) -> Result<Option<(u64, u64)>, String> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let additions = value
+        .get("additions")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "Recent repository stats have invalid additions".to_owned())?;
+    let deletions = value
+        .get("deletions")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "Recent repository stats have invalid deletions".to_owned())?;
+    Ok(Some((additions, deletions)))
 }
 
 fn stored_path(value: &Value) -> Result<PathBuf, String> {

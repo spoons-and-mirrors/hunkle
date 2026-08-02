@@ -1,6 +1,6 @@
 use crate::git::{self, Branch, LinkedWorktree};
 
-use super::TextInput;
+use super::{TextInput, linked_worktrees::RepositoryPickerItem};
 
 use std::{
     path::{Path, PathBuf},
@@ -52,7 +52,6 @@ struct ChangeDetailsCompletion {
     index: usize,
     path: PathBuf,
     stats: Option<(u64, u64)>,
-    branch: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -196,24 +195,16 @@ impl HeaderPicker {
 
     pub(crate) fn start_change_details(&mut self) {
         self.change_details_rx = None;
-        if !matches!(
-            self.kind,
-            Some(HeaderPickerKind::Repositories | HeaderPickerKind::Worktrees)
-        ) {
+        if self.kind != Some(HeaderPickerKind::Worktrees) {
             return;
         }
         let paths = self
             .all_items
             .iter()
-            .filter_map(|item| match item {
-                HeaderPickerItem::Repository {
-                    path,
-                    stats,
-                    branch,
-                    ..
-                } => Some((path.clone(), stats.is_none(), branch.is_none())),
-                HeaderPickerItem::Worktree { worktree, stats } => {
-                    Some((worktree.path.clone(), stats.is_none(), false))
+            .enumerate()
+            .filter_map(|(index, item)| match item {
+                HeaderPickerItem::Worktree { worktree, stats } if stats.is_none() => {
+                    Some((index, worktree.path.clone()))
                 }
                 _ => None,
             })
@@ -227,18 +218,10 @@ impl HeaderPicker {
         let _ = thread::Builder::new()
             .name("header-picker-change-details".to_owned())
             .spawn(move || {
-                for (index, (path, load_stats, load_branch)) in paths.into_iter().enumerate() {
-                    let stats = load_stats
-                        .then(|| git::load_change_line_counts(&path).ok())
-                        .flatten();
-                    let branch = load_branch.then(|| git::branch_name(&path).ok()).flatten();
+                for (index, path) in paths {
+                    let stats = git::load_change_line_counts(&path).ok();
                     if sender
-                        .send(ChangeDetailsCompletion {
-                            index,
-                            path,
-                            stats,
-                            branch,
-                        })
+                        .send(ChangeDetailsCompletion { index, path, stats })
                         .is_err()
                     {
                         break;
@@ -265,111 +248,129 @@ impl HeaderPicker {
         }
 
         let mut changed = false;
-        let mut searchable_changed = false;
         for completion in completions {
-            let (_, all_searchable_changed) = Self::update_change_details_at(
+            Self::update_worktree_stats_at(
                 &mut self.all_items,
                 completion.index,
                 &completion.path,
                 completion.stats,
-                completion.branch.as_deref(),
             );
-            if all_searchable_changed
-                && let Some(item) = self.all_items.get(completion.index)
-                && let Some(searchable) = self.searchable_items.get_mut(completion.index)
-            {
-                *searchable = item.normalized_search_text();
-            }
-            let (visible_changed, visible_searchable_changed) = if self.query.is_empty() {
-                Self::update_change_details_at(
+            let visible_changed = if self.query.is_empty() {
+                Self::update_worktree_stats_at(
                     &mut self.items,
                     completion.index,
                     &completion.path,
                     completion.stats,
-                    completion.branch.as_deref(),
                 )
             } else {
-                Self::update_change_details(
-                    &mut self.items,
-                    &completion.path,
-                    completion.stats,
-                    completion.branch.as_deref(),
-                )
+                Self::update_worktree_stats(&mut self.items, &completion.path, completion.stats)
             };
             let completion_is_visible = !self.query.is_empty()
                 || (completion.index >= self.scroll
                     && completion.index < self.scroll.saturating_add(self.viewport_rows));
             changed |= visible_changed && completion_is_visible;
-            searchable_changed |= all_searchable_changed || visible_searchable_changed;
         }
         if disconnected {
             self.change_details_rx = None;
         }
-        if searchable_changed && !self.query.is_empty() {
-            self.apply_filter();
-            changed = true;
-        }
         changed
     }
 
-    fn update_change_details(
+    pub(crate) fn sync_repository_details(&mut self, details: &[RepositoryPickerItem]) -> bool {
+        if self.kind != Some(HeaderPickerKind::Repositories) {
+            return false;
+        }
+        let details = details
+            .iter()
+            .map(|detail| (detail.common_dir.as_path(), detail))
+            .collect::<std::collections::HashMap<_, _>>();
+        let (all_changed, searchable_changed) =
+            Self::update_repository_details(&mut self.all_items, &details);
+        if searchable_changed {
+            self.searchable_items = self
+                .all_items
+                .iter()
+                .map(HeaderPickerItem::normalized_search_text)
+                .collect();
+            self.apply_filter();
+        } else {
+            Self::update_repository_details(&mut self.items, &details);
+        }
+        all_changed
+    }
+
+    fn update_repository_details(
         items: &mut [HeaderPickerItem],
-        path: &Path,
-        stats: Option<(u64, u64)>,
-        branch: Option<&str>,
+        details: &std::collections::HashMap<&Path, &RepositoryPickerItem>,
     ) -> (bool, bool) {
         let mut changed = false;
         let mut searchable_changed = false;
         for item in items {
-            match item {
-                HeaderPickerItem::Repository {
-                    path: item_path,
-                    stats: item_stats,
-                    branch: item_branch,
-                    ..
-                } if item_path == path => {
-                    if let Some(stats) = stats
-                        && *item_stats != Some(stats)
-                    {
-                        *item_stats = Some(stats);
-                        changed = true;
-                    }
-                    if let Some(branch) = branch
-                        && item_branch.as_deref() != Some(branch)
-                    {
-                        *item_branch = Some(branch.to_owned());
-                        changed = true;
-                        searchable_changed = true;
-                    }
-                }
-                HeaderPickerItem::Worktree {
-                    worktree,
-                    stats: item_stats,
-                } if worktree.path == path => {
-                    if let Some(stats) = stats
-                        && *item_stats != Some(stats)
-                    {
-                        *item_stats = Some(stats);
-                        changed = true;
-                    }
-                }
-                _ => {}
+            let HeaderPickerItem::Repository {
+                common_dir,
+                label,
+                stats,
+                branch,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            let Some(detail) = details.get(common_dir.as_path()) else {
+                continue;
+            };
+            if label != &detail.label {
+                label.clone_from(&detail.label);
+                changed = true;
+                searchable_changed = true;
+            }
+            if let Some(detail_stats) = detail.stats
+                && *stats != Some(detail_stats)
+            {
+                *stats = Some(detail_stats);
+                changed = true;
+            }
+            if branch != &detail.branch {
+                branch.clone_from(&detail.branch);
+                changed = true;
+                searchable_changed = true;
             }
         }
         (changed, searchable_changed)
     }
 
-    fn update_change_details_at(
+    fn update_worktree_stats(
+        items: &mut [HeaderPickerItem],
+        path: &Path,
+        stats: Option<(u64, u64)>,
+    ) -> bool {
+        let mut changed = false;
+        for item in items {
+            if let HeaderPickerItem::Worktree {
+                worktree,
+                stats: item_stats,
+            } = item
+                && worktree.path == path
+                && let Some(stats) = stats
+                && *item_stats != Some(stats)
+            {
+                *item_stats = Some(stats);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn update_worktree_stats_at(
         items: &mut [HeaderPickerItem],
         index: usize,
         path: &Path,
         stats: Option<(u64, u64)>,
-        branch: Option<&str>,
-    ) -> (bool, bool) {
+    ) -> bool {
         let Some(item) = items.get_mut(index) else {
-            return (false, false);
+            return false;
         };
-        Self::update_change_details(std::slice::from_mut(item), path, stats, branch)
+        Self::update_worktree_stats(std::slice::from_mut(item), path, stats)
     }
 
     pub(crate) fn is_open(&self) -> bool {
@@ -567,5 +568,63 @@ mod tests {
         picker.apply_filter();
 
         assert_eq!(picker.items.len(), 1);
+    }
+
+    #[test]
+    fn synchronizes_cached_repository_details_as_one_batch() {
+        let mut picker = HeaderPicker::default();
+        picker.open(
+            HeaderPickerKind::Repositories,
+            vec![
+                HeaderPickerItem::Repository {
+                    common_dir: PathBuf::from("/tmp/alpha/.git"),
+                    path: PathBuf::from("/tmp/alpha"),
+                    label: "alpha".to_owned(),
+                    stats: None,
+                    branch: None,
+                },
+                HeaderPickerItem::Repository {
+                    common_dir: PathBuf::from("/tmp/bravo/.git"),
+                    path: PathBuf::from("/tmp/bravo"),
+                    label: "bravo".to_owned(),
+                    stats: None,
+                    branch: None,
+                },
+            ],
+            0,
+        );
+
+        assert!(picker.sync_repository_details(&[
+            RepositoryPickerItem {
+                common_dir: PathBuf::from("/tmp/alpha/.git"),
+                root: PathBuf::from("/tmp/alpha"),
+                label: "alpha".to_owned(),
+                stats: Some((12, 3)),
+                branch: Some("main".to_owned()),
+            },
+            RepositoryPickerItem {
+                common_dir: PathBuf::from("/tmp/bravo/.git"),
+                root: PathBuf::from("/tmp/bravo"),
+                label: "bravo".to_owned(),
+                stats: Some((7, 2)),
+                branch: Some("topic".to_owned()),
+            },
+        ]));
+        assert!(matches!(
+            &picker.items[0],
+            HeaderPickerItem::Repository {
+                stats: Some((12, 3)),
+                branch: Some(branch),
+                ..
+            } if branch == "main"
+        ));
+        assert!(matches!(
+            &picker.items[1],
+            HeaderPickerItem::Repository {
+                stats: Some((7, 2)),
+                branch: Some(branch),
+                ..
+            } if branch == "topic"
+        ));
     }
 }
