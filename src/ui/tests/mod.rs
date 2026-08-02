@@ -92,6 +92,16 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.graph_commit_open);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("COMMIT"));
+    assert!(screen.contains("MESSAGE"));
 
     fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
     let mut dirty_app = App::new(root.to_path_buf());

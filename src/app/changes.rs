@@ -997,6 +997,7 @@ impl ChangesState {
     }
 
     pub(super) fn preview_commit(&mut self, repo: &RepositoryData, commit: &Commit) {
+        self.preview_pane = LeftPane::Worktree;
         self.branch_comparison = None;
         self.diff_scroll = 0;
         self.markdown_alternate_scroll = None;
