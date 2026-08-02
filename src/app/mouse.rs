@@ -8,7 +8,8 @@ use super::{
     ACTION_ITEMS, App, CloneField, ExplorerHitTarget, ExplorerTab, GraphColumnDrag, GraphHitTarget,
     HeaderPickerKind, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
     RepositoryBrowserHitTarget, SettingsPage, Shortcuts, View, WorktreeManagerEffect,
-    WorktreeManagerHitTarget, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
+    WorktreeManagerHitTarget, WorktreePickerField, changes::ChangesEffect, file_editor::FileEditor,
+    scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -171,6 +172,15 @@ impl App {
                         Some(HitTarget::HeaderPickerCloneUrl) => {
                             self.header_picker.set_clone_field(CloneField::Url)
                         }
+                        Some(HitTarget::HeaderPickerNewWorktree) => {
+                            self.begin_header_worktree_creation()
+                        }
+                        Some(HitTarget::HeaderPickerWorktreeName) => self
+                            .header_picker
+                            .set_worktree_field(WorktreePickerField::Name),
+                        Some(HitTarget::HeaderPickerWorktreeBase) => self
+                            .header_picker
+                            .set_worktree_field(WorktreePickerField::Base),
                         Some(HitTarget::HeaderPickerOverlay) => {}
                         _ => self.header_picker.close(),
                     }
@@ -1005,6 +1015,9 @@ impl App {
                     | HitTarget::HeaderPickerClone
                     | HitTarget::HeaderPickerCloneDirectory
                     | HitTarget::HeaderPickerCloneUrl
+                    | HitTarget::HeaderPickerNewWorktree
+                    | HitTarget::HeaderPickerWorktreeName
+                    | HitTarget::HeaderPickerWorktreeBase
                     | HitTarget::HeaderPickerItem(_),
                 ) => {}
             },
@@ -1071,6 +1084,9 @@ impl App {
                     | HitTarget::HeaderPickerClone
                     | HitTarget::HeaderPickerCloneDirectory
                     | HitTarget::HeaderPickerCloneUrl
+                    | HitTarget::HeaderPickerNewWorktree
+                    | HitTarget::HeaderPickerWorktreeName
+                    | HitTarget::HeaderPickerWorktreeBase
                     | HitTarget::HeaderPickerItem(_),
                 ) => {}
             },

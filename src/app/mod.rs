@@ -32,7 +32,7 @@ pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use header_picker::{
     AgentDestinationKind, BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem,
-    HeaderPickerKind, RepositoryPickerStep,
+    HeaderPickerKind, RepositoryPickerStep, WorktreePickerField, WorktreePickerStep,
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 #[cfg(test)]
@@ -590,6 +590,15 @@ impl App {
             self.header_picker.message = None;
             return;
         }
+        if self.header_picker.creating_worktree() {
+            let text = text
+                .chars()
+                .filter(|character| !matches!(character, '\r' | '\n'))
+                .collect::<String>();
+            self.header_picker.worktree_input_mut().insert(&text);
+            self.header_picker.message = None;
+            return;
+        }
         if self.header_picker.filtering() {
             let text = text
                 .chars()
@@ -732,6 +741,13 @@ impl App {
             .header_picker
             .clone_url
             .poll_blink(cloning_repository && self.header_picker.clone_field == CloneField::Url);
+        let creating_worktree = self.header_picker.creating_worktree();
+        changed |= self.header_picker.worktree_name.poll_blink(
+            creating_worktree && self.header_picker.worktree_field == WorktreePickerField::Name,
+        );
+        changed |= self.header_picker.worktree_base.poll_blink(
+            creating_worktree && self.header_picker.worktree_field == WorktreePickerField::Base,
+        );
         let filtering_header_picker = self.header_picker.filtering();
         changed |= self.header_picker.query.poll_blink(filtering_header_picker);
         changed |= self.header_picker.poll_change_details();

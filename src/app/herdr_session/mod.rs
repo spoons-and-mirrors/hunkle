@@ -58,11 +58,11 @@ pub(super) fn pane_layout(pane_id: String) -> Result<HerdrPaneLayout, String> {
 
 pub(crate) fn create_managed_worktree(
     cwd: PathBuf,
-    path: PathBuf,
+    path: Option<PathBuf>,
     branch: String,
     base: String,
-) -> Result<(), String> {
-    client::perform(client::Action::CreateWorktreeAt {
+) -> Result<PathBuf, String> {
+    client::create_worktree(client::Action::CreateWorktree {
         cwd,
         path,
         branch,

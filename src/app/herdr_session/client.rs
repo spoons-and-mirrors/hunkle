@@ -228,9 +228,9 @@ impl EventCoalescer {
 }
 
 pub(super) enum Action {
-    CreateWorktreeAt {
+    CreateWorktree {
         cwd: PathBuf,
-        path: PathBuf,
+        path: Option<PathBuf>,
         branch: String,
         base: String,
     },
@@ -259,6 +259,19 @@ pub(super) fn environment() -> Option<Environment> {
 
 pub(super) fn perform(action: Action) -> Result<(), String> {
     run(&action_args(action)).map(|_| ())
+}
+
+pub(super) fn create_worktree(action: Action) -> Result<PathBuf, String> {
+    let response = run(&action_args(action))?;
+    created_worktree_path(&response)
+}
+
+fn created_worktree_path(response: &Value) -> Result<PathBuf, String> {
+    response
+        .pointer("/result/worktree/path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| "Herdr did not identify the created worktree".to_owned())
 }
 
 pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String> {
@@ -1191,24 +1204,28 @@ fn environment_from(
 
 fn action_args(action: Action) -> Vec<String> {
     match action {
-        Action::CreateWorktreeAt {
+        Action::CreateWorktree {
             cwd,
             path,
             branch,
             base,
-        } => vec![
-            "worktree".to_owned(),
-            "create".to_owned(),
-            "--cwd".to_owned(),
-            cwd.to_string_lossy().into_owned(),
-            "--branch".to_owned(),
-            branch,
-            "--base".to_owned(),
-            base,
-            "--path".to_owned(),
-            path.to_string_lossy().into_owned(),
-            "--no-focus".to_owned(),
-        ],
+        } => {
+            let mut args = vec![
+                "worktree".to_owned(),
+                "create".to_owned(),
+                "--cwd".to_owned(),
+                cwd.to_string_lossy().into_owned(),
+                "--branch".to_owned(),
+                branch,
+                "--base".to_owned(),
+                base,
+            ];
+            if let Some(path) = path {
+                args.extend(["--path".to_owned(), path.to_string_lossy().into_owned()]);
+            }
+            args.push("--no-focus".to_owned());
+            args
+        }
         Action::RemoveWorktree { workspace_id } => vec![
             "worktree".to_owned(),
             "remove".to_owned(),
@@ -1652,9 +1669,9 @@ mod tests {
     #[test]
     fn builds_typed_action_arguments() {
         assert_eq!(
-            action_args(Action::CreateWorktreeAt {
+            action_args(Action::CreateWorktree {
                 cwd: PathBuf::from("/tmp/current checkout"),
-                path: PathBuf::from("/tmp/new checkout"),
+                path: Some(PathBuf::from("/tmp/new checkout")),
                 branch: "feature/modal".to_owned(),
                 base: "abc123".to_owned(),
             }),
@@ -1674,6 +1691,26 @@ mod tests {
             .map(str::to_owned)
         );
         assert_eq!(
+            action_args(Action::CreateWorktree {
+                cwd: PathBuf::from("/tmp/current checkout"),
+                path: None,
+                branch: "feature/modal".to_owned(),
+                base: "main".to_owned(),
+            }),
+            [
+                "worktree",
+                "create",
+                "--cwd",
+                "/tmp/current checkout",
+                "--branch",
+                "feature/modal",
+                "--base",
+                "main",
+                "--no-focus",
+            ]
+            .map(str::to_owned)
+        );
+        assert_eq!(
             action_args(Action::RemoveWorktree {
                 workspace_id: "w3".to_owned(),
             }),
@@ -1685,6 +1722,22 @@ mod tests {
             }),
             ["workspace", "focus", "w1"].map(str::to_owned)
         );
+    }
+
+    #[test]
+    fn created_worktree_path_uses_herdr_response_path() {
+        let response = serde_json::json!({
+            "ok": true,
+            "result": {
+                "type": "worktree_created",
+                "worktree": { "path": "/tmp/herdr-selected-path" }
+            }
+        });
+        assert_eq!(
+            created_worktree_path(&response).unwrap(),
+            PathBuf::from("/tmp/herdr-selected-path")
+        );
+        assert!(created_worktree_path(&serde_json::json!({ "ok": true })).is_err());
     }
 
     #[test]

@@ -76,6 +76,20 @@ pub(crate) enum CloneField {
     Url,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorktreePickerStep {
+    #[default]
+    Worktrees,
+    Create,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorktreePickerField {
+    #[default]
+    Name,
+    Base,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct HeaderPicker {
     pub(crate) kind: Option<HeaderPickerKind>,
@@ -97,6 +111,10 @@ pub(crate) struct HeaderPicker {
     pub(crate) clone_directory: TextInput,
     pub(crate) clone_url: TextInput,
     pub(crate) clone_field: CloneField,
+    pub(crate) worktree_step: WorktreePickerStep,
+    pub(crate) worktree_name: TextInput,
+    pub(crate) worktree_base: TextInput,
+    pub(crate) worktree_field: WorktreePickerField,
     clone_rx: Option<Receiver<Result<PathBuf, String>>>,
     change_details_rx: Option<Receiver<ChangeDetailsCompletion>>,
 }
@@ -132,6 +150,10 @@ impl HeaderPicker {
         self.clone_field = CloneField::Directory;
         self.clone_directory.clear();
         self.clone_url.clear();
+        self.worktree_step = WorktreePickerStep::Worktrees;
+        self.worktree_name.clear();
+        self.worktree_base.clear();
+        self.worktree_field = WorktreePickerField::Name;
     }
 
     pub(crate) fn open_message(&mut self, kind: HeaderPickerKind, message: String) {
@@ -156,6 +178,10 @@ impl HeaderPicker {
         self.clone_field = CloneField::Directory;
         self.clone_directory.clear();
         self.clone_url.clear();
+        self.worktree_step = WorktreePickerStep::Worktrees;
+        self.worktree_name.clear();
+        self.worktree_base.clear();
+        self.worktree_field = WorktreePickerField::Name;
     }
 
     pub(crate) fn open_branch_bases(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
@@ -222,6 +248,10 @@ impl HeaderPicker {
         self.clone_field = CloneField::Directory;
         self.clone_directory.clear();
         self.clone_url.clear();
+        self.worktree_step = WorktreePickerStep::Worktrees;
+        self.worktree_name.clear();
+        self.worktree_base.clear();
+        self.worktree_field = WorktreePickerField::Name;
     }
 
     pub(crate) fn start_change_details(&mut self) {
@@ -417,8 +447,41 @@ impl HeaderPicker {
             && self.repository_step == RepositoryPickerStep::Clone
     }
 
+    pub(crate) fn creating_worktree(&self) -> bool {
+        self.kind == Some(HeaderPickerKind::Worktrees)
+            && self.worktree_step == WorktreePickerStep::Create
+    }
+
+    pub(crate) fn begin_worktree_creation(&mut self, base: &str) {
+        self.worktree_step = WorktreePickerStep::Create;
+        self.worktree_name.clear();
+        self.worktree_name.focus();
+        self.worktree_base.set(base);
+        self.worktree_field = WorktreePickerField::Name;
+        self.message = None;
+    }
+
+    pub(crate) fn set_worktree_field(&mut self, field: WorktreePickerField) {
+        self.worktree_field = field;
+        match field {
+            WorktreePickerField::Name => self.worktree_name.focus(),
+            WorktreePickerField::Base => self.worktree_base.focus(),
+        }
+    }
+
+    pub(crate) fn worktree_input_mut(&mut self) -> &mut TextInput {
+        match self.worktree_field {
+            WorktreePickerField::Name => &mut self.worktree_name,
+            WorktreePickerField::Base => &mut self.worktree_base,
+        }
+    }
+
     pub(crate) fn filtering(&self) -> bool {
-        self.is_open() && self.searchable && !self.naming_branch() && !self.cloning_repository()
+        self.is_open()
+            && self.searchable
+            && !self.naming_branch()
+            && !self.cloning_repository()
+            && !self.creating_worktree()
     }
 
     pub(crate) fn begin_clone(&mut self, directory: &Path) {

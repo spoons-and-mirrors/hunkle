@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::{WorktreePickerField, WorktreePickerStep};
 
 #[test]
 fn repository_picker_labels_linked_worktrees_by_repository() {
@@ -416,6 +417,39 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert!(worktree_text.contains("+0"));
     assert!(worktree_text.contains("-0"));
     assert!(worktree_text.trim_end().ends_with("linked"));
+    let new_worktree = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerNewWorktree)
+        .unwrap();
+    assert_eq!(new_worktree.y, picker.y + 1);
+    assert_eq!(new_worktree.right() + 1, picker.right());
+    assert_eq!(
+        terminal.backend().buffer()[(new_worktree.x, new_worktree.y)].bg,
+        palette().green
+    );
+    let current_branch = app.repository().unwrap().branch.clone();
+    click(&mut app, new_worktree.x, new_worktree.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.header_picker.creating_worktree());
+    assert_eq!(app.header_picker.worktree_base.text(), current_branch);
+    let name_input = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerWorktreeName)
+        .unwrap();
+    let base_input = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerWorktreeBase)
+        .unwrap();
+    assert_eq!(name_input.y + 2, base_input.y);
+    app.handle_paste("feature/new-tree");
+    assert_eq!(app.header_picker.worktree_name.text(), "feature/new-tree");
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.header_picker.worktree_field, WorktreePickerField::Base);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(
+        app.header_picker.worktree_step,
+        WorktreePickerStep::Worktrees
+    );
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

@@ -83,7 +83,7 @@ impl App {
                 }
                 if !self
                     .worktree_manager
-                    .start_create(cwd, path.clone(), branch, start_point)
+                    .start_create(cwd, Some(path.clone()), branch, start_point)
                 {
                     self.notice = Some("A worktree operation is already running".to_owned());
                     return;
