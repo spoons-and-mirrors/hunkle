@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -100,9 +100,14 @@ pub(super) fn draw(
         .min(herdr.agents.len().saturating_sub(viewport));
     let hovered_agent = match hovered {
         Some(HitTarget::Agent(index)) => Some(index),
-        Some(HitTarget::AgentTooltip { agent, .. } | HitTarget::AgentMessage { agent, .. }) => {
-            Some(agent)
-        }
+        Some(
+            HitTarget::AgentPreviewPicker(agent)
+            | HitTarget::AgentPreviewPickerItem(agent)
+            | HitTarget::AgentPreviewPrevious(agent)
+            | HitTarget::AgentPreviewNext(agent)
+            | HitTarget::AgentTooltip { agent, .. }
+            | HitTarget::AgentMessage { agent, .. },
+        ) => Some(agent),
         _ => None,
     };
     let mut last_card = None;
@@ -190,6 +195,9 @@ pub(super) fn draw_history(
     herdr: &HerdrSession,
     index: usize,
     selected_message: Option<usize>,
+    pressed_navigation: Option<bool>,
+    picker_open: bool,
+    hovered: Option<HitTarget>,
     area: Rect,
 ) -> Vec<(HitTarget, Rect)> {
     if area.width < 24 || area.height < 10 {
@@ -208,7 +216,13 @@ pub(super) fn draw_history(
         AgentStatus::Idle => ("IDLE", palette().cyan),
         AgentStatus::Unknown => ("UNKNOWN", palette().faint),
     };
-    let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
+    let agent_count = herdr.agents.len();
+    let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
+    let desired_navigation_width = badge_width(repository).saturating_add(6);
+    let navigation_width = desired_navigation_width
+        .min(area.width.saturating_sub(17))
+        .max(6)
+        .min(area.width);
     frame.render_widget(
         Paragraph::new("CONVERSATION LOG").style(
             Style::default()
@@ -219,6 +233,109 @@ pub(super) fn draw_history(
         Rect::new(
             area.x,
             area.y,
+            area.width
+                .saturating_sub(navigation_width)
+                .saturating_sub(1),
+            1,
+        ),
+    );
+    let navigation_x = area.right().saturating_sub(navigation_width);
+    let repository_width = navigation_width.saturating_sub(6);
+    let repository_area = Rect::new(navigation_x, area.y, repository_width, 1);
+    let previous_button = Rect::new(
+        repository_area.right(),
+        area.y,
+        3.min(navigation_width.saturating_sub(repository_width)),
+        1,
+    );
+    let next_button = Rect::new(
+        previous_button.right(),
+        area.y,
+        area.right().saturating_sub(previous_button.right()),
+        1,
+    );
+    let button_style = |pressed| {
+        Style::default()
+            .fg(if agent_count <= 1 {
+                palette().faint
+            } else if pressed {
+                palette().canvas
+            } else {
+                palette().accent
+            })
+            .bg(if pressed {
+                palette().selected
+            } else {
+                palette().raised
+            })
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(
+        Paragraph::new(" ← ")
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(button_style(pressed_navigation == Some(false))),
+        previous_button,
+    );
+    draw_badge(
+        frame,
+        repository_area,
+        repository,
+        palette().cyan,
+        palette().panel,
+    );
+    frame.render_widget(
+        Paragraph::new(" → ")
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(button_style(pressed_navigation == Some(true))),
+        next_button,
+    );
+    let mut navigation_targets = Vec::new();
+    if repository_area.width >= 3 {
+        navigation_targets.push((HitTarget::AgentPreviewPicker(index), repository_area));
+    }
+    if agent_count > 1 && navigation_width >= 2 {
+        navigation_targets.push((HitTarget::AgentPreviewPrevious(index), previous_button));
+        navigation_targets.push((HitTarget::AgentPreviewNext(index), next_button));
+    }
+    if messages.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Waiting for conversation history…")
+                .style(Style::default().fg(palette().faint).bg(palette().panel))
+                .wrap(Wrap { trim: true }),
+            Rect::new(
+                area.x,
+                area.y.saturating_add(2),
+                area.width,
+                area.height.saturating_sub(2),
+            ),
+        );
+        draw_agent_preview_picker(
+            frame,
+            herdr,
+            index,
+            repository_area,
+            area,
+            picker_open,
+            hovered,
+            &mut navigation_targets,
+        );
+        return navigation_targets;
+    }
+    let selected_message = selected_message
+        .unwrap_or_else(|| messages.len().saturating_sub(1))
+        .min(messages.len().saturating_sub(1));
+    let message = &messages[selected_message];
+    let turn = format!("TURN {} OF {}", selected_message + 1, messages.len());
+    let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
+    frame.render_widget(
+        Paragraph::new(truncate_width(
+            &turn,
+            usize::from(area.width.saturating_sub(phase_width).saturating_sub(1)),
+        ))
+        .style(Style::default().fg(palette().faint).bg(palette().panel)),
+        Rect::new(
+            area.x,
+            area.y.saturating_add(1),
             area.width.saturating_sub(phase_width).saturating_sub(1),
             1,
         ),
@@ -234,38 +351,10 @@ pub(super) fn draw_history(
             ),
         Rect::new(
             area.right().saturating_sub(phase_width),
-            area.y,
+            area.y.saturating_add(1),
             phase_width,
             1,
         ),
-    );
-    if messages.is_empty() {
-        frame.render_widget(
-            Paragraph::new("Waiting for conversation history…")
-                .style(Style::default().fg(palette().faint).bg(palette().panel))
-                .wrap(Wrap { trim: true }),
-            Rect::new(
-                area.x,
-                area.y.saturating_add(2),
-                area.width,
-                area.height.saturating_sub(2),
-            ),
-        );
-        return Vec::new();
-    }
-    let selected_message = selected_message
-        .unwrap_or_else(|| messages.len().saturating_sub(1))
-        .min(messages.len().saturating_sub(1));
-    let message = &messages[selected_message];
-    let turn = format!(
-        "TURN {} OF {}  ·  TEXT SNAPSHOT",
-        selected_message + 1,
-        messages.len()
-    );
-    frame.render_widget(
-        Paragraph::new(truncate_width(&turn, usize::from(area.width)))
-            .style(Style::default().fg(palette().faint).bg(palette().panel)),
-        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
     );
     let mut targets = vec![(
         HitTarget::AgentTooltip {
@@ -274,6 +363,7 @@ pub(super) fn draw_history(
         },
         area,
     )];
+    targets.extend(navigation_targets);
     let main = Rect::new(
         area.x,
         area.y.saturating_add(3),
@@ -285,23 +375,9 @@ pub(super) fn draw_history(
     let marker_start = selected_message
         .saturating_sub(marker_count / 2)
         .min(messages.len().saturating_sub(marker_count));
-    if timeline.width > 0 {
-        frame.render_widget(
-            Paragraph::new("│\n".repeat(usize::from(timeline.height)))
-                .style(Style::default().fg(palette().faint).bg(palette().panel)),
-            Rect::new(timeline.x, timeline.y, 1, timeline.height),
-        );
-    }
     for visible_index in 0..marker_count {
         let message_index = marker_start + visible_index;
-        let offset = if marker_count <= 1 {
-            0
-        } else {
-            u16::try_from(visible_index)
-                .unwrap_or(0)
-                .saturating_mul(timeline.height.saturating_sub(1))
-                / u16::try_from(marker_count - 1).unwrap_or(1)
-        };
+        let offset = u16::try_from(visible_index).unwrap_or(0);
         let marker = Rect::new(
             timeline.x,
             timeline.y.saturating_add(offset),
@@ -313,8 +389,13 @@ pub(super) fn draw_history(
         } else {
             palette().muted
         };
+        let symbol = if message_index == selected_message {
+            "◉"
+        } else {
+            "○"
+        };
         frame.render_widget(
-            Paragraph::new("■").style(Style::default().fg(color).bg(palette().panel)),
+            Paragraph::new(symbol).style(Style::default().fg(color).bg(palette().panel)),
             Rect::new(marker.x, marker.y, 1, 1),
         );
         targets.push((
@@ -417,46 +498,42 @@ pub(super) fn draw_history(
             status == AgentStatus::Working && selected_message == messages.len().saturating_sub(1);
         let spinner = SPINNER_FRAMES[herdr.spinner_frame() % SPINNER_FRAMES.len()];
         let spans = match activity {
-            AgentActivityPreview::Reasoning => vec![
-                Span::styled(
-                    if newest && live && message.reasoning_active {
-                        spinner
-                    } else {
-                        "·"
-                    },
-                    Style::default().fg(palette().orange),
-                ),
-                Span::styled(
-                    "  REASONING",
+            AgentActivityPreview::Reasoning => {
+                let active = newest && live && message.reasoning_active;
+                let mut spans = Vec::new();
+                if active {
+                    spans.push(Span::styled(spinner, Style::default().fg(palette().orange)));
+                }
+                spans.push(Span::styled(
+                    if active { "  REASONING" } else { "REASONING" },
                     Style::default()
                         .fg(palette().orange)
                         .add_modifier(Modifier::BOLD),
-                ),
-            ],
+                ));
+                spans
+            }
             AgentActivityPreview::Tool {
                 name,
                 title,
                 running,
             } => {
-                let mut spans = vec![
-                    Span::styled(
-                        if *running && newest && live {
-                            spinner
-                        } else {
-                            "·"
-                        },
-                        Style::default().fg(palette().cyan),
-                    ),
-                    Span::styled(
-                        "  TOOL  ",
-                        Style::default()
-                            .fg(palette().cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(name.as_str(), Style::default().fg(palette().accent)),
-                ];
+                let active = *running && newest && live;
+                let mut spans = Vec::new();
+                if active {
+                    spans.push(Span::styled(spinner, Style::default().fg(palette().cyan)));
+                }
+                spans.push(Span::styled(
+                    if active { "  TOOL  " } else { "TOOL  " },
+                    Style::default()
+                        .fg(palette().cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    name.as_str(),
+                    Style::default().fg(palette().accent),
+                ));
                 if let Some(title) = title {
-                    spans.push(Span::styled("  ·  ", Style::default().fg(palette().faint)));
+                    spans.push(Span::raw("  "));
                     spans.push(Span::styled(
                         title.as_str(),
                         Style::default().fg(palette().soft),
@@ -492,7 +569,106 @@ pub(super) fn draw_history(
             1,
         ),
     );
+    draw_agent_preview_picker(
+        frame,
+        herdr,
+        index,
+        repository_area,
+        area,
+        picker_open,
+        hovered,
+        &mut targets,
+    );
     targets
+}
+
+fn draw_agent_preview_picker(
+    frame: &mut Frame<'_>,
+    herdr: &HerdrSession,
+    selected: usize,
+    anchor: Rect,
+    bounds: Rect,
+    open: bool,
+    hovered: Option<HitTarget>,
+    targets: &mut Vec<(HitTarget, Rect)>,
+) {
+    if !open || anchor.width == 0 || herdr.agents.is_empty() {
+        return;
+    }
+    let y = anchor.bottom();
+    let height = u16::try_from(herdr.agents.len())
+        .unwrap_or(u16::MAX)
+        .min(bounds.bottom().saturating_sub(y));
+    if height == 0 {
+        return;
+    }
+    let desired_width = herdr
+        .agents
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
+            let agent = herdr.agent_display_name(index).unwrap_or("agent");
+            UnicodeWidthStr::width(repository)
+                .saturating_add(UnicodeWidthStr::width(agent))
+                .saturating_add(6)
+        })
+        .max()
+        .unwrap_or(0);
+    let width = u16::try_from(desired_width)
+        .unwrap_or(u16::MAX)
+        .max(anchor.width)
+        .min(bounds.width);
+    let x = anchor.x.min(bounds.right().saturating_sub(width));
+    let popover = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, popover);
+    fill(frame, popover, palette().raised);
+    for (row, index) in (0..herdr.agents.len())
+        .take(usize::from(height))
+        .enumerate()
+    {
+        let rect = Rect::new(
+            x,
+            y.saturating_add(u16::try_from(row).unwrap_or(0)),
+            width,
+            1,
+        );
+        let current = index == selected;
+        let hovered = hovered == Some(HitTarget::AgentPreviewPickerItem(index));
+        let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
+        let agent = herdr.agent_display_name(index).unwrap_or("agent");
+        let text = truncate_width(
+            &format!(
+                " {}  {}  {}",
+                if current { "◉" } else { "○" },
+                repository,
+                agent
+            ),
+            usize::from(width),
+        );
+        frame.render_widget(
+            Paragraph::new(text).style(
+                Style::default()
+                    .fg(if current {
+                        palette().yellow
+                    } else {
+                        palette().ink
+                    })
+                    .bg(if hovered {
+                        palette().selected
+                    } else {
+                        palette().raised
+                    })
+                    .add_modifier(if current {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            rect,
+        );
+        targets.push((HitTarget::AgentPreviewPickerItem(index), rect));
+    }
 }
 
 fn draw_half_cell_card(

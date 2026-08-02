@@ -688,6 +688,28 @@ impl HerdrSession {
         })
     }
 
+    pub(crate) fn agent_repository_name(&self, index: usize) -> Option<&str> {
+        let agent = self.agents.get(index)?;
+        if let Some(repository) = agent
+            .destination_cwd
+            .as_deref()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+        {
+            return Some(repository);
+        }
+        let workspace = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == agent.workspace_id)?;
+        workspace
+            .repo_root
+            .as_deref()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .or(Some(workspace.label.as_str()))
+    }
+
     pub(crate) fn display_agent(&mut self, pane_id: String) {
         if self.agent_display_running {
             return;

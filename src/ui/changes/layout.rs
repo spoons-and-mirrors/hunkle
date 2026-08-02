@@ -58,7 +58,13 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
     let hovered = app.hovered_hit_target.filter(|target| {
         matches!(
             target,
-            HitTarget::Agent(_) | HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }
+            HitTarget::Agent(_)
+                | HitTarget::AgentPreviewPicker(_)
+                | HitTarget::AgentPreviewPickerItem(_)
+                | HitTarget::AgentPreviewPrevious(_)
+                | HitTarget::AgentPreviewNext(_)
+                | HitTarget::AgentTooltip { .. }
+                | HitTarget::AgentMessage { .. }
         )
     });
     for (target, rect) in agents::draw(

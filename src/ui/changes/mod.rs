@@ -698,8 +698,16 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         ) if agent == index => Some(message),
         _ => None,
     };
-    for (target, rect) in agents::draw_history(frame, &app.herdr, index, selected_message, history)
-    {
+    for (target, rect) in agents::draw_history(
+        frame,
+        &app.herdr,
+        index,
+        selected_message,
+        app.agent_preview_button_flash(),
+        app.agent_preview_picker_open(),
+        app.hovered_hit_target,
+        history,
+    ) {
         app.regions.register_hit_target(target, rect);
     }
 }

@@ -95,6 +95,10 @@ pub(crate) enum HitTarget {
     Graph(GraphHitTarget),
     Explorer(ExplorerHitTarget),
     Agent(usize),
+    AgentPreviewPicker(usize),
+    AgentPreviewPickerItem(usize),
+    AgentPreviewPrevious(usize),
+    AgentPreviewNext(usize),
     AgentTooltip { agent: usize, message: usize },
     AgentMessage { agent: usize, message: usize },
 }

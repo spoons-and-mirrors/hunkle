@@ -132,6 +132,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .collect::<String>();
     assert!(hovered_screen.contains("CONVERSATION LOG"));
     assert!(hovered_screen.contains("TURN 5 OF 5"));
+    assert!(!hovered_screen.contains("TEXT SNAPSHOT"));
     assert!(!hovered_screen.contains("LIVE · REFRESHING"));
     assert!(!hovered_screen.contains("FINAL SNAPSHOT"));
     assert!(hovered_screen.contains("5 REQUESTS"));
@@ -164,6 +165,12 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(text_row < tool_row);
     assert!(tool_row < reasoning_row);
     assert!(reasoning_row < metrics_row);
+    for row in [tool_row, reasoning_row] {
+        let text = (history.x..history.right())
+            .map(|x| terminal.backend().buffer()[(x, row)].symbol())
+            .collect::<String>();
+        assert!(!text.contains('·'));
+    }
 
     app.handle_mouse(mouse(MouseEventKind::ScrollUp, area.x + 2, area.y));
     assert_eq!(
@@ -240,10 +247,21 @@ fn renders_and_targets_agents_in_the_normal_view() {
         })
         .unwrap();
     assert_eq!(first_message.x, second_message.x);
-    assert!(first_message.y < second_message.y);
+    assert_eq!(second_message.y, first_message.y + 1);
     assert_eq!(
         terminal.backend().buffer()[(first_message.x, first_message.y)].symbol(),
-        "■"
+        "○"
+    );
+    let selected_message = app
+        .regions
+        .hit_target_rect(HitTarget::AgentMessage {
+            agent: 0,
+            message: 4,
+        })
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(selected_message.x, selected_message.y)].symbol(),
+        "◉"
     );
     assert_eq!(
         terminal.backend().buffer()[(first_message.x + 2, first_message.y)].symbol(),
@@ -287,6 +305,10 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert_eq!(
         terminal.backend().buffer()[(newest_message.x, newest_message.y)].fg,
         super::palette().muted
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(newest_message.x, newest_message.y)].symbol(),
+        "○"
     );
 
     app.handle_mouse(mouse(
@@ -339,7 +361,20 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(!app.agents_pane_visible());
     assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
-    app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let preview = app
+        .regions
+        .hit_target_rect(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 4,
+        })
+        .unwrap();
+    app.handle_mouse(mouse(MouseEventKind::Moved, preview.x + 4, preview.y + 4));
+    let pane_before_tab = app.changes.pane;
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_ne!(app.changes.pane, pane_before_tab);
+    assert_eq!(app.hovered_hit_target, None);
+    assert!(!app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
@@ -360,12 +395,189 @@ fn renders_and_targets_agents_in_the_normal_view() {
             })
             .is_some()
     );
+    let preview = app
+        .regions
+        .hit_target_rect(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 4,
+        })
+        .unwrap();
+    app.handle_mouse(mouse(MouseEventKind::Moved, preview.x + 4, preview.y + 4));
     let changes_tab = app
         .regions
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
         .unwrap();
     click(&mut app, changes_tab.x, changes_tab.y);
     assert!(!app.agents_pane_pinned);
+    assert_eq!(app.hovered_hit_target, None);
+    assert!(!app.agents_pane_visible());
+}
+
+#[test]
+fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut snapshot = agent_snapshot();
+    snapshot["result"]["snapshot"]["agents"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "agent": "opencode",
+            "agent_session": {
+                "source": "env",
+                "agent": "opencode",
+                "kind": "session_id",
+                "value": "ses_second"
+            },
+            "agent_status": "idle",
+            "focused": false,
+            "pane_id": "w1:p2",
+            "tab_id": "w1:t1",
+            "terminal_title_stripped": "OC | Second agent",
+            "workspace_id": "w1"
+        }));
+    snapshot["result"]["snapshot"]["panes"] = serde_json::json!([
+        {
+            "pane_id": "w1:p1",
+            "cwd": "/repos/first-repo"
+        },
+        {
+            "pane_id": "w1:p2",
+            "cwd": "/repos/second-repo"
+        }
+    ]);
+    let mut app = App::new(root.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&snapshot);
+    app.herdr
+        .set_agent_user_messages_for_test(0, &[("First request", Some("First reply"), 1, 0)]);
+    app.herdr
+        .set_agent_user_messages_for_test(1, &[("Second request", Some("Second reply"), 2, 1)]);
+    let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let card = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
+    app.handle_mouse(mouse(MouseEventKind::Moved, card.x + 2, card.y));
+    assert!(app.poll_agent_hover(std::time::Instant::now() + Duration::from_secs(1)));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let header_text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(header_text.contains("first-repo"));
+    assert!(!header_text.contains("1/2"));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+    assert!(app.agents_pane_pinned);
+
+    let next = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewNext(0))
+        .unwrap();
+    let previous = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPrevious(0))
+        .unwrap();
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPicker(0))
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(picker.x, picker.y)].symbol(),
+        "▐"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(picker.right() - 1, picker.y)].symbol(),
+        "▌"
+    );
+    assert_eq!(picker.right(), previous.x);
+    assert_eq!(previous.right(), next.x);
+    assert_eq!(
+        terminal.backend().buffer()[(next.x + 1, next.y)].symbol(),
+        "→"
+    );
+    assert_eq!(next.width, 3);
+    click(&mut app, next.x, next.y);
+    assert_eq!(
+        app.hovered_hit_target,
+        Some(HitTarget::AgentTooltip {
+            agent: 1,
+            message: 0,
+        })
+    );
+    assert!(app.agents_pane_pinned);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(next.x + 1, next.y)].bg,
+        super::palette().selected
+    );
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .contains("Second request")
+    );
+    let second_header: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(second_header.contains("second-repo"));
+    assert!(!second_header.contains("first-repo"));
+
+    let viewer = app.regions.diff.unwrap();
+    app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
+    assert_eq!(app.agents_pane_index(), Some(1));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let stable_header: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(stable_header.contains("second-repo"));
+    assert!(!stable_header.contains("first-repo"));
+
+    let previous = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPrevious(1))
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(previous.x + 1, previous.y)].symbol(),
+        "←"
+    );
+    assert_eq!(previous.width, 3);
+    click(&mut app, previous.x, previous.y);
+    assert_eq!(
+        app.hovered_hit_target,
+        Some(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 0,
+        })
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPicker(0))
+        .unwrap();
+    click(&mut app, picker.x + 1, picker.y);
+    assert!(app.agent_preview_picker_open());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let second_agent = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPickerItem(1))
+        .unwrap();
+    click(&mut app, second_agent.x + 1, second_agent.y);
+    assert!(!app.agent_preview_picker_open());
+    assert_eq!(app.agents_pane_index(), Some(1));
 }
 
 #[test]
