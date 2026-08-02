@@ -267,23 +267,6 @@ pub(super) fn draw_history(
             .style(Style::default().fg(palette().faint).bg(palette().panel)),
         Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                message.request_count.to_string(),
-                Style::default().fg(palette().yellow),
-            ),
-            Span::styled(" REQUESTS", Style::default().fg(palette().muted)),
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                message.tool_call_count.to_string(),
-                Style::default().fg(palette().cyan),
-            ),
-            Span::styled(" TOOLS", Style::default().fg(palette().muted)),
-        ]))
-        .style(Style::default().bg(palette().panel)),
-        Rect::new(area.x, area.y.saturating_add(2), area.width, 1),
-    );
     let mut targets = vec![(
         HitTarget::AgentTooltip {
             agent: index,
@@ -291,12 +274,11 @@ pub(super) fn draw_history(
         },
         area,
     )];
-    let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     let main = Rect::new(
         area.x,
-        area.y.saturating_add(4),
+        area.y.saturating_add(3),
         area.width,
-        footer.y.saturating_sub(area.y.saturating_add(4)),
+        area.bottom().saturating_sub(area.y.saturating_add(3)),
     );
     let timeline = Rect::new(main.x, main.y, 2.min(main.width), main.height);
     let marker_count = messages.len().min(usize::from(timeline.height));
@@ -353,14 +335,11 @@ pub(super) fn draw_history(
         .activities
         .len()
         .min(2)
-        .min(usize::from(cards.height.saturating_sub(8) / 3));
+        .min(usize::from(cards.height.saturating_sub(15) / 3));
     let activity_height = u16::try_from(activity_count).unwrap_or(0).saturating_mul(3);
-    let message_height = cards.height.saturating_sub(activity_height);
-    let agent_height = 5
-        .min(message_height.saturating_sub(3))
-        .max(3)
-        .min(message_height);
-    let user_height = message_height.saturating_sub(agent_height);
+    let message_height = cards.height.min(14);
+    let user_height = message_height.div_ceil(2);
+    let agent_height = message_height.saturating_sub(user_height);
     let user_card = Rect::new(cards.x, cards.y, cards.width, user_height);
     let user_body = draw_half_cell_card(frame, user_card, palette().surface_alt, palette().panel);
     frame.render_widget(
@@ -492,13 +471,26 @@ pub(super) fn draw_history(
         );
     }
     frame.render_widget(
-        Paragraph::new(if status == AgentStatus::Working {
-            "LIVE · REFRESHING"
-        } else {
-            "FINAL SNAPSHOT"
-        })
-        .style(Style::default().fg(phase_color).bg(palette().panel)),
-        footer,
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                message.request_count.to_string(),
+                Style::default().fg(palette().yellow),
+            ),
+            Span::styled(" REQUESTS", Style::default().fg(palette().muted)),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                message.tool_call_count.to_string(),
+                Style::default().fg(palette().cyan),
+            ),
+            Span::styled(" TOOLS", Style::default().fg(palette().muted)),
+        ]))
+        .style(Style::default().bg(palette().panel)),
+        Rect::new(
+            cards.x,
+            agent_card.bottom().saturating_add(activity_height),
+            cards.width,
+            1,
+        ),
     );
     targets
 }

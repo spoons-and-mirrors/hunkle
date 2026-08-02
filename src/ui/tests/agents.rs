@@ -115,7 +115,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .collect::<String>();
     assert!(hovered_screen.contains("CONVERSATION LOG"));
     assert!(hovered_screen.contains("TURN 5 OF 5"));
-    assert!(hovered_screen.contains("LIVE · REFRESHING"));
+    assert!(!hovered_screen.contains("LIVE · REFRESHING"));
+    assert!(!hovered_screen.contains("FINAL SNAPSHOT"));
     assert!(hovered_screen.contains("5 REQUESTS"));
     assert!(hovered_screen.contains("10 TOOLS"));
     assert!(hovered_screen.contains("Please refine"));
@@ -142,8 +143,10 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let text_row = row_containing("Timer updates").unwrap();
     let tool_row = row_containing("apply_patch").unwrap();
     let reasoning_row = row_containing("REASONING").unwrap();
+    let metrics_row = row_containing("5 REQUESTS").unwrap();
     assert!(text_row < tool_row);
     assert!(tool_row < reasoning_row);
+    assert!(reasoning_row < metrics_row);
 
     app.handle_mouse(mouse(MouseEventKind::ScrollUp, area.x + 2, area.y));
     assert_eq!(
@@ -228,6 +231,18 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert_eq!(
         terminal.backend().buffer()[(first_message.x + 2, first_message.y)].symbol(),
         "▄"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(first_message.x + 2, first_message.y + 6)].symbol(),
+        "▀"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(first_message.x + 2, first_message.y + 7)].symbol(),
+        "▄"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(first_message.x + 2, first_message.y + 13)].symbol(),
+        "▀"
     );
     app.handle_mouse(mouse(
         MouseEventKind::Moved,
