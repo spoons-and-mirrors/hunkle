@@ -157,20 +157,11 @@ impl EventCoalescer {
 }
 
 pub(super) enum Action {
-    CreateWorkspace {
-        path: Option<PathBuf>,
-    },
-    CreateWorktree {
-        workspace_id: String,
-    },
     CreateWorktreeAt {
         cwd: PathBuf,
         path: PathBuf,
         branch: String,
         base: String,
-    },
-    CloseWorkspace {
-        workspace_id: String,
     },
     RemoveWorktree {
         workspace_id: String,
@@ -178,16 +169,6 @@ pub(super) enum Action {
     FocusWorkspace {
         workspace_id: String,
     },
-    RenameWorkspace {
-        workspace_id: String,
-        label: String,
-    },
-}
-
-pub(super) struct RestoreRequest {
-    pub(super) path: PathBuf,
-    pub(super) label: String,
-    pub(super) linked_worktree: bool,
 }
 
 struct ParsedWorkspace {
@@ -1069,10 +1050,6 @@ fn parse_pane_layout(layout: &Value) -> Result<HerdrPaneLayout, String> {
     })
 }
 
-pub(super) fn restore(request: RestoreRequest) -> Result<Option<String>, String> {
-    run(&restore_args(request)).map(|value| workspace_id_in(&value))
-}
-
 pub(super) fn send_command_below(command: String) -> Result<String, String> {
     if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
         return Err("Herdr command prompt is only available inside Herdr".to_owned());
@@ -1244,43 +1221,8 @@ fn environment_from(
     })
 }
 
-fn restore_args(request: RestoreRequest) -> Vec<String> {
-    let mut args = if request.linked_worktree {
-        vec![
-            "worktree".to_owned(),
-            "open".to_owned(),
-            "--path".to_owned(),
-        ]
-    } else {
-        vec![
-            "workspace".to_owned(),
-            "create".to_owned(),
-            "--cwd".to_owned(),
-        ]
-    };
-    args.push(request.path.to_string_lossy().into_owned());
-    args.extend(["--label".to_owned(), request.label, "--no-focus".to_owned()]);
-    args
-}
-
 fn action_args(action: Action) -> Vec<String> {
     match action {
-        Action::CreateWorkspace { path } => {
-            let mut args = vec!["workspace".to_owned(), "create".to_owned()];
-            if let Some(path) = path {
-                args.push("--cwd".to_owned());
-                args.push(path.to_string_lossy().into_owned());
-            }
-            args.push("--no-focus".to_owned());
-            args
-        }
-        Action::CreateWorktree { workspace_id } => vec![
-            "worktree".to_owned(),
-            "create".to_owned(),
-            "--workspace".to_owned(),
-            workspace_id,
-            "--no-focus".to_owned(),
-        ],
         Action::CreateWorktreeAt {
             cwd,
             path,
@@ -1299,9 +1241,6 @@ fn action_args(action: Action) -> Vec<String> {
             path.to_string_lossy().into_owned(),
             "--no-focus".to_owned(),
         ],
-        Action::CloseWorkspace { workspace_id } => {
-            vec!["workspace".to_owned(), "close".to_owned(), workspace_id]
-        }
         Action::RemoveWorktree { workspace_id } => vec![
             "worktree".to_owned(),
             "remove".to_owned(),
@@ -1311,15 +1250,6 @@ fn action_args(action: Action) -> Vec<String> {
         Action::FocusWorkspace { workspace_id } => {
             vec!["workspace".to_owned(), "focus".to_owned(), workspace_id]
         }
-        Action::RenameWorkspace {
-            workspace_id,
-            label,
-        } => vec![
-            "workspace".to_owned(),
-            "rename".to_owned(),
-            workspace_id,
-            label,
-        ],
     }
 }
 
@@ -1600,18 +1530,6 @@ fn parse_agent_status(value: Option<&str>) -> AgentStatus {
     }
 }
 
-fn workspace_id_in(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(object) => object
-            .get("workspace_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| object.values().find_map(workspace_id_in)),
-        Value::Array(values) => values.iter().find_map(workspace_id_in),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1762,26 +1680,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_typed_action_and_restore_arguments() {
-        assert_eq!(
-            action_args(Action::CreateWorkspace {
-                path: Some(PathBuf::from("/tmp/current workspace")),
-            }),
-            [
-                "workspace",
-                "create",
-                "--cwd",
-                "/tmp/current workspace",
-                "--no-focus",
-            ]
-            .map(str::to_owned)
-        );
-        assert_eq!(
-            action_args(Action::CreateWorktree {
-                workspace_id: "w1".to_owned(),
-            }),
-            ["worktree", "create", "--workspace", "w1", "--no-focus"].map(str::to_owned)
-        );
+    fn builds_typed_action_arguments() {
         assert_eq!(
             action_args(Action::CreateWorktreeAt {
                 cwd: PathBuf::from("/tmp/current checkout"),
@@ -1805,12 +1704,6 @@ mod tests {
             .map(str::to_owned)
         );
         assert_eq!(
-            action_args(Action::CloseWorkspace {
-                workspace_id: "w1".to_owned(),
-            }),
-            ["workspace", "close", "w1"].map(str::to_owned)
-        );
-        assert_eq!(
             action_args(Action::RemoveWorktree {
                 workspace_id: "w3".to_owned(),
             }),
@@ -1821,47 +1714,6 @@ mod tests {
                 workspace_id: "w1".to_owned(),
             }),
             ["workspace", "focus", "w1"].map(str::to_owned)
-        );
-        assert_eq!(
-            action_args(Action::RenameWorkspace {
-                workspace_id: "w1".to_owned(),
-                label: "code".to_owned(),
-            }),
-            ["workspace", "rename", "w1", "code"].map(str::to_owned)
-        );
-        assert_eq!(
-            restore_args(RestoreRequest {
-                path: PathBuf::from("/tmp/code"),
-                label: "Code".to_owned(),
-                linked_worktree: false,
-            }),
-            [
-                "workspace",
-                "create",
-                "--cwd",
-                "/tmp/code",
-                "--label",
-                "Code",
-                "--no-focus",
-            ]
-            .map(str::to_owned)
-        );
-        assert_eq!(
-            restore_args(RestoreRequest {
-                path: PathBuf::from("/tmp/feature"),
-                label: "Feature".to_owned(),
-                linked_worktree: true,
-            }),
-            [
-                "worktree",
-                "open",
-                "--path",
-                "/tmp/feature",
-                "--label",
-                "Feature",
-                "--no-focus",
-            ]
-            .map(str::to_owned)
         );
     }
 
@@ -2667,7 +2519,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_environment_and_nested_workspace_ids() {
+    fn detects_environment() {
         assert!(
             environment_from(
                 Some("0"),
@@ -2687,10 +2539,6 @@ mod tests {
         assert_eq!(environment.workspace_id.as_deref(), Some("w1"));
         assert_eq!(environment.tab_id.as_deref(), Some("w1:t1"));
         assert_eq!(environment.pane_id.as_deref(), Some("w1:p1"));
-        let response = serde_json::json!({
-            "result": { "event": { "workspace": { "workspace_id": "workspace-42" } } }
-        });
-        assert_eq!(workspace_id_in(&response).as_deref(), Some("workspace-42"));
     }
 
     #[test]

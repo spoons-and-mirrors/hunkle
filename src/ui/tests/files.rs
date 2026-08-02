@@ -605,7 +605,7 @@ fn left_pane_files_take_over_the_preview_from_graph() {
     assert_eq!(app.changes.pane, LeftPane::Files);
     app.view = View::Graph;
     app.graph_commit_open = true;
-    app.mode = Mode::WorkspacePanel;
+    app.mode = Mode::Normal;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let explorer = app.regions.explorer_list.unwrap();
     let file_row = app

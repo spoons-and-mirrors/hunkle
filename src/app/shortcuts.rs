@@ -9,8 +9,6 @@ pub(crate) enum ShortcutAction {
     Quit,
     OpenHerdr,
     FindFile,
-    ToggleWorkspace,
-    OpenPresets,
     Refresh,
     OpenExplorer,
     OpenWorktrees,
@@ -39,13 +37,6 @@ pub(crate) enum ShortcutAction {
     CreateWorktree,
     DeleteWorktree,
     RefreshWorktrees,
-    WorkspaceRefresh,
-    WorkspaceGroup,
-    WorkspaceRename,
-    WorkspaceDelete,
-    PresetCreate,
-    PresetUpdate,
-    PresetDelete,
     BranchDelete,
     AuthorEnableAll,
     AuthorDisableAll,
@@ -183,9 +174,7 @@ const FILE_EDIT: u16 = 1 << 2;
 const EXPLORER: u16 = 1 << 3;
 const WORKTREES: u16 = 1 << 4;
 const REPOSITORY_BROWSER: u16 = 1 << 5;
-const WORKSPACE: u16 = 1 << 6;
-const PRESETS: u16 = 1 << 7;
-const AUTHOR_FILTER: u16 = 1 << 8;
+const AUTHOR_FILTER: u16 = 1 << 6;
 
 const fn chord(code: KeyCode, modifiers: KeyModifiers) -> KeyChord {
     KeyChord { code, modifiers }
@@ -263,22 +252,6 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         MAIN,
         KeyCode::Char('w'),
         KeyModifiers::SHIFT
-    ),
-    shortcut!(
-        ToggleWorkspace,
-        "toggle-workspace",
-        "Workspace manager",
-        "Navigation",
-        MAIN,
-        KeyCode::Char('w')
-    ),
-    shortcut!(
-        OpenPresets,
-        "open-presets",
-        "Workspace presets",
-        "Navigation",
-        MAIN | WORKSPACE,
-        KeyCode::Char('p')
     ),
     shortcut!(
         OpenSettings,
@@ -498,62 +471,6 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         KeyModifiers::CONTROL
     ),
     shortcut!(
-        WorkspaceRefresh,
-        "workspace-refresh",
-        "Refresh workspaces",
-        "Workspace manager",
-        WORKSPACE,
-        KeyCode::Char('r')
-    ),
-    shortcut!(
-        WorkspaceGroup,
-        "workspace-group",
-        "Create workspace group",
-        "Workspace manager",
-        WORKSPACE,
-        KeyCode::Char('g')
-    ),
-    shortcut!(
-        WorkspaceRename,
-        "workspace-rename",
-        "Rename workspace / agent",
-        "Workspace manager",
-        WORKSPACE,
-        KeyCode::F(2)
-    ),
-    shortcut!(
-        WorkspaceDelete,
-        "workspace-delete",
-        "Close workspace / worktree",
-        "Workspace manager",
-        WORKSPACE,
-        KeyCode::Delete
-    ),
-    shortcut!(
-        PresetCreate,
-        "preset-create",
-        "Create workspace preset",
-        "Workspace presets",
-        PRESETS,
-        KeyCode::Char('n')
-    ),
-    shortcut!(
-        PresetUpdate,
-        "preset-update",
-        "Update workspace preset",
-        "Workspace presets",
-        PRESETS,
-        KeyCode::Char('u')
-    ),
-    shortcut!(
-        PresetDelete,
-        "preset-delete",
-        "Delete workspace preset",
-        "Workspace presets",
-        PRESETS,
-        KeyCode::Delete
-    ),
-    shortcut!(
         BranchDelete,
         "branch-delete",
         "Delete local branch",
@@ -604,13 +521,6 @@ impl Shortcuts {
         self.binding(action) == KeyChord::from_event(event)
     }
 
-    pub(crate) fn matches_main(&self, event: KeyEvent) -> bool {
-        let chord = KeyChord::from_event(event);
-        SHORTCUTS.iter().any(|definition| {
-            definition.scope & MAIN != 0 && self.binding(definition.action) == chord
-        })
-    }
-
     pub(crate) fn main_action(&self, event: KeyEvent) -> Option<ShortcutAction> {
         let chord = KeyChord::from_event(event);
         SHORTCUTS.iter().find_map(|definition| {
@@ -629,14 +539,6 @@ impl Shortcuts {
 
     pub(crate) fn remap_repository_browser(&self, event: KeyEvent) -> KeyEvent {
         self.remap(event, REPOSITORY_BROWSER)
-    }
-
-    pub(crate) fn remap_workspace(&self, event: KeyEvent) -> KeyEvent {
-        self.remap(event, WORKSPACE)
-    }
-
-    pub(crate) fn remap_presets(&self, event: KeyEvent) -> KeyEvent {
-        self.remap(event, PRESETS)
     }
 
     pub(crate) fn remap_author_filter(&self, event: KeyEvent) -> KeyEvent {
@@ -801,7 +703,14 @@ mod tests {
         let mut shortcuts = Shortcuts::default();
         let graph = shortcuts.binding(ShortcutAction::ToggleGraph);
         assert!(shortcuts.set(ShortcutAction::OpenExplorer, graph).is_err());
-        assert!(shortcuts.set(ShortcutAction::WorkspaceGroup, graph).is_ok());
+        assert!(
+            shortcuts
+                .set(
+                    ShortcutAction::ExplorerFavorite,
+                    KeyChord::new(KeyCode::Char('g'), KeyModifiers::NONE),
+                )
+                .is_ok()
+        );
         assert!(
             shortcuts
                 .set(

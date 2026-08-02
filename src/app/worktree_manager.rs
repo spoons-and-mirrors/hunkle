@@ -60,7 +60,6 @@ pub(crate) struct WorktreeRemoveDialog {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorktreeManagerRow {
-    Group(usize),
     Worktree { repository: usize, worktree: usize },
     Status(usize),
 }
@@ -170,7 +169,7 @@ impl WorktreeManager {
         self.pending_create = self.create_dialog.take();
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = super::workspace_panel::create_managed_worktree(
+            let result = super::herdr_session::create_managed_worktree(
                 cwd,
                 path.clone(),
                 branch,
@@ -297,12 +296,6 @@ impl WorktreeManager {
     pub(crate) fn rows(&self) -> Vec<WorktreeManagerRow> {
         let query = self.query.to_lowercase();
         let mut rows = Vec::new();
-        let show_groups = self
-            .catalog
-            .repositories
-            .iter()
-            .any(|repository| repository.group.is_some());
-        let mut previous_group = None;
         for (repository_index, repository) in self.catalog.repositories.iter().enumerate() {
             let repository_matches = query.is_empty()
                 || repository.label.to_lowercase().contains(&query)
@@ -326,10 +319,6 @@ impl WorktreeManager {
                 .collect::<Vec<_>>();
             if matching.is_empty() && (!repository_matches || repository.error.is_none()) {
                 continue;
-            }
-            if show_groups && previous_group.as_ref() != Some(&repository.group) {
-                rows.push(WorktreeManagerRow::Group(repository_index));
-                previous_group = Some(repository.group.clone());
             }
             if repository.error.is_some() {
                 rows.push(WorktreeManagerRow::Status(repository_index));
@@ -819,7 +808,6 @@ mod tests {
             vec![LinkedWorktreeRepository {
                 common_dir: PathBuf::from("/repo/.git"),
                 label: "repo".to_owned(),
-                group: None,
                 worktrees: vec![
                     linked("/repo", "main", true),
                     linked("/repo-feature", "feature/modal", false),
@@ -847,60 +835,6 @@ mod tests {
             }]
         );
         assert_eq!(manager.state.selected(), Some(0));
-    }
-
-    #[test]
-    fn inserts_group_headings_only_when_groups_change() {
-        let mut manager = manager();
-        manager.catalog = LinkedWorktreeCatalogSnapshot::for_test(
-            vec![
-                LinkedWorktreeRepository {
-                    common_dir: PathBuf::from("/alpha/.git"),
-                    label: "alpha".to_owned(),
-                    group: Some("Projects".to_owned()),
-                    worktrees: vec![linked("/alpha", "main", true)],
-                    error: None,
-                },
-                LinkedWorktreeRepository {
-                    common_dir: PathBuf::from("/zulu/.git"),
-                    label: "zulu".to_owned(),
-                    group: Some("Projects".to_owned()),
-                    worktrees: vec![linked("/zulu", "main", true)],
-                    error: None,
-                },
-                LinkedWorktreeRepository {
-                    common_dir: PathBuf::from("/solo/.git"),
-                    label: "solo".to_owned(),
-                    group: None,
-                    worktrees: vec![linked("/solo", "main", true)],
-                    error: None,
-                },
-            ],
-            None,
-            HerdrOwnership::Disabled,
-        );
-        manager.select_first();
-
-        assert_eq!(
-            manager.rows(),
-            [
-                WorktreeManagerRow::Group(0),
-                WorktreeManagerRow::Worktree {
-                    repository: 0,
-                    worktree: 0,
-                },
-                WorktreeManagerRow::Worktree {
-                    repository: 1,
-                    worktree: 0,
-                },
-                WorktreeManagerRow::Group(2),
-                WorktreeManagerRow::Worktree {
-                    repository: 2,
-                    worktree: 0,
-                },
-            ]
-        );
-        assert_eq!(manager.state.selected(), Some(1));
     }
 
     #[test]

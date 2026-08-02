@@ -11,7 +11,7 @@ pub(super) use unicode_width::UnicodeWidthStr;
 pub(super) use crate::{
     app::{
         App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, ShortcutAction,
-        TextInput, View, WorkspacePanelHitTarget,
+        TextInput, View,
     },
     git::{Change, Commit, DiffSummary},
     repo_path::{RepoPath, display_os_str},
@@ -19,10 +19,10 @@ pub(super) use crate::{
 };
 
 pub(super) use super::{
-    fill, palette,
+    agents, fill, palette,
     preview::{PreparedPreview, PreviewInput, take_inline_transmission, take_kitty_transmission},
     text::word_wrapped_height,
-    truncate_width, workspace_panel,
+    truncate_width,
 };
 
 mod commit_editor;

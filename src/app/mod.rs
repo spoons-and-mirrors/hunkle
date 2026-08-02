@@ -10,13 +10,13 @@ mod files;
 mod fuzzy;
 mod header_picker;
 mod herdr_prompt;
+mod herdr_session;
 mod linked_worktrees;
 mod mouse;
 mod repository_browser;
 mod settings;
 mod shortcuts;
 mod text_input;
-mod workspace_panel;
 mod worktree_manager;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandRecord, CommandStatus};
@@ -34,6 +34,9 @@ pub(crate) use header_picker::{
     AgentDestinationKind, BranchPickerStep, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
+#[cfg(test)]
+pub(crate) use herdr_session::HerdrPaneRect;
+pub(crate) use herdr_session::{AgentEntryState, AgentStatus, HerdrPaneLayout, HerdrSession};
 pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate,
     LinkedWorktreeCatalog, LinkedWorktreeCatalogSnapshot, LinkedWorktreeObservation,
@@ -46,13 +49,6 @@ pub(crate) use repository_browser::{
 pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use settings::{SettingsStore, valid_opencode_model};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
-#[cfg(test)]
-pub(crate) use workspace_panel::HerdrPaneRect;
-pub(crate) use workspace_panel::{
-    AgentStatus, HerdrPaneLayout, SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
-    WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect, WorkspacePanelEntryState,
-    WorkspacePanelRow, WorkspaceRenameDialog, WorkspaceRenameTarget,
-};
 pub(crate) use worktree_manager::{
     WorktreeCreateDialog, WorktreeCreateField, WorktreeManager, WorktreeManagerEffect,
     WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
@@ -68,7 +64,7 @@ pub(super) use std::{
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
-const SETTINGS_ROW_COUNT: usize = 10;
+const SETTINGS_ROW_COUNT: usize = 9;
 
 pub(super) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) use ratatui::{
@@ -129,7 +125,7 @@ pub struct App {
     pub(crate) header_picker: HeaderPicker,
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) worktree_manager: WorktreeManager,
-    pub(crate) workspace_panel: WorkspacePanel,
+    pub(crate) herdr: HerdrSession,
     pub(crate) agents_visible: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
@@ -162,7 +158,6 @@ pub struct App {
     last_file_editor_click: Option<(Position, Instant)>,
     pub(crate) file_editor_dragging: bool,
     pending_file_selection: Option<RepoPath>,
-    workspace_focus_restore_path: Option<PathBuf>,
     pending_workspace_restore: Option<PathBuf>,
     workspace_state: Option<WorkspaceState>,
     initial_pane_pending: bool,
@@ -189,10 +184,6 @@ impl App {
             (SettingsStore::memory(), settings)
         };
         let workspace_config_dir = settings_store.config_dir();
-        let workspace_groups_path =
-            workspace_config_dir.map(|path| path.join("workspace-groups.json"));
-        let workspace_snapshots_path =
-            workspace_config_dir.map(|path| path.join("workspace-snapshots.json"));
         #[cfg(not(test))]
         let known_repositories_path =
             workspace_config_dir.map(|path| path.join("known-repositories.json"));
@@ -243,10 +234,9 @@ impl App {
             let _ = linked_worktrees.remember_repository(common_dir, &repository.root);
         }
         linked_worktrees.set_active_path(session.data().map(|repository| repository.root.clone()));
-        let mut workspace_panel =
-            WorkspacePanel::detect(workspace_groups_path, workspace_snapshots_path);
-        workspace_panel.set_cross_workspace_agents(settings.cross_workspace_agents);
-        linked_worktrees.observe_herdr(workspace_panel.linked_worktree_observation());
+        let mut herdr = HerdrSession::detect(workspace_config_dir);
+        herdr.set_cross_workspace_agents(settings.cross_workspace_agents);
+        linked_worktrees.observe_herdr(herdr.linked_worktree_observation());
         linked_worktrees.refresh();
         let mut author_filter = AuthorFilter::default();
         if let Some(repo) = session.data() {
@@ -285,7 +275,7 @@ impl App {
             header_picker: HeaderPicker::default(),
             linked_worktrees,
             worktree_manager: WorktreeManager::new(),
-            workspace_panel,
+            herdr,
             agents_visible: true,
             hovered_hit_target: None,
             settings,
@@ -318,7 +308,6 @@ impl App {
             last_file_editor_click: None,
             file_editor_dragging: false,
             pending_file_selection: None,
-            workspace_focus_restore_path: None,
             pending_workspace_restore: None,
             workspace_state: None,
             initial_pane_pending,
@@ -452,14 +441,6 @@ impl App {
         self.session.fetch_running()
     }
 
-    pub(crate) fn workspace_panel_enabled(&self) -> bool {
-        self.settings.workspace_panel_enabled && self.workspace_panel.is_enabled()
-    }
-
-    pub(crate) fn workspace_panel_available(&self) -> bool {
-        self.settings.workspace_panel_enabled && self.workspace_panel.is_available()
-    }
-
     pub(crate) fn format_running(&self) -> bool {
         self.session.format_running()
     }
@@ -576,8 +557,6 @@ impl App {
             Mode::FileEdit => unreachable!("file editor keys are handled first"),
             Mode::Editor => self.handle_editor(key),
             Mode::Files => self.handle_file_dialog(key),
-            Mode::WorkspacePanel => self.handle_workspace_panel(key),
-            Mode::WorkspacePresets => self.handle_workspace_presets(key),
             Mode::Help => {
                 if key.code == KeyCode::Esc
                     || self
@@ -668,8 +647,6 @@ impl App {
                     dialog.error = None;
                 }
             }
-            Mode::WorkspacePanel => self.workspace_panel.paste(text),
-            Mode::WorkspacePresets => self.workspace_panel.paste(text),
             _ => {}
         }
     }
@@ -682,34 +659,23 @@ impl App {
         let mut changed = self.mode == Mode::Explorer
             && self.explorer_tab == ExplorerTab::Explorer
             && self.workspace_explorer.poll_index();
-        if self.workspace_panel.is_enabled()
-            || (self.mode == Mode::Explorer
-                && self.explorer_tab == ExplorerTab::Worktrees
-                && self.workspace_panel.is_enabled())
-            || self.workspace_panel.destructive_action_running()
-        {
-            let panel_poll = {
-                let _activity = diagnostics::activity("poll-workspace-panel", "");
-                self.workspace_panel.poll()
+        if self.herdr.is_enabled() || self.herdr.destructive_action_running() {
+            let herdr_poll = {
+                let _activity = diagnostics::activity("poll-herdr-session", "");
+                self.herdr.poll()
             };
-            changed |= panel_poll.changed;
-            if let Some(error) = panel_poll.notice {
+            changed |= herdr_poll.changed;
+            if let Some(error) = herdr_poll.notice {
                 self.notice = Some(error);
             }
-            if let Some(path) = panel_poll.reopen_path {
+            if let Some(path) = herdr_poll.reopen_path {
                 diagnostics::event(format!("opening repository path={}", path.display()));
                 self.queue_workspace_restore(path);
-            }
-            if panel_poll.workspace_focus_succeeded
-                && let Some(path) = self.workspace_focus_restore_path.take()
-            {
-                self.queue_workspace_restore(path);
-                changed = true;
             }
         }
         if self
             .linked_worktrees
-            .observe_herdr(self.workspace_panel.linked_worktree_observation())
+            .observe_herdr(self.herdr.linked_worktree_observation())
         {
             self.linked_worktrees.refresh();
         }
@@ -804,12 +770,6 @@ impl App {
                 }
                 Err(error) => self.notice = Some(error),
             }
-        }
-        changed |= self.workspace_panel.snapshot_input.poll_blink(
-            self.mode == Mode::WorkspacePresets && self.workspace_panel.snapshot_editing,
-        );
-        if let Some(dialog) = &mut self.workspace_panel.rename_dialog {
-            changed |= dialog.input.poll_blink(self.mode == Mode::WorkspacePanel);
         }
         if let Some(completion) = self.commit_message_generator.poll() {
             changed = true;
@@ -1046,9 +1006,7 @@ impl App {
                         diagnostics::activity("apply-workspace", self.diagnostic_context());
                     diagnostics::event(format!("workspace opened {}", self.diagnostic_context()));
                     self.pending_reload = None;
-                    if self.mode != Mode::WorkspacePanel {
-                        self.mode = Mode::Normal;
-                    }
+                    self.mode = Mode::Normal;
                     self.actions = ActionsState::default();
                     let local = self.session.data().is_some_and(RepositoryData::is_local);
                     self.graph_state = TableState::default();
@@ -1419,12 +1377,6 @@ impl App {
             }
             ShortcutAction::Quit => self.should_quit = true,
             ShortcutAction::OpenHerdr => self.open_herdr_prompt(),
-            ShortcutAction::ToggleWorkspace if self.workspace_panel_enabled() => {
-                self.open_workspace_panel();
-            }
-            ShortcutAction::OpenPresets if self.workspace_panel_enabled() => {
-                self.open_workspace_presets();
-            }
             ShortcutAction::Refresh => self.reload(RefreshScope::ALL),
             ShortcutAction::OpenExplorer => self.open_explorer(),
             ShortcutAction::OpenWorktrees => self.open_worktree_manager(),
@@ -1896,102 +1848,6 @@ impl App {
             }
             ExplorerTab::Worktrees => self.open_worktree_manager(),
             ExplorerTab::Branches => self.open_repository_browser(),
-        }
-    }
-
-    pub(crate) fn apply_workspace_panel_effect(&mut self, effect: WorkspacePanelEffect) {
-        match effect {
-            WorkspacePanelEffect::None | WorkspacePanelEffect::Unhandled => {}
-            WorkspacePanelEffect::Close => self.mode = Mode::Normal,
-            WorkspacePanelEffect::CreateWorkspace => {
-                let path = self
-                    .session
-                    .data()
-                    .map(|repository| repository.root.clone())
-                    .or_else(|| std::env::current_dir().ok());
-                diagnostics::event(format!(
-                    "Herdr workspace create requested path={}",
-                    path.as_deref()
-                        .map_or_else(|| "<default>".to_owned(), |path| path.display().to_string())
-                ));
-                self.workspace_panel.create_workspace(path.as_deref());
-            }
-            WorkspacePanelEffect::CreateWorktree(workspace_id) => {
-                diagnostics::event(format!(
-                    "Herdr worktree create requested workspace={workspace_id}"
-                ));
-                self.workspace_panel.create_worktree(&workspace_id);
-            }
-            WorkspacePanelEffect::RenameWorkspace {
-                workspace_id,
-                label,
-            } => {
-                diagnostics::event(format!(
-                    "Herdr workspace rename requested workspace={workspace_id}"
-                ));
-                self.workspace_panel.rename_workspace(workspace_id, label);
-            }
-            WorkspacePanelEffect::RenameAgent { identity, label } => {
-                if let Err(error) = self.workspace_panel.rename_agent(identity, label) {
-                    self.notice = Some(error);
-                }
-            }
-            WorkspacePanelEffect::CloseWorkspace(workspace_id) => {
-                if self.session.open_running() || self.worktree_removal_running() {
-                    self.notice = Some(
-                        "Wait for the current workspace operation to finish before closing it"
-                            .to_owned(),
-                    );
-                    return;
-                }
-                diagnostics::event(format!(
-                    "Herdr workspace close requested workspace={workspace_id}"
-                ));
-                self.workspace_panel.close_workspace(&workspace_id);
-            }
-            WorkspacePanelEffect::DeleteWorktree {
-                workspace_id,
-                path,
-                parent_path,
-            } => {
-                let removing_current = path.as_deref().is_some_and(|worktree_path| {
-                    self.session
-                        .data()
-                        .is_some_and(|repository| same_path(&repository.root, worktree_path))
-                });
-                if self.session.open_running()
-                    || self.worktree_removal_running()
-                    || (removing_current && !self.session.can_start_mutation())
-                {
-                    self.notice = Some(
-                        "Wait for the current workspace operation to finish before removing it"
-                            .to_owned(),
-                    );
-                    return;
-                }
-                diagnostics::event(format!(
-                    "Herdr worktree remove requested workspace={workspace_id}"
-                ));
-                let reopen_path = parent_path.filter(|_| removing_current);
-                self.workspace_panel
-                    .delete_worktree(&workspace_id, reopen_path);
-            }
-            WorkspacePanelEffect::DisplayAgent(pane_id) => {
-                diagnostics::event(format!("Herdr agent display requested pane={pane_id}"));
-                self.workspace_panel.display_agent(pane_id);
-            }
-            WorkspacePanelEffect::OpenWorkspace(path) => {
-                if self.workspace_focus_restore_path.is_none() {
-                    self.workspace_focus_restore_path =
-                        self.repository().map(|repository| repository.root.clone());
-                }
-                diagnostics::event(format!(
-                    "opening selected workspace in current hunkle path={}",
-                    path.display()
-                ));
-                self.open_repository_with_fetch(path);
-            }
-            WorkspacePanelEffect::Notice(notice) => self.notice = Some(notice),
         }
     }
 

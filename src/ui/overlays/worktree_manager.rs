@@ -213,20 +213,6 @@ pub(crate) fn draw_worktree_manager(
         rows.iter()
             .enumerate()
             .map(|(row_index, row)| match *row {
-                WorktreeManagerRow::Group(repository_index) => {
-                    let group = manager.repositories()[repository_index].group.as_deref();
-                    let label = Line::from(Span::styled(
-                        group.unwrap_or("Ungrouped").to_uppercase(),
-                        Style::default()
-                            .fg(palette().ink)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    if row_index == 0 {
-                        ListItem::new(label)
-                    } else {
-                        ListItem::new(vec![Line::raw(""), label])
-                    }
-                }
                 WorktreeManagerRow::Status(repository_index) => {
                     let repository = &manager.repositories()[repository_index];
                     let label = truncate_width(&repository.label, repository_column);
@@ -373,11 +359,7 @@ pub(crate) fn draw_worktree_manager(
     ));
     let mut row_y = list.y;
     for (index, row) in rows.iter().enumerate().skip(manager.state.offset()) {
-        let row_height = if matches!(row, WorktreeManagerRow::Group(_)) && index != 0 {
-            2
-        } else {
-            1
-        };
+        let row_height = 1;
         let remaining = list.bottom().saturating_sub(row_y);
         if remaining < row_height {
             break;

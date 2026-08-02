@@ -10,7 +10,7 @@ pub(super) fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> R
         return Rect::new(content.x, list_y, content.width, available);
     }
 
-    let agent_count = app.workspace_panel.agents.len();
+    let agent_count = app.herdr.agents.len();
     if app.agents_height_fit_for != Some(agent_count) {
         app.agents_height_fit_for = Some(agent_count);
         app.settings.agents_height = (3 * agent_count).saturating_add(2).clamp(5, 256) as u16;
@@ -56,19 +56,17 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
         return;
     };
     let hovered = match &app.hovered_hit_target {
-        Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index))) => Some(*index),
+        Some(HitTarget::Agent(index)) => Some(*index),
         _ => None,
     };
-    let enabled = app.workspace_panel_enabled();
-    for (target, rect) in workspace_panel::draw_agents_pane(
+    for (target, rect) in agents::draw(
         frame,
-        &mut app.workspace_panel,
+        &mut app.herdr,
         &app.linked_worktrees,
         &app.settings,
         header,
         list,
         app.dragging_agents,
-        enabled,
         hovered,
     ) {
         app.regions.register_hit_target(target, rect);

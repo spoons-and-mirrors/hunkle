@@ -29,7 +29,6 @@ fn repository() -> LinkedWorktreeRepository {
     LinkedWorktreeRepository {
         common_dir: PathBuf::from("/repo/.git"),
         label: "repo".to_owned(),
-        group: None,
         worktrees: vec![linked("/repo", true), linked("/repo-feature", false)],
         error: None,
     }
@@ -251,14 +250,8 @@ fn orders_repositories_by_observed_workspace_order() {
     let mut catalog = LinkedWorktreeCatalog::new(None);
     catalog.observe_herdr(LinkedWorktreeObservation {
         candidates: vec![
-            LinkedWorktreeCandidate {
-                path: zulu,
-                group: Some("First".to_owned()),
-            },
-            LinkedWorktreeCandidate {
-                path: alpha,
-                group: Some("Second".to_owned()),
-            },
+            LinkedWorktreeCandidate { path: zulu },
+            LinkedWorktreeCandidate { path: alpha },
         ],
         ownership: HerdrOwnership::Disabled,
     });
@@ -277,13 +270,5 @@ fn orders_repositories_by_observed_workspace_order() {
             .map(|repository| repository.label.as_str())
             .collect::<Vec<_>>(),
         ["zulu", "alpha"]
-    );
-    assert_eq!(
-        catalog.snapshot.repositories[0].group.as_deref(),
-        Some("First")
-    );
-    assert_eq!(
-        catalog.snapshot.repositories[1].group.as_deref(),
-        Some("Second")
     );
 }

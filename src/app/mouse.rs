@@ -7,9 +7,8 @@ use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 use super::{
     ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphColumnDrag, GraphHitTarget,
     HeaderPickerKind, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
-    RepositoryBrowserHitTarget, SettingsPage, Shortcuts, View, WorkspaceDropTarget,
-    WorkspacePanelHitTarget, WorktreeManagerEffect, WorktreeManagerHitTarget,
-    changes::ChangesEffect, file_editor::FileEditor, scroll_table,
+    RepositoryBrowserHitTarget, SettingsPage, Shortcuts, View, WorktreeManagerEffect,
+    WorktreeManagerHitTarget, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -106,12 +105,6 @@ impl App {
             return;
         }
 
-        if self.workspace_panel.rename_dialog.is_some()
-            || self.workspace_panel.delete_dialog.is_some()
-            || self.workspace_panel.snapshot_load_dialog.is_some()
-        {
-            return;
-        }
         if self.mode == Mode::Explorer
             && self.explorer_tab == ExplorerTab::Worktrees
             && self.worktree_manager.dialog_open()
@@ -185,53 +178,17 @@ impl App {
         {
             return;
         }
-        if self.mode == Mode::WorkspacePresets {
-            self.handle_workspace_presets_mouse(mouse);
-            return;
-        }
         if self.mode == Mode::FileEdit {
             self.handle_file_editor_mouse(mouse, point);
             return;
         }
 
-        if self.workspace_panel.is_dragging_workspace() {
-            match mouse.kind {
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    let target = self.workspace_drop_target(point);
-                    self.workspace_panel.update_workspace_drag(target);
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    let effect = self.workspace_panel.finish_workspace_drag();
-                    self.apply_workspace_panel_effect(effect);
-                }
-                _ => {}
-            }
-            return;
-        }
-        if (self.workspace_panel.create_menu_open || self.workspace_panel.snapshot_menu_open)
-            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(HitTarget::Agent(index)) = self.regions.hit_target_at(point)
         {
             self.selection.clear();
-            self.handle_workspace_panel_click(point);
+            self.activate_agent(index);
             return;
-        }
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(HitTarget::WorkspacePanel(target)) = self.regions.hit_target_at(point)
-        {
-            match target {
-                WorkspacePanelHitTarget::Workspace(index)
-                    if self.workspace_panel.begin_workspace_drag(index) =>
-                {
-                    self.mode = Mode::WorkspacePanel;
-                    return;
-                }
-                WorkspacePanelHitTarget::Agent(_) => {
-                    self.selection.clear();
-                    self.activate_workspace_panel_target(target);
-                    return;
-                }
-                _ => {}
-            }
         }
 
         if self.file_drag.is_some() {
@@ -317,10 +274,6 @@ impl App {
             }
             return;
         }
-        if self.mode == Mode::WorkspacePanel && mouse.kind == MouseEventKind::Moved {
-            return;
-        }
-
         if mouse.kind == MouseEventKind::Moved {
             if self.select_graph_row(point) {
                 return;
@@ -543,7 +496,6 @@ impl App {
                 WorktreeManagerHitTarget::Overlay,
             )),
             self.regions.diff,
-            self.regions.workspace_panel,
             self.regions.worktree,
             self.regions.graph_table,
         ]
@@ -578,8 +530,6 @@ impl App {
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
-            Mode::WorkspacePanel => self.handle_workspace_panel_click(point),
-            Mode::WorkspacePresets => self.handle_workspace_presets_mouse(mouse),
             Mode::Normal | Mode::Commit => self.handle_primary_left_click(point),
         }
     }
@@ -619,8 +569,8 @@ impl App {
                 self.open_author_filter();
                 return;
             }
-            Some(HitTarget::WorkspacePanel(target)) => {
-                self.activate_workspace_panel_target(target);
+            Some(HitTarget::Agent(index)) => {
+                self.activate_agent(index);
                 return;
             }
             _ => {}
@@ -904,147 +854,14 @@ impl App {
         true
     }
 
-    fn handle_workspace_panel_click(&mut self, point: Position) {
-        let target = self.regions.hit_target_at(point);
-        if self.workspace_panel.create_menu_open
-            && !matches!(
-                target,
-                Some(HitTarget::WorkspacePanel(
-                    WorkspacePanelHitTarget::CreateMenu
-                        | WorkspacePanelHitTarget::CreateWorkspace
-                        | WorkspacePanelHitTarget::CreateWorktree
-                ))
-            )
+    fn activate_agent(&mut self, index: usize) {
+        if let Some(pane_id) = self
+            .herdr
+            .agents
+            .get(index)
+            .map(|agent| agent.pane_id.clone())
         {
-            self.workspace_panel.close_create_menu();
-            return;
-        }
-        if self.workspace_panel.snapshot_menu_open
-            && !matches!(
-                target,
-                Some(HitTarget::WorkspacePanel(
-                    WorkspacePanelHitTarget::SnapshotMenu
-                        | WorkspacePanelHitTarget::SaveSnapshot
-                        | WorkspacePanelHitTarget::Snapshot(_)
-                ))
-            )
-        {
-            self.workspace_panel.close_snapshot_menu();
-            return;
-        }
-        if let Some(HitTarget::WorkspacePanel(target)) = target {
-            self.activate_workspace_panel_target(target);
-        } else if !self
-            .regions
-            .workspace_panel
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.mode = Mode::Normal;
-            self.handle_primary_left_click(point);
-        }
-    }
-
-    fn activate_workspace_panel_target(&mut self, target: WorkspacePanelHitTarget) {
-        match target {
-            WorkspacePanelHitTarget::Focus => self.open_workspace_panel(),
-            WorkspacePanelHitTarget::Collapse => {
-                self.mode = Mode::Normal;
-            }
-            WorkspacePanelHitTarget::CreateMenu => {
-                self.mode = Mode::WorkspacePanel;
-                self.workspace_panel.toggle_create_menu();
-            }
-            WorkspacePanelHitTarget::CreateWorkspace => {
-                let effect = self.workspace_panel.activate_create_choice(0);
-                self.apply_workspace_panel_effect(effect);
-            }
-            WorkspacePanelHitTarget::CreateWorktree => {
-                let effect = self.workspace_panel.activate_create_choice(1);
-                self.apply_workspace_panel_effect(effect);
-            }
-            WorkspacePanelHitTarget::SnapshotMenu => {
-                self.open_workspace_presets();
-            }
-            WorkspacePanelHitTarget::PresetOverlay => {}
-            WorkspacePanelHitTarget::SaveSnapshot => {
-                let effect = self.workspace_panel.activate_snapshot_choice(0);
-                self.apply_workspace_panel_effect(effect);
-            }
-            WorkspacePanelHitTarget::Snapshot(index) => {
-                let effect = self.workspace_panel.activate_snapshot_choice(index + 1);
-                self.apply_workspace_panel_effect(effect);
-            }
-            WorkspacePanelHitTarget::Group(index) => self.workspace_panel.toggle_group(index),
-            WorkspacePanelHitTarget::Workspace(index) => {
-                let effect = self.workspace_panel.click_workspace(index);
-                self.apply_workspace_panel_effect(effect);
-            }
-            WorkspacePanelHitTarget::Agent(index) => {
-                let effect = self.workspace_panel.click_agent(index);
-                self.apply_workspace_panel_effect(effect);
-            }
-        }
-    }
-
-    fn handle_workspace_presets_mouse(&mut self, mouse: MouseEvent) {
-        let point = Position::new(mouse.column, mouse.row);
-        let target = self.regions.hit_target_at(point);
-        match mouse.kind {
-            MouseEventKind::Moved => match target {
-                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SaveSnapshot)) => {
-                    self.workspace_panel.select_snapshot_choice(0);
-                }
-                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Snapshot(index))) => {
-                    self.workspace_panel.select_snapshot_choice(index + 1);
-                }
-                _ => {}
-            },
-            MouseEventKind::ScrollUp => {
-                let effect = self
-                    .workspace_panel
-                    .handle_workspace_presets(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-                self.apply_workspace_panel_effect(effect);
-            }
-            MouseEventKind::ScrollDown => {
-                let effect = self
-                    .workspace_panel
-                    .handle_workspace_presets(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-                self.apply_workspace_panel_effect(effect);
-            }
-            MouseEventKind::Down(MouseButton::Left) => match target {
-                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SaveSnapshot)) => {
-                    let effect = self.workspace_panel.activate_snapshot_choice(0);
-                    self.apply_workspace_panel_effect(effect);
-                }
-                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Snapshot(index))) => {
-                    let effect = self.workspace_panel.activate_snapshot_choice(index + 1);
-                    self.apply_workspace_panel_effect(effect);
-                }
-                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::PresetOverlay)) => {}
-                _ => self.mode = Mode::Normal,
-            },
-            _ => {}
-        }
-    }
-
-    fn workspace_drop_target(&self, point: Position) -> Option<WorkspaceDropTarget> {
-        match self.regions.hit_target_at(point) {
-            Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Group(index))) => {
-                Some(WorkspaceDropTarget::Group(index))
-            }
-            Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Workspace(index))) => self
-                .workspace_panel
-                .group_for_workspace(index)
-                .map(WorkspaceDropTarget::Group)
-                .or(Some(WorkspaceDropTarget::Ungrouped)),
-            _ if self
-                .regions
-                .workspace_panel
-                .is_some_and(|rect| rect.contains(point)) =>
-            {
-                Some(WorkspaceDropTarget::Ungrouped)
-            }
-            _ => None,
+            self.herdr.display_agent(pane_id);
         }
     }
 
@@ -1163,7 +980,7 @@ impl App {
                 Some(HitTarget::WorktreeManager(_)) => {}
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::Explorer(_)) => {}
-                Some(HitTarget::WorkspacePanel(_)) => {}
+                Some(HitTarget::Agent(_)) => {}
                 Some(HitTarget::Changes(_)) => {}
                 Some(HitTarget::CommitMessageGenerate) => {}
                 Some(HitTarget::MarkdownPreviewToggle) => {}
@@ -1226,7 +1043,7 @@ impl App {
                 Some(HitTarget::RepositoryBrowser(_)) => {}
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::Explorer(_)) => {}
-                Some(HitTarget::WorkspacePanel(_)) => {}
+                Some(HitTarget::Agent(_)) => {}
                 Some(HitTarget::Changes(_)) => {}
                 Some(HitTarget::CommitMessageGenerate) => {}
                 Some(HitTarget::MarkdownPreviewToggle) => {}
@@ -1437,52 +1254,45 @@ impl App {
             self.toggle_format_on_save();
         } else if self
             .regions
-            .workspace_panel_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 3;
-            self.toggle_workspace_panel_enabled();
-        } else if self
-            .regions
             .cross_workspace_agents_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 4;
+            self.settings_selection = 3;
             self.toggle_cross_workspace_agents();
         } else if self
             .regions
             .agent_harness_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 5;
+            self.settings_selection = 4;
             self.toggle_agent_harness();
         } else if self
             .regions
             .agent_time_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 6;
+            self.settings_selection = 5;
             self.toggle_agent_time_display();
         } else if self
             .regions
             .clear_agent_timings_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 7;
+            self.settings_selection = 6;
             self.clear_agent_timing_history();
         } else if self
             .regions
             .media_preview_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 8;
+            self.settings_selection = 7;
             self.toggle_media_preview_protocol();
         } else if self
             .regions
             .editor_setting
             .is_some_and(|rect| rect.contains(point))
         {
-            self.settings_selection = 9;
+            self.settings_selection = 8;
             self.open_editor_setting();
         }
     }
@@ -1536,19 +1346,7 @@ impl App {
     }
 
     fn scroll_at(&mut self, point: Position, delta: isize) {
-        if self
-            .regions
-            .workspace_panel_workspaces
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.workspace_panel.scroll_workspace(delta);
-        } else if self
-            .regions
-            .workspace_panel_agents
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.workspace_panel.scroll_agents(delta);
-        } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
+        if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
             let amount = delta.saturating_mul(2);
             let current = self.regions.commit_scroll;
             let next = if amount < 0 {
@@ -1594,7 +1392,7 @@ impl App {
             .agents_list
             .is_some_and(|rect| rect.contains(point))
         {
-            self.workspace_panel.scroll_agents(delta);
+            self.herdr.scroll_agents(delta);
         } else if self
             .regions
             .worktree_list

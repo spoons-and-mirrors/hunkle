@@ -66,12 +66,6 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
             ShortcutAction::OpenRepositoryBrowser,
             "Branches / PRs / issues",
         ),
-        shortcut_help(
-            shortcuts,
-            ShortcutAction::ToggleWorkspace,
-            "Open workspace manager",
-        ),
-        shortcut_help(shortcuts, ShortcutAction::OpenPresets, "Workspace presets"),
         shortcut_help(shortcuts, ShortcutAction::OpenSettings, "Settings"),
         shortcut_help(shortcuts, ShortcutAction::OpenActions, "Git actions"),
         shortcut_help(shortcuts, ShortcutAction::OpenGitCommand, "Git command"),

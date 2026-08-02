@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use super::{AgentPaneDirection, HerdrPaneLayout, TextInput, workspace_panel};
+use super::{AgentPaneDirection, HerdrPaneLayout, TextInput, herdr_session};
 
 pub(crate) struct HerdrPromptPoll {
     pub(crate) changed: bool,
@@ -113,7 +113,7 @@ impl HerdrPrompt {
         self.sending = true;
         thread::spawn(move || {
             let result =
-                workspace_panel::send_command_below(command).map(|pane_id| HerdrPromptCompletion {
+                herdr_session::send_command_below(command).map(|pane_id| HerdrPromptCompletion {
                     message: format!("Sent to Herdr pane {pane_id}"),
                     reopen_path: None,
                 });
@@ -142,7 +142,7 @@ impl HerdrPrompt {
         });
         let sender = self.layout_sender.clone();
         thread::spawn(move || {
-            let _ = sender.send((request_id, workspace_panel::pane_layout(host_pane_id)));
+            let _ = sender.send((request_id, herdr_session::pane_layout(host_pane_id)));
         });
         Ok(())
     }
@@ -207,7 +207,7 @@ impl HerdrPrompt {
             ));
             let reopen_path = pending.path.clone();
             let result =
-                workspace_panel::replace_pane_with_agent(pending.path, workspace_id, pane_id).map(
+                herdr_session::replace_pane_with_agent(pending.path, workspace_id, pane_id).map(
                     |pane_id| HerdrPromptCompletion {
                         message: format!("Started agent in Herdr pane {pane_id}"),
                         reopen_path: Some(reopen_path),
@@ -248,7 +248,7 @@ impl HerdrPrompt {
                 pending.path.display()
             ));
             let reopen_path = pending.path.clone();
-            let result = workspace_panel::split_pane_with_agent(pending.path, pane_id, direction)
+            let result = herdr_session::split_pane_with_agent(pending.path, pane_id, direction)
                 .map(|pane_id| HerdrPromptCompletion {
                     message: format!("Started agent in new Herdr pane {pane_id}"),
                     reopen_path: Some(reopen_path),

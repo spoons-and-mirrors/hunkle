@@ -89,10 +89,6 @@ emergency quit command elsewhere.
 | `N` in Worktrees                  | Create a linked worktree from the selected checkout                                                                                                                                  |
 | `b`                               | Open the Explorer modal's Branches tab for branches, pull requests, and issues                                                                                                       |
 | `Delete` in Branches              | Delete a local branch, optionally including its tracked remote branch or forcing deletion of unmerged work; checked-out, default, `main`, `master`, and `dev` branches are protected |
-| `w`                               | Open or close the Herdr Workspace Manager                                                                                                                                            |
-| `F2` in Workspaces                | Rename the selected workspace                                                                                                                                                        |
-| `Delete` in Workspaces            | Confirm closing a workspace and its panes, or safely removing a linked worktree                                                                                                      |
-| `p`                               | Open workspace presets; create, update, load, or delete saved setups                                                                                                                 |
 | `s`                               | Open settings                                                                                                                                                                        |
 | `x`                               | Open repository Actions                                                                                                                                                              |
 | `G`                               | Open Git command                                                                                                                                                                     |
@@ -157,49 +153,15 @@ Hunkle remembers the last repository opened in each Herdr pane. Relaunching it
 from the same shell directory restores that repository; changing the shell
 directory or passing an explicit path starts from the requested location instead.
 
-When hunkle runs inside Herdr, press `w` to open the Workspace Manager, a
-responsive modal backed by Herdr's session snapshot. It presents workspace
-hierarchy and agent activity without reducing the width of the main repository
-view. Single-click a workspace to open its repository immediately in the current
-hunkle without switching Herdr workspaces. Press `F2` to rename the selected
-workspace. Press `Enter` or double-click to switch the active Herdr workspace;
-after a successful switch, the hidden hunkle restores the repository it showed
-before the first click. Use `j`/`k` to navigate or `w`/`Esc` to return to
-hunkle. Inventory refresh continues in the background, including while the
-manager is closed.
-
-Click `+ New` in the manager to create a Herdr workspace at Hunkle's current
-path or a worktree based on the selected workspace, without leaving the current
-workspace. Press `p`, or click `Presets`, to open Workspace Presets. Use `n` to
-capture the current setup as a new preset, `u` to update the selected preset,
-`Enter` to load it, and `Delete` to remove it. Presets preserve workspace paths,
-labels, linked-worktree entries, the focused workspace, and Hunkle groups
-including empty and folded groups; they are stored in `workspace-snapshots.json`
-beside Hunkle's config. Before recall, Hunkle shows how many workspaces and
-panes will open or close and requires confirmation. Recall opens missing
-workspaces before focusing its saved workspace and closing workspaces outside
-the preset, then reconnects groups to the resulting Herdr workspace IDs. Legacy
-presets without group metadata preserve currently known group memberships by
-matching workspace paths instead of clearing them. Linked worktrees stay
-indented beneath their parent workspace and move with that parent rather than
-between groups independently. Inside the manager, press `g` to create a group.
-Click groups to fold or expand them, and drag parent workspaces onto a group or
-back into ungrouped space. A single workspace click opens it in Hunkle; press
-`Enter` or double-click to switch to its Herdr workspace. Agents are ordered by
-recent Herdr activity, and clicking one restores its shared tab layout beside
-Hunkle.
 Agent timers accumulate across every session used by the same agent in a
 terminal, are shared between Hunkle processes, and persist across restarts in
-`agent-timings.json` beside Hunkle's config. Press `Delete` to confirm closing a
-selected workspace and all its panes, or safely removing a selected linked
-worktree from disk.
+`agent-timings.json` beside Hunkle's config.
 
 ## Mouse
 
 - Click header controls to switch views, refresh, open Explorer, or open help.
 - Drag the divider between Changes and Diff to resize either panel.
-- Click a workspace in the Workspace Manager to select it, or click an agent to
-  display it beside Hunkle; click outside the modal to close it.
+- Click an agent to display its Herdr tab layout beside Hunkle.
 - Drag the History section header vertically to resize the current-branch commit
   shelf.
 - Click `x ACTIONS` above History to push, fetch, pull with rebase, or run a
@@ -315,9 +277,8 @@ own:
 | `app::settings`                 | Settings discovery, legacy fallback, validation, and persistence                                           |
 | `app::shortcuts`                | Named command registry, contextual conflict checks, key normalization, overrides, and labels               |
 | `app::worktree_manager`         | Linked-worktree interaction, creation, filtering, opening, and semantic removal requests                   |
-| `app::workspace_panel`          | Workspace Panel interaction, focus transitions, groups, presets, and background refresh                    |
-| `app::workspace_panel::herdr`   | Typed Herdr environment, command, pane-layout, agent replacement, restore, and session-snapshot adapter     |
-| `app::workspace_panel::presets` | Preset and group persistence, migration, matching, and recall planning                                     |
+| `app::herdr_session`            | Herdr session snapshots, agent activity, timing, pane layouts, and linked-worktree ownership                |
+| `app::herdr_session::client`    | Typed Herdr environment, command, pane-layout, agent replacement, and session-snapshot adapter              |
 | `repository_session`            | Active workspace lifecycle, background operations, and completion invalidation policy                      |
 | `git`                           | Installed-Git facade, refresh orchestration, worktree operations, and history loading                      |
 | `git::graph`                    | Commit capping and deterministic graph-lane projection                                                     |
@@ -330,7 +291,7 @@ own:
 | `ui::editor`                    | Inline-editor layout, cursor, selection, wrapping, and gutter presentation                                 |
 | `ui::history`                   | Current-branch history and all-refs graph                                                                  |
 | `ui::overlays`                  | Explorer, worktree manager, repository browser, settings, and help overlays                                |
-| `ui::workspace_panel`           | Responsive Herdr Workspace Manager modal                                                                   |
+| `ui::agents`                    | Agent activity, destination metadata, timing, and layout-switching controls                                 |
 | `ui::text`                      | Deterministic source and diff presentation                                                                 |
 | `theme`                         | Theme discovery, resolution, and palette data                                                              |
 

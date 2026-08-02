@@ -18,7 +18,6 @@ use known_repositories::KnownRepositoryStore;
 pub(crate) struct LinkedWorktreeRepository {
     pub(crate) common_dir: PathBuf,
     pub(crate) label: String,
-    pub(crate) group: Option<String>,
     pub(crate) worktrees: Vec<LinkedWorktree>,
     pub(crate) error: Option<String>,
 }
@@ -57,7 +56,6 @@ impl<'a> AgentDestinationMetadata<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LinkedWorktreeCandidate {
     pub(crate) path: PathBuf,
-    pub(crate) group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,9 +324,7 @@ impl LinkedWorktreeCatalog {
                 let Ok(common_dir) = git::common_git_dir(&candidate.path) else {
                     continue;
                 };
-                candidate_ranks
-                    .entry(common_dir.clone())
-                    .or_insert((rank, candidate.group));
+                candidate_ranks.entry(common_dir.clone()).or_insert(rank);
                 if seen.insert(common_dir.clone()) {
                     discovered.push(common_dir.clone());
                     common_dirs.push(common_dir);
@@ -337,9 +333,7 @@ impl LinkedWorktreeCatalog {
             common_dirs.sort_by_cached_key(|path| {
                 (
                     !candidate_ranks.contains_key(path),
-                    candidate_ranks
-                        .get(path)
-                        .map_or(usize::MAX, |(rank, _)| *rank),
+                    candidate_ranks.get(path).copied().unwrap_or(usize::MAX),
                     path.to_string_lossy().to_lowercase(),
                 )
             });
@@ -347,14 +341,10 @@ impl LinkedWorktreeCatalog {
             let repositories = common_dirs
                 .into_iter()
                 .filter_map(|common_dir| {
-                    let group = candidate_ranks
-                        .get(&common_dir)
-                        .and_then(|(_, group)| group.clone());
                     let is_candidate = candidate_ranks.contains_key(&common_dir);
                     match git::list_worktrees(&common_dir) {
                         Ok(worktrees) => Some(LinkedWorktreeRepository {
                             label: repository_label(&common_dir, &worktrees),
-                            group,
                             common_dir,
                             worktrees,
                             error: None,
@@ -365,7 +355,6 @@ impl LinkedWorktreeCatalog {
                         }
                         Err(error) => Some(LinkedWorktreeRepository {
                             label: repository_label(&common_dir, &[]),
-                            group,
                             common_dir,
                             worktrees: Vec::new(),
                             error: Some(error.to_string()),

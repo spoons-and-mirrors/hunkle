@@ -5,7 +5,7 @@
 
 ## Context
 
-Linked-worktree behavior was spread across `WorktreeManager`, `WorkspacePanel`, `App`, header pickers, and the Git adapter. Those callers independently combined known repository paths, Git inventory, Herdr ownership, active-workspace state, and removal safety. The removal dialog also cached whether removal should use Git or Herdr before the user confirmed it.
+Linked-worktree behavior was spread across `WorktreeManager`, the Herdr session service, `App`, header pickers, and the Git adapter. Those callers independently combined known repository paths, Git inventory, Herdr ownership, active-workspace state, and removal safety. The removal dialog also cached whether removal should use Git or Herdr before the user confirmed it.
 
 This made the Worktrees interaction a shallow module: removing it would leave linked-worktree discovery, naming, ownership reconciliation, and safety policy distributed across the application. It also tied background inventory freshness to whether the Worktrees overlay happened to be open.
 
@@ -32,7 +32,7 @@ The catalog refreshes independently of overlay visibility, retains its previous 
 - Herdr availability does not block non-destructive worktree use.
 - Removal routing is recomputed at confirmation and cannot use stale ownership.
 - Git parsing/removal and Herdr execution remain concrete adapters rather than being hidden behind a generic runtime interface.
-- `WorkspacePanel` emits one owned observation containing candidates and ownership instead of three parallel values that callers must reconcile.
+- The Herdr session service emits one owned observation containing candidates and ownership instead of three parallel values that callers must reconcile.
 
 ## Rejected Alternatives
 

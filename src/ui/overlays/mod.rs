@@ -15,11 +15,9 @@ pub(super) use crate::app::{
     CommandStatus, Explorer, ExplorerHitTarget, ExplorerTab, FileDialog, FileDialogKind,
     FileNameAction, FileSearch, HerdrPrompt, HitTarget, Issue, PickerAction, PickerEntry,
     PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
-    SettingsPage, ShortcutAction, Shortcuts, SnapshotLoadDialog, SurroundingEntry,
-    WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
-    WorkspaceRenameDialog, WorkspaceRenameTarget, WorktreeCreateDialog, WorktreeCreateField,
-    WorktreeManager, WorktreeManagerHitTarget, WorktreeManagerRow, WorktreeRemoveDialog,
-    short_head, worktree_label,
+    SettingsPage, ShortcutAction, Shortcuts, SurroundingEntry, WorktreeCreateDialog,
+    WorktreeCreateField, WorktreeManager, WorktreeManagerHitTarget, WorktreeManagerRow,
+    WorktreeRemoveDialog, short_head, worktree_label,
 };
 
 pub(super) use super::{
@@ -40,8 +38,6 @@ mod repository_browser;
 pub(super) use repository_browser::*;
 mod settings;
 pub(super) use settings::*;
-mod workspace_panel;
-pub(super) use workspace_panel::*;
 mod worktree_manager;
 pub(super) use worktree_manager::*;
 
@@ -62,7 +58,6 @@ pub(super) struct SettingsRegions {
     pub(super) format_on_save: Option<Rect>,
     pub(super) opencode_model: Option<Rect>,
     pub(super) opencode_reasoning: Option<Rect>,
-    pub(super) workspace_panel: Option<Rect>,
     pub(super) cross_workspace_agents: Option<Rect>,
     pub(super) agent_harness: Option<Rect>,
     pub(super) agent_time: Option<Rect>,

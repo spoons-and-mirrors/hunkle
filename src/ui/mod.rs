@@ -1,10 +1,10 @@
+mod agents;
 mod changes;
 mod history;
 mod overlays;
 pub(crate) mod preview;
 mod sqlite;
 mod text;
-mod workspace_panel;
 
 #[cfg(test)]
 mod tests;
@@ -23,7 +23,7 @@ pub(super) use crate::{
     app::{
         AgentDestinationKind, App, BranchPickerStep, ExplorerTab, FileDialogKind, GraphHitTarget,
         HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode, Regions, ShortcutAction,
-        TAB_WIDTH, View, WorkspacePanelHitTarget,
+        TAB_WIDTH, View,
     },
     theme::{Palette, load_theme},
 };
@@ -81,8 +81,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     draw_header(frame, app, layout[0]);
     let content = layout[1];
-    app.workspace_panel
-        .set_visible(app.mode == Mode::WorkspacePanel);
     let main_content = content;
     if app.workspace_loading_initial_state() {
         app.reset_media_presentation();
@@ -211,7 +209,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.format_on_save_setting = regions.format_on_save;
             app.regions.opencode_model_setting = regions.opencode_model;
             app.regions.opencode_reasoning_setting = regions.opencode_reasoning;
-            app.regions.workspace_panel_setting = regions.workspace_panel;
             app.regions.cross_workspace_agents_setting = regions.cross_workspace_agents;
             app.regions.agent_harness_setting = regions.agent_harness;
             app.regions.agent_time_setting = regions.agent_time;
@@ -294,56 +291,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::Help => {
             dim(frame);
             overlays::draw_help(frame, &app.settings.shortcuts);
-        }
-        Mode::WorkspacePanel => {
-            dim(frame);
-            let panel_area = workspace_panel::drawer_area(frame.area());
-            app.regions.workspace_panel = Some(panel_area);
-            let (workspace_section, agent_section) = workspace_panel::section_areas(panel_area);
-            app.regions.workspace_panel_workspaces = Some(workspace_section);
-            app.regions.workspace_panel_agents = Some(agent_section);
-            let workspace_panel_hover = match app.hovered_hit_target {
-                Some(HitTarget::WorkspacePanel(target)) => Some(target),
-                _ => None,
-            };
-            let loaded_workspace_path = app.repository().map(|repository| repository.root.clone());
-            for (target, rect) in workspace_panel::draw(
-                frame,
-                &mut app.workspace_panel,
-                &app.linked_worktrees,
-                panel_area,
-                workspace_panel_hover,
-                &app.settings,
-                loaded_workspace_path.as_deref(),
-            ) {
-                app.regions.register_hit_target(target, rect);
-            }
-            if let Some(dialog) = &app.workspace_panel.rename_dialog {
-                dim(frame);
-                overlays::draw_workspace_rename_dialog(frame, dialog);
-            } else if let Some(dialog) = &app.workspace_panel.snapshot_load_dialog {
-                dim(frame);
-                overlays::draw_snapshot_load_dialog(frame, dialog);
-            } else if let Some(dialog) = &app.workspace_panel.delete_dialog {
-                dim(frame);
-                overlays::draw_workspace_delete_dialog(frame, dialog);
-            }
-        }
-        Mode::WorkspacePresets => {
-            dim(frame);
-            if let Some(dialog) = &app.workspace_panel.snapshot_load_dialog {
-                overlays::draw_snapshot_load_dialog(frame, dialog);
-            } else {
-                let (overlay, targets) = overlays::draw_workspace_presets(
-                    frame,
-                    &app.workspace_panel,
-                    &app.settings.shortcuts,
-                );
-                app.regions.workspace_presets_overlay = Some(overlay);
-                for (target, rect) in targets {
-                    app.regions.register_hit_target(target, rect);
-                }
-            }
         }
         Mode::Normal | Mode::Commit => {}
     }
@@ -443,14 +390,6 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             left_pane_label,
         ),
     ];
-    if app.workspace_panel_available() {
-        labels.push((
-            app.settings
-                .shortcuts
-                .label(ShortcutAction::ToggleWorkspace),
-            "Workspaces",
-        ));
-    }
     labels.extend([
         (
             app.settings.shortcuts.label(ShortcutAction::OpenExplorer),
@@ -547,18 +486,9 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.regions.changes = None;
     app.regions.graph = rects.first().copied();
     app.regions.left_pane_toggle = rects.get(1).copied();
-    if app.workspace_panel_available()
-        && let Some(rect) = rects.get(2).copied()
-    {
-        app.regions.register_hit_target(
-            HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Focus),
-            rect,
-        );
-    }
-    let offset = usize::from(app.workspace_panel_available());
-    app.regions.explorer = rects.get(2 + offset).copied();
-    app.regions.settings = rects.get(3 + offset).copied();
-    app.regions.help = rects.get(4 + offset).copied();
+    app.regions.explorer = rects.get(2).copied();
+    app.regions.settings = rects.get(3).copied();
+    app.regions.help = rects.get(4).copied();
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)),

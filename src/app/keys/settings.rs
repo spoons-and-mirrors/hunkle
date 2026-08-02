@@ -76,24 +76,21 @@ impl App {
                 self.toggle_format_on_save();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 3 => {
-                self.toggle_workspace_panel_enabled();
-            }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 4 => {
                 self.toggle_cross_workspace_agents();
             }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 5 => {
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 4 => {
                 self.toggle_agent_harness();
             }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 6 => {
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 5 => {
                 self.toggle_agent_time_display();
             }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 7 => {
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 6 => {
                 self.clear_agent_timing_history();
             }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 8 => {
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 7 => {
                 self.toggle_media_preview_protocol();
             }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 9 => {
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 8 => {
                 self.open_editor_setting();
             }
             _ => {}
@@ -259,11 +256,6 @@ impl App {
         self.settings_changed();
     }
 
-    pub(crate) fn toggle_workspace_panel_enabled(&mut self) {
-        self.settings.workspace_panel_enabled = !self.settings.workspace_panel_enabled;
-        self.settings_changed();
-    }
-
     pub(crate) fn toggle_format_on_save(&mut self) {
         self.settings.format_on_save = !self.settings.format_on_save;
         self.settings_changed();
@@ -276,7 +268,7 @@ impl App {
 
     pub(crate) fn toggle_cross_workspace_agents(&mut self) {
         self.settings.cross_workspace_agents = !self.settings.cross_workspace_agents;
-        self.workspace_panel
+        self.herdr
             .set_cross_workspace_agents(self.settings.cross_workspace_agents);
         self.settings_changed();
     }
@@ -287,7 +279,7 @@ impl App {
     }
 
     pub(crate) fn clear_agent_timing_history(&mut self) {
-        self.notice = Some(match self.workspace_panel.clear_agent_timing_history() {
+        self.notice = Some(match self.herdr.clear_agent_timing_history() {
             Ok(()) => "Agent timing history cleared".to_owned(),
             Err(error) => error,
         });

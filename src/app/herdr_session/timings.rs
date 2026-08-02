@@ -331,7 +331,7 @@ fn unlock(_file: &File) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::workspace_panel::AgentStatus;
+    use crate::app::herdr_session::AgentStatus;
 
     #[test]
     fn migrates_the_active_session_timer_to_the_agent() {

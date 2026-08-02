@@ -14,10 +14,9 @@ pub(super) use unicode_width::UnicodeWidthStr;
 pub(super) use crate::app::{
     AgentPaneDirection, App, BrowserTab, ChangesHitTarget, CommitMessageGenerator,
     ExplorerHitTarget, ExplorerTab, GraphColumn, GraphHitTarget, HeaderPickerItem,
-    HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect, HitTarget, LeftPane, Mode, PullRequest,
-    RemoteItems, RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore, ShortcutAction,
-    SqliteFocus, View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget,
-    WorktreeManagerHitTarget, WorktreeManagerRow,
+    HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget, LeftPane, Mode,
+    PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore,
+    ShortcutAction, SqliteFocus, View, WorktreeManagerHitTarget, WorktreeManagerRow,
 };
 pub(super) use crate::repo_path::RepoPath;
 
@@ -26,12 +25,12 @@ pub(super) use super::{
     wrapped_editor_cursor,
 };
 
+mod agents;
 mod editor;
 mod files;
 mod header;
 mod media;
 mod sqlite;
-mod workspace_panel;
 mod worktree_manager;
 
 fn assert_black_underlay(terminal: &Terminal<TestBackend>) {
@@ -620,7 +619,7 @@ fn renders_every_primary_surface() {
     assert!(!app.dragging_agents);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
         "result": {
             "snapshot": {
                 "workspaces": [],
@@ -822,7 +821,7 @@ fn renders_every_primary_surface() {
     );
     app.changes.diff_wrap = true;
     app.changes.diff_scroll = usize::MAX;
-    app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
         "result": {
             "snapshot": {
                 "workspaces": [],
@@ -1629,7 +1628,6 @@ fn renders_every_primary_surface() {
     assert!(settings_screen.contains("Auto-fetch remotes"));
     assert!(settings_screen.contains("Fetch interval"));
     assert!(settings_screen.contains("Format on save"));
-    assert!(settings_screen.contains("Workspace manager"));
     assert!(settings_screen.contains("Cross-workspace agents"));
     assert!(settings_screen.contains("Agent harness"));
     assert!(settings_screen.contains("Agent time"));
@@ -1649,26 +1647,18 @@ fn renders_every_primary_surface() {
     );
     assert!(app.regions.fetch_interval_up.is_some());
     let format_on_save_setting = app.regions.format_on_save_setting.unwrap();
-    let workspace_setting = app.regions.workspace_panel_setting.unwrap();
     let cross_workspace_setting = app.regions.cross_workspace_agents_setting.unwrap();
     let agent_harness_setting = app.regions.agent_harness_setting.unwrap();
     let agent_time_setting = app.regions.agent_time_setting.unwrap();
     let clear_agent_timings_setting = app.regions.clear_agent_timings_setting.unwrap();
     let media_preview_setting = app.regions.media_preview_setting.unwrap();
     let editor_setting = app.regions.editor_setting.unwrap();
-    assert!(format_on_save_setting.y < workspace_setting.y);
-    assert_eq!(cross_workspace_setting.y, workspace_setting.y + 2);
+    assert_eq!(cross_workspace_setting.y, format_on_save_setting.y + 4);
     assert_eq!(agent_harness_setting.y, cross_workspace_setting.y + 2);
     assert_eq!(agent_time_setting.y, agent_harness_setting.y + 2);
     assert_eq!(clear_agent_timings_setting.y, agent_time_setting.y + 2);
     assert_eq!(media_preview_setting.y, clear_agent_timings_setting.y + 2);
     assert_eq!(editor_setting.y, media_preview_setting.y + 2);
-    let switch_x = workspace_setting.right().saturating_sub(6);
-    assert_eq!(buffer[(switch_x + 3, workspace_setting.y)].symbol(), "◼");
-    assert!(
-        (switch_x..switch_x + 5)
-            .all(|x| buffer[(x, workspace_setting.y)].bg == super::palette().green)
-    );
     let harness_switch_x = agent_harness_setting.right().saturating_sub(6);
     assert_eq!(
         buffer[(harness_switch_x + 1, agent_harness_setting.y)].symbol(),
@@ -1721,15 +1711,6 @@ fn renders_every_primary_surface() {
     assert!(app.shortcut_capture);
     app.shortcut_capture = false;
     app.settings_page = SettingsPage::General;
-
-    app.settings.workspace_panel_enabled = false;
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(switch_x + 1, workspace_setting.y)].symbol(), "◼");
-    assert!(
-        (switch_x..switch_x + 5)
-            .all(|x| buffer[(x, workspace_setting.y)].bg == super::palette().faint)
-    );
 
     app.mode = Mode::Editor;
     app.editor_input = "nvim".to_owned();

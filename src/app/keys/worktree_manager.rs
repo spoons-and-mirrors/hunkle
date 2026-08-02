@@ -5,10 +5,10 @@ impl App {
         if self.mode == Mode::Explorer && self.explorer_tab == ExplorerTab::Worktrees {
             return;
         }
-        self.workspace_panel.refresh_worktree_inventory();
+        self.herdr.refresh_worktree_inventory();
         if self
             .linked_worktrees
-            .observe_herdr(self.workspace_panel.linked_worktree_observation())
+            .observe_herdr(self.herdr.linked_worktree_observation())
         {
             self.linked_worktrees.refresh();
         }
@@ -65,7 +65,7 @@ impl App {
                 }
             }
             WorktreeManagerEffect::Refresh => {
-                self.workspace_panel.refresh_worktree_inventory();
+                self.herdr.refresh_worktree_inventory();
                 self.linked_worktrees.refresh();
             }
             WorktreeManagerEffect::CreateHerdr {
@@ -110,7 +110,7 @@ impl App {
                         }
                     }
                     Ok(LinkedWorktreeRemovalPlan::Herdr { workspace_id, path }) => {
-                        self.workspace_panel.delete_worktree(&workspace_id, None);
+                        self.herdr.delete_worktree(&workspace_id, None);
                         self.notice = Some(format!("Removing worktree {}…", path.display()));
                         self.mode = Mode::Normal;
                     }
@@ -122,7 +122,6 @@ impl App {
     }
 
     pub(crate) fn worktree_removal_running(&self) -> bool {
-        self.worktree_manager.operation_running()
-            || self.workspace_panel.destructive_action_running()
+        self.worktree_manager.operation_running() || self.herdr.destructive_action_running()
     }
 }

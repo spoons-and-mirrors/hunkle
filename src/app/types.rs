@@ -26,8 +26,6 @@ pub enum Mode {
     FileEdit,
     Editor,
     Files,
-    WorkspacePanel,
-    WorkspacePresets,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +102,7 @@ pub(crate) enum HitTarget {
     Explorer(ExplorerHitTarget),
     RepositoryBrowser(RepositoryBrowserHitTarget),
     WorktreeManager(WorktreeManagerHitTarget),
-    WorkspacePanel(WorkspacePanelHitTarget),
+    Agent(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,22 +129,6 @@ pub(crate) enum WorktreeManagerHitTarget {
     Overlay,
     List,
     Item { generation: u64, row: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkspacePanelHitTarget {
-    Focus,
-    Collapse,
-    CreateMenu,
-    CreateWorkspace,
-    CreateWorktree,
-    SnapshotMenu,
-    PresetOverlay,
-    SaveSnapshot,
-    Snapshot(usize),
-    Group(usize),
-    Workspace(usize),
-    Agent(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,10 +216,6 @@ pub struct Regions {
     pub explorer: Option<Rect>,
     pub settings: Option<Rect>,
     pub help: Option<Rect>,
-    pub workspace_panel: Option<Rect>,
-    pub workspace_panel_workspaces: Option<Rect>,
-    pub workspace_panel_agents: Option<Rect>,
-    pub workspace_presets_overlay: Option<Rect>,
     pub actions: Option<Rect>,
     pub worktree: Option<Rect>,
     pub worktree_list: Option<Rect>,
@@ -289,7 +267,6 @@ pub struct Regions {
     pub opencode_model_setting: Option<Rect>,
     pub opencode_reasoning_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
-    pub workspace_panel_setting: Option<Rect>,
     pub cross_workspace_agents_setting: Option<Rect>,
     pub agent_harness_setting: Option<Rect>,
     pub agent_time_setting: Option<Rect>,

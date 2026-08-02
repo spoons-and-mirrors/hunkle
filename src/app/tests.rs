@@ -118,81 +118,6 @@ fn repeated_open_keeps_the_first_workspace_request_active() {
 }
 
 #[test]
-fn opening_a_workspace_keeps_the_workspace_panel_focused() {
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    fs::write(first.path().join("first.txt"), "first\n").unwrap();
-    fs::write(second.path().join("second.txt"), "second\n").unwrap();
-    let mut app = App::new(first.path().to_path_buf());
-    app.mode = Mode::WorkspacePanel;
-
-    app.open_repository_with_fetch(second.path().to_path_buf());
-    wait_for_state(&mut app, |app| !app.session.open_running());
-
-    assert_eq!(app.mode, Mode::WorkspacePanel);
-    assert_eq!(
-        app.repository().unwrap().root,
-        fs::canonicalize(second.path()).unwrap()
-    );
-}
-
-#[test]
-fn speculative_workspace_open_restores_after_focus_succeeds() {
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    fs::write(first.path().join("first.txt"), "first\n").unwrap();
-    fs::write(second.path().join("second.txt"), "second\n").unwrap();
-    let first_path = fs::canonicalize(first.path()).unwrap();
-    let second_path = fs::canonicalize(second.path()).unwrap();
-    let mut app = App::new(first.path().to_path_buf());
-    app.mode = Mode::WorkspacePanel;
-
-    app.apply_workspace_panel_effect(WorkspacePanelEffect::OpenWorkspace(
-        second.path().to_path_buf(),
-    ));
-    assert!(app.session.open_running());
-    wait_for_state(&mut app, |app| {
-        !app.session.open_running()
-            && app
-                .repository()
-                .is_some_and(|repository| repository.root == second_path)
-    });
-    assert_eq!(
-        app.workspace_focus_restore_path.as_deref(),
-        Some(first_path.as_path())
-    );
-
-    let restore_path = app.workspace_focus_restore_path.take().unwrap();
-    app.queue_workspace_restore(restore_path);
-    wait_for_state(&mut app, |app| {
-        !app.session.open_running()
-            && app.pending_workspace_restore.is_none()
-            && app
-                .repository()
-                .is_some_and(|repository| repository.root == first_path)
-    });
-
-    app.apply_workspace_panel_effect(WorkspacePanelEffect::OpenWorkspace(
-        second.path().to_path_buf(),
-    ));
-    let restore_path = app.workspace_focus_restore_path.take().unwrap();
-    app.queue_workspace_restore(restore_path);
-    assert_eq!(
-        app.pending_workspace_restore.as_deref(),
-        Some(first_path.as_path())
-    );
-    wait_for_state(&mut app, |app| {
-        !app.session.open_running()
-            && app.pending_workspace_restore.is_none()
-            && app
-                .repository()
-                .is_some_and(|repository| repository.root == first_path)
-    });
-
-    assert_eq!(app.mode, Mode::WorkspacePanel);
-}
-
-#[test]
 fn successful_agent_creation_opens_its_destination() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
@@ -656,7 +581,6 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
             fetch_interval_minutes: 6,
             format_on_save: true,
             worktree_width: 38,
-            workspace_panel_enabled: true,
             cross_workspace_agents: false,
             show_agent_harness: false,
             agent_time_display: settings::AgentTimeDisplay::LatestLoop,
@@ -679,10 +603,6 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(!app.settings.format_on_save);
-    assert_eq!(app.settings_store.load(), app.settings);
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(!app.settings.workspace_panel_enabled);
     assert_eq!(app.settings_store.load(), app.settings);
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -798,28 +718,6 @@ fn opencode_settings_edit_model_reasoning_and_persist() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.settings.opencode_model, "provider/model");
     assert!(app.opencode_error.is_some());
-}
-
-#[test]
-fn workspace_group_shortcut_only_works_in_the_workspace_manager() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut app = App::new(directory.path().to_path_buf());
-    app.settings
-        .shortcuts
-        .set(
-            ShortcutAction::WorkspaceGroup,
-            KeyChord::new(KeyCode::Char('v'), KeyModifiers::ALT),
-        )
-        .unwrap();
-
-    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(!app.workspace_panel.group_editing);
-
-    app.mode = Mode::WorkspacePanel;
-    app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
-    assert!(app.workspace_panel.group_editing);
 }
 
 #[test]
