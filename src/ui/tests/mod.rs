@@ -1348,6 +1348,8 @@ fn renders_every_primary_surface() {
     assert!(explorer_screen.contains("AROUND HERE"));
     assert!(explorer_screen.contains("CONTENTS"));
     assert!(explorer_screen.contains("★ Project"));
+    assert!(!explorer_screen.contains("F2 WORKTREES"));
+    assert!(!explorer_screen.contains("F3 BRANCHES"));
     assert!(!explorer_screen.contains("OPEN REPOSITORY"));
     assert!(!explorer_screen.contains('┌'));
     assert!(

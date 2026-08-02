@@ -369,7 +369,7 @@ impl App {
 
     pub(crate) fn begin_header_worktree_creation(&mut self) {
         if self.header_picker.worktree_creation_running() {
-            self.header_picker.message = Some("Wait for the current Herdr operation".to_owned());
+            self.header_picker.message = Some("Wait for the current worktree creation".to_owned());
             return;
         }
         let Some(repository) = self.git_repository() else {
@@ -409,7 +409,7 @@ impl App {
                 }
                 if self.header_picker.worktree_creation_running() {
                     self.header_picker.message =
-                        Some("Wait for the current Herdr operation".to_owned());
+                        Some("Wait for the current worktree creation".to_owned());
                     return;
                 }
                 let Some(cwd) = self

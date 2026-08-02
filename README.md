@@ -109,14 +109,11 @@ remove it. Hidden directories are browseable, `.config` participates in
 background search, and only Git metadata and expensive generated trees are
 omitted from indexing.
 
-Worktrees lists the linked Git checkouts belonging to repositories hunkle has
-opened or discovered through the active Herdr session. Press `W`, then type to
-filter by repository, branch, path, or commit. Press `N` to create a linked
-worktree from the selected checkout; enter a new or existing local branch and
-its destination path, and Hunkle opens the result after Git creates it. Press
-`Enter` or double-click to open a checkout. `Delete` safely removes a selected
-linked worktree after confirmation; primary, current, locked, missing, and dirty
-worktrees are protected, and Herdr-owned worktrees are removed through Herdr.
+The **WORKTREE** header card lists linked Git checkouts for the active
+repository. Type to filter by branch, path, or commit, and press `Enter` or
+double-click to open a checkout. Press `Ctrl+N` in the popover to create a
+linked worktree through Herdr; enter its name and starting branch, and Hunkle
+opens the result after creation.
 
 When Hunkle runs inside Herdr, click the green **AGENT** header card to choose a
 Git-inventoried repository or linked worktree, then choose which non-Hunkle pane
