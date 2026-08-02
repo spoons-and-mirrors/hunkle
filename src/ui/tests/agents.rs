@@ -78,7 +78,7 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
         .regions
         .hit_target_rect(HitTarget::AgentStashToggle)
         .unwrap();
-    assert_eq!(toggle.right().saturating_add(1), header.right());
+    assert_eq!(toggle.right(), header.right());
     assert_eq!(toggle.y, header.y);
     let toggle_text = (toggle.x..toggle.right())
         .map(|x| terminal.backend().buffer()[(x, toggle.y)].symbol())

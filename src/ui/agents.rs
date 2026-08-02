@@ -40,10 +40,7 @@ pub(super) fn draw(
     };
     let toggle_width = u16::try_from(UnicodeWidthStr::width(toggle_label)).unwrap_or(0);
     let toggle = Rect::new(
-        header
-            .right()
-            .saturating_sub(toggle_width)
-            .saturating_sub(1),
+        header.right().saturating_sub(toggle_width),
         header.y,
         toggle_width.min(header.width),
         1,
