@@ -668,22 +668,49 @@ fn fuzzy_searches_and_opens_repository_files() {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::FileSearch);
+    assert_eq!(app.view, View::RepositorySearch);
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-    assert_eq!(app.file_search.query, "/");
-    assert_eq!(app.mode, Mode::FileSearch);
+    assert_eq!(app.file_search.query.text(), "/");
+    for character in "ab".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+    assert_eq!(app.file_search.query.text(), "/aXb");
+    assert_eq!(app.view, View::RepositorySearch);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.view, View::Changes);
 
     app.view = View::Graph;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.view, View::Graph);
+    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let graph = app.regions.graph.unwrap();
+    click(&mut app, graph.x, graph.y);
+    assert_eq!(app.view, View::Changes);
+    app.view = View::Graph;
+    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     for character in "profile card".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
-    assert_eq!(app.mode, Mode::FileSearch);
+    assert_eq!(app.view, View::RepositorySearch);
     assert_eq!(app.file_search.match_count, 1);
+    let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    narrow.draw(|frame| draw(frame, &mut app)).unwrap();
+    let narrow_screen: String = narrow
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(narrow_screen.contains("REPOSITORY"));
+    assert!(narrow_screen.contains("Esc back"));
+    assert!(app.file_search.preview_path.is_none());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_black_underlay(&terminal);
 
     let screen: String = terminal
         .backend()
@@ -692,15 +719,44 @@ fn fuzzy_searches_and_opens_repository_files() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(screen.contains("REPO SEARCH"));
+    assert!(screen.contains("REPOSITORY"));
     assert!(screen.contains("FILES"));
     assert!(screen.contains("TEXT"));
     assert!(screen.contains("profile_card.rs"));
     assert!(screen.contains("src/components"));
-    assert!(app.regions.file_search_overlay.is_some());
+    assert!(app.regions.file_search.is_some());
     assert!(app.regions.file_search_list.is_some());
 
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    for _ in 0..100 {
+        let _ = app.poll_worker();
+        if !app.file_search.preview_loading {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("pub struct ProfileCard"));
+
+    let selected_row = app.file_search.state.selected().unwrap();
+    let result = app
+        .regions
+        .hit_target_rect(HitTarget::FileSearch(
+            crate::app::FileSearchHitTarget::Result {
+                generation: app.file_search.target_generation(),
+                row: selected_row,
+            },
+        ))
+        .unwrap();
+    click(&mut app, result.x, result.y);
+    assert_eq!(app.view, View::RepositorySearch);
+    click(&mut app, result.x, result.y);
     wait_for_preview(&mut app);
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.view, View::Changes);
@@ -739,8 +795,8 @@ fn repository_text_search_opens_the_matching_source_line() {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     for character in "Needle".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }

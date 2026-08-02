@@ -117,7 +117,7 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
         shortcut_help(
             shortcuts,
             ShortcutAction::ToggleAgents,
-            "Show / hide agents",
+            "Cycle agents / stash / off",
         ),
         shortcut_help(shortcuts, ShortcutAction::UnstageAll, "Unstage all"),
         shortcut_help(

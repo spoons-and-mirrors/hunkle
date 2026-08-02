@@ -75,6 +75,7 @@ pub struct ChangesState {
     pub(crate) worktree_scroll: usize,
     pub(crate) worktree_scroll_to_selection: bool,
     pub(crate) explorer_scroll: usize,
+    explorer_scroll_to_selection: bool,
     pub(crate) diff: String,
     pub(crate) diff_scroll: usize,
     pub(crate) diff_wrap: bool,
@@ -149,6 +150,7 @@ impl ChangesState {
             worktree_scroll: 0,
             worktree_scroll_to_selection: true,
             explorer_scroll: 0,
+            explorer_scroll_to_selection: false,
             diff: String::new(),
             diff_scroll: 0,
             diff_wrap: true,
@@ -206,6 +208,7 @@ impl ChangesState {
         self.worktree_scroll = 0;
         self.worktree_scroll_to_selection = true;
         self.explorer_scroll = 0;
+        self.explorer_scroll_to_selection = false;
         self.set_diff(String::new());
         self.diff_scroll = 0;
         self.hunk_selection = None;
@@ -449,8 +452,24 @@ impl ChangesState {
         self.explorer_scroll = self
             .explorer_scroll
             .min(self.explorer_rows_cache.len().saturating_sub(viewport));
+        self.explorer_scroll_to_selection = true;
         self.refresh_diff(Some(repo));
         true
+    }
+
+    pub(crate) fn reveal_explorer_selection(&mut self, viewport: usize) {
+        if !self.explorer_scroll_to_selection {
+            return;
+        }
+        ensure_selection_visible(
+            &mut self.explorer_scroll,
+            self.explorer_state.selected(),
+            viewport,
+        );
+        self.explorer_scroll = self
+            .explorer_scroll
+            .min(self.explorer_rows_cache.len().saturating_sub(viewport));
+        self.explorer_scroll_to_selection = false;
     }
 
     pub(super) fn set_pane(&mut self, pane: LeftPane, repo: Option<&RepositoryData>) -> bool {
@@ -941,6 +960,7 @@ impl ChangesState {
     }
 
     pub(super) fn scroll_explorer(&mut self, viewport: usize, delta: isize) {
+        self.explorer_scroll_to_selection = false;
         scroll_viewport(
             &mut self.explorer_scroll,
             self.explorer_rows_cache.len(),

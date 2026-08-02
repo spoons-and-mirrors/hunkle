@@ -91,12 +91,28 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
     let visible_view = app.visible_view();
-    changes::draw(
-        frame,
-        app,
-        main_content,
-        visible_view != View::Graph || app.graph_commit_open,
-    );
+    if visible_view == View::RepositorySearch {
+        app.reset_media_presentation();
+        let search_root = app.repository().map(|repository| repository.root.clone());
+        let regions = overlays::draw_file_search(
+            frame,
+            &mut app.file_search,
+            search_root.as_deref(),
+            main_content,
+        );
+        app.regions.file_search = Some(regions.overlay);
+        app.regions.file_search_list = Some(regions.list);
+        for (target, rect) in regions.targets {
+            app.regions.register_hit_target(target, rect);
+        }
+    } else {
+        changes::draw(
+            frame,
+            app,
+            main_content,
+            visible_view != View::Graph || app.graph_commit_open,
+        );
+    }
     if visible_view == View::Graph && !app.graph_commit_open {
         let graph_area = app.regions.diff.unwrap_or(main_content);
         frame.render_widget(Clear, graph_area);
@@ -128,16 +144,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_main_top_padding(frame, app, layout[1]);
     draw_navigation(frame, app, layout[2]);
     match app.mode {
-        Mode::FileSearch => {
-            dim(frame);
-            let regions =
-                overlays::draw_file_search(frame, &mut app.file_search, &app.settings.shortcuts);
-            app.regions.file_search_overlay = Some(regions.overlay);
-            app.regions.file_search_list = Some(regions.list);
-            for (target, rect) in regions.targets {
-                app.regions.register_hit_target(target, rect);
-            }
-        }
         Mode::Explorer => {
             dim(frame);
             let targets = overlays::draw_explorer(
@@ -372,29 +378,22 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         (ShortcutAction::ShowAgents, "Agents")
     };
+    let search_active = app.visible_view() == View::RepositorySearch;
+    let key_label = |action| {
+        if search_active {
+            String::new()
+        } else {
+            app.settings.shortcuts.label(action)
+        }
+    };
     let mut labels = vec![
-        (
-            app.settings.shortcuts.label(ShortcutAction::ToggleGraph),
-            "Git Graph",
-        ),
-        (
-            app.settings.shortcuts.label(left_pane_action),
-            left_pane_label,
-        ),
+        (key_label(ShortcutAction::ToggleGraph), "Git Graph"),
+        (key_label(left_pane_action), left_pane_label),
     ];
     labels.extend([
-        (
-            app.settings.shortcuts.label(ShortcutAction::OpenExplorer),
-            "Explorer",
-        ),
-        (
-            app.settings.shortcuts.label(ShortcutAction::OpenSettings),
-            "Settings",
-        ),
-        (
-            app.settings.shortcuts.label(ShortcutAction::OpenHelp),
-            "Help",
-        ),
+        (key_label(ShortcutAction::OpenExplorer), "Explorer"),
+        (key_label(ShortcutAction::OpenSettings), "Settings"),
+        (key_label(ShortcutAction::OpenHelp), "Help"),
     ]);
 
     let total_width = labels.iter().fold(0_u16, |width, (key, label)| {

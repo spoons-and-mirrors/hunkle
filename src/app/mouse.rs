@@ -327,7 +327,7 @@ impl App {
         if self.mode == Mode::Files {
             return;
         }
-        if self.mode == Mode::FileSearch {
+        if self.mode == Mode::Normal && self.view == View::RepositorySearch {
             self.handle_file_search_mouse(mouse);
             return;
         }
@@ -547,7 +547,7 @@ impl App {
             self.regions.command_overlay,
             self.regions.herdr_prompt_overlay,
             self.regions.editor_overlay,
-            self.regions.file_search_overlay,
+            self.regions.file_search,
             self.regions.file_dialog_overlay,
             self.regions
                 .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Overlay)),
@@ -580,12 +580,30 @@ impl App {
             Mode::HerdrPrompt => {}
             Mode::FileEdit => self.place_file_editor_cursor(point, false),
             Mode::Explorer => self.handle_explorer_mouse(mouse),
-            Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::AuthorFilter => self.handle_author_filter_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
+            Mode::Normal if self.view == View::RepositorySearch => {
+                let global_navigation = [
+                    self.regions.graph,
+                    self.regions.left_pane_toggle,
+                    self.regions.explorer,
+                    self.regions.settings,
+                    self.regions.help,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|rect| rect.contains(point));
+                if global_navigation {
+                    self.file_search.close();
+                    self.view = self.search_return_view;
+                    self.handle_primary_left_click(point);
+                } else {
+                    self.handle_file_search_mouse(mouse);
+                }
+            }
             Mode::Normal | Mode::Commit => self.handle_primary_left_click(point),
         }
     }
@@ -1106,33 +1124,68 @@ impl App {
     fn handle_file_search_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.file_search.move_selection(1),
-            MouseEventKind::ScrollUp => self.file_search.move_selection(-1),
-            MouseEventKind::Down(MouseButton::Left) => {
+            MouseEventKind::ScrollDown
                 if self
                     .regions
-                    .file_search_overlay
-                    .is_some_and(|rect| !rect.contains(point))
-                {
-                    self.file_search.close();
-                    self.mode = Mode::Normal;
-                    return;
-                }
+                    .file_search_list
+                    .is_some_and(|rect| rect.contains(point)) =>
+            {
+                self.file_search.move_selection(1);
+            }
+            MouseEventKind::ScrollUp
+                if self
+                    .regions
+                    .file_search_list
+                    .is_some_and(|rect| rect.contains(point)) =>
+            {
+                self.file_search.move_selection(-1);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
                 let Some(HitTarget::FileSearch(target)) = self.regions.hit_target_at(point) else {
-                    return;
-                };
-                let Some(repo) = self.session.data() else {
+                    self.last_file_search_click = None;
                     return;
                 };
                 match target {
-                    FileSearchHitTarget::Scope(scope) => self.file_search.set_scope(scope, repo),
-                    FileSearchHitTarget::CaseSensitive => self.file_search.toggle_case(repo),
-                    FileSearchHitTarget::WholeWord => self.file_search.toggle_whole_word(repo),
-                    FileSearchHitTarget::Regex => self.file_search.toggle_regex(repo),
-                    FileSearchHitTarget::IncludeIgnored => self.file_search.toggle_ignored(repo),
                     FileSearchHitTarget::Result { generation, row } => {
-                        if self.file_search.select(generation, row) {
+                        if !self.file_search.select(generation, row) {
+                            return;
+                        }
+                        let Some(destination) = self.file_search.selected_destination() else {
+                            return;
+                        };
+                        let double_click =
+                            self.last_file_search_click
+                                .as_ref()
+                                .is_some_and(|(previous, at)| {
+                                    previous == &destination
+                                        && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+                                });
+                        self.last_file_search_click =
+                            (!double_click).then(|| (destination, Instant::now()));
+                        if double_click {
                             self.activate_file_search_result();
+                        }
+                    }
+                    target => {
+                        self.last_file_search_click = None;
+                        let Some(repo) = self.session.data() else {
+                            return;
+                        };
+                        match target {
+                            FileSearchHitTarget::Scope(scope) => {
+                                self.file_search.set_scope(scope, repo)
+                            }
+                            FileSearchHitTarget::CaseSensitive => {
+                                self.file_search.toggle_case(repo)
+                            }
+                            FileSearchHitTarget::WholeWord => {
+                                self.file_search.toggle_whole_word(repo)
+                            }
+                            FileSearchHitTarget::Regex => self.file_search.toggle_regex(repo),
+                            FileSearchHitTarget::IncludeIgnored => {
+                                self.file_search.toggle_ignored(repo)
+                            }
+                            FileSearchHitTarget::Result { .. } => unreachable!(),
                         }
                     }
                 }

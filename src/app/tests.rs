@@ -178,7 +178,12 @@ fn local_workspaces_reload_files_and_reject_git_actions() {
         assert_eq!(app.notice.as_deref(), Some("Not a Git repository"), "{key}");
     }
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(app.agents_visible);
+    assert!(app.herdr.showing_stash);
+    assert_eq!(app.notice.as_deref(), Some("Agent stash shown"));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(!app.agents_visible);
+    assert!(!app.herdr.showing_stash);
     assert_eq!(app.notice.as_deref(), Some("Agents hidden"));
 
     fs::write(root.join("two.txt"), "two\n").unwrap();
@@ -540,9 +545,14 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
 
     assert!(app.agents_visible);
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(app.agents_visible);
+    assert!(app.herdr.showing_stash);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(!app.agents_visible);
+    assert!(!app.herdr.showing_stash);
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(app.agents_visible);
+    assert!(!app.herdr.showing_stash);
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.view, View::Changes);

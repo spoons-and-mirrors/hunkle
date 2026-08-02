@@ -720,16 +720,20 @@ pub(crate) fn draw_explorer(
 pub(crate) fn draw_file_search(
     frame: &mut Frame<'_>,
     search: &mut FileSearch,
-    shortcuts: &Shortcuts,
+    root: Option<&std::path::Path>,
+    area: Rect,
 ) -> FileSearchRegions {
-    let desired_height = (13 + search.rows.len().clamp(1, 16) as u16).clamp(18, 29);
-    let area = centered_min(frame.area(), 90, 0, 72, desired_height);
+    let area = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
     let mut targets = Vec::new();
-    frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
         frame,
-        Rect::new(area.x, area.y, area.width, 3),
+        Rect::new(area.x, area.y, area.width, 1),
         palette().surface_alt,
     );
     fill(
@@ -740,43 +744,28 @@ pub(crate) fn draw_file_search(
 
     let inner_x = area.x.saturating_add(2);
     let inner_width = area.width.saturating_sub(4);
-    let count = format!("{} FILES", search.total_files());
-    let title_width = "REPO SEARCH  Files and text".len();
-    let title_padding = usize::from(inner_width)
-        .saturating_sub(title_width + UnicodeWidthStr::width(count.as_str()));
+    let count = format!("{} files", search.total_files());
+    let title_padding = usize::from(inner_width).saturating_sub(10 + count.len());
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "REPO SEARCH",
+                "REPOSITORY",
                 Style::default()
                     .fg(palette().ink)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Files and text", Style::default().fg(palette().faint)),
             Span::raw(" ".repeat(title_padding)),
-            Span::styled(
-                count,
-                Style::default()
-                    .fg(palette().accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(count, Style::default().fg(palette().muted)),
         ])),
-        Rect::new(inner_x, area.y.saturating_add(1), inner_width, 1),
+        Rect::new(inner_x, area.y, inner_width, 1),
     );
 
-    let input = Rect::new(inner_x, area.y.saturating_add(4), inner_width, 3);
+    let input = Rect::new(inner_x, area.y.saturating_add(2), inner_width, 1);
     fill(frame, input, palette().selected);
-    fill(
-        frame,
-        Rect::new(input.x, input.y, 1, input.height),
-        palette().accent,
-    );
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            "QUERY",
-            Style::default()
-                .fg(palette().muted)
-                .add_modifier(Modifier::BOLD),
+        Paragraph::new(search_query_line(
+            search,
+            usize::from(input.width.saturating_sub(4)),
         )),
         Rect::new(
             input.x.saturating_add(2),
@@ -785,46 +774,20 @@ pub(crate) fn draw_file_search(
             1,
         ),
     );
-    let query_width = usize::from(input.width.saturating_sub(5));
-    let query = truncate_start_width(&search.query, query_width);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                if query.is_empty() {
-                    "Search all files…".to_owned()
-                } else {
-                    query
-                },
-                Style::default().fg(if search.query.is_empty() {
-                    palette().faint
-                } else {
-                    palette().ink
-                }),
-            ),
-            Span::styled("▌", Style::default().fg(palette().accent)),
-        ])),
-        Rect::new(
-            input.x.saturating_add(2),
-            input.y.saturating_add(1),
-            input.width.saturating_sub(4),
-            1,
-        ),
-    );
 
-    let controls = Rect::new(inner_x, area.y.saturating_add(8), inner_width, 1);
+    let controls = Rect::new(inner_x, area.y.saturating_add(4), inner_width, 1);
     let mut control_x = controls.x;
     for scope in SearchScope::ALL {
-        let label = format!(" {} ", scope.label());
+        let label = scope.label();
         let rect = Rect::new(control_x, controls.y, label.len() as u16, 1);
         let active = search.scope == scope;
         frame.render_widget(
             Paragraph::new(label).style(if active {
                 Style::default()
-                    .fg(palette().ink)
-                    .bg(palette().selected)
+                    .fg(palette().accent)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(palette().muted)
+                Style::default().fg(palette().faint)
             }),
             rect,
         );
@@ -832,7 +795,7 @@ pub(crate) fn draw_file_search(
             HitTarget::FileSearch(FileSearchHitTarget::Scope(scope)),
             rect,
         ));
-        control_x = rect.right().saturating_add(1);
+        control_x = rect.right().saturating_add(3);
     }
     let text_options_enabled = search.scope != SearchScope::Files;
     let options = [
@@ -863,15 +826,22 @@ pub(crate) fn draw_file_search(
     ];
     let options_width = options
         .iter()
-        .map(|(label, _, _, _)| label.len() + 3)
+        .map(|(label, _, _, _)| label.len())
         .sum::<usize>()
-        + options.len().saturating_sub(1);
-    let mut option_x = controls
-        .right()
-        .saturating_sub(u16::try_from(options_width).unwrap_or(u16::MAX));
+        + options.len().saturating_sub(1) * 3;
+    let stacked_options = usize::from(inner_width) < options_width + 26;
+    let options_y = controls.y + u16::from(stacked_options);
+    let mut option_x = if stacked_options {
+        controls.x
+    } else {
+        controls
+            .right()
+            .saturating_sub(u16::try_from(options_width).unwrap_or(u16::MAX))
+    };
     for (label, active, target, enabled) in options {
-        let text = format!("[{label}]");
+        let text = label;
         let rect = Rect::new(option_x, controls.y, text.len() as u16, 1);
+        let rect = Rect::new(rect.x, options_y, rect.width, 1);
         let style = if !enabled {
             Style::default().fg(palette().faint)
         } else if active {
@@ -885,7 +855,7 @@ pub(crate) fn draw_file_search(
         if enabled {
             targets.push((HitTarget::FileSearch(target), rect));
         }
-        option_x = rect.right().saturating_add(1);
+        option_x = rect.right().saturating_add(3);
     }
 
     let inventory_status = if search.inventory_truncated {
@@ -893,8 +863,10 @@ pub(crate) fn draw_file_search(
     } else {
         ""
     };
-    let detail = if search.query.trim().is_empty() {
-        "Fuzzy paths and repository text".to_owned()
+    let detail = if let Some(error) = &search.error {
+        error.clone()
+    } else if search.query.text().trim().is_empty() {
+        "Type a filename, path, symbol, or phrase".to_owned()
     } else if search.searching {
         format!(
             "{} file matches · {} text matches · searching{}",
@@ -913,29 +885,49 @@ pub(crate) fn draw_file_search(
             inventory_status
         )
     };
+    let status_y = options_y.saturating_add(2);
+    let status_style = if search.error.is_some() {
+        Style::default().fg(palette().red)
+    } else if search.searching {
+        Style::default().fg(palette().accent)
+    } else {
+        Style::default().fg(palette().muted)
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "RESULTS",
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {detail}"), Style::default().fg(palette().faint)),
-        ])),
-        Rect::new(inner_x, area.y.saturating_add(10), inner_width, 1),
+        Paragraph::new(detail).style(status_style),
+        Rect::new(inner_x, status_y, inner_width, 1),
     );
 
-    let list_y = area.y.saturating_add(12);
-    let list = Rect::new(
+    let list_y = status_y.saturating_add(2);
+    let body = Rect::new(
         inner_x,
         list_y,
         inner_width,
         area.bottom().saturating_sub(1).saturating_sub(list_y),
     );
+    let (list, preview) = if body.width >= 84 && body.height >= 8 {
+        let list_width = (body.width * 44 / 100).max(38);
+        (
+            Rect::new(body.x, body.y, list_width, body.height),
+            Some(Rect::new(
+                body.x.saturating_add(list_width).saturating_add(2),
+                body.y,
+                body.width.saturating_sub(list_width).saturating_sub(2),
+                body.height,
+            )),
+        )
+    } else {
+        search.clear_preview();
+        (body, None)
+    };
+    if preview.is_some()
+        && let Some(root) = root
+    {
+        search.ensure_preview(root);
+    }
     if search.rows.is_empty() {
-        let message = if search.query.trim().is_empty() {
-            "Type to search filenames, paths, and source text"
+        let message = if search.query.text().trim().is_empty() {
+            "Search starts as you type"
         } else {
             "No repository files or text match that query"
         };
@@ -947,7 +939,7 @@ pub(crate) fn draw_file_search(
             list,
         );
     } else {
-        let query = search.query.clone();
+        let query = search.query.text().to_owned();
         let items = search
             .rows
             .iter()
@@ -976,13 +968,27 @@ pub(crate) fn draw_file_search(
         }
     }
 
+    if let Some(preview) = preview {
+        fill(
+            frame,
+            Rect::new(preview.x.saturating_sub(1), preview.y, 1, preview.height),
+            palette().surface_alt,
+        );
+        draw_search_preview(frame, search, preview);
+    }
+
+    let footer = key_hint_line(
+        &[
+            ("Esc", "back"),
+            ("Enter", "open"),
+            ("↑↓", "select"),
+            ("Tab", "scope"),
+            ("Alt+I", "ignored"),
+        ],
+        usize::from(inner_width),
+    );
     frame.render_widget(
-        Paragraph::new(format!(
-            "Enter open  ↑↓ select  ←→ scope  Alt+C/W/R/I text/ignored options  Esc close  {}",
-            shortcuts.label(ShortcutAction::FindFile),
-        ))
-        .style(Style::default().fg(palette().muted))
-        .alignment(Alignment::Right),
+        Paragraph::new(footer).alignment(Alignment::Right),
         Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1),
     );
 
@@ -991,6 +997,147 @@ pub(crate) fn draw_file_search(
         list,
         targets,
     }
+}
+
+fn draw_search_preview(frame: &mut Frame<'_>, search: &FileSearch, area: Rect) {
+    let Some(path) = search.preview_path.as_ref() else {
+        frame.render_widget(
+            Paragraph::new("Select a result to preview")
+                .style(Style::default().fg(palette().faint)),
+            area,
+        );
+        return;
+    };
+    let location = search.preview_line.map_or_else(
+        || path.display(),
+        |line| format!("{}:{line}", path.display()),
+    );
+    frame.render_widget(
+        Paragraph::new(location).style(
+            Style::default()
+                .fg(palette().ink)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let body = Rect::new(
+        area.x,
+        area.y.saturating_add(2),
+        area.width,
+        area.height.saturating_sub(2),
+    );
+    if search.preview_loading {
+        frame.render_widget(
+            Paragraph::new("Loading preview…").style(Style::default().fg(palette().muted)),
+            body,
+        );
+        return;
+    }
+    let start = search.preview_line.map_or(0, |line| {
+        line.saturating_sub(usize::from(body.height) / 2)
+            .saturating_sub(1)
+    });
+    let mut lines = crate::ui::text::styled_source_window(
+        &search.preview_content,
+        &path.display(),
+        usize::from(body.width),
+        start,
+        usize::from(body.height),
+    );
+    if let Some(line) = search.preview_line {
+        let selected = line.saturating_sub(1).saturating_sub(start);
+        if let Some(rendered) = lines.get_mut(selected) {
+            rendered.style = Style::default().bg(palette().inactive_selected);
+            if let Some((column, length)) = search.preview_match {
+                highlight_preview_match(rendered, column, length, body.width >= 72);
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn highlight_preview_match(line: &mut Line<'static>, start: usize, length: usize, numbered: bool) {
+    if length == 0 {
+        return;
+    }
+    let end = start.saturating_add(length);
+    let mut position = 0;
+    let mut highlighted = Vec::with_capacity(line.spans.len().saturating_add(2));
+    for (index, span) in std::mem::take(&mut line.spans).into_iter().enumerate() {
+        if numbered && index == 0 {
+            highlighted.push(span);
+            continue;
+        }
+        let text = span.content.as_ref();
+        let span_length = text.chars().count();
+        let overlap_start = start.saturating_sub(position).min(span_length);
+        let overlap_end = end.saturating_sub(position).min(span_length);
+        if overlap_start >= overlap_end {
+            highlighted.push(span);
+        } else {
+            let before_end = char_byte_offset(text, overlap_start);
+            let match_end = char_byte_offset(text, overlap_end);
+            if before_end > 0 {
+                highlighted.push(Span::styled(text[..before_end].to_owned(), span.style));
+            }
+            highlighted.push(Span::styled(
+                text[before_end..match_end].to_owned(),
+                span.style.patch(
+                    Style::default()
+                        .fg(palette().panel)
+                        .bg(palette().accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ));
+            if match_end < text.len() {
+                highlighted.push(Span::styled(text[match_end..].to_owned(), span.style));
+            }
+        }
+        position = position.saturating_add(span_length);
+    }
+    line.spans = highlighted;
+}
+
+fn char_byte_offset(value: &str, character: usize) -> usize {
+    value
+        .char_indices()
+        .nth(character)
+        .map_or(value.len(), |(offset, _)| offset)
+}
+
+fn search_query_line(search: &FileSearch, width: usize) -> Line<'static> {
+    if search.query.is_empty() {
+        return Line::from(vec![
+            Span::styled("/ ", Style::default().fg(palette().accent)),
+            Span::styled(
+                "Search files and contents",
+                Style::default().fg(palette().faint),
+            ),
+        ]);
+    }
+
+    let text = search.query.text();
+    let cursor = search.query.cursor();
+    let before = truncate_start_width(&text[..cursor], width.saturating_sub(3));
+    let mut following = text[cursor..].chars();
+    let cursor_character = following
+        .next()
+        .map_or_else(|| " ".to_owned(), |ch| ch.to_string());
+    let used = UnicodeWidthStr::width(before.as_str())
+        + UnicodeWidthStr::width(cursor_character.as_str())
+        + 2;
+    let after = truncate_width(following.as_str(), width.saturating_sub(used));
+    let cursor_style = if search.query.cursor_visible() {
+        Style::default().fg(palette().panel).bg(palette().accent)
+    } else {
+        Style::default().fg(palette().ink)
+    };
+    Line::from(vec![
+        Span::styled("/ ", Style::default().fg(palette().accent)),
+        Span::styled(before, Style::default().fg(palette().ink)),
+        Span::styled(cursor_character, cursor_style),
+        Span::styled(after, Style::default().fg(palette().ink)),
+    ])
 }
 
 fn file_search_row(row: &FileSearchRow, width: usize, query: &str) -> ListItem<'static> {
@@ -1205,9 +1352,12 @@ pub(super) fn key_hint_line<'a>(items: &[(&'a str, &'a str)], maximum_width: usi
 
 #[cfg(test)]
 mod file_search_tests {
-    use ratatui::style::Style;
+    use ratatui::{
+        style::{Modifier, Style},
+        text::{Line, Span},
+    };
 
-    use super::{fuzzy_highlight_spans, palette};
+    use super::{fuzzy_highlight_spans, highlight_preview_match, palette};
 
     #[test]
     fn highlights_slash_separated_path_query_segments() {
@@ -1220,5 +1370,24 @@ mod file_search_tests {
                 .collect::<String>();
             assert_eq!(highlighted, segment);
         }
+    }
+
+    #[test]
+    fn highlights_the_exact_preview_match_without_losing_the_gutter() {
+        let mut line = Line::from(vec![
+            Span::raw("    9  "),
+            Span::styled("αneedleβ", Style::default().fg(palette().cyan)),
+        ]);
+
+        highlight_preview_match(&mut line, 1, 6, true);
+
+        assert_eq!(line.spans[0].content, "    9  ");
+        let matched = line
+            .spans
+            .iter()
+            .find(|span| span.style.bg == Some(palette().accent))
+            .expect("matched preview span");
+        assert_eq!(matched.content, "needle");
+        assert!(matched.style.add_modifier.contains(Modifier::BOLD));
     }
 }

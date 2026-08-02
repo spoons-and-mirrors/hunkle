@@ -14,9 +14,12 @@ use std::{
 use ratatui::widgets::ListState;
 use regex::{Regex, RegexBuilder};
 
-use crate::{git::RepositoryData, repo_path::RepoPath};
+use crate::{
+    git::{self, RepositoryData},
+    repo_path::RepoPath,
+};
 
-use super::fuzzy::fuzzy_text_score_lower;
+use super::{TextInput, fuzzy::fuzzy_text_score_lower};
 
 const MAX_FILE_RESULTS: usize = 40;
 const MAX_ALL_FILE_RESULTS: usize = 6;
@@ -109,7 +112,7 @@ struct FileMatch {
 }
 
 pub(crate) struct FileSearch {
-    pub(crate) query: String,
+    pub(crate) query: TextInput,
     pub(crate) rows: Vec<FileSearchRow>,
     pub(crate) state: ListState,
     pub(crate) match_count: usize,
@@ -127,6 +130,12 @@ pub(crate) struct FileSearch {
     ignored_available: bool,
     rows_generation: u64,
     worker: SearchWorker,
+    pub(crate) preview_path: Option<RepoPath>,
+    pub(crate) preview_line: Option<usize>,
+    pub(crate) preview_match: Option<(usize, usize)>,
+    pub(crate) preview_content: String,
+    pub(crate) preview_loading: bool,
+    preview_worker: SearchPreviewWorker,
 }
 
 impl FileSearch {
@@ -136,7 +145,7 @@ impl FileSearch {
         files_fingerprint: Option<u64>,
     ) -> Self {
         let mut search = Self {
-            query: String::new(),
+            query: TextInput::default(),
             rows: Vec::new(),
             state: ListState::default(),
             match_count: 0,
@@ -154,6 +163,12 @@ impl FileSearch {
             ignored_available: false,
             rows_generation: 0,
             worker: SearchWorker::new(),
+            preview_path: None,
+            preview_line: None,
+            preview_match: None,
+            preview_content: String::new(),
+            preview_loading: false,
+            preview_worker: SearchPreviewWorker::new(),
         };
         search.reindex(files, ignored_files, files_fingerprint);
         search
@@ -199,13 +214,14 @@ impl FileSearch {
     }
 
     pub(crate) fn repository_refreshed(&mut self, repository: &RepositoryData) {
+        self.clear_preview();
         self.inventory_truncated = repository.inventory_truncated;
         self.reindex(
             &repository.files,
             &repository.ignored_files,
             Some(repository.files_fingerprint),
         );
-        if !self.query.trim().is_empty() {
+        if !self.query.text().trim().is_empty() {
             self.refresh(repository);
         }
     }
@@ -223,7 +239,9 @@ impl FileSearch {
 
     pub(crate) fn open(&mut self, inventory_truncated: bool) {
         self.worker.cancel();
+        self.clear_preview();
         self.query.clear();
+        self.query.focus();
         self.file_matches.clear();
         self.text_matches.clear();
         self.match_count = 0;
@@ -239,29 +257,81 @@ impl FileSearch {
 
     pub(crate) fn close(&mut self) {
         self.worker.cancel();
+        self.clear_preview();
         self.searching = false;
     }
 
+    pub(crate) fn clear_preview(&mut self) {
+        self.preview_worker.cancel();
+        self.preview_path = None;
+        self.preview_line = None;
+        self.preview_match = None;
+        self.preview_content.clear();
+        self.preview_loading = false;
+    }
+
+    pub(crate) fn ensure_preview(&mut self, root: &Path) {
+        let Some(row) = self.state.selected().and_then(|index| self.rows.get(index)) else {
+            self.clear_preview();
+            return;
+        };
+        let (path, line, matched) = match row {
+            FileSearchRow::File { path } => (path.clone(), None, None),
+            FileSearchRow::Text(result) => (
+                result.path.clone(),
+                Some(result.line),
+                Some((
+                    result.column.saturating_sub(1),
+                    result.matched.chars().count(),
+                )),
+            ),
+            FileSearchRow::Header { .. } | FileSearchRow::Status(_) => {
+                self.clear_preview();
+                return;
+            }
+        };
+        self.preview_line = line;
+        self.preview_match = matched;
+        if self.preview_path.as_ref() == Some(&path) {
+            return;
+        }
+        self.preview_path = Some(path.clone());
+        self.preview_content.clear();
+        self.preview_loading = true;
+        self.preview_worker.request(root.to_path_buf(), path);
+    }
+
     pub(crate) fn push(&mut self, character: char, repository: &RepositoryData) {
-        self.query.push(character);
+        self.query.insert_char(character);
         self.refresh(repository);
     }
 
     pub(crate) fn paste(&mut self, text: &str, repository: &RepositoryData) {
-        self.query.extend(
-            text.chars()
-                .filter(|character| !matches!(character, '\r' | '\n')),
-        );
+        let text = text
+            .chars()
+            .filter(|character| !matches!(character, '\r' | '\n'))
+            .collect::<String>();
+        self.query.insert(&text);
         self.refresh(repository);
     }
 
     pub(crate) fn backspace(&mut self, repository: &RepositoryData) {
-        self.query.pop();
+        self.query.backspace();
         self.refresh(repository);
     }
 
     pub(crate) fn clear(&mut self, repository: &RepositoryData) {
         self.query.clear();
+        self.refresh(repository);
+    }
+
+    pub(crate) fn delete(&mut self, repository: &RepositoryData) {
+        self.query.delete();
+        self.refresh(repository);
+    }
+
+    pub(crate) fn delete_word(&mut self, repository: &RepositoryData) {
+        self.query.delete_word();
         self.refresh(repository);
     }
 
@@ -339,6 +409,16 @@ impl FileSearch {
         self.state.select(Some(selectable[next]));
     }
 
+    pub(crate) fn select_first(&mut self) {
+        self.state
+            .select(self.rows.iter().position(FileSearchRow::selectable));
+    }
+
+    pub(crate) fn select_last(&mut self) {
+        self.state
+            .select(self.rows.iter().rposition(FileSearchRow::selectable));
+    }
+
     pub(crate) fn select(&mut self, generation: u64, row: usize) -> bool {
         if generation != self.rows_generation
             || !self.rows.get(row).is_some_and(FileSearchRow::selectable)
@@ -408,17 +488,25 @@ impl FileSearch {
                 }
                 SearchEvent::Error { message, .. } => {
                     self.searching = false;
-                    self.error = Some(message);
+                    self.error = Some(message.split_whitespace().collect::<Vec<_>>().join(" "));
                     self.rebuild_rows(selected.as_ref());
                     changed = true;
                 }
             }
+        }
+        if let Some(result) = self.preview_worker.poll()
+            && self.preview_path.as_ref() == Some(&result.path)
+        {
+            self.preview_content = result.content;
+            self.preview_loading = false;
+            changed = true;
         }
         changed
     }
 
     pub(crate) fn shutdown(&mut self) {
         self.worker.shutdown();
+        self.preview_worker.shutdown();
     }
 
     fn refresh(&mut self, repository: &RepositoryData) {
@@ -428,7 +516,7 @@ impl FileSearch {
         self.search_truncated = false;
         self.error = None;
         self.refresh_file_matches();
-        if self.query.trim().is_empty() || self.scope == SearchScope::Files {
+        if self.query.text().trim().is_empty() || self.scope == SearchScope::Files {
             self.searching = false;
             self.rebuild_rows(None);
             return;
@@ -438,7 +526,7 @@ impl FileSearch {
             generation: self.worker.generation(),
             root: repository.root.clone(),
             fingerprint: repository.files_fingerprint,
-            query: self.query.clone(),
+            query: self.query.text().to_owned(),
             options: self.options,
             index: Arc::clone(&self.index),
         });
@@ -448,7 +536,7 @@ impl FileSearch {
     fn refresh_file_matches(&mut self) {
         self.file_matches.clear();
         self.match_count = 0;
-        let query = self.query.trim().to_lowercase();
+        let query = self.query.text().trim().to_lowercase();
         let terms = query.split_whitespace().collect::<Vec<_>>();
         if terms.is_empty() || self.scope == SearchScope::Text {
             self.rebuild_rows(None);
@@ -484,7 +572,7 @@ impl FileSearch {
 
     fn rebuild_rows(&mut self, selected: Option<&SearchDestination>) {
         self.rows.clear();
-        if self.query.trim().is_empty() {
+        if self.query.text().trim().is_empty() {
             self.state.select(None);
             self.bump_rows_generation();
             return;
@@ -516,12 +604,10 @@ impl FileSearch {
             });
             self.rows
                 .extend(self.text_matches.iter().cloned().map(FileSearchRow::Text));
-            if let Some(error) = &self.error {
-                self.rows.push(FileSearchRow::Status(error.clone()));
-            } else if self.searching && self.text_matches.is_empty() {
+            if self.searching && self.text_matches.is_empty() {
                 self.rows
                     .push(FileSearchRow::Status("Searching file contents…".to_owned()));
-            } else if !self.searching && self.text_matches.is_empty() {
+            } else if !self.searching && self.text_matches.is_empty() && self.error.is_none() {
                 self.rows
                     .push(FileSearchRow::Status("No text matches".to_owned()));
             }
@@ -544,6 +630,85 @@ impl FileSearch {
 
     fn bump_rows_generation(&mut self) {
         self.rows_generation = self.rows_generation.wrapping_add(1);
+    }
+}
+
+struct SearchPreviewResult {
+    path: RepoPath,
+    content: String,
+}
+
+struct SearchPreviewWorker {
+    pending: Arc<Mutex<Option<(u64, PathBuf, RepoPath)>>>,
+    wake: Option<SyncSender<()>>,
+    results: Receiver<(u64, SearchPreviewResult)>,
+    generation: u64,
+    join: Option<JoinHandle<()>>,
+}
+
+impl SearchPreviewWorker {
+    fn new() -> Self {
+        let pending: Arc<Mutex<Option<(u64, PathBuf, RepoPath)>>> = Arc::new(Mutex::new(None));
+        let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker_pending = Arc::clone(&pending);
+        let join = thread::spawn(move || {
+            while wake_rx.recv().is_ok() {
+                let request = worker_pending.lock().ok().and_then(|mut slot| slot.take());
+                let Some((generation, root, path)) = request else {
+                    continue;
+                };
+                let content = git::file_content(&root, &path)
+                    .unwrap_or_else(|error| format!("Unable to preview file: {error:#}"));
+                if result_tx
+                    .send((generation, SearchPreviewResult { path, content }))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Self {
+            pending,
+            wake: Some(wake_tx),
+            results: result_rx,
+            generation: 0,
+            join: Some(join),
+        }
+    }
+
+    fn request(&mut self, root: PathBuf, path: RepoPath) {
+        self.generation = self.generation.wrapping_add(1);
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = Some((self.generation, root, path));
+        }
+        if let Some(wake) = &self.wake {
+            let _ = wake.try_send(());
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.take();
+        }
+    }
+
+    fn poll(&mut self) -> Option<SearchPreviewResult> {
+        let mut latest = None;
+        while let Ok((generation, result)) = self.results.try_recv() {
+            if generation == self.generation {
+                latest = Some(result);
+            }
+        }
+        latest
+    }
+
+    fn shutdown(&mut self) {
+        self.wake.take();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
@@ -937,7 +1102,7 @@ mod tests {
             RepoPath::from("src/ui/app_view.rs"),
         ];
         let mut search = FileSearch::new(&files, &[], Some(1));
-        search.query = "app view".to_owned();
+        search.query.set("app view");
         search.scope = SearchScope::Files;
         search.refresh_file_matches();
 
@@ -956,7 +1121,7 @@ mod tests {
             .map(|index| RepoPath::from(format!("src/file-{index:03}.rs")))
             .collect::<Vec<_>>();
         let mut search = FileSearch::new(&files, &[], Some(1));
-        search.query = "f".to_owned();
+        search.query.set("f");
         search.scope = SearchScope::Files;
         search.refresh_file_matches();
 
@@ -990,7 +1155,7 @@ mod tests {
             Some(repository.files_fingerprint),
         );
 
-        search.query = "Needle".to_owned();
+        search.query.set("Needle");
         search.refresh(&repository);
         wait_for_search(&mut search, &repository);
 
@@ -1054,7 +1219,7 @@ mod tests {
             &repository.ignored_files,
             Some(repository.files_fingerprint),
         );
-        search.query = "Needle".to_owned();
+        search.query.set("Needle");
         search.refresh(&repository);
         wait_for_search(&mut search, &repository);
         assert_eq!(search.text_match_count, 1);
@@ -1090,7 +1255,7 @@ mod tests {
             Some(repository.files_fingerprint),
         );
         search.scope = SearchScope::Text;
-        search.query = "a".to_owned();
+        search.query.set("a");
         search.refresh(&repository);
         wait_for_search(&mut search, &repository);
 

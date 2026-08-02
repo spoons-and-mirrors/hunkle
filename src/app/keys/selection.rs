@@ -24,6 +24,7 @@ impl App {
                 move_table(&mut self.graph_state, len, delta);
                 self.graph_scroll_to_selection = true;
             }
+            View::RepositorySearch => self.file_search.move_selection(delta),
         }
     }
 
@@ -49,6 +50,7 @@ impl App {
                     .select((self.visible_graph_len() > 0).then_some(0));
                 self.graph_scroll_to_selection = true;
             }
+            View::RepositorySearch => self.file_search.select_first(),
         }
     }
 
@@ -71,6 +73,7 @@ impl App {
                     .select(self.visible_graph_len().checked_sub(1));
                 self.graph_scroll_to_selection = true;
             }
+            View::RepositorySearch => self.file_search.select_last(),
         }
     }
 

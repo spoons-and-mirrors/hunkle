@@ -18,19 +18,32 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.file_search.close();
-                self.mode = Mode::Normal;
+                self.view = self.search_return_view;
             }
             KeyCode::Enter => self.activate_file_search_result(),
-            KeyCode::Down | KeyCode::Tab => self.file_search.move_selection(1),
-            KeyCode::Up | KeyCode::BackTab => self.file_search.move_selection(-1),
-            KeyCode::Left => {
+            KeyCode::Down => self.file_search.move_selection(1),
+            KeyCode::Up => self.file_search.move_selection(-1),
+            KeyCode::Tab => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.move_scope(1, repo);
+                }
+            }
+            KeyCode::BackTab => {
                 if let Some(repo) = self.session.data() {
                     self.file_search.move_scope(-1, repo);
                 }
             }
+            KeyCode::Left => {
+                self.file_search.query.move_left();
+            }
             KeyCode::Right => {
+                self.file_search.query.move_right();
+            }
+            KeyCode::Home => self.file_search.query.move_home(),
+            KeyCode::End => self.file_search.query.move_end(),
+            KeyCode::Delete => {
                 if let Some(repo) = self.session.data() {
-                    self.file_search.move_scope(1, repo);
+                    self.file_search.delete(repo);
                 }
             }
             KeyCode::Backspace => {
@@ -41,6 +54,14 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(repo) = self.session.data() {
                     self.file_search.clear(repo);
+                }
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.file_search.query.select_all();
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.delete_word(repo);
                 }
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -113,7 +134,8 @@ impl App {
             Some(repository.files_fingerprint),
         );
         self.file_search.open(repository.inventory_truncated);
-        self.mode = Mode::FileSearch;
+        self.search_return_view = self.view;
+        self.view = View::RepositorySearch;
     }
 
     pub(crate) fn activate_file_search_result(&mut self) {
@@ -127,7 +149,8 @@ impl App {
         let viewport = self
             .regions
             .explorer_list
-            .map_or(0, |rect| usize::from(rect.height));
+            .or(self.regions.file_search_list)
+            .map_or(1, |rect| usize::from(rect.height));
         if self.session.data().is_none() {
             return;
         }
@@ -138,7 +161,6 @@ impl App {
                 self.changes.pin_preview_line(path, line);
             }
             self.file_search.close();
-            self.mode = Mode::Normal;
         }
     }
 }

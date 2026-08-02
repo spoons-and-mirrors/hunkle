@@ -287,6 +287,10 @@ fn renders_every_primary_surface() {
     assert!(app.regions.agents_list.is_some());
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.agents_list.is_some());
+    assert!(app.herdr.showing_stash);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agents_list.is_none());
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

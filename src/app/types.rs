@@ -9,13 +9,13 @@ pub(crate) struct CommitDraftResult {
 pub enum View {
     Changes,
     Graph,
+    RepositorySearch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Commit,
-    FileSearch,
     Explorer,
     Settings,
     Help,
@@ -254,7 +254,7 @@ pub struct Regions {
     pub command_output: Option<Rect>,
     pub herdr_prompt_overlay: Option<Rect>,
     pub editor_overlay: Option<Rect>,
-    pub file_search_overlay: Option<Rect>,
+    pub file_search: Option<Rect>,
     pub file_search_list: Option<Rect>,
     pub files_add: Option<Rect>,
     pub files_root: Option<Rect>,

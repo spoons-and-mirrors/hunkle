@@ -89,6 +89,7 @@ mod tests;
 pub struct App {
     pub(crate) session: RepositorySession,
     pub view: View,
+    search_return_view: View,
     pub(crate) graph_commit_open: bool,
     pub mode: Mode,
     pub changes: ChangesState,
@@ -149,6 +150,7 @@ pub struct App {
     file_drag: Option<FileDrag>,
     last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
     last_file_editor_click: Option<(Position, Instant)>,
+    last_file_search_click: Option<(SearchDestination, Instant)>,
     pub(crate) file_editor_dragging: bool,
     pending_file_selection: Option<RepoPath>,
     pending_workspace_restore: Option<PathBuf>,
@@ -237,6 +239,7 @@ impl App {
         let mut app = Self {
             session,
             view: View::Changes,
+            search_return_view: View::Changes,
             graph_commit_open: false,
             mode,
             changes,
@@ -297,6 +300,7 @@ impl App {
             file_drag: None,
             last_worktree_file_click: None,
             last_file_editor_click: None,
+            last_file_search_click: None,
             file_editor_dragging: false,
             pending_file_selection: None,
             pending_workspace_restore: None,
@@ -322,7 +326,9 @@ impl App {
     }
 
     pub(crate) fn visible_view(&self) -> View {
-        if self.view == View::Graph
+        if self.view == View::RepositorySearch {
+            View::RepositorySearch
+        } else if self.view == View::Graph
             || self.graph_commit_open
             || (self.view == View::Changes
                 && self.changes.preview_pane == LeftPane::Worktree
@@ -501,6 +507,10 @@ impl App {
             self.handle_header_picker(key);
             return;
         }
+        if self.mode == Mode::Normal && self.view == View::RepositorySearch {
+            self.handle_file_search(key);
+            return;
+        }
         if self.mode == Mode::Normal
             && self
                 .settings
@@ -520,7 +530,6 @@ impl App {
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Commit => self.handle_commit_input(key),
-            Mode::FileSearch => self.handle_file_search(key),
             Mode::Explorer => self.handle_explorer(key),
             Mode::Settings => self.handle_settings(key),
             Mode::AuthorFilter => self.handle_author_filter(key),
@@ -581,6 +590,12 @@ impl App {
             self.header_picker.apply_filter();
             return;
         }
+        if self.mode == Mode::Normal && self.view == View::RepositorySearch {
+            if let Some(repo) = self.session.data() {
+                self.file_search.paste(text, repo);
+            }
+            return;
+        }
         if self.mode == Mode::Normal && self.paste_clipboard_files(text) {
             return;
         }
@@ -599,11 +614,6 @@ impl App {
             Mode::Commit => {
                 self.commit_input.insert(text);
                 self.schedule_commit_draft();
-            }
-            Mode::FileSearch => {
-                if let Some(repo) = self.session.data() {
-                    self.file_search.paste(text, repo);
-                }
             }
             Mode::Explorer => self.workspace_explorer.paste(text),
             Mode::Command if self.actions.status != CommandStatus::Running => {
@@ -689,6 +699,10 @@ impl App {
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        changed |= self
+            .file_search
+            .query
+            .poll_blink(self.mode == Mode::Normal && self.view == View::RepositorySearch);
         let naming_branch = self.header_picker.naming_branch();
         changed |= self.header_picker.branch_name.poll_blink(naming_branch);
         let cloning_repository = self.header_picker.cloning_repository();
@@ -1079,7 +1093,7 @@ impl App {
                             self.changes.set_pane(pane, Some(repo));
                             self.initial_pane_pending = false;
                         }
-                        if self.mode == Mode::FileSearch {
+                        if self.view == View::RepositorySearch {
                             self.file_search.repository_refreshed(repo);
                         } else {
                             self.file_search.invalidate();
@@ -1390,12 +1404,18 @@ impl App {
                 self.focus_commit();
             }
             ShortcutAction::ToggleAgents => {
-                self.agents_visible = !self.agents_visible;
                 self.dragging_agents = false;
                 self.notice = Some(
-                    if self.agents_visible {
+                    if !self.agents_visible {
+                        self.agents_visible = true;
+                        self.herdr.show_live_agents();
                         "Agents shown"
+                    } else if !self.herdr.showing_stash {
+                        self.herdr.toggle_stash();
+                        "Agent stash shown"
                     } else {
+                        self.agents_visible = false;
+                        self.herdr.show_live_agents();
                         "Agents hidden"
                     }
                     .to_owned(),

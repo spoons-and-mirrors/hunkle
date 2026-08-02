@@ -58,6 +58,7 @@ pub(super) fn draw_explorer_changes(
     app.regions.files_root = Some(root_target);
 
     let viewport = usize::from(list_area.height);
+    app.changes.reveal_explorer_selection(viewport);
     let row_count = app.changes.explorer_rows().len();
     app.changes.explorer_scroll = app
         .changes
