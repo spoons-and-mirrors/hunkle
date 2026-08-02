@@ -3,7 +3,7 @@ pub(super) use ratatui::{
     layout::{Alignment, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Clear, List, ListItem, Paragraph, Wrap},
 };
 pub(super) use ratatui_image::{Resize, StatefulImage};
 pub(super) use unicode_width::UnicodeWidthStr;
@@ -97,13 +97,20 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         worktree_content.width,
         1,
     );
-    let worktree_list_y = actions_row.bottom();
+    let staging_row = Rect::new(
+        worktree_content.x,
+        actions_row.bottom(),
+        worktree_content.width,
+        1,
+    );
+    let worktree_list_y = staging_row.bottom();
     let worktree_list = layout_agents_pane(app, worktree_content, worktree_list_y);
     app.regions.worktree_list = Some(worktree_list);
     app.regions.register_hit_target(
         HitTarget::Changes(app.changes.worktree_background_target()),
         worktree_list,
     );
+    draw_sidebar_tabs(frame, app, worktree_header);
     let repo = app.session.data().expect("checked above");
     let local_workspace = repo.is_local();
     let details_ready = repo.details_ready;
@@ -195,86 +202,44 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         }
     }
     let list = List::new(items);
-    let stage_label = details_ready.then(|| {
-        if worktree_header.width >= 36 {
-            format!("Stage all  {} files", repo.changes.len())
-        } else {
-            "All".to_owned()
-        }
-    });
-    let worktree_title = if !details_ready {
-        "CHANGES  …".to_owned()
-    } else if worktree_header.width >= 36 {
-        format!("CHANGES  {}", repo.changes.len())
-    } else {
-        "CHANGES".to_owned()
-    };
-    let files_title = "FILES";
-    let worktree_title_width = UnicodeWidthStr::width(worktree_title.as_str());
-    let title_width = worktree_title_width + 2 + files_title.len();
-    let stage_width = stage_label
-        .as_deref()
-        .map_or(0, |label| UnicodeWidthStr::width(label) + 3);
-    let stage_target_width = worktree_header.width.min(stage_width as u16);
+    let stage_label = details_ready.then_some("STAGE ALL  ");
+    let stage_width = stage_label.map_or(0, |label| UnicodeWidthStr::width(label) + 1);
+    let stage_target_width = staging_row.width.min(stage_width as u16);
     if details_ready {
         app.regions.register_hit_target(
             HitTarget::Changes(ChangesHitTarget::StageAll),
             Rect::new(
-                worktree_header.right().saturating_sub(stage_target_width),
-                worktree_header.y,
+                staging_row.right().saturating_sub(stage_target_width),
+                staging_row.y,
                 stage_target_width,
                 1,
             ),
         );
     }
-    let stage_padding =
-        usize::from(worktree_header.width).saturating_sub(title_width + stage_width);
-    let mut header = vec![
-        Span::styled(
-            worktree_title,
-            Style::default()
-                .fg(palette().muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(files_title, Style::default().fg(palette().faint)),
+    let files_label = if details_ready {
+        format!("{} FILES", repo.changes.len())
+    } else {
+        "LOADING CHANGES…".to_owned()
+    };
+    let stage_padding = usize::from(staging_row.width)
+        .saturating_sub(UnicodeWidthStr::width(files_label.as_str()) + stage_width);
+    let mut staging = vec![
+        Span::styled(files_label, Style::default().fg(palette().faint)),
         Span::raw(" ".repeat(stage_padding)),
     ];
     if let Some(stage_label) = stage_label {
-        header.extend([
-            Span::styled(
-                format!("{stage_label} "),
-                Style::default().fg(palette().muted),
-            ),
-            Span::styled(
-                format!("{checkbox} "),
-                Style::default()
-                    .fg(checkbox_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
+        staging.push(Span::styled(
+            stage_label,
+            Style::default().fg(palette().muted),
+        ));
+        staging.push(Span::styled(
+            checkbox,
+            Style::default()
+                .fg(checkbox_color)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
-    frame.render_widget(Paragraph::new(Line::from(header)), worktree_header);
-    app.regions.register_hit_target(
-        HitTarget::Changes(ChangesHitTarget::WorktreeTab),
-        Rect::new(
-            worktree_header.x,
-            worktree_header.y,
-            worktree_title_width as u16,
-            1,
-        ),
-    );
-    app.regions.register_hit_target(
-        HitTarget::Changes(ChangesHitTarget::FilesTab),
-        Rect::new(
-            worktree_header
-                .x
-                .saturating_add(worktree_title_width as u16 + 2),
-            worktree_header.y,
-            files_title.len() as u16,
-            1,
-        ),
-    );
+    frame.render_widget(Paragraph::new(Line::from(staging)), staging_row);
     frame.render_widget(list, worktree_list);
 
     app.regions.actions = if local_workspace {
@@ -300,6 +265,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
             has_changes,
             details_ready,
         );
+        draw_agent_history_pane(frame, app, worktree_content);
         return;
     }
     let repo = app.session.data().expect("checked above");
@@ -629,6 +595,121 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_detail
         has_changes,
         details_ready,
     );
+    draw_agent_history_pane(frame, app, worktree_content);
+}
+
+pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let agents_active = app.agents_pane_visible();
+    let tabs = [
+        (
+            "CHANGES",
+            ChangesHitTarget::WorktreeTab,
+            !agents_active && app.changes.pane == LeftPane::Worktree,
+        ),
+        (
+            "FILES",
+            ChangesHitTarget::FilesTab,
+            !agents_active && app.changes.pane == LeftPane::Files,
+        ),
+        ("AGENT", ChangesHitTarget::AgentsTab, agents_active),
+    ];
+    let mut spans = Vec::new();
+    let mut x = area.x;
+    for (index, (label, target, active)) in tabs.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+            x = x.saturating_add(2);
+        }
+        let width = UnicodeWidthStr::width(label) as u16;
+        spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(if active {
+                    palette().muted
+                } else {
+                    palette().faint
+                })
+                .add_modifier(if active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+        app.regions.register_hit_target(
+            HitTarget::Changes(target),
+            Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1),
+        );
+        x = x.saturating_add(width);
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, content: Rect) {
+    if !app.agents_pane_visible() {
+        return;
+    }
+    let bottom = app
+        .regions
+        .agents_splitter
+        .map_or(content.bottom(), |splitter| splitter.y);
+    let pane = Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        bottom.saturating_sub(content.y),
+    );
+    frame.render_widget(Clear, pane);
+    fill(frame, pane, palette().panel);
+    app.regions.clear_hit_targets_in(pane);
+    app.regions.worktree_list = None;
+    app.regions.explorer_list = None;
+    app.regions.commit = None;
+    app.regions.actions = None;
+    app.regions.files_add = None;
+    app.regions.files_root = None;
+
+    let header = Rect::new(
+        pane.x,
+        pane.y.saturating_add(1),
+        pane.width,
+        u16::from(pane.height > 1),
+    );
+    draw_sidebar_tabs(frame, app, header);
+    let history = Rect::new(
+        pane.x,
+        header.bottom().saturating_add(1),
+        pane.width,
+        pane.bottom()
+            .saturating_sub(header.bottom().saturating_add(1)),
+    );
+    let Some(index) = app.agents_pane_index() else {
+        frame.render_widget(
+            Paragraph::new("NO AGENT SELECTED")
+                .style(Style::default().fg(palette().faint))
+                .alignment(Alignment::Center),
+            history,
+        );
+        return;
+    };
+    app.herdr.request_agent_latest_user_message(index);
+    let selected_message = match app.hovered_hit_target {
+        Some(
+            HitTarget::AgentTooltip { agent, message } | HitTarget::AgentMessage { agent, message },
+        ) if agent == index => Some(message),
+        _ => None,
+    };
+    for (target, rect) in agents::draw_history(
+        frame,
+        &app.herdr,
+        index,
+        selected_message,
+        app.agent_preview_button_flash(),
+        app.agent_preview_picker_open(),
+        app.hovered_hit_target,
+        history,
+    ) {
+        app.regions.register_hit_target(target, rect);
+    }
 }
 
 #[cfg(test)]

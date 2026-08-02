@@ -35,7 +35,9 @@ pub(crate) use header_picker::{
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 #[cfg(test)]
 pub(crate) use herdr_session::HerdrPaneRect;
-pub(crate) use herdr_session::{AgentEntryState, AgentStatus, HerdrPaneLayout, HerdrSession};
+pub(crate) use herdr_session::{
+    AgentActivityPreview, AgentEntryState, AgentStatus, HerdrPaneLayout, HerdrSession,
+};
 pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
     LinkedWorktreeObservation, RepositoryPickerItem,
@@ -114,7 +116,13 @@ pub struct App {
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) herdr: HerdrSession,
     pub(crate) agents_visible: bool,
+    pub(crate) agents_pane_pinned: bool,
+    agent_preview_selection: Option<usize>,
+    agent_preview_picker_open: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
+    suppressed_agent_hover: Option<usize>,
+    pending_agent_hover: Option<(usize, Position, Instant)>,
+    agent_preview_button_flash: Option<(bool, Instant)>,
     pub settings: Settings,
     pub settings_selection: usize,
     pub(crate) settings_page: SettingsPage,
@@ -256,7 +264,13 @@ impl App {
             linked_worktrees,
             herdr,
             agents_visible: true,
+            agents_pane_pinned: false,
+            agent_preview_selection: None,
+            agent_preview_picker_open: false,
             hovered_hit_target: None,
+            suppressed_agent_hover: None,
+            pending_agent_hover: None,
+            agent_preview_button_flash: None,
             settings,
             settings_selection: 0,
             settings_page: SettingsPage::General,
@@ -323,6 +337,57 @@ impl App {
         } else {
             View::Changes
         }
+    }
+
+    pub(crate) fn agents_pane_visible(&self) -> bool {
+        self.agents_pane_pinned
+            || self.agent_preview_picker_open
+            || match self.hovered_hit_target {
+                Some(HitTarget::Agent(index)) => !self.agent_preview_blocked(index),
+                Some(
+                    HitTarget::AgentPreviewPicker(_)
+                    | HitTarget::AgentPreviewPickerItem(_)
+                    | HitTarget::AgentPreviewPrevious(_)
+                    | HitTarget::AgentPreviewNext(_)
+                    | HitTarget::AgentTooltip { .. }
+                    | HitTarget::AgentMessage { .. },
+                ) => true,
+                _ => false,
+            }
+    }
+
+    pub(crate) fn agents_pane_index(&self) -> Option<usize> {
+        if self.agents_pane_pinned || self.agent_preview_picker_open {
+            return self
+                .agent_preview_selection
+                .filter(|index| *index < self.herdr.agents.len())
+                .or_else(|| self.default_agent_preview_index());
+        }
+        match self.hovered_hit_target {
+            Some(HitTarget::Agent(index)) if !self.agent_preview_blocked(index) => Some(index),
+            Some(
+                HitTarget::AgentPreviewPicker(agent)
+                | HitTarget::AgentPreviewPickerItem(agent)
+                | HitTarget::AgentPreviewPrevious(agent)
+                | HitTarget::AgentPreviewNext(agent)
+                | HitTarget::AgentTooltip { agent, .. }
+                | HitTarget::AgentMessage { agent, .. },
+            ) => Some(agent),
+            _ => None,
+        }
+    }
+
+    fn default_agent_preview_index(&self) -> Option<usize> {
+        (0..self.herdr.agents.len())
+            .find(|index| self.herdr.agent_entry_state(*index).selected)
+            .or((!self.herdr.agents.is_empty()).then_some(0))
+    }
+
+    fn agent_preview_blocked(&self, index: usize) -> bool {
+        self.suppressed_agent_hover == Some(index)
+            || self
+                .pending_agent_hover
+                .is_some_and(|(pending, _, _)| pending == index)
     }
 
     pub(crate) fn diagnostic_context(&self) -> String {
@@ -611,7 +676,16 @@ impl App {
     }
 
     pub fn poll_worker(&mut self) -> bool {
-        let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
+        let now = Instant::now();
+        let mut changed = self.poll_agent_hover(now);
+        if self
+            .agent_preview_button_flash
+            .is_some_and(|(_, deadline)| now >= deadline)
+        {
+            self.agent_preview_button_flash = None;
+            changed = true;
+        }
+        changed |= self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
         if self.herdr.is_enabled() {
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
@@ -1846,6 +1920,7 @@ impl App {
         match self.settings.shortcuts.main_action(key) {
             Some(ShortcutAction::TogglePane) => self.toggle_left_pane(),
             Some(ShortcutAction::ToggleGraph) if self.mode == Mode::Normal => self.toggle_graph(),
+            Some(ShortcutAction::ShowAgents) => self.show_agents_pane(),
             _ => return false,
         }
         true
@@ -1858,7 +1933,52 @@ impl App {
 
     fn show_left_pane(&mut self, pane: LeftPane) {
         self.initial_pane_pending = false;
+        self.dismiss_agent_preview();
         self.changes.set_pane(pane, self.session.data());
+        self.show_main_pane();
+    }
+
+    fn dismiss_agent_preview(&mut self) {
+        self.agents_pane_pinned = false;
+        self.agent_preview_selection = None;
+        self.agent_preview_picker_open = false;
+        self.pending_agent_hover = None;
+        self.suppressed_agent_hover = None;
+        self.agent_preview_button_flash = None;
+        if matches!(
+            self.hovered_hit_target,
+            Some(
+                HitTarget::Agent(_)
+                    | HitTarget::AgentPreviewPicker(_)
+                    | HitTarget::AgentPreviewPickerItem(_)
+                    | HitTarget::AgentPreviewPrevious(_)
+                    | HitTarget::AgentPreviewNext(_)
+                    | HitTarget::AgentTooltip { .. }
+                    | HitTarget::AgentMessage { .. }
+            )
+        ) {
+            self.hovered_hit_target = None;
+        }
+    }
+
+    pub(crate) fn agent_preview_button_flash(&self) -> Option<bool> {
+        self.agent_preview_button_flash
+            .filter(|(_, deadline)| Instant::now() < *deadline)
+            .map(|(forward, _)| forward)
+    }
+
+    pub(crate) fn agent_preview_picker_open(&self) -> bool {
+        self.agent_preview_picker_open
+    }
+
+    pub(super) fn show_agents_pane(&mut self) {
+        let selection = self
+            .agents_pane_index()
+            .or_else(|| self.default_agent_preview_index());
+        self.initial_pane_pending = false;
+        self.agents_visible = true;
+        self.agents_pane_pinned = true;
+        self.agent_preview_selection = selection;
         self.show_main_pane();
     }
 
@@ -1868,6 +1988,11 @@ impl App {
     }
 
     fn toggle_left_pane(&mut self) {
+        if self.agents_pane_pinned {
+            self.dismiss_agent_preview();
+            self.show_main_pane();
+            return;
+        }
         self.show_left_pane(match self.changes.pane {
             LeftPane::Worktree => LeftPane::Files,
             LeftPane::Files => LeftPane::Worktree,

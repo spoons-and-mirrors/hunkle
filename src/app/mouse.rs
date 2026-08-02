@@ -11,23 +11,128 @@ use super::{
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+const AGENT_HOVER_DELAY: Duration = Duration::from_millis(500);
+const AGENT_PREVIEW_BUTTON_FLASH: Duration = Duration::from_millis(150);
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
+        if self.agent_preview_picker_open
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && !matches!(
+                self.regions.hit_target_at(point),
+                Some(HitTarget::AgentPreviewPicker(_) | HitTarget::AgentPreviewPickerItem(_))
+            )
+        {
+            self.agent_preview_picker_open = false;
+        }
         if mouse.kind == MouseEventKind::Moved {
+            let preview_was_visible = self.agents_pane_visible();
             let target = self.regions.hit_target_at(point);
-            self.hovered_hit_target = match (target, self.hovered_hit_target) {
-                (
-                    Some(HitTarget::Agent(index)),
-                    Some(HitTarget::AgentTooltip { agent, message }),
-                ) if index == agent => Some(HitTarget::AgentTooltip { agent, message }),
-                _ => target,
-            };
+            let suppressed_agent = self.suppressed_agent_hover.filter(|index| {
+                self.regions
+                    .hit_target_rect(HitTarget::Agent(*index))
+                    .is_some_and(|card| card.contains(point))
+            });
+            if let Some(index) = suppressed_agent {
+                self.pending_agent_hover = None;
+                self.hovered_hit_target = Some(HitTarget::Agent(index));
+            } else {
+                self.suppressed_agent_hover = None;
+                let pending_agent = self.pending_agent_hover.map(|(index, _, _)| index);
+                let open_agent = match self.hovered_hit_target {
+                    Some(HitTarget::Agent(index)) => Some(index),
+                    Some(
+                        HitTarget::AgentPreviewPicker(agent)
+                        | HitTarget::AgentPreviewPickerItem(agent)
+                        | HitTarget::AgentPreviewPrevious(agent)
+                        | HitTarget::AgentPreviewNext(agent)
+                        | HitTarget::AgentTooltip { agent, .. }
+                        | HitTarget::AgentMessage { agent, .. },
+                    ) => Some(agent),
+                    _ => None,
+                };
+                let open_message = match (pending_agent, self.hovered_hit_target) {
+                    (Some(_), _) => None,
+                    (None, Some(HitTarget::Agent(agent))) => self
+                        .herdr
+                        .agent_user_messages(agent)
+                        .filter(|messages| !messages.is_empty())
+                        .map(|messages| (agent, messages.len() - 1)),
+                    (
+                        None,
+                        Some(
+                            HitTarget::AgentPreviewPicker(agent)
+                            | HitTarget::AgentPreviewPickerItem(agent)
+                            | HitTarget::AgentPreviewPrevious(agent)
+                            | HitTarget::AgentPreviewNext(agent),
+                        ),
+                    ) => self
+                        .herdr
+                        .agent_user_messages(agent)
+                        .filter(|messages| !messages.is_empty())
+                        .map(|messages| (agent, messages.len() - 1)),
+                    (
+                        None,
+                        Some(
+                            HitTarget::AgentTooltip { agent, message }
+                            | HitTarget::AgentMessage { agent, message },
+                        ),
+                    ) => Some((agent, message)),
+                    _ => None,
+                };
+                let delayed_agent = match target {
+                    Some(HitTarget::Agent(index))
+                        if pending_agent == Some(index)
+                            || (!preview_was_visible && open_agent != Some(index)) =>
+                    {
+                        Some(index)
+                    }
+                    _ => None,
+                };
+                if let Some(index) = delayed_agent {
+                    let deadline = match self.pending_agent_hover {
+                        Some((pending, _, deadline)) if pending == index => deadline,
+                        _ => Instant::now() + AGENT_HOVER_DELAY,
+                    };
+                    self.pending_agent_hover = Some((index, point, deadline));
+                    self.hovered_hit_target = Some(HitTarget::Agent(index));
+                } else {
+                    self.pending_agent_hover = None;
+                    self.hovered_hit_target = match (target, open_message) {
+                        (
+                            Some(
+                                target @ (HitTarget::AgentTooltip { .. }
+                                | HitTarget::AgentMessage { .. }),
+                            ),
+                            _,
+                        ) => Some(target),
+                        (Some(HitTarget::Agent(index)), Some((agent, message)))
+                            if index == agent =>
+                        {
+                            Some(HitTarget::AgentTooltip { agent, message })
+                        }
+                        (Some(target @ HitTarget::Agent(_)), _) => Some(target),
+                        (_, Some((agent, message)))
+                            if self
+                                .regions
+                                .worktree
+                                .is_some_and(|sidebar| sidebar.contains(point)) =>
+                        {
+                            Some(HitTarget::AgentTooltip { agent, message })
+                        }
+                        _ => target,
+                    };
+                }
+            }
             if let Some(target) = self.hovered_hit_target {
                 let agent = match target {
                     HitTarget::Agent(index) => Some(index),
-                    HitTarget::AgentTooltip { agent, .. }
+                    HitTarget::AgentPreviewPicker(agent)
+                    | HitTarget::AgentPreviewPickerItem(agent)
+                    | HitTarget::AgentPreviewPrevious(agent)
+                    | HitTarget::AgentPreviewNext(agent)
+                    | HitTarget::AgentTooltip { agent, .. }
                     | HitTarget::AgentMessage { agent, .. } => Some(agent),
                     _ => None,
                 };
@@ -35,6 +140,8 @@ impl App {
                     self.herdr.request_agent_latest_user_message(index);
                 }
             }
+        } else {
+            self.pending_agent_hover = None;
         }
         if self.herdr_prompt.agent_pane_picker_open() {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -207,7 +314,7 @@ impl App {
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-        ) && self.cycle_agent_message(point, mouse.kind == MouseEventKind::ScrollDown)
+        ) && self.cycle_agent_message(point, mouse.kind == MouseEventKind::ScrollUp)
         {
             return;
         }
@@ -587,6 +694,23 @@ impl App {
                 self.activate_agent(index);
                 return;
             }
+            Some(HitTarget::AgentPreviewPicker(index)) => {
+                self.agent_preview_selection = Some(index);
+                self.agent_preview_picker_open = !self.agent_preview_picker_open;
+                return;
+            }
+            Some(HitTarget::AgentPreviewPickerItem(index)) => {
+                self.select_agent_preview(index);
+                return;
+            }
+            Some(HitTarget::AgentPreviewPrevious(index)) => {
+                self.cycle_agent_preview(index, false);
+                return;
+            }
+            Some(HitTarget::AgentPreviewNext(index)) => {
+                self.cycle_agent_preview(index, true);
+                return;
+            }
             Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => return,
             _ => {}
         }
@@ -804,9 +928,14 @@ impl App {
     fn apply_changes_effect(&mut self, effect: Option<ChangesEffect>) {
         match effect {
             Some(ChangesEffect::PaneActivated) => {
+                self.dismiss_agent_preview();
                 self.last_worktree_file_click = None;
                 self.mode = Mode::Normal;
                 self.show_main_pane();
+            }
+            Some(ChangesEffect::AgentsPaneActivated) => {
+                self.show_agents_pane();
+                self.mode = Mode::Normal;
             }
             Some(ChangesEffect::WorktreeDirectoryActivated) => {
                 self.last_worktree_file_click = None;
@@ -876,8 +1005,74 @@ impl App {
             .get(index)
             .map(|agent| agent.pane_id.clone())
         {
+            self.suppressed_agent_hover = Some(index);
+            self.pending_agent_hover = None;
+            self.hovered_hit_target = None;
+            self.agents_pane_pinned = false;
+            self.agent_preview_selection = None;
+            self.agent_preview_picker_open = false;
             self.herdr.display_agent(pane_id);
         }
+    }
+
+    fn cycle_agent_preview(&mut self, current: usize, forward: bool) {
+        let count = self.herdr.agents.len();
+        if count == 0 {
+            return;
+        }
+        let current = current.min(count - 1);
+        let index = if forward {
+            (current + 1) % count
+        } else if current == 0 {
+            count - 1
+        } else {
+            current - 1
+        };
+        self.pending_agent_hover = None;
+        self.suppressed_agent_hover = None;
+        self.agent_preview_picker_open = false;
+        self.agent_preview_button_flash =
+            Some((forward, Instant::now() + AGENT_PREVIEW_BUTTON_FLASH));
+        self.select_agent_preview(index);
+    }
+
+    fn select_agent_preview(&mut self, index: usize) {
+        if index >= self.herdr.agents.len() {
+            return;
+        }
+        self.agent_preview_selection = Some(index);
+        self.agent_preview_picker_open = false;
+        self.hovered_hit_target = self
+            .herdr
+            .agent_user_messages(index)
+            .filter(|messages| !messages.is_empty())
+            .map_or(Some(HitTarget::Agent(index)), |messages| {
+                Some(HitTarget::AgentTooltip {
+                    agent: index,
+                    message: messages.len() - 1,
+                })
+            });
+        self.herdr.request_agent_latest_user_message(index);
+    }
+
+    pub(crate) fn poll_agent_hover(&mut self, now: Instant) -> bool {
+        let Some((index, point, deadline)) = self.pending_agent_hover else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.pending_agent_hover = None;
+        if !self
+            .regions
+            .hit_target_rect(HitTarget::Agent(index))
+            .is_some_and(|card| card.contains(point))
+        {
+            return false;
+        }
+        self.hovered_hit_target = Some(HitTarget::Agent(index));
+        self.herdr.request_agent_latest_user_message(index);
+        true
     }
 
     fn handle_action_mouse(&mut self, mouse: MouseEvent) {
@@ -1245,7 +1440,7 @@ impl App {
         let Some(message_count) = self
             .herdr
             .agent_user_messages(agent)
-            .map(<[String]>::len)
+            .map(|messages| messages.len())
             .filter(|count| *count > 0)
         else {
             self.herdr.request_agent_latest_user_message(agent);

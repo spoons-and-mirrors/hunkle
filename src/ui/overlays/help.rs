@@ -111,6 +111,7 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
             ShortcutAction::ToggleAgents,
             "Show / hide agents",
         ),
+        shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Open agents pane"),
         shortcut_help(shortcuts, ShortcutAction::UnstageAll, "Unstage all"),
         shortcut_help(
             shortcuts,
