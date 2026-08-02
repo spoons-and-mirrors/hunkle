@@ -31,7 +31,8 @@ pub(crate) use file_editor::{FileEditor, TAB_WIDTH};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use header_picker::{
-    AgentDestinationKind, BranchPickerStep, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
+    AgentDestinationKind, BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem,
+    HeaderPickerKind, RepositoryPickerStep,
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 #[cfg(test)]
@@ -580,6 +581,15 @@ impl App {
             self.header_picker.message = None;
             return;
         }
+        if self.header_picker.cloning_repository() {
+            let text = text
+                .chars()
+                .filter(|character| !matches!(character, '\r' | '\n'))
+                .collect::<String>();
+            self.header_picker.clone_input_mut().insert(&text);
+            self.header_picker.message = None;
+            return;
+        }
         if self.header_picker.filtering() {
             let text = text
                 .chars()
@@ -714,9 +724,28 @@ impl App {
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
         let naming_branch = self.header_picker.naming_branch();
         changed |= self.header_picker.branch_name.poll_blink(naming_branch);
+        let cloning_repository = self.header_picker.cloning_repository();
+        changed |= self.header_picker.clone_directory.poll_blink(
+            cloning_repository && self.header_picker.clone_field == CloneField::Directory,
+        );
+        changed |= self
+            .header_picker
+            .clone_url
+            .poll_blink(cloning_repository && self.header_picker.clone_field == CloneField::Url);
         let filtering_header_picker = self.header_picker.filtering();
         changed |= self.header_picker.query.poll_blink(filtering_header_picker);
         changed |= self.header_picker.poll_change_details();
+        if let Some(result) = self.header_picker.poll_clone() {
+            changed = true;
+            match result {
+                Ok(path) => {
+                    self.notice = Some(format!("Cloned {}; opening workspace…", path.display()));
+                    self.queue_workspace_restore(path);
+                    self.linked_worktrees.refresh();
+                }
+                Err(error) => self.notice = Some(format!("Could not clone repository: {error}")),
+            }
+        }
         if let Some(done) = self
             .commit_draft_rx
             .as_ref()

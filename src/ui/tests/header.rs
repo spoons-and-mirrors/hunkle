@@ -53,6 +53,74 @@ fn repository_picker_labels_linked_worktrees_by_repository() {
 }
 
 #[test]
+fn repository_picker_clones_and_opens_a_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    fs::create_dir(&source).unwrap();
+    run_git(&source, &["init", "-b", "main"]);
+    run_git(&source, &["config", "user.name", "Header Test"]);
+    run_git(&source, &["config", "user.email", "header@example.com"]);
+    fs::write(source.join("tracked.txt"), "initial\n").unwrap();
+    run_git(&source, &["add", "tracked.txt"]);
+    run_git(&source, &["commit", "-m", "initial"]);
+    let destination = directory.path().join("cloned");
+
+    let mut app = App::new(source.clone());
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let repository = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderRepository)
+        .unwrap();
+    click(&mut app, repository.x, repository.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let picker = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOverlay)
+        .unwrap();
+    let clone = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerClone)
+        .unwrap();
+    assert_eq!(clone.y, picker.y + 1);
+    assert_eq!(clone.right() + 1, picker.right());
+    assert_eq!(
+        terminal.backend().buffer()[(clone.x, clone.y)].bg,
+        palette().green
+    );
+    click(&mut app, clone.x, clone.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert!(app.header_picker.cloning_repository());
+    let directory_input = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerCloneDirectory)
+        .unwrap();
+    let url_input = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerCloneUrl)
+        .unwrap();
+    assert_eq!(directory_input.y + 2, url_input.y);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    app.handle_paste(destination.to_str().unwrap());
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_paste(source.to_str().unwrap());
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.header_picker.is_open());
+    assert!(app.header_picker.clone_running());
+
+    wait_for(&mut app, |app| {
+        app.repository()
+            .is_some_and(|repository| repository.root == destination && repository.details_ready)
+    });
+    assert_eq!(
+        fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+        "initial\n"
+    );
+}
+
+#[test]
 fn header_cards_open_pickers_and_checkout_branches() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("repository");

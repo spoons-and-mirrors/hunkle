@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, ExplorerHitTarget, ExplorerTab, GraphColumnDrag, GraphHitTarget,
+    ACTION_ITEMS, App, CloneField, ExplorerHitTarget, ExplorerTab, GraphColumnDrag, GraphHitTarget,
     HeaderPickerKind, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
     RepositoryBrowserHitTarget, SettingsPage, Shortcuts, View, WorktreeManagerEffect,
     WorktreeManagerHitTarget, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
@@ -163,6 +163,13 @@ impl App {
                         }
                         Some(HitTarget::HeaderPickerNewBranch) => {
                             self.begin_header_branch_creation()
+                        }
+                        Some(HitTarget::HeaderPickerClone) => self.begin_repository_clone(),
+                        Some(HitTarget::HeaderPickerCloneDirectory) => {
+                            self.header_picker.set_clone_field(CloneField::Directory)
+                        }
+                        Some(HitTarget::HeaderPickerCloneUrl) => {
+                            self.header_picker.set_clone_field(CloneField::Url)
                         }
                         Some(HitTarget::HeaderPickerOverlay) => {}
                         _ => self.header_picker.close(),
@@ -995,6 +1002,9 @@ impl App {
                     | HitTarget::AgentPaneSplit(_, _)
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
+                    | HitTarget::HeaderPickerClone
+                    | HitTarget::HeaderPickerCloneDirectory
+                    | HitTarget::HeaderPickerCloneUrl
                     | HitTarget::HeaderPickerItem(_),
                 ) => {}
             },
@@ -1058,6 +1068,9 @@ impl App {
                     | HitTarget::AgentPaneSplit(_, _)
                     | HitTarget::HeaderPickerOverlay
                     | HitTarget::HeaderPickerNewBranch
+                    | HitTarget::HeaderPickerClone
+                    | HitTarget::HeaderPickerCloneDirectory
+                    | HitTarget::HeaderPickerCloneUrl
                     | HitTarget::HeaderPickerItem(_),
                 ) => {}
             },

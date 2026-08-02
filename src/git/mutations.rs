@@ -1,5 +1,30 @@
 use super::*;
 
+pub(crate) fn clone_repository(destination: &Path, url: &str) -> Result<PathBuf> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("clone destination must have a parent directory"))?;
+    let parent = fs::canonicalize(parent)
+        .with_context(|| format!("could not open clone directory {}", parent.display()))?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| anyhow!("clone destination must name a repository directory"))?;
+    let destination = parent.join(name);
+    let mut command = base_command(&parent);
+    command.arg("clone").arg("--").arg(url).arg(&destination);
+    let output = process::run(
+        &mut command,
+        Limits::new(GIT_STDOUT_LIMIT, GIT_STDERR_LIMIT, GIT_NETWORK_TIMEOUT),
+    )
+    .context("could not run git clone")?;
+    ensure_complete(&output, "git clone")?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    fs::canonicalize(&destination)
+        .with_context(|| format!("could not open cloned repository {}", destination.display()))
+}
+
 pub(crate) fn discard_unstaged(root: &Path, change: &Change) -> Result<()> {
     if change.staged {
         bail!("Cannot discard a staged change");

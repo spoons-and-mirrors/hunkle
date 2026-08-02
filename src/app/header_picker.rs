@@ -62,6 +62,20 @@ pub(crate) enum BranchPickerStep {
     Name,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepositoryPickerStep {
+    #[default]
+    Repositories,
+    Clone,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloneField {
+    #[default]
+    Directory,
+    Url,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct HeaderPicker {
     pub(crate) kind: Option<HeaderPickerKind>,
@@ -79,6 +93,11 @@ pub(crate) struct HeaderPicker {
     pub(crate) branch_step: BranchPickerStep,
     pub(crate) branch_base: Option<Branch>,
     pub(crate) branch_name: TextInput,
+    pub(crate) repository_step: RepositoryPickerStep,
+    pub(crate) clone_directory: TextInput,
+    pub(crate) clone_url: TextInput,
+    pub(crate) clone_field: CloneField,
+    clone_rx: Option<Receiver<Result<PathBuf, String>>>,
     change_details_rx: Option<Receiver<ChangeDetailsCompletion>>,
 }
 
@@ -109,6 +128,10 @@ impl HeaderPicker {
         self.branch_step = BranchPickerStep::Branches;
         self.branch_base = None;
         self.branch_name.clear();
+        self.repository_step = RepositoryPickerStep::Repositories;
+        self.clone_field = CloneField::Directory;
+        self.clone_directory.clear();
+        self.clone_url.clear();
     }
 
     pub(crate) fn open_message(&mut self, kind: HeaderPickerKind, message: String) {
@@ -129,6 +152,10 @@ impl HeaderPicker {
         self.branch_step = BranchPickerStep::Branches;
         self.branch_base = None;
         self.branch_name.clear();
+        self.repository_step = RepositoryPickerStep::Repositories;
+        self.clone_field = CloneField::Directory;
+        self.clone_directory.clear();
+        self.clone_url.clear();
     }
 
     pub(crate) fn open_branch_bases(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
@@ -191,6 +218,10 @@ impl HeaderPicker {
         self.branch_step = BranchPickerStep::Branches;
         self.branch_base = None;
         self.branch_name.clear();
+        self.repository_step = RepositoryPickerStep::Repositories;
+        self.clone_field = CloneField::Directory;
+        self.clone_directory.clear();
+        self.clone_url.clear();
     }
 
     pub(crate) fn start_change_details(&mut self) {
@@ -381,8 +412,64 @@ impl HeaderPicker {
         self.kind == Some(HeaderPickerKind::Branches) && self.branch_step == BranchPickerStep::Name
     }
 
+    pub(crate) fn cloning_repository(&self) -> bool {
+        self.kind == Some(HeaderPickerKind::Repositories)
+            && self.repository_step == RepositoryPickerStep::Clone
+    }
+
     pub(crate) fn filtering(&self) -> bool {
-        self.is_open() && self.searchable && !self.naming_branch()
+        self.is_open() && self.searchable && !self.naming_branch() && !self.cloning_repository()
+    }
+
+    pub(crate) fn begin_clone(&mut self, directory: &Path) {
+        self.repository_step = RepositoryPickerStep::Clone;
+        self.clone_directory.set(directory.display().to_string());
+        self.clone_directory.focus();
+        self.clone_url.clear();
+        self.clone_field = CloneField::Directory;
+        self.message = None;
+    }
+
+    pub(crate) fn set_clone_field(&mut self, field: CloneField) {
+        self.clone_field = field;
+        match field {
+            CloneField::Directory => self.clone_directory.focus(),
+            CloneField::Url => self.clone_url.focus(),
+        }
+    }
+
+    pub(crate) fn clone_input_mut(&mut self) -> &mut TextInput {
+        match self.clone_field {
+            CloneField::Directory => &mut self.clone_directory,
+            CloneField::Url => &mut self.clone_url,
+        }
+    }
+
+    pub(crate) fn clone_running(&self) -> bool {
+        self.clone_rx.is_some()
+    }
+
+    pub(crate) fn start_clone(&mut self, directory: PathBuf, url: String) -> bool {
+        if self.clone_running() {
+            return false;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.clone_rx = Some(receiver);
+        thread::spawn(move || {
+            let result = git::clone_repository(&directory, &url).map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        true
+    }
+
+    pub(crate) fn poll_clone(&mut self) -> Option<Result<PathBuf, String>> {
+        let result = match self.clone_rx.as_ref()?.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err("repository clone worker stopped".to_string()),
+        };
+        self.clone_rx = None;
+        Some(result)
     }
 
     pub(crate) fn apply_filter(&mut self) {
