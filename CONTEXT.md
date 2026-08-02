@@ -30,7 +30,7 @@ Git inventory is authoritative for whether a linked worktree exists and for its 
 
 ## Linked worktree catalog
 
-The application-owned catalog that reconciles Git inventory, known repository discovery, and Herdr observations. Header pickers and agent destinations consume its snapshot rather than independently reconstructing topology.
+The application-owned catalog that reconciles Git inventory, known repository discovery, and Herdr observations. Header pickers and linked-worktree labels consume its snapshot rather than independently reconstructing topology.
 
 ## Files
 
@@ -42,7 +42,7 @@ The `o` interaction for finding and opening another workspace. Confirming a file
 
 ## Agent destination
 
-A Git-inventoried Repository or Linked worktree where Hunkle can launch an OpenCode agent. Inside Herdr, the user first chooses this filesystem destination and then chooses a non-Hunkle pane in the active tab to replace. The Linked worktree catalog remains authoritative for destination existence; Herdr remains the adapter for pane layout and replacement.
+The active Git Repository or Linked worktree where Hunkle launches an OpenCode agent. The Repository, Worktree, and Branch header cards define this filesystem destination; clicking Agent uses it directly. Herdr remains the adapter for choosing pane placement and starting the agent.
 
 ## Interaction
 

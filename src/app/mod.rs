@@ -29,8 +29,8 @@ pub(crate) use file_editor::{FileEditor, TAB_WIDTH};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use header_picker::{
-    AgentDestinationKind, BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem,
-    HeaderPickerKind, RepositoryPickerStep, WorktreePickerField, WorktreePickerStep,
+    BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
+    RepositoryPickerStep, WorktreePickerField, WorktreePickerStep,
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 #[cfg(test)]
@@ -1351,6 +1351,7 @@ impl App {
             }
             ShortcutAction::Quit => self.should_quit = true,
             ShortcutAction::OpenHerdr => self.open_herdr_prompt(),
+            ShortcutAction::StartAgent => self.start_header_agent(),
             ShortcutAction::Refresh => self.reload(RefreshScope::ALL),
             ShortcutAction::OpenExplorer => self.open_explorer(),
             ShortcutAction::OpenSettings => self.open_settings(),
@@ -1722,7 +1723,6 @@ impl App {
             HeaderPickerKind::Worktrees => self.open_header_worktrees(),
             HeaderPickerKind::Branches => self.open_header_branches(),
             HeaderPickerKind::DiffTargets => self.open_header_diff_targets(),
-            HeaderPickerKind::AgentDestinations => self.open_header_agent_destinations(),
         }
     }
 
@@ -1801,13 +1801,6 @@ impl App {
                     current_revision,
                     target_revision,
                 );
-            }
-            HeaderPickerItem::AgentDestination { path, branch, .. } => {
-                if let Err(error) = self.herdr_prompt.prepare_agent(path, branch) {
-                    self.notice = Some(error);
-                } else {
-                    self.notice = Some("Loading active Herdr tab layout".to_owned());
-                }
             }
         }
     }

@@ -14,13 +14,6 @@ pub(crate) enum HeaderPickerKind {
     Worktrees,
     Branches,
     DiffTargets,
-    AgentDestinations,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentDestinationKind {
-    Repository,
-    Worktree,
 }
 
 #[derive(Debug, Clone)]
@@ -38,12 +31,6 @@ pub(crate) enum HeaderPickerItem {
     Branch(Branch),
     BranchBase(Branch),
     DiffTarget(Branch),
-    AgentDestination {
-        path: PathBuf,
-        repository: String,
-        branch: String,
-        kind: AgentDestinationKind,
-    },
 }
 
 #[derive(Debug)]
@@ -681,12 +668,6 @@ impl HeaderPickerItem {
             Self::Branch(branch) | Self::BranchBase(branch) | Self::DiffTarget(branch) => {
                 branch.name.clone()
             }
-            Self::AgentDestination {
-                path,
-                repository,
-                branch,
-                ..
-            } => format!("{} {repository} {branch}", path.display()),
         }
     }
 }
@@ -698,15 +679,15 @@ mod tests {
     #[test]
     fn scrolling_moves_the_viewport_without_moving_selection() {
         let items = (0..12)
-            .map(|index| HeaderPickerItem::AgentDestination {
+            .map(|index| HeaderPickerItem::Repository {
                 path: PathBuf::from(format!("/tmp/repository-{index}")),
-                repository: format!("repository-{index}"),
-                branch: "main".to_owned(),
-                kind: AgentDestinationKind::Repository,
+                label: format!("repository-{index}"),
+                stats: None,
+                branch: Some("main".to_owned()),
             })
             .collect();
         let mut picker = HeaderPicker::default();
-        picker.open(HeaderPickerKind::AgentDestinations, items, 0);
+        picker.open(HeaderPickerKind::Repositories, items, 0);
         picker.set_viewport_rows(3);
 
         picker.scroll_by(2);
@@ -716,25 +697,6 @@ mod tests {
         picker.move_selection(1);
         assert_eq!(picker.selected, 1);
         assert_eq!(picker.visible_start(), 1);
-    }
-
-    #[test]
-    fn filters_agent_destinations_by_branch() {
-        let mut picker = HeaderPicker::default();
-        picker.open(
-            HeaderPickerKind::AgentDestinations,
-            vec![HeaderPickerItem::AgentDestination {
-                path: PathBuf::from("/tmp/checkout"),
-                repository: "repository".to_owned(),
-                branch: "topic-branch".to_owned(),
-                kind: AgentDestinationKind::Worktree,
-            }],
-            0,
-        );
-        picker.query.insert("topic");
-        picker.apply_filter();
-
-        assert_eq!(picker.items.len(), 1);
     }
 
     #[test]

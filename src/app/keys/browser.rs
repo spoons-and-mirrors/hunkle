@@ -203,70 +203,25 @@ impl App {
         }
     }
 
-    pub(crate) fn open_header_agent_destinations(&mut self) {
-        if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
-            self.header_picker.open_message(
-                HeaderPickerKind::AgentDestinations,
-                "Agents can only be started inside Herdr".to_owned(),
-            );
+    pub(crate) fn start_header_agent(&mut self) {
+        if self.mode != Mode::Normal || self.session.open_running() {
             return;
         }
-
-        let current = self.repository().map(|repository| repository.root.clone());
-        let snapshot = self.linked_worktrees.snapshot();
-        let mut items = Vec::new();
-        for repository in snapshot
-            .repositories
-            .iter()
-            .filter(|repository| repository.error.is_none())
-        {
-            for worktree in repository
-                .worktrees
-                .iter()
-                .filter(|worktree| !worktree.is_bare)
-            {
-                let branch = worktree
-                    .branch
-                    .as_deref()
-                    .map(|branch| {
-                        branch
-                            .strip_prefix("refs/heads/")
-                            .unwrap_or(branch)
-                            .to_owned()
-                    })
-                    .unwrap_or_else(|| "detached HEAD".to_owned());
-                items.push(HeaderPickerItem::AgentDestination {
-                    path: worktree.path.clone(),
-                    repository: repository.label.clone(),
-                    branch,
-                    kind: if worktree.is_main {
-                        AgentDestinationKind::Repository
-                    } else {
-                        AgentDestinationKind::Worktree
-                    },
-                });
-            }
+        self.header_picker.close();
+        let Some(repository) = self.git_repository() else {
+            self.notice = Some("Agents require a Git repository".to_owned());
+            return;
+        };
+        if !repository.details_ready {
+            self.notice = Some("Repository details are still loading".to_owned());
+            return;
         }
-        let selected = current
-            .as_deref()
-            .and_then(|current| {
-                items.iter().position(|item| {
-                    matches!(item, HeaderPickerItem::AgentDestination { path, .. } if same_path(path, current))
-                })
-            })
-            .unwrap_or(0);
-        if items.is_empty() {
-            self.header_picker.open_message(
-                HeaderPickerKind::AgentDestinations,
-                if snapshot.loading {
-                    "Agent destinations are still loading".to_owned()
-                } else {
-                    "No agent destinations".to_owned()
-                },
-            );
+        let path = repository.root.clone();
+        let branch = repository.branch.clone();
+        if let Err(error) = self.herdr_prompt.prepare_agent(path, branch) {
+            self.notice = Some(error);
         } else {
-            self.header_picker
-                .open(HeaderPickerKind::AgentDestinations, items, selected);
+            self.notice = Some("Loading active Herdr tab layout".to_owned());
         }
     }
 

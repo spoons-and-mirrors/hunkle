@@ -237,71 +237,26 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .collect::<String>();
     assert_eq!(branch_text, format!("▌{long_branch} "));
 
-    wait_for(&mut app, |app| {
-        app.linked_worktrees
-            .snapshot()
-            .repositories
-            .iter()
-            .map(|repository| repository.worktrees.len())
-            .sum::<usize>()
-            >= 2
-    });
     click(&mut app, agent.x, agent.y);
+    assert_eq!(app.header_picker.kind, None);
+    assert_eq!(app.herdr_prompt.agent_destination(), Some(root));
     assert_eq!(
-        app.header_picker.kind,
-        Some(HeaderPickerKind::AgentDestinations)
+        app.herdr_prompt.agent_destination_branch(),
+        Some(long_branch)
     );
-    assert_eq!(app.header_picker.items.len(), 2);
-    assert!(app.header_picker.items.iter().any(|item| matches!(
-        item,
-        HeaderPickerItem::AgentDestination {
-            path,
-            branch,
-            kind,
-            ..
-        } if path == &linked
-            && branch == "linked"
-            && *kind == super::AgentDestinationKind::Worktree
-    )));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let picker = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderPickerOverlay)
-        .unwrap();
-    assert_eq!(picker.y, agent.bottom());
     assert_eq!(
-        picker.x,
-        agent
-            .x
-            .min(terminal.size().unwrap().width - picker.width - 1)
+        app.notice.as_deref(),
+        Some("Loading active Herdr tab layout")
     );
-    let mut picker_text = String::new();
-    for y in picker.y..picker.bottom() {
-        for x in picker.x..picker.right() {
-            picker_text.push_str(terminal.backend().buffer()[(x, y)].symbol());
-        }
-    }
-    assert!(picker_text.contains("START AGENT"));
+    assert!(app.herdr_prompt.cancel_pending_agent());
 
-    assert_eq!(app.header_picker.selected, 0);
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.header_picker.selected, 1);
-    let first_row = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderPickerItem(0))
-        .unwrap();
-    app.handle_mouse(mouse(MouseEventKind::Moved, first_row.x + 1, first_row.y));
-    assert_eq!(app.header_picker.selected, 1);
-    app.handle_mouse(mouse(
-        MouseEventKind::ScrollUp,
-        first_row.x + 1,
-        first_row.y,
-    ));
-    assert_eq!(app.header_picker.selected, 1);
-    assert_eq!(app.hovered_hit_target, None);
-    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 0, 20));
-    assert_eq!(app.header_picker.selected, 1);
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+    assert_eq!(app.herdr_prompt.agent_destination(), Some(root));
+    assert_eq!(
+        app.herdr_prompt.agent_destination_branch(),
+        Some(long_branch)
+    );
+    assert!(app.herdr_prompt.cancel_pending_agent());
 
     click(&mut app, diff.x, diff.y);
     assert_eq!(app.mode, Mode::Normal);

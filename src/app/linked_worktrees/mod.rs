@@ -157,10 +157,6 @@ impl LinkedWorktreeCatalog {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> LinkedWorktreeCatalogSnapshot {
-        self.snapshot.clone()
-    }
-
     pub(crate) fn repository(&self, common_dir: &Path) -> Option<&LinkedWorktreeRepository> {
         self.snapshot.repository(common_dir)
     }

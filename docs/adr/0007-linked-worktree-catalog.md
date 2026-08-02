@@ -23,7 +23,7 @@ The catalog refreshes independently of overlay visibility, retains its previous 
 ## Consequences
 
 - Linked-worktree topology has one owner and a small snapshot interface.
-- Header pickers, labels, and agent destinations consume the same inventory.
+- Header pickers and linked-worktree labels consume the same inventory.
 - Git parsing and Herdr execution remain concrete adapters rather than being hidden behind a generic runtime interface.
 - The Herdr session service emits candidate observations without creating catalog-only paths.
 

@@ -20,8 +20,7 @@ pub(super) use crate::app::{
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    AgentDestinationKind, BranchPickerStep, draw, lighter, palette, selected_display_range, text,
-    wrapped_editor_cursor,
+    BranchPickerStep, draw, lighter, palette, selected_display_range, text, wrapped_editor_cursor,
 };
 
 mod agents;

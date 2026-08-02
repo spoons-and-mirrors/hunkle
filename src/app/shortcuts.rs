@@ -14,6 +14,7 @@ pub(crate) enum ShortcutAction {
     OpenSettings,
     OpenActions,
     OpenGitCommand,
+    StartAgent,
     OpenHelp,
     ToggleWrap,
     ToggleMarkdown,
@@ -265,6 +266,15 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         "Navigation",
         MAIN,
         KeyCode::F(1)
+    ),
+    shortcut!(
+        StartAgent,
+        "start-agent",
+        "Start agent",
+        "Navigation",
+        MAIN,
+        KeyCode::Char(' '),
+        KeyModifiers::CONTROL
     ),
     shortcut!(
         OpenHelp,
@@ -602,6 +612,15 @@ mod tests {
             KeyChord::from_event(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
             KeyChord::parse("G").unwrap()
         );
+    }
+
+    #[test]
+    fn control_space_starts_an_agent_by_default() {
+        let shortcuts = Shortcuts::default();
+        let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+
+        assert_eq!(shortcuts.main_action(key), Some(ShortcutAction::StartAgent));
+        assert_eq!(shortcuts.label(ShortcutAction::StartAgent), "Ctrl+Space");
     }
 
     #[test]

@@ -336,14 +336,9 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let Some(kind) = app.header_picker.kind else {
         return;
     };
-    let anchor_target = if kind == HeaderPickerKind::AgentDestinations {
-        HitTarget::HeaderAgent
-    } else {
-        HitTarget::HeaderRepository
-    };
     let anchor = app
         .regions
-        .hit_target_rect(anchor_target)
+        .hit_target_rect(HitTarget::HeaderRepository)
         .unwrap_or(Rect::new(frame.area().x, frame.area().y, 1, 1));
     let picker_y = anchor.bottom();
     let available_height = frame.area().bottom().saturating_sub(picker_y);
@@ -354,17 +349,8 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let cloning_repository = app.header_picker.cloning_repository();
     let creating_worktree = app.header_picker.creating_worktree();
     let filtering = app.header_picker.filtering();
-    let destination_title = filtering && kind == HeaderPickerKind::AgentDestinations;
-    let picker_chrome = if filtering {
-        4 + usize::from(destination_title)
-    } else {
-        1
-    };
-    let item_offset = if filtering {
-        3 + u16::from(destination_title)
-    } else {
-        1
-    };
+    let picker_chrome = if filtering { 4 } else { 1 };
+    let item_offset = if filtering { 3 } else { 1 };
     let visible_items =
         header_picker_visible_items(frame.area().height, available_height, picker_chrome);
     let row_count = if cloning_repository || creating_worktree {
@@ -379,7 +365,6 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     app.header_picker.set_viewport_rows(row_count);
     let maximum_width = match kind {
         HeaderPickerKind::Repositories => 80,
-        HeaderPickerKind::AgentDestinations => 72,
         _ => 58,
     };
     let width = frame
@@ -420,7 +405,6 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             ),
         },
         HeaderPickerKind::DiffTargets => " DIFF AGAINST".to_owned(),
-        HeaderPickerKind::AgentDestinations => " AGENT DESTINATION".to_owned(),
     };
     let new_branch_action = kind == HeaderPickerKind::Branches
         && app.header_picker.branch_step == BranchPickerStep::Branches;
@@ -441,35 +425,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let has_action = new_branch_action || clone_action || new_worktree_action;
     let action_space = action_width + u16::from(has_action);
     if filtering {
-        if destination_title {
-            let title_width = area.width.min(14);
-            frame.render_widget(
-                Paragraph::new(" START AGENT").style(
-                    Style::default()
-                        .fg(palette().green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Rect::new(area.x, area.y.saturating_add(1), title_width, 1),
-            );
-            frame.render_widget(
-                Paragraph::new("↑↓ SELECT · ENTER START ")
-                    .alignment(Alignment::Right)
-                    .style(Style::default().fg(palette().muted)),
-                Rect::new(
-                    area.x.saturating_add(title_width),
-                    area.y.saturating_add(1),
-                    area.width.saturating_sub(title_width),
-                    1,
-                ),
-            );
-        }
-        draw_header_picker_search(
-            frame,
-            app,
-            area,
-            action_space,
-            1 + u16::from(destination_title),
-        );
+        draw_header_picker_search(frame, app, area, action_space, 1);
     } else {
         frame.render_widget(
             Paragraph::new(truncate_width(
@@ -780,28 +736,6 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     None,
                     false,
                 ),
-                HeaderPickerItem::AgentDestination {
-                    path,
-                    repository,
-                    kind,
-                    ..
-                } => (
-                    match kind {
-                        AgentDestinationKind::Repository => repository.clone(),
-                        AgentDestinationKind::Worktree => format!(
-                            "  {}",
-                            path.file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("worktree")
-                        ),
-                    },
-                    path.display().to_string(),
-                    None,
-                    current_root.is_some_and(|current| current == path),
-                    Some(22),
-                    None,
-                    false,
-                ),
             };
             (
                 index,
@@ -1079,7 +1013,6 @@ pub(super) fn draw_header_picker_search(
             }
             Some(HeaderPickerKind::Branches) => "Search branch...",
             Some(HeaderPickerKind::DiffTargets) => "Search target branch...",
-            Some(HeaderPickerKind::AgentDestinations) => "Filter repositories and worktrees...",
             None => "Search...",
         };
         format!(" {}{placeholder}", if cursor_visible { "▌" } else { " " })

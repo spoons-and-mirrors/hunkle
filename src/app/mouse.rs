@@ -149,7 +149,7 @@ impl App {
                     return;
                 }
                 Some(HitTarget::HeaderAgent) => {
-                    self.toggle_header_picker(HeaderPickerKind::AgentDestinations);
+                    self.start_header_agent();
                     return;
                 }
                 _ => {}

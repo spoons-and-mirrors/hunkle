@@ -68,6 +68,7 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
             ShortcutAction::OpenHerdr,
             "Send to Herdr pane below",
         ),
+        shortcut_help(shortcuts, ShortcutAction::StartAgent, "Start agent"),
         shortcut_pair_help(
             shortcuts,
             ShortcutAction::EditFile,
