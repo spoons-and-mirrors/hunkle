@@ -348,6 +348,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let naming_branch = app.header_picker.naming_branch();
     let cloning_repository = app.header_picker.cloning_repository();
     let creating_worktree = app.header_picker.creating_worktree();
+    let deleting_worktree = app.header_picker.deleting_worktree();
     let filtering = app.header_picker.filtering();
     let picker_chrome = if filtering { 4 } else { 1 };
     let item_offset = if filtering { 3 } else { 1 };
@@ -355,6 +356,8 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         header_picker_visible_items(frame.area().height, available_height, picker_chrome);
     let row_count = if cloning_repository || creating_worktree {
         5
+    } else if deleting_worktree {
+        3
     } else if naming_branch {
         2
     } else if app.header_picker.items.is_empty() {
@@ -392,6 +395,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         HeaderPickerKind::Worktrees => match app.header_picker.worktree_step {
             WorktreePickerStep::Worktrees => " WORKTREES".to_owned(),
             WorktreePickerStep::Create => " NEW WORKTREE".to_owned(),
+            WorktreePickerStep::Delete => " DELETE WORKTREE".to_owned(),
         },
         HeaderPickerKind::Branches => match app.header_picker.branch_step {
             BranchPickerStep::Branches => " BRANCHES".to_owned(),
@@ -432,7 +436,11 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                 &title,
                 usize::from(area.width.saturating_sub(action_width)),
             ))
-            .style(Style::default().fg(palette().muted)),
+            .style(Style::default().fg(if deleting_worktree {
+                palette().red
+            } else {
+                palette().muted
+            })),
             Rect::new(area.x, area.y, area.width.saturating_sub(action_width), 1),
         );
     }
@@ -639,6 +647,59 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
+    if deleting_worktree {
+        let path = app
+            .header_picker
+            .worktree_delete
+            .as_deref()
+            .map_or_else(|| "worktree".to_owned(), |path| path.display().to_string());
+        frame.render_widget(
+            Paragraph::new(truncate_start_width(
+                &format!(" Delete {path}?"),
+                usize::from(area.width),
+            ))
+            .style(Style::default().fg(palette().ink)),
+            Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(" Uncommitted changes prevent deletion")
+                .style(Style::default().fg(palette().muted)),
+            Rect::new(area.x, area.y.saturating_add(2), area.width, 1),
+        );
+        let button_width = area.width.saturating_sub(1).min(18) / 2;
+        let cancel = Rect::new(
+            area.right().saturating_sub(button_width),
+            area.y.saturating_add(3),
+            button_width,
+            1,
+        );
+        let delete = Rect::new(
+            cancel.x.saturating_sub(button_width).saturating_sub(1),
+            cancel.y,
+            button_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_width(" Delete", usize::from(delete.width))).style(
+                Style::default()
+                    .fg(palette().canvas)
+                    .bg(palette().red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            delete,
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_width(" Cancel", usize::from(cancel.width)))
+                .style(Style::default().fg(palette().ink).bg(palette().selected)),
+            cancel,
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerConfirmDeleteWorktree, delete);
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerCancelDeleteWorktree, cancel);
+        return;
+    }
+
     if app.header_picker.items.is_empty() {
         let message = app.header_picker.message.as_deref().unwrap_or_else(|| {
             if app.header_picker.query.is_empty() {
@@ -759,7 +820,12 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             1,
         );
         let selected = app.header_picker.selected == index;
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerItem(index));
+        let hovered = matches!(
+            app.hovered_hit_target,
+            Some(HitTarget::HeaderPickerItem(hovered_index))
+                | Some(HitTarget::HeaderPickerDeleteWorktree(hovered_index))
+                if hovered_index == index
+        );
         let marker = if current { "●" } else { " " };
         let background = if selected || hovered {
             palette().selected
@@ -839,6 +905,24 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         }
         app.regions
             .register_hit_target(HitTarget::HeaderPickerItem(index), rect);
+        let deletable = matches!(
+            app.header_picker.items.get(index),
+            Some(HeaderPickerItem::Worktree { worktree, .. }) if !worktree.is_main && !current
+        );
+        if hovered && deletable {
+            let delete = Rect::new(rect.right().saturating_sub(3), rect.y, 3.min(rect.width), 1);
+            frame.render_widget(
+                Paragraph::new(" X ").style(
+                    Style::default()
+                        .fg(palette().canvas)
+                        .bg(palette().red)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                delete,
+            );
+            app.regions
+                .register_hit_target(HitTarget::HeaderPickerDeleteWorktree(index), delete);
+        }
     }
 }
 

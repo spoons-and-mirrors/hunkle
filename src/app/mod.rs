@@ -726,6 +726,16 @@ impl App {
                 Err(error) => self.notice = Some(format!("Could not create worktree: {error}")),
             }
         }
+        if let Some(result) = self.header_picker.poll_worktree_deletion() {
+            changed = true;
+            match result {
+                Ok(path) => {
+                    self.notice = Some(format!("Deleted worktree {}", path.display()));
+                    self.linked_worktrees.refresh();
+                }
+                Err(error) => self.notice = Some(format!("Could not delete worktree: {error}")),
+            }
+        }
         if let Some(done) = self
             .commit_draft_rx
             .as_ref()

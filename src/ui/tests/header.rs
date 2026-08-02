@@ -54,6 +54,116 @@ fn repository_picker_labels_linked_worktrees_by_repository() {
 }
 
 #[test]
+fn worktree_picker_deletes_a_clean_linked_worktree_after_confirmation() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("repository");
+    let linked = directory.path().join("linked");
+    fs::create_dir(&root).unwrap();
+    run_git(&root, &["init", "-b", "main"]);
+    run_git(&root, &["config", "user.name", "Header Test"]);
+    run_git(&root, &["config", "user.email", "header@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(&root, &["add", "tracked.txt"]);
+    run_git(&root, &["commit", "-m", "initial"]);
+    run_git(
+        &root,
+        &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
+    );
+
+    let mut app = App::new(root.clone());
+    wait_for(&mut app, |app| {
+        app.repository()
+            .and_then(|repository| repository.common_dir.as_deref())
+            .and_then(|common_dir| app.linked_worktrees.repository(common_dir))
+            .is_some_and(|repository| repository.worktrees.len() == 2)
+    });
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let worktrees = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderWorktrees)
+        .unwrap();
+    click(&mut app, worktrees.x, worktrees.y);
+    let linked_index = app
+        .header_picker
+        .items
+        .iter()
+        .position(|item| {
+            matches!(item, HeaderPickerItem::Worktree { worktree, .. } if worktree.path == linked)
+        })
+        .unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderPickerDeleteWorktree(linked_index))
+            .is_none()
+    );
+    let linked_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(linked_index))
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        linked_row.x.saturating_add(1),
+        linked_row.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let delete = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerDeleteWorktree(linked_index))
+        .unwrap();
+    assert_eq!(delete.right(), linked_row.right());
+    assert_eq!(
+        terminal.backend().buffer()[(delete.x + 1, delete.y)].symbol(),
+        "X"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(delete.x + 1, delete.y)].bg,
+        palette().red
+    );
+
+    click(&mut app, delete.x + 1, delete.y);
+    assert!(app.header_picker.deleting_worktree());
+    assert_eq!(
+        app.header_picker.worktree_delete.as_deref(),
+        Some(linked.as_path())
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let confirmation = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerConfirmDeleteWorktree)
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(confirmation.x, confirmation.y)].bg,
+        palette().red
+    );
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("DELETE WORKTREE"));
+    assert!(rendered.contains("Uncommitted changes prevent deletion"));
+
+    click(&mut app, confirmation.x, confirmation.y);
+    wait_for(&mut app, |app| {
+        !linked.exists()
+            && app
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Deleted worktree"))
+    });
+    wait_for(&mut app, |app| {
+        app.repository()
+            .and_then(|repository| repository.common_dir.as_deref())
+            .and_then(|common_dir| app.linked_worktrees.repository(common_dir))
+            .is_some_and(|repository| repository.worktrees.len() == 1)
+    });
+}
+
+#[test]
 fn repository_picker_clones_and_opens_a_repository() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");

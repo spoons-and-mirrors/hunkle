@@ -146,6 +146,34 @@ fn lists_a_real_linked_worktree() {
 }
 
 #[test]
+fn worktree_removal_refuses_uncommitted_changes_and_never_forces_deletion() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("main repository");
+    let linked = directory.path().join("linked worktree");
+    fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-b", "main"]);
+    git(&root, &["config", "user.name", "Test Author"]);
+    git(&root, &["config", "user.email", "test@example.com"]);
+    fs::write(root.join("tracked.txt"), "base\n").unwrap();
+    git(&root, &["add", "tracked.txt"]);
+    git(&root, &["commit", "-m", "base"]);
+    git(
+        &root,
+        &["worktree", "add", "-b", "topic", linked.to_str().unwrap()],
+    );
+
+    fs::write(linked.join("uncommitted.txt"), "keep me\n").unwrap();
+    assert!(remove_worktree(&root, &linked).is_err());
+    assert!(linked.exists());
+    assert_eq!(list_worktrees(&root).unwrap().len(), 2);
+
+    fs::remove_file(linked.join("uncommitted.txt")).unwrap();
+    remove_worktree(&root, &linked).unwrap();
+    assert!(!linked.exists());
+    assert_eq!(list_worktrees(&root).unwrap().len(), 1);
+}
+
+#[test]
 fn parses_staged_and_unstaged_status_entries() {
     let parsed = parse_status(b"M  staged.rs\0 M changed.rs\0?? new.rs\0MM both.rs\0").unwrap();
     assert_eq!(parsed.len(), 5);

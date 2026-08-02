@@ -67,6 +67,7 @@ pub(crate) enum WorktreePickerStep {
     #[default]
     Worktrees,
     Create,
+    Delete,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -101,8 +102,10 @@ pub(crate) struct HeaderPicker {
     pub(crate) worktree_name: TextInput,
     pub(crate) worktree_base: TextInput,
     pub(crate) worktree_field: WorktreePickerField,
+    pub(crate) worktree_delete: Option<PathBuf>,
     clone_rx: Option<Receiver<Result<PathBuf, String>>>,
     worktree_rx: Option<Receiver<Result<PathBuf, String>>>,
+    worktree_delete_rx: Option<Receiver<Result<PathBuf, String>>>,
     change_details_rx: Option<Receiver<ChangeDetailsCompletion>>,
 }
 
@@ -141,6 +144,7 @@ impl HeaderPicker {
         self.worktree_name.clear();
         self.worktree_base.clear();
         self.worktree_field = WorktreePickerField::Name;
+        self.worktree_delete = None;
     }
 
     pub(crate) fn open_message(&mut self, kind: HeaderPickerKind, message: String) {
@@ -169,6 +173,7 @@ impl HeaderPicker {
         self.worktree_name.clear();
         self.worktree_base.clear();
         self.worktree_field = WorktreePickerField::Name;
+        self.worktree_delete = None;
     }
 
     pub(crate) fn open_branch_bases(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
@@ -239,6 +244,7 @@ impl HeaderPicker {
         self.worktree_name.clear();
         self.worktree_base.clear();
         self.worktree_field = WorktreePickerField::Name;
+        self.worktree_delete = None;
     }
 
     pub(crate) fn start_change_details(&mut self) {
@@ -439,6 +445,17 @@ impl HeaderPicker {
             && self.worktree_step == WorktreePickerStep::Create
     }
 
+    pub(crate) fn deleting_worktree(&self) -> bool {
+        self.kind == Some(HeaderPickerKind::Worktrees)
+            && self.worktree_step == WorktreePickerStep::Delete
+    }
+
+    pub(crate) fn begin_worktree_deletion(&mut self, path: PathBuf) {
+        self.worktree_step = WorktreePickerStep::Delete;
+        self.worktree_delete = Some(path);
+        self.message = None;
+    }
+
     pub(crate) fn begin_worktree_creation(&mut self, base: &str) {
         self.worktree_step = WorktreePickerStep::Create;
         self.worktree_name.clear();
@@ -469,6 +486,7 @@ impl HeaderPicker {
             && !self.naming_branch()
             && !self.cloning_repository()
             && !self.creating_worktree()
+            && !self.deleting_worktree()
     }
 
     pub(crate) fn begin_clone(&mut self, directory: &Path) {
@@ -526,6 +544,10 @@ impl HeaderPicker {
         self.worktree_rx.is_some()
     }
 
+    pub(crate) fn worktree_deletion_running(&self) -> bool {
+        self.worktree_delete_rx.is_some()
+    }
+
     pub(crate) fn start_worktree_creation(
         &mut self,
         cwd: PathBuf,
@@ -555,6 +577,36 @@ impl HeaderPicker {
             Err(TryRecvError::Disconnected) => {
                 self.worktree_rx = None;
                 Some(Err("worktree worker disconnected".to_owned()))
+            }
+        }
+    }
+
+    pub(crate) fn start_worktree_deletion(&mut self, cwd: PathBuf, path: PathBuf) -> bool {
+        if self.worktree_delete_rx.is_some() {
+            return false;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.worktree_delete_rx = Some(receiver);
+        thread::spawn(move || {
+            let result = git::remove_worktree(&cwd, &path)
+                .map(|()| path)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        true
+    }
+
+    pub(crate) fn poll_worktree_deletion(&mut self) -> Option<Result<PathBuf, String>> {
+        let receiver = self.worktree_delete_rx.as_ref()?;
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.worktree_delete_rx = None;
+                Some(result)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.worktree_delete_rx = None;
+                Some(Err("worktree deletion worker disconnected".to_owned()))
             }
         }
     }

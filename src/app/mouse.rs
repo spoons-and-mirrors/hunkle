@@ -160,7 +160,11 @@ impl App {
                 MouseEventKind::ScrollDown
                     if matches!(
                         self.regions.hit_target_at(point),
-                        Some(HitTarget::HeaderPickerOverlay | HitTarget::HeaderPickerItem(_))
+                        Some(
+                            HitTarget::HeaderPickerOverlay
+                                | HitTarget::HeaderPickerItem(_)
+                                | HitTarget::HeaderPickerDeleteWorktree(_),
+                        )
                     ) =>
                 {
                     self.hovered_hit_target = None;
@@ -169,7 +173,11 @@ impl App {
                 MouseEventKind::ScrollUp
                     if matches!(
                         self.regions.hit_target_at(point),
-                        Some(HitTarget::HeaderPickerOverlay | HitTarget::HeaderPickerItem(_))
+                        Some(
+                            HitTarget::HeaderPickerOverlay
+                                | HitTarget::HeaderPickerItem(_)
+                                | HitTarget::HeaderPickerDeleteWorktree(_),
+                        )
                     ) =>
                 {
                     self.hovered_hit_target = None;
@@ -192,6 +200,15 @@ impl App {
                         }
                         Some(HitTarget::HeaderPickerNewWorktree) => {
                             self.begin_header_worktree_creation()
+                        }
+                        Some(HitTarget::HeaderPickerDeleteWorktree(index)) => {
+                            self.begin_header_worktree_deletion(index)
+                        }
+                        Some(HitTarget::HeaderPickerConfirmDeleteWorktree) => {
+                            self.confirm_header_worktree_deletion()
+                        }
+                        Some(HitTarget::HeaderPickerCancelDeleteWorktree) => {
+                            self.open_header_worktrees()
                         }
                         Some(HitTarget::HeaderPickerWorktreeName) => self
                             .header_picker

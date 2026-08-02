@@ -238,6 +238,10 @@ impl App {
             self.handle_worktree_creation(key);
             return;
         }
+        if self.header_picker.deleting_worktree() {
+            self.handle_worktree_deletion(key);
+            return;
+        }
         match key.code {
             KeyCode::Esc if self.header_picker.branch_step == BranchPickerStep::Base => {
                 self.open_header_branches();
@@ -321,8 +325,10 @@ impl App {
     }
 
     pub(crate) fn begin_header_worktree_creation(&mut self) {
-        if self.header_picker.worktree_creation_running() {
-            self.header_picker.message = Some("Wait for the current worktree creation".to_owned());
+        if self.header_picker.worktree_creation_running()
+            || self.header_picker.worktree_deletion_running()
+        {
+            self.header_picker.message = Some("Wait for the current worktree operation".to_owned());
             return;
         }
         let Some(repository) = self.git_repository() else {
@@ -331,6 +337,67 @@ impl App {
         };
         let base = repository.branch.clone();
         self.header_picker.begin_worktree_creation(&base);
+    }
+
+    pub(crate) fn begin_header_worktree_deletion(&mut self, index: usize) {
+        if self.header_picker.worktree_creation_running()
+            || self.header_picker.worktree_deletion_running()
+        {
+            self.header_picker.message = Some("Wait for the current worktree operation".to_owned());
+            return;
+        }
+        let Some(HeaderPickerItem::Worktree { worktree, .. }) = self.header_picker.items.get(index)
+        else {
+            return;
+        };
+        if worktree.is_main {
+            self.header_picker.message = Some("The main worktree cannot be deleted".to_owned());
+            return;
+        }
+        if self
+            .repository()
+            .is_some_and(|repository| same_path(&repository.root, &worktree.path))
+        {
+            self.header_picker.message = Some("The active worktree cannot be deleted".to_owned());
+            return;
+        }
+        self.header_picker
+            .begin_worktree_deletion(worktree.path.clone());
+    }
+
+    pub(crate) fn handle_worktree_deletion(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') => self.open_header_worktrees(),
+            KeyCode::Enter | KeyCode::Char('y') => self.confirm_header_worktree_deletion(),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn confirm_header_worktree_deletion(&mut self) {
+        if self.header_picker.worktree_creation_running()
+            || self.header_picker.worktree_deletion_running()
+        {
+            self.header_picker.message = Some("Wait for the current worktree operation".to_owned());
+            return;
+        }
+        let Some(path) = self.header_picker.worktree_delete.clone() else {
+            self.open_header_worktrees();
+            return;
+        };
+        let Some(cwd) = self
+            .git_repository()
+            .map(|repository| repository.root.clone())
+        else {
+            self.header_picker.message = Some("Not a Git repository".to_owned());
+            return;
+        };
+        if self
+            .header_picker
+            .start_worktree_deletion(cwd, path.clone())
+        {
+            self.header_picker.close();
+            self.notice = Some(format!("Deleting worktree {}…", path.display()));
+        }
     }
 
     pub(crate) fn handle_worktree_creation(&mut self, key: KeyEvent) {
