@@ -16,7 +16,7 @@ use super::{
     AgentPaneDirection, HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate,
     LinkedWorktreeObservation, settings::AgentTimeDisplay,
 };
-use crate::git;
+use crate::{filesystem::atomic_write, git};
 
 mod client;
 mod timings;
@@ -29,6 +29,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const AGENT_CHANGE_STATS_INTERVAL: Duration = Duration::from_secs(5);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+const LAYOUT_INDEX_VERSION: u8 = 1;
 pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub(super) fn send_command_below(command: String) -> Result<String, String> {
@@ -159,6 +160,18 @@ struct AgentTiming {
     awaiting_sequence: bool,
 }
 
+#[derive(Default, Deserialize, Serialize)]
+struct AgentLayoutIndex {
+    version: u8,
+    layouts: Vec<AgentLayoutRecord>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AgentLayoutRecord {
+    key: AgentTimingKey,
+    layout: client::AgentLayout,
+}
+
 impl AgentTiming {
     fn new(status: AgentStatus, state_change_seq: u64, now_ms: u64) -> Self {
         Self {
@@ -269,7 +282,9 @@ enum Completion {
         warning: Option<String>,
     },
     AgentDisplay {
-        result: Result<(), String>,
+        result: Result<Box<client::DisplayAgentResult>, String>,
+        selected_key: AgentTimingKey,
+        outgoing_key: Option<AgentTimingKey>,
         reopen_path: Option<PathBuf>,
     },
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
@@ -299,6 +314,9 @@ pub(crate) struct HerdrSession {
     next_spinner: Instant,
     agent_timings: HashMap<AgentTimingKey, AgentTiming>,
     agent_timings_path: Option<PathBuf>,
+    agent_layouts: HashMap<AgentTimingKey, client::AgentLayout>,
+    agent_layouts_path: Option<PathBuf>,
+    displayed_agent_key: Option<AgentTimingKey>,
 }
 
 impl HerdrSession {
@@ -316,6 +334,13 @@ impl HerdrSession {
             session.host_workspace_id = environment.workspace_id;
             session.host_tab_id = environment.tab_id;
             session.host_pane_id = environment.pane_id;
+            if let (Some(config_dir), Some(host_pane_id)) =
+                (config_dir, session.host_pane_id.as_deref())
+            {
+                let path = agent_layouts_path(config_dir, host_pane_id);
+                session.agent_layouts = load_agent_layouts(&path).unwrap_or_default();
+                session.agent_layouts_path = Some(path);
+            }
             session.start_event_listener();
         }
         session
@@ -347,6 +372,9 @@ impl HerdrSession {
             next_spinner: Instant::now(),
             agent_timings: HashMap::new(),
             agent_timings_path,
+            agent_layouts: HashMap::new(),
+            agent_layouts_path: None,
+            displayed_agent_key: None,
         }
     }
 
@@ -448,12 +476,27 @@ impl HerdrSession {
                 }
                 Completion::AgentDisplay {
                     result,
+                    selected_key,
+                    outgoing_key,
                     reopen_path,
                 } => {
                     self.agent_display_running = false;
                     self.next_refresh = Instant::now();
                     match result {
-                        Ok(()) => {
+                        Ok(result) => {
+                            let client::DisplayAgentResult { displayed, parked } = *result;
+                            if let (Some(key), Some(layout)) = (outgoing_key, parked) {
+                                self.agent_layouts.insert(key, layout);
+                            }
+                            self.agent_layouts.insert(selected_key.clone(), displayed);
+                            self.displayed_agent_key = Some(selected_key);
+                            if let Some(path) = self.agent_layouts_path.as_deref()
+                                && let Err(error) = save_agent_layouts(path, &self.agent_layouts)
+                            {
+                                poll.notice = Some(format!(
+                                    "Agent displayed, but its layout could not be saved: {error}"
+                                ));
+                            }
                             self.inventory_verified = false;
                             poll.reopen_path = reopen_path;
                         }
@@ -507,6 +550,23 @@ impl HerdrSession {
             )
         });
         self.agents = ranked.into_iter().map(|(_, agent)| agent).collect();
+        let displayed_is_present = self.displayed_agent_key.as_ref().is_some_and(|key| {
+            self.agents.iter().any(|agent| {
+                &agent.timing_key == key
+                    && self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
+                    && self.host_tab_id.as_deref() == Some(&agent.tab_id)
+            })
+        });
+        if !displayed_is_present {
+            self.displayed_agent_key = self
+                .agents
+                .iter()
+                .find(|agent| {
+                    self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
+                        && self.host_tab_id.as_deref() == Some(&agent.tab_id)
+                })
+                .map(|agent| agent.timing_key.clone());
+        }
         self.agent_scroll = self.agent_scroll.min(self.agents.len().saturating_sub(1));
     }
 
@@ -581,7 +641,11 @@ impl HerdrSession {
 
     pub(crate) fn agent_entry_state(&self, index: usize) -> AgentEntryState {
         AgentEntryState {
-            selected: self.agents.get(index).is_some_and(|agent| agent.focused),
+            selected: self.agents.get(index).is_some_and(|agent| {
+                self.displayed_agent_key
+                    .as_ref()
+                    .map_or(agent.focused, |key| key == &agent.timing_key)
+            }),
         }
     }
 
@@ -614,15 +678,28 @@ impl HerdrSession {
             host_workspace_id,
             host_tab_id,
             allow_cross_workspace: self.cross_workspace_agents,
+            saved_layout: self.agent_layouts.get(&agent.timing_key).cloned(),
         };
+        let selected_key = agent.timing_key.clone();
+        let outgoing_key = self.displayed_agent_key.clone().or_else(|| {
+            self.agents
+                .iter()
+                .find(|agent| {
+                    self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
+                        && self.host_tab_id.as_deref() == Some(&agent.tab_id)
+                })
+                .map(|agent| agent.timing_key.clone())
+        });
         let reopen_path = agent.cwd.clone();
         self.agent_display_running = true;
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = client::display_agent(request);
+            let result = client::display_agent(request).map(Box::new);
             let reopen_path = result.as_ref().ok().and(reopen_path);
             let _ = sender.send(Completion::AgentDisplay {
                 result,
+                selected_key,
+                outgoing_key,
                 reopen_path,
             });
         });
@@ -789,6 +866,53 @@ impl HerdrSession {
     }
 }
 
+fn agent_layouts_path(config_dir: &Path, host_pane_id: &str) -> PathBuf {
+    let key = host_pane_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    config_dir.join("agent-layouts").join(format!("{key}.json"))
+}
+
+fn load_agent_layouts(
+    path: &Path,
+) -> std::io::Result<HashMap<AgentTimingKey, client::AgentLayout>> {
+    let index: AgentLayoutIndex =
+        serde_json::from_slice(&fs::read(path)?).map_err(std::io::Error::other)?;
+    if index.version != LAYOUT_INDEX_VERSION {
+        return Ok(HashMap::new());
+    }
+    Ok(index
+        .layouts
+        .into_iter()
+        .map(|record| (record.key, record.layout))
+        .collect())
+}
+
+fn save_agent_layouts(
+    path: &Path,
+    layouts: &HashMap<AgentTimingKey, client::AgentLayout>,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut records = layouts
+        .iter()
+        .map(|(key, layout)| AgentLayoutRecord {
+            key: key.clone(),
+            layout: layout.clone(),
+        })
+        .collect::<Vec<_>>();
+    records.sort_by_key(|record| record.key.stable_id());
+    let bytes = serde_json::to_vec(&AgentLayoutIndex {
+        version: LAYOUT_INDEX_VERSION,
+        layouts: records,
+    })
+    .map_err(std::io::Error::other)?;
+    atomic_write(path, &bytes)
+}
+
 fn populate_workspace_branches(workspaces: &mut [HerdrWorkspace]) {
     for workspace in workspaces {
         workspace.branch = workspace.path.as_deref().and_then(workspace_branch);
@@ -827,4 +951,39 @@ fn branch_from_head(path: &Path) -> Option<String> {
         .strip_prefix("ref: refs/heads/")
         .filter(|branch| !branch.is_empty())
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn saves_agent_layouts_per_hunkle_pane() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = agent_layouts_path(directory.path(), "w1:p7");
+        let key = AgentTimingKey::Terminal("terminal-1".to_owned());
+        let layout: client::AgentLayout = serde_json::from_value(serde_json::json!({
+            "root": {
+                "Split": {
+                    "direction": "Right",
+                    "ratio": 0.6,
+                    "first": { "Pane": "w1:p7" },
+                    "second": { "Pane": "w1:p8" }
+                }
+            }
+        }))
+        .unwrap();
+        let layouts = HashMap::from([(key.clone(), layout.clone())]);
+
+        save_agent_layouts(&path, &layouts).unwrap();
+
+        assert_eq!(load_agent_layouts(&path).unwrap().get(&key), Some(&layout));
+        assert_eq!(
+            path,
+            directory
+                .path()
+                .join("agent-layouts")
+                .join("77313a7037.json")
+        );
+    }
 }
