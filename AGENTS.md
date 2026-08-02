@@ -10,3 +10,4 @@
 ## Installation
 
 - At the end of every task that changes Hunkle, install the current checkout with `cargo install --path . --force --locked`.
+- After installing from inside Herdr, restart any open Hunkle process in place so it loads the new binary. Preserve its pane and tab layout, and do not restart unrelated panes or processes.

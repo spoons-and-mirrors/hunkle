@@ -18,7 +18,14 @@ impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         if mouse.kind == MouseEventKind::Moved {
-            self.hovered_hit_target = self.regions.hit_target_at(point);
+            let target = self.regions.hit_target_at(point);
+            self.hovered_hit_target = match (target, self.hovered_hit_target) {
+                (
+                    Some(HitTarget::Agent(index)),
+                    Some(HitTarget::AgentTooltip { agent, message }),
+                ) if index == agent => Some(HitTarget::AgentTooltip { agent, message }),
+                _ => target,
+            };
             if let Some(target) = self.hovered_hit_target {
                 let agent = match target {
                     HitTarget::Agent(index) => Some(index),
@@ -208,6 +215,14 @@ impl App {
         }
         if self.mode == Mode::FileEdit {
             self.handle_file_editor_mouse(mouse, point);
+            return;
+        }
+
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        ) && self.cycle_agent_message(point, mouse.kind == MouseEventKind::ScrollDown)
+        {
             return;
         }
 
@@ -1391,6 +1406,48 @@ impl App {
         }
         self.graph_state.select(Some(index));
         self.graph_scroll_to_selection = false;
+        true
+    }
+
+    fn cycle_agent_message(&mut self, point: Position, older: bool) -> bool {
+        let Some(target) = self.regions.hit_target_at(point) else {
+            return false;
+        };
+        let (agent, pointed_message) = match target {
+            HitTarget::Agent(agent) => (agent, None),
+            HitTarget::AgentTooltip { agent, message }
+            | HitTarget::AgentMessage { agent, message } => (agent, Some(message)),
+            _ => return false,
+        };
+        let Some(message_count) = self
+            .herdr
+            .agent_user_messages(agent)
+            .map(<[String]>::len)
+            .filter(|count| *count > 0)
+        else {
+            self.herdr.request_agent_latest_user_message(agent);
+            return true;
+        };
+        let current = pointed_message
+            .or(match self.hovered_hit_target {
+                Some(HitTarget::AgentTooltip {
+                    agent: hovered_agent,
+                    message,
+                }) if hovered_agent == agent => Some(message),
+                Some(HitTarget::AgentMessage {
+                    agent: hovered_agent,
+                    message,
+                }) if hovered_agent == agent => Some(message),
+                _ => None,
+            })
+            .unwrap_or(message_count - 1)
+            .min(message_count - 1);
+        let message = if older {
+            current.checked_sub(1).unwrap_or(message_count - 1)
+        } else {
+            (current + 1) % message_count
+        };
+        self.hovered_hit_target = Some(HitTarget::AgentTooltip { agent, message });
         true
     }
 

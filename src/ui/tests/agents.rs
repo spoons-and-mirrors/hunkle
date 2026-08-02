@@ -96,6 +96,35 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(hovered_screen.contains("USER MESSAGE"));
     assert!(hovered_screen.contains("5 / 5"));
     assert!(hovered_screen.contains("Please refine"));
+
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, area.x + 2, area.y));
+    assert_eq!(
+        app.hovered_hit_target,
+        Some(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 3
+        })
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let scrolled_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(scrolled_screen.contains("4 / 5"));
+    assert!(scrolled_screen.contains("Fourth request"));
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, area.x + 3, area.y));
+    assert_eq!(
+        app.hovered_hit_target,
+        Some(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 4
+        })
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
     let tooltip = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
@@ -145,6 +174,33 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .collect::<String>();
     assert!(historical_screen.contains("2 / 5"));
     assert!(historical_screen.contains("Second request"));
+
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        tooltip.x + 2,
+        tooltip.y + 3,
+    ));
+    assert_eq!(
+        app.hovered_hit_target,
+        Some(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 0
+        })
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        tooltip.x + 2,
+        tooltip.y + 3,
+    ));
+    assert_eq!(
+        app.hovered_hit_target,
+        Some(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 4
+        })
+    );
+
     click(&mut app, area.x + 2, area.y);
     assert_eq!(app.mode, Mode::Normal);
 }
