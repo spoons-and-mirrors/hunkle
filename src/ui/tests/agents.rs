@@ -354,12 +354,18 @@ fn renders_and_targets_agents_in_the_normal_view() {
 
     click(&mut app, area.x + 2, area.y);
     assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.hovered_hit_target, None);
-    assert!(!app.agents_pane_visible());
+    assert_eq!(
+        app.hovered_hit_target,
+        Some(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 4,
+        })
+    );
+    assert!(app.agents_pane_visible());
 
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
-    assert!(!app.agents_pane_visible());
+    assert!(app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
@@ -367,13 +373,13 @@ fn renders_and_targets_agents_in_the_normal_view() {
                 agent: 0,
                 message: 4,
             })
-            .is_none()
+            .is_some()
     );
 
     app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
-    assert!(!app.agents_pane_visible());
+    assert!(app.agents_pane_visible());
     open_agents_pane(&mut app);
     assert!(app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -491,7 +497,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(header_text.contains("first-repo"));
+    assert!(header_text.contains("first-repo"), "{header_text}");
     assert!(header_text.contains("BACKGROUND"));
     assert!(!header_text.contains("1/2"));
     assert!(app.agents_pane_pinned);

@@ -224,7 +224,7 @@ impl App {
             && let Some(HitTarget::Agent(index)) = self.regions.hit_target_at(point)
         {
             self.selection.clear();
-            self.activate_agent(index);
+            self.toggle_agent_visibility(index);
             return;
         }
 
@@ -592,7 +592,7 @@ impl App {
                 return;
             }
             Some(HitTarget::Agent(index)) => {
-                self.activate_agent(index);
+                self.toggle_agent_visibility(index);
                 return;
             }
             Some(HitTarget::AgentPreviewPicker(index)) => {
@@ -613,9 +613,7 @@ impl App {
                 return;
             }
             Some(HitTarget::AgentPreviewPlacement(index)) => {
-                if let Err(error) = self.herdr.toggle_agent_placement(index) {
-                    self.notice = Some(error);
-                }
+                self.toggle_agent_visibility(index);
                 return;
             }
             Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => return,
@@ -910,18 +908,9 @@ impl App {
         true
     }
 
-    fn activate_agent(&mut self, index: usize) {
-        if let Some(pane_id) = self
-            .herdr
-            .agents
-            .get(index)
-            .map(|agent| agent.pane_id.clone())
-        {
-            self.hovered_hit_target = None;
-            self.agents_pane_pinned = false;
-            self.agent_preview_selection = None;
-            self.agent_preview_picker_open = false;
-            self.herdr.display_agent(pane_id);
+    fn toggle_agent_visibility(&mut self, index: usize) {
+        if let Err(error) = self.herdr.toggle_agent_visibility(index) {
+            self.notice = Some(error);
         }
     }
 

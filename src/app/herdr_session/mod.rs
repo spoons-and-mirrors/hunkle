@@ -16,7 +16,8 @@ use super::{
     AgentPaneDirection, LinkedWorktreeCandidate, LinkedWorktreeObservation,
     settings::AgentTimeDisplay,
 };
-use crate::{filesystem::atomic_write, git};
+use crate::filesystem::atomic_write;
+use crate::git;
 
 mod client;
 mod latest_message;
@@ -275,15 +276,22 @@ enum Completion {
         event: client::Event,
         observed_at_ms: u64,
     },
+    AgentPlacement {
+        result: Result<(Option<client::AgentPanePlacement>, client::MovedAgentPane), String>,
+        background: bool,
+        key: AgentTimingKey,
+        destination_workspace_id: String,
+        reopen_path: Option<PathBuf>,
+    },
     AgentDisplay {
         result: Result<Box<client::DisplayAgentResult>, String>,
         selected_key: AgentTimingKey,
         outgoing_key: Option<AgentTimingKey>,
         reopen_path: Option<PathBuf>,
-    },
-    AgentPlacement {
-        result: Result<(), String>,
-        background: bool,
+        host_workspace_id: String,
+        host_tab_id: String,
+        selected_workspace_id: String,
+        selected_tab_id: String,
     },
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     LatestUserMessage {
@@ -323,8 +331,9 @@ pub(crate) struct HerdrSession {
     host_tab_id: Option<String>,
     host_pane_id: Option<String>,
     cross_workspace_agents: bool,
-    agent_display_running: bool,
     agent_placement_running: bool,
+    agent_display_running: bool,
+    agent_pane_placements: HashMap<AgentTimingKey, client::AgentPanePlacement>,
     agent_change_stats: HashMap<PathBuf, (u64, u64)>,
     agent_change_stats_loading: bool,
     next_agent_change_stats: Instant,
@@ -384,8 +393,9 @@ impl HerdrSession {
             host_tab_id: None,
             host_pane_id: None,
             cross_workspace_agents: false,
-            agent_display_running: false,
             agent_placement_running: false,
+            agent_display_running: false,
+            agent_pane_placements: HashMap::new(),
             agent_change_stats: HashMap::new(),
             agent_change_stats_loading: false,
             next_agent_change_stats: Instant::now(),
@@ -456,17 +466,72 @@ impl HerdrSession {
                     self.apply_agent_status_event_at(event, observed_at_ms);
                     self.next_refresh = Instant::now();
                 }
+                Completion::AgentPlacement {
+                    result,
+                    background,
+                    key,
+                    destination_workspace_id,
+                    reopen_path,
+                } => {
+                    self.agent_placement_running = false;
+                    self.next_refresh = Instant::now();
+                    poll.notice = Some(match result {
+                        Ok((placement, moved)) => {
+                            if let Some(placement) = placement {
+                                self.agent_pane_placements.insert(key.clone(), placement);
+                            }
+                            if let Some(agent) =
+                                self.agents.iter_mut().find(|agent| agent.timing_key == key)
+                            {
+                                agent.workspace_id = destination_workspace_id;
+                                agent.tab_id = moved.tab_id;
+                                agent.pane_id = moved.pane_id;
+                            }
+                            if background {
+                                if self.displayed_agent_key.as_ref() == Some(&key) {
+                                    self.displayed_agent_key = None;
+                                }
+                                "Agent moved to background tab".to_owned()
+                            } else {
+                                self.displayed_agent_key = Some(key);
+                                poll.reopen_path = reopen_path;
+                                "Agent returned to foreground".to_owned()
+                            }
+                        }
+                        Err(error) => error,
+                    });
+                }
                 Completion::AgentDisplay {
                     result,
                     selected_key,
                     outgoing_key,
                     reopen_path,
+                    host_workspace_id,
+                    host_tab_id,
+                    selected_workspace_id,
+                    selected_tab_id,
                 } => {
                     self.agent_display_running = false;
                     self.next_refresh = Instant::now();
                     match result {
                         Ok(result) => {
-                            let client::DisplayAgentResult { displayed, parked } = *result;
+                            let client::DisplayAgentResult {
+                                displayed,
+                                parked,
+                                pane_locations,
+                            } = *result;
+                            for agent in &mut self.agents {
+                                let Some(location) = pane_locations.get(&agent.pane_id) else {
+                                    continue;
+                                };
+                                agent.pane_id = location.pane_id.clone();
+                                agent.tab_id = location.tab_id.clone();
+                                if location.tab_id == host_tab_id {
+                                    agent.workspace_id = host_workspace_id.clone();
+                                } else if location.tab_id == selected_tab_id {
+                                    agent.workspace_id = selected_workspace_id.clone();
+                                }
+                            }
                             if let (Some(key), Some(layout)) = (outgoing_key, parked) {
                                 self.agent_layouts.insert(key, layout);
                             }
@@ -483,15 +548,6 @@ impl HerdrSession {
                         }
                         Err(error) => poll.notice = Some(error),
                     }
-                }
-                Completion::AgentPlacement { result, background } => {
-                    self.agent_placement_running = false;
-                    self.next_refresh = Instant::now();
-                    poll.notice = Some(match result {
-                        Ok(()) if background => "Agent moved to background tab".to_owned(),
-                        Ok(()) => "Agent returned to foreground".to_owned(),
-                        Err(error) => error,
-                    });
                 }
                 Completion::AgentChangeStats(stats) => {
                     self.agent_change_stats_loading = false;
@@ -703,14 +759,26 @@ impl HerdrSession {
         })
     }
 
-    pub(crate) fn agent_placement_running(&self) -> bool {
-        self.agent_placement_running
+    pub(crate) fn agent_layout_running(&self) -> bool {
+        self.agent_placement_running || self.agent_display_running
     }
 
-    pub(crate) fn toggle_agent_placement(&mut self, index: usize) -> Result<(), String> {
-        if self.agent_display_running || self.agent_placement_running {
+    pub(crate) fn toggle_agent_visibility(&mut self, index: usize) -> Result<(), String> {
+        if self.agent_layout_running() {
             return Err("Another agent layout change is still in progress".to_owned());
         }
+        if !self.agent_is_in_host_tab(index)
+            && self
+                .agents
+                .iter()
+                .any(|agent| self.agent_is_in_host_tab_by_agent(agent))
+        {
+            return self.display_agent(index);
+        }
+        self.start_agent_placement(index)
+    }
+
+    fn start_agent_placement(&mut self, index: usize) -> Result<(), String> {
         let agent = self
             .agents
             .get(index)
@@ -727,21 +795,105 @@ impl HerdrSession {
         }
         let background = self.agent_is_in_host_tab(index);
         let pane_id = agent.pane_id.clone();
+        let key = agent.timing_key.clone();
         let label = self
             .agent_repository_name(index)
             .unwrap_or("agent")
             .to_owned();
+        let placement = self
+            .agent_pane_placements
+            .get(&key)
+            .copied()
+            .unwrap_or_default();
+        let destination_workspace_id = if background {
+            agent.workspace_id.clone()
+        } else {
+            host_workspace_id.clone()
+        };
+        let reopen_path = (!background).then(|| agent.cwd.clone()).flatten();
         self.agent_placement_running = true;
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = if background {
-                client::background_agent(pane_id, host_workspace_id, label)
+                client::background_agent(
+                    pane_id,
+                    host_workspace_id,
+                    label,
+                    host_tab_id,
+                    host_pane_id,
+                )
+                .map(|(placement, moved)| (Some(placement), moved))
             } else {
-                client::foreground_agent(pane_id, host_tab_id, host_pane_id)
+                client::foreground_agent(pane_id, host_tab_id, host_pane_id, placement)
+                    .map(|moved| (None, moved))
             };
-            let _ = sender.send(Completion::AgentPlacement { result, background });
+            let _ = sender.send(Completion::AgentPlacement {
+                result,
+                background,
+                key,
+                destination_workspace_id,
+                reopen_path,
+            });
         });
         Ok(())
+    }
+
+    fn display_agent(&mut self, index: usize) -> Result<(), String> {
+        let agent = self
+            .agents
+            .get(index)
+            .ok_or_else(|| "Agent is no longer available".to_owned())?;
+        let (Some(host_workspace_id), Some(host_tab_id), Some(host_pane_id)) = (
+            self.host_workspace_id.clone(),
+            self.host_tab_id.clone(),
+            self.host_pane_id.clone(),
+        ) else {
+            return Err("Hunkle is not attached to a Herdr pane".to_owned());
+        };
+        let selected_workspace_id = agent.workspace_id.clone();
+        let selected_tab_id = agent.tab_id.clone();
+        let request = client::DisplayAgentRequest {
+            pane_id: agent.pane_id.clone(),
+            workspace_id: agent.workspace_id.clone(),
+            tab_id: agent.tab_id.clone(),
+            host_pane_id,
+            host_workspace_id: host_workspace_id.clone(),
+            host_tab_id: host_tab_id.clone(),
+            allow_cross_workspace: self.cross_workspace_agents,
+            saved_layout: self.agent_layouts.get(&agent.timing_key).cloned(),
+        };
+        let selected_key = agent.timing_key.clone();
+        let outgoing_key = self.displayed_agent_key.clone().or_else(|| {
+            self.agents
+                .iter()
+                .find(|agent| self.agent_is_in_host_tab_by_agent(agent))
+                .map(|agent| agent.timing_key.clone())
+        });
+        let reopen_path = agent.cwd.clone();
+        let completion_host_workspace_id = host_workspace_id.clone();
+        let completion_host_tab_id = host_tab_id.clone();
+        self.agent_display_running = true;
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = client::display_agent(request).map(Box::new);
+            let reopen_path = result.as_ref().ok().and(reopen_path);
+            let _ = sender.send(Completion::AgentDisplay {
+                result,
+                selected_key,
+                outgoing_key,
+                reopen_path,
+                host_workspace_id: completion_host_workspace_id,
+                host_tab_id: completion_host_tab_id,
+                selected_workspace_id,
+                selected_tab_id,
+            });
+        });
+        Ok(())
+    }
+
+    fn agent_is_in_host_tab_by_agent(&self, agent: &HerdrAgent) -> bool {
+        self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
+            && self.host_tab_id.as_deref() == Some(&agent.tab_id)
     }
 
     pub(crate) fn agent_repository_name(&self, index: usize) -> Option<&str> {
@@ -764,55 +916,6 @@ impl HerdrSession {
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .or(Some(workspace.label.as_str()))
-    }
-
-    pub(crate) fn display_agent(&mut self, pane_id: String) {
-        if self.agent_display_running || self.agent_placement_running {
-            return;
-        }
-        let Some(agent) = self.agents.iter().find(|agent| agent.pane_id == pane_id) else {
-            return;
-        };
-        let (Some(host_workspace_id), Some(host_tab_id), Some(host_pane_id)) = (
-            self.host_workspace_id.clone(),
-            self.host_tab_id.clone(),
-            self.host_pane_id.clone(),
-        ) else {
-            return;
-        };
-        let request = client::DisplayAgentRequest {
-            pane_id: agent.pane_id.clone(),
-            workspace_id: agent.workspace_id.clone(),
-            tab_id: agent.tab_id.clone(),
-            host_pane_id,
-            host_workspace_id,
-            host_tab_id,
-            allow_cross_workspace: self.cross_workspace_agents,
-            saved_layout: self.agent_layouts.get(&agent.timing_key).cloned(),
-        };
-        let selected_key = agent.timing_key.clone();
-        let outgoing_key = self.displayed_agent_key.clone().or_else(|| {
-            self.agents
-                .iter()
-                .find(|agent| {
-                    self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
-                        && self.host_tab_id.as_deref() == Some(&agent.tab_id)
-                })
-                .map(|agent| agent.timing_key.clone())
-        });
-        let reopen_path = agent.cwd.clone();
-        self.agent_display_running = true;
-        let sender = self.sender.clone();
-        thread::spawn(move || {
-            let result = client::display_agent(request).map(Box::new);
-            let reopen_path = result.as_ref().ok().and(reopen_path);
-            let _ = sender.send(Completion::AgentDisplay {
-                result,
-                selected_key,
-                outgoing_key,
-                reopen_path,
-            });
-        });
     }
 
     pub(crate) fn set_cross_workspace_agents(&mut self, enabled: bool) {

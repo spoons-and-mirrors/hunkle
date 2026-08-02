@@ -1,10 +1,11 @@
 use std::{
-    collections::HashMap,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
 };
+
+use std::collections::HashMap;
 
 use interprocess::local_socket::{Stream, traits::Stream as _};
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,27 @@ pub(super) struct DisplayAgentRequest {
 enum LayoutDirection {
     Right,
     Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct AgentPanePlacement {
+    direction: LayoutDirection,
+    ratio: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MovedAgentPane {
+    pub(super) pane_id: String,
+    pub(super) tab_id: String,
+}
+
+impl Default for AgentPanePlacement {
+    fn default() -> Self {
+        Self {
+            direction: LayoutDirection::Right,
+            ratio: 0.5,
+        }
+    }
 }
 
 impl LayoutDirection {
@@ -161,6 +183,7 @@ pub(super) struct AgentLayout {
 pub(super) struct DisplayAgentResult {
     pub(super) displayed: AgentLayout,
     pub(super) parked: Option<AgentLayout>,
+    pub(super) pane_locations: HashMap<String, LivePaneLocation>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -173,9 +196,9 @@ struct LiveLayout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LivePaneLocation {
-    pane_id: String,
-    tab_id: String,
+pub(super) struct LivePaneLocation {
+    pub(super) pane_id: String,
+    pub(super) tab_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,17 +299,35 @@ pub(super) fn background_agent(
     pane_id: String,
     workspace_id: String,
     label: String,
-) -> Result<(), String> {
-    background_agent_with(pane_id, workspace_id, label, run)
+    host_tab_id: String,
+    host_pane_id: String,
+) -> Result<(AgentPanePlacement, MovedAgentPane), String> {
+    background_agent_with(
+        pane_id,
+        workspace_id,
+        label,
+        host_tab_id,
+        host_pane_id,
+        run,
+        api_request,
+    )
 }
 
 fn background_agent_with(
     pane_id: String,
     workspace_id: String,
     label: String,
+    host_tab_id: String,
+    host_pane_id: String,
     runner: impl FnMut(&[String]) -> Result<Value, String>,
-) -> Result<(), String> {
-    move_agent_with(
+    mut api: impl FnMut(&str, &Value) -> Result<Value, String>,
+) -> Result<(AgentPanePlacement, MovedAgentPane), String> {
+    let layout = export_layout(&mut api, &host_tab_id)?;
+    if layout.zoomed {
+        return Err("Agent panes cannot be parked while the Herdr tab is zoomed".to_owned());
+    }
+    let placement = direct_agent_placement(&layout.root, &host_pane_id, &pane_id)?;
+    let moved = move_agent_with(
         &[
             "pane".to_owned(),
             "move".to_owned(),
@@ -299,23 +340,26 @@ fn background_agent_with(
             "--no-focus".to_owned(),
         ],
         runner,
-    )
+    )?;
+    Ok((placement, moved))
 }
 
 pub(super) fn foreground_agent(
     pane_id: String,
     host_tab_id: String,
     host_pane_id: String,
-) -> Result<(), String> {
-    foreground_agent_with(pane_id, host_tab_id, host_pane_id, run)
+    placement: AgentPanePlacement,
+) -> Result<MovedAgentPane, String> {
+    foreground_agent_with(pane_id, host_tab_id, host_pane_id, placement, run)
 }
 
 fn foreground_agent_with(
     pane_id: String,
     host_tab_id: String,
     host_pane_id: String,
+    placement: AgentPanePlacement,
     runner: impl FnMut(&[String]) -> Result<Value, String>,
-) -> Result<(), String> {
+) -> Result<MovedAgentPane, String> {
     move_agent_with(
         &[
             "pane".to_owned(),
@@ -326,22 +370,75 @@ fn foreground_agent_with(
             "--target-pane".to_owned(),
             host_pane_id,
             "--split".to_owned(),
-            "right".to_owned(),
+            placement.direction.as_str().to_owned(),
             "--ratio".to_owned(),
-            "0.5".to_owned(),
+            placement.ratio.to_string(),
             "--no-focus".to_owned(),
         ],
         runner,
     )
 }
 
+fn direct_agent_placement(
+    node: &LiveLayoutNode,
+    host_pane_id: &str,
+    agent_pane_id: &str,
+) -> Result<AgentPanePlacement, String> {
+    let LiveLayoutNode::Split {
+        direction,
+        ratio,
+        first,
+        second,
+    } = node
+    else {
+        return Err("The agent pane is not split beside Hunkle".to_owned());
+    };
+    if first.contains(host_pane_id)
+        && matches!(second.as_ref(), LiveLayoutNode::Pane(pane) if pane == agent_pane_id)
+    {
+        return Ok(AgentPanePlacement {
+            direction: *direction,
+            ratio: *ratio,
+        });
+    }
+    if matches!(first.as_ref(), LiveLayoutNode::Pane(pane) if pane == agent_pane_id)
+        && second.contains(host_pane_id)
+    {
+        return Ok(AgentPanePlacement {
+            direction: *direction,
+            ratio: 1.0 - *ratio,
+        });
+    }
+    if first.contains(host_pane_id) && first.contains(agent_pane_id) {
+        return direct_agent_placement(first, host_pane_id, agent_pane_id);
+    }
+    if second.contains(host_pane_id) && second.contains(agent_pane_id) {
+        return direct_agent_placement(second, host_pane_id, agent_pane_id);
+    }
+    Err("The agent pane must be directly to the right of or below Hunkle".to_owned())
+}
+
 fn move_agent_with(
     args: &[String],
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
-) -> Result<(), String> {
+) -> Result<MovedAgentPane, String> {
     let value = runner(args)?;
-    require_changed(&value, "/result/move_result", "pane move")?;
-    Ok(())
+    let result = require_changed(&value, "/result/move_result", "pane move")?;
+    let pane = result
+        .get("pane")
+        .ok_or_else(|| "Herdr returned an invalid pane move result".to_owned())?;
+    Ok(MovedAgentPane {
+        pane_id: pane
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Herdr returned an invalid moved pane ID".to_owned())?
+            .to_owned(),
+        tab_id: pane
+            .get("tab_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Herdr returned an invalid moved tab ID".to_owned())?
+            .to_owned(),
+    })
 }
 
 fn display_agent_with<F, A>(
@@ -360,9 +457,24 @@ where
         let host = export_layout(&mut api, &request.host_tab_id)?;
         validate_layouts(&request, &host, &host)?;
         let layout = AgentLayout { root: host.root };
+        let mut pane_ids = Vec::new();
+        layout.root.collect_panes(&mut pane_ids);
+        let pane_locations = pane_ids
+            .into_iter()
+            .map(|pane_id| {
+                (
+                    pane_id.to_owned(),
+                    LivePaneLocation {
+                        pane_id: pane_id.to_owned(),
+                        tab_id: host.tab_id.clone(),
+                    },
+                )
+            })
+            .collect();
         return Ok(DisplayAgentResult {
             displayed: layout.clone(),
             parked: Some(layout),
+            pane_locations,
         });
     }
 
@@ -441,6 +553,7 @@ where
             parked: Some(AgentLayout {
                 root: host.root.remap(&panes)?,
             }),
+            pane_locations: panes.clone(),
         })
     })();
     match exchange {
@@ -2645,30 +2758,54 @@ mod tests {
     #[test]
     fn moves_agents_between_background_and_host_tabs_without_focus() {
         let mut calls = Vec::new();
-        background_agent_with(
+        let (placement, background_move) = background_agent_with(
             "w1:p2".to_owned(),
             "w1".to_owned(),
             "hunkle".to_owned(),
-            |args| {
-                calls.push(args.to_vec());
-                Ok(serde_json::json!({
-                    "result": { "move_result": { "changed": true } }
-                }))
-            },
-        )
-        .unwrap();
-        foreground_agent_with(
-            "w1:p2".to_owned(),
             "w1:t1".to_owned(),
             "w1:p1".to_owned(),
             |args| {
                 calls.push(args.to_vec());
-                Ok(serde_json::json!({
-                    "result": { "move_result": { "changed": true } }
-                }))
+                Ok(moved("w1:p2", "w1:t2"))
+            },
+            |method, params| {
+                assert_eq!(method, "layout.export");
+                assert_eq!(params, &serde_json::json!({ "tab_id": "w1:t1" }));
+                Ok(layout(
+                    "w1",
+                    "w1:t1",
+                    "w1:p1",
+                    split("down", 0.37, pane("w1:p1"), pane("w1:p2")),
+                ))
             },
         )
         .unwrap();
+        assert_eq!(
+            placement,
+            AgentPanePlacement {
+                direction: LayoutDirection::Down,
+                ratio: 0.37,
+            }
+        );
+        assert_eq!(
+            background_move,
+            MovedAgentPane {
+                pane_id: "w1:p2".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+            }
+        );
+        let foreground_move = foreground_agent_with(
+            "w1:p2".to_owned(),
+            "w1:t1".to_owned(),
+            "w1:p1".to_owned(),
+            placement,
+            |args| {
+                calls.push(args.to_vec());
+                Ok(moved("w1:p3", "w1:t1"))
+            },
+        )
+        .unwrap();
+        assert_eq!(foreground_move.pane_id, "w1:p3");
 
         assert_eq!(
             calls,
@@ -2695,9 +2832,9 @@ mod tests {
                     "--target-pane",
                     "w1:p1",
                     "--split",
-                    "right",
+                    "down",
                     "--ratio",
-                    "0.5",
+                    "0.37",
                     "--no-focus",
                 ]
                 .map(str::to_owned)

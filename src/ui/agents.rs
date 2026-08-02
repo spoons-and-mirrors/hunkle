@@ -221,7 +221,7 @@ pub(super) fn draw_history(
     let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
     let desired_navigation_width = badge_width(repository).saturating_add(6);
     let navigation_width = desired_navigation_width
-        .min(area.width.saturating_sub(17))
+        .min(area.width.saturating_sub(13))
         .max(6)
         .min(area.width);
     frame.render_widget(
@@ -298,7 +298,7 @@ pub(super) fn draw_history(
         navigation_targets.push((HitTarget::AgentPreviewPrevious(index), previous_button));
         navigation_targets.push((HitTarget::AgentPreviewNext(index), next_button));
     }
-    let placement_running = herdr.agent_placement_running();
+    let placement_running = herdr.agent_layout_running();
     let placement_label = if placement_running {
         " MOVING...  "
     } else if herdr.agent_is_in_host_tab(index) {
