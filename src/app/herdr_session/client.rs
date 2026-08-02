@@ -93,6 +93,13 @@ impl LiveLayoutNode {
         }
     }
 
+    fn pane_count(&self) -> usize {
+        match self {
+            Self::Pane(_) => 1,
+            Self::Split { first, second, .. } => first.pane_count() + second.pane_count(),
+        }
+    }
+
     fn without_pane(&self, pane_id: &str) -> Option<Self> {
         match self {
             Self::Pane(candidate) => (candidate != pane_id).then(|| self.clone()),
@@ -349,6 +356,9 @@ where
         }
         let parked = export_layout(&mut api, &selected.tab_id)?;
         verify_layout(&parked, &outgoing, &panes, "parked")?;
+        if outgoing.pane_count() > 1 || selected.root.pane_count() > 1 {
+            refresh_rebuilt_agent(&mut api, &request.pane_id, &request.host_pane_id, &panes)?;
+        }
         Ok(DisplayAgentResult {
             displayed: AgentLayout {
                 root: final_host.root,
@@ -588,6 +598,41 @@ fn saved_layout_matches(layout: &AgentLayout, parked: &LiveLayoutNode, host_pane
             .root
             .without_pane(host_pane_id)
             .is_some_and(|saved| saved.has_same_panes(parked))
+}
+
+fn refresh_rebuilt_agent<A>(
+    api: &mut A,
+    agent_pane: &str,
+    host_pane: &str,
+    panes: &HashMap<String, LivePaneLocation>,
+) -> Result<(), String>
+where
+    A: FnMut(&str, &Value) -> Result<Value, String>,
+{
+    let agent_pane = panes
+        .get(agent_pane)
+        .map(|location| location.pane_id.as_str())
+        .ok_or_else(|| format!("Saved layout pane {agent_pane} is unavailable"))?;
+    focus_pane(api, agent_pane, "refresh the displayed agent")?;
+    focus_pane(api, host_pane, "restore focus in Hunkle")
+}
+
+fn focus_pane<A>(api: &mut A, pane_id: &str, operation: &str) -> Result<(), String>
+where
+    A: FnMut(&str, &Value) -> Result<Value, String>,
+{
+    let value = api("pane.focus", &serde_json::json!({ "pane_id": pane_id }))?;
+    let result = value
+        .get("result")
+        .ok_or_else(|| format!("Herdr returned an invalid response while trying to {operation}"))?;
+    if result.get("type").and_then(Value::as_str) != Some("pane_focused")
+        || result.get("pane_id").and_then(Value::as_str) != Some(pane_id)
+    {
+        return Err(format!(
+            "Herdr focused an unexpected pane while trying to {operation}"
+        ));
+    }
+    Ok(())
 }
 
 fn rebuild_layout<F>(
@@ -1507,6 +1552,15 @@ mod tests {
         })
     }
 
+    fn focused(pane_id: &str) -> Value {
+        serde_json::json!({
+            "result": {
+                "type": "pane_focused",
+                "pane_id": pane_id,
+            }
+        })
+    }
+
     #[test]
     fn parses_agent_status_events() {
         assert_eq!(
@@ -1696,6 +1750,9 @@ mod tests {
                 Ok(moved(&args[2], &args[4]))
             },
             |method, params| {
+                if method == "pane.focus" {
+                    return Ok(focused(params["pane_id"].as_str().unwrap()));
+                }
                 assert_eq!(method, "layout.export");
                 exports += 1;
                 Ok(match exports {
@@ -1762,6 +1819,7 @@ mod tests {
         let selected = pane("w1:p3");
         let mut commands = Vec::new();
         let mut exports = 0;
+        let mut focuses = Vec::new();
 
         let result = display_agent_with(
             DisplayAgentRequest {
@@ -1778,7 +1836,12 @@ mod tests {
                 commands.push(args.to_vec());
                 Ok(moved(&args[2], &args[4]))
             },
-            |_, _| {
+            |method, params| {
+                if method == "pane.focus" {
+                    let pane_id = params["pane_id"].as_str().unwrap();
+                    focuses.push(pane_id.to_owned());
+                    return Ok(focused(pane_id));
+                }
                 exports += 1;
                 Ok(match exports {
                     1 => layout("w1", "w1:t1", "w1:p1", outgoing.clone()),
@@ -1854,6 +1917,7 @@ mod tests {
             agent_layout(split("right", 0.6, pane("w1:p1"), pane("w1:p3")))
         );
         assert_eq!(result.parked.unwrap(), agent_layout(outgoing));
+        assert_eq!(focuses, ["w1:p3", "w1:p1"]);
     }
 
     #[test]
@@ -1884,7 +1948,10 @@ mod tests {
                 commands.push(args.to_vec());
                 Ok(moved(&args[2], &args[4]))
             },
-            |_, _| {
+            |method, params| {
+                if method == "pane.focus" {
+                    return Ok(focused(params["pane_id"].as_str().unwrap()));
+                }
                 exports += 1;
                 Ok(match exports {
                     1 => layout(
@@ -2140,7 +2207,10 @@ mod tests {
                     _ => panic!("unexpected pane move"),
                 })
             },
-            |_, _| {
+            |method, params| {
+                if method == "pane.focus" {
+                    return Ok(focused(params["pane_id"].as_str().unwrap()));
+                }
                 exports += 1;
                 Ok(match exports {
                     1 => layout(
