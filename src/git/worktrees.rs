@@ -31,6 +31,107 @@ pub(crate) fn list_worktrees(repository: &Path) -> Result<Vec<LinkedWorktree>> {
     parse_worktrees(&output.stdout)
 }
 
+pub(crate) fn create_worktree(repository: &Path, branch: &str, base: &str) -> Result<PathBuf> {
+    create_worktree_in(repository, branch, base, &worktree_storage_root()?)
+}
+
+fn worktree_storage_root() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("XDG_DATA_HOME").filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(path).join("hunkle").join("worktrees"));
+    }
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .filter(|path| !path.is_empty())
+    {
+        return Ok(PathBuf::from(path).join("hunkle").join("worktrees"));
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .context("the home directory is unavailable")?;
+    #[cfg(windows)]
+    return Ok(PathBuf::from(home)
+        .join("AppData")
+        .join("Local")
+        .join("hunkle")
+        .join("worktrees"));
+    #[cfg(not(windows))]
+    Ok(PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("hunkle")
+        .join("worktrees"))
+}
+
+pub(super) fn create_worktree_in(
+    repository: &Path,
+    branch: &str,
+    base: &str,
+    storage_root: &Path,
+) -> Result<PathBuf> {
+    let main = list_worktrees(repository)?
+        .into_iter()
+        .find(|worktree| worktree.is_main && !worktree.is_bare)
+        .context("Git did not identify the main worktree")?;
+    let repository_name = main
+        .path
+        .file_name()
+        .context("the main worktree has no directory name")?;
+    let common_dir = common_git_dir(&main.path)?;
+    let mut repository_directory = repository_name.to_os_string();
+    repository_directory.push(format!("-{:016x}", path_hash(&common_dir)));
+    let path = storage_root
+        .join(repository_directory)
+        .join(branch.replace('/', "-"));
+    let path_parent = path
+        .parent()
+        .context("the worktree path has no parent directory")?;
+    fs::create_dir_all(path_parent).with_context(|| {
+        format!(
+            "could not create worktree directory {}",
+            path_parent.display()
+        )
+    })?;
+
+    let output = process::run(
+        base_command(repository)
+            .args(["worktree", "add", "-b"])
+            .arg(branch)
+            .arg("--")
+            .arg(&path)
+            .arg(base),
+        git_limits(),
+    )
+    .with_context(|| format!("could not create worktree {}", path.display()))?;
+    ensure_complete(&output, "git worktree add")?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    fs::canonicalize(&path)
+        .with_context(|| format!("could not resolve created worktree {}", path.display()))
+}
+
+fn path_hash(path: &Path) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        for byte in path.as_os_str().as_bytes() {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in path.as_os_str().encode_wide() {
+            for byte in unit.to_le_bytes() {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    hash
+}
+
 pub(crate) fn remove_worktree(repository: &Path, worktree: &Path) -> Result<()> {
     let output = process::run(
         base_command(repository)

@@ -112,16 +112,16 @@ omitted from indexing.
 The **WORKTREE** header card lists linked Git checkouts for the active
 repository. Type to filter by branch, path, or commit, and press `Enter` or
 double-click to open a checkout. Press `Ctrl+N` in the popover to create a
-linked worktree through Herdr; enter its name and starting branch, and Hunkle
-opens the result after creation.
+linked worktree directly with Git; enter its name and starting branch, and
+Hunkle opens the result after creation. Hunkle-created worktrees are stored in
+`$XDG_DATA_HOME/hunkle/worktrees`, or `~/.local/share/hunkle/worktrees` when
+`XDG_DATA_HOME` is unset.
 
-When Hunkle runs inside Herdr, click the green **AGENT** header card to choose a
-Git-inventoried repository or linked worktree, then choose which non-Hunkle pane
-in the active Herdr tab to replace with an OpenCode agent. The destination
-picker can be filtered by repository, branch, or path. After the agent starts,
-Hunkle opens that destination as its active repository. The displaced pane is
-parked in its own tab, named after its starting directory, so it cannot be
-merged into another agent's saved layout.
+When Hunkle runs inside Herdr, click the green **AGENT** header card or press
+`Ctrl+Space` to start an OpenCode agent at the repository, worktree, and branch
+shown in the header. Choose which non-Hunkle pane in the active Herdr tab to
+replace. The displaced pane is parked in its own tab, named after its starting
+directory, so it cannot be merged into another agent's saved layout.
 
 The Agents section acts as a live per-agent layout switcher. Clicking an agent
 restores its complete pane layout around the fixed Hunkle pane, keeps keyboard

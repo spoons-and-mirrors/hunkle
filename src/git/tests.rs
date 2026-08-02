@@ -146,6 +146,42 @@ fn lists_a_real_linked_worktree() {
 }
 
 #[test]
+fn creates_a_linked_worktree_without_a_runtime_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("main repository");
+    fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-b", "main"]);
+    git(&root, &["config", "user.name", "Test Author"]);
+    git(&root, &["config", "user.email", "test@example.com"]);
+    fs::write(root.join("tracked.txt"), "base\n").unwrap();
+    git(&root, &["add", "tracked.txt"]);
+    git(&root, &["commit", "-m", "base"]);
+
+    let storage = directory.path().join("data/hunkle/worktrees");
+    let created = create_worktree_in(&root, "feature/direct", "main", &storage).unwrap();
+
+    assert_eq!(created.parent().unwrap().parent().unwrap(), storage);
+    assert!(
+        created
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("main repository-")
+    );
+    assert_eq!(created.file_name().unwrap(), "feature-direct");
+    assert_eq!(
+        fs::read_to_string(created.join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+    assert_eq!(
+        list_worktrees(&root).unwrap()[1].branch.as_deref(),
+        Some("refs/heads/feature/direct")
+    );
+}
+
+#[test]
 fn worktree_removal_refuses_uncommitted_changes_and_never_forces_deletion() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("main repository");

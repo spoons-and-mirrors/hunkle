@@ -560,7 +560,8 @@ impl HeaderPicker {
         let (sender, receiver) = mpsc::channel();
         self.worktree_rx = Some(receiver);
         thread::spawn(move || {
-            let result = super::herdr_session::create_managed_worktree(cwd, None, name, base);
+            let result =
+                git::create_worktree(&cwd, &name, &base).map_err(|error| error.to_string());
             let _ = sender.send(result);
         });
         true
