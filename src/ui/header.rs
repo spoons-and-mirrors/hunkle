@@ -700,9 +700,6 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
 
     let start = app.header_picker.visible_start();
     let current_root = app.repository().map(|repository| repository.root.as_path());
-    let current_common_dir = app
-        .repository()
-        .and_then(|repository| repository.common_dir.as_deref());
     let rows = app
         .header_picker
         .items
@@ -718,12 +715,12 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     label,
                     stats,
                     branch,
-                    common_dir,
+                    ..
                 } => (
                     label.clone(),
                     path.display().to_string(),
                     Some(branch.clone().unwrap_or_default()),
-                    current_common_dir.is_some_and(|current| current == common_dir),
+                    current_root.is_some_and(|current| current == path),
                     None,
                     *stats,
                     true,

@@ -7,18 +7,17 @@ impl App {
             .iter()
             .map(|detail| HeaderPickerItem::Repository {
                 path: detail.root.clone(),
-                common_dir: detail.common_dir.clone(),
                 label: detail.label.clone(),
                 stats: detail.stats,
                 branch: detail.branch.clone(),
             })
             .collect::<Vec<_>>();
         let selected = self
-            .git_repository()
-            .and_then(|repository| repository.common_dir.as_deref())
+            .repository()
+            .map(|repository| repository.root.as_path())
             .and_then(|current| {
                 items.iter().position(|item| {
-                    matches!(item, HeaderPickerItem::Repository { common_dir, .. } if common_dir == current)
+                    matches!(item, HeaderPickerItem::Repository { path, .. } if same_path(path, current))
                 })
             })
             .unwrap_or(0);
@@ -35,20 +34,19 @@ impl App {
     pub(crate) fn repository_picker_details(&self) -> Vec<RepositoryPickerItem> {
         let mut details = self.linked_worktrees.recent_repository_picker_items();
         let Some(repository) = self
-            .git_repository()
+            .repository()
             .filter(|repository| repository.details_ready)
         else {
             return details;
         };
-        let Some(common_dir) = repository.common_dir.as_deref() else {
-            return details;
-        };
         if let Some(current) = details
             .iter_mut()
-            .find(|detail| detail.common_dir == common_dir)
+            .find(|detail| same_path(&detail.root, &repository.root))
         {
-            current.stats = Some(git::change_line_counts(&repository.changes));
-            current.branch = Some(repository.branch.clone());
+            if !repository.is_local() {
+                current.stats = Some(git::change_line_counts(&repository.changes));
+                current.branch = Some(repository.branch.clone());
+            }
         }
         details
     }

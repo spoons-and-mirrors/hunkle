@@ -75,27 +75,47 @@ fn persists_repository_identity_and_recent_order() {
     let mut catalog = LinkedWorktreeCatalog::new(Some(path.clone()));
     for index in 0..12 {
         catalog
-            .remember_repository(
-                Path::new(&format!("/repo-{index}/.git")),
+            .remember_workspace(
+                Some(Path::new(&format!("/repo-{index}/.git"))),
                 Path::new(&format!("/repo-{index}")),
             )
             .unwrap();
     }
     catalog
-        .remember_repository(Path::new("/repo-5/.git"), Path::new("/repo-5-linked"))
+        .remember_workspace(Some(Path::new("/repo-5/.git")), Path::new("/repo-5-linked"))
         .unwrap();
 
     let restored = LinkedWorktreeCatalog::new(Some(path));
     assert_eq!(restored.store.recent.len(), 12);
     assert_eq!(
-        restored.store.recent[0].common_dir,
-        Path::new("/repo-5/.git")
+        restored.store.recent[0].common_dir.as_deref(),
+        Some(Path::new("/repo-5/.git"))
     );
     assert_eq!(restored.store.recent[0].root, Path::new("/repo-5-linked"));
     assert_eq!(
-        restored.store.recent[1].common_dir,
-        Path::new("/repo-11/.git")
+        restored.store.recent[1].common_dir.as_deref(),
+        Some(Path::new("/repo-11/.git"))
     );
+}
+
+#[test]
+fn persists_local_workspaces_in_recent_order_without_git_inventory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("known-repositories.json");
+    let mut catalog = LinkedWorktreeCatalog::new(Some(path.clone()));
+    catalog
+        .remember_workspace(Some(Path::new("/repo/.git")), Path::new("/repo"))
+        .unwrap();
+    catalog
+        .remember_workspace(None, Path::new("/home/example"))
+        .unwrap();
+
+    let restored = LinkedWorktreeCatalog::new(Some(path));
+    let recent = restored.recent_repository_picker_items();
+    assert_eq!(recent[0].root, Path::new("/home/example"));
+    assert_eq!(recent[0].label, "example");
+    assert_eq!(restored.store.recent[0].common_dir, None);
+    assert_eq!(restored.store.repositories, [PathBuf::from("/repo/.git")]);
 }
 
 #[test]
@@ -104,7 +124,7 @@ fn persists_repository_stats_for_an_instant_picker_open() {
     let path = directory.path().join("known-repositories.json");
     let mut catalog = LinkedWorktreeCatalog::new(Some(path.clone()));
     catalog
-        .remember_repository(Path::new("/repo/.git"), Path::new("/repo"))
+        .remember_workspace(Some(Path::new("/repo/.git")), Path::new("/repo"))
         .unwrap();
     assert!(
         catalog
@@ -129,7 +149,7 @@ fn malformed_inventory_is_not_overwritten() {
 
     assert!(
         catalog
-            .remember_repository(Path::new("/repo/.git"), Path::new("/repo"))
+            .remember_workspace(Some(Path::new("/repo/.git")), Path::new("/repo"))
             .is_err()
     );
     assert_eq!(fs::read(path).unwrap(), b"not json");
@@ -143,7 +163,9 @@ fn persists_non_utf8_repository_identity_without_loss() {
     let common_dir = PathBuf::from(std::ffi::OsString::from_vec(b"/repo/\xff/.git".to_vec()));
     let root = PathBuf::from(std::ffi::OsString::from_vec(b"/repo/\xff".to_vec()));
     let mut catalog = LinkedWorktreeCatalog::new(Some(path.clone()));
-    catalog.remember_repository(&common_dir, &root).unwrap();
+    catalog
+        .remember_workspace(Some(&common_dir), &root)
+        .unwrap();
 
     let restored = LinkedWorktreeCatalog::new(Some(path));
     assert_eq!(restored.store.repositories, [common_dir]);

@@ -26,7 +26,6 @@ pub(crate) enum AgentDestinationKind {
 #[derive(Debug, Clone)]
 pub(crate) enum HeaderPickerItem {
     Repository {
-        common_dir: PathBuf,
         path: PathBuf,
         label: String,
         stats: Option<(u64, u64)>,
@@ -344,7 +343,7 @@ impl HeaderPicker {
         }
         let details = details
             .iter()
-            .map(|detail| (detail.common_dir.as_path(), detail))
+            .map(|detail| (detail.root.as_path(), detail))
             .collect::<std::collections::HashMap<_, _>>();
         let (all_changed, searchable_changed) =
             Self::update_repository_details(&mut self.all_items, &details);
@@ -369,7 +368,7 @@ impl HeaderPicker {
         let mut searchable_changed = false;
         for item in items {
             let HeaderPickerItem::Repository {
-                common_dir,
+                path,
                 label,
                 stats,
                 branch,
@@ -378,7 +377,7 @@ impl HeaderPicker {
             else {
                 continue;
             };
-            let Some(detail) = details.get(common_dir.as_path()) else {
+            let Some(detail) = details.get(path.as_path()) else {
                 continue;
             };
             if label != &detail.label {
@@ -744,7 +743,6 @@ mod tests {
         picker.open(
             HeaderPickerKind::Repositories,
             vec![HeaderPickerItem::Repository {
-                common_dir: PathBuf::from("/tmp/catalog/.git"),
                 path: PathBuf::from("/tmp/catalog"),
                 label: "project-catalog".to_owned(),
                 stats: None,
@@ -765,14 +763,12 @@ mod tests {
             HeaderPickerKind::Repositories,
             vec![
                 HeaderPickerItem::Repository {
-                    common_dir: PathBuf::from("/tmp/alpha/.git"),
                     path: PathBuf::from("/tmp/alpha"),
                     label: "alpha".to_owned(),
                     stats: None,
                     branch: None,
                 },
                 HeaderPickerItem::Repository {
-                    common_dir: PathBuf::from("/tmp/bravo/.git"),
                     path: PathBuf::from("/tmp/bravo"),
                     label: "bravo".to_owned(),
                     stats: None,
@@ -784,14 +780,12 @@ mod tests {
 
         assert!(picker.sync_repository_details(&[
             RepositoryPickerItem {
-                common_dir: PathBuf::from("/tmp/alpha/.git"),
                 root: PathBuf::from("/tmp/alpha"),
                 label: "alpha".to_owned(),
                 stats: Some((12, 3)),
                 branch: Some("main".to_owned()),
             },
             RepositoryPickerItem {
-                common_dir: PathBuf::from("/tmp/bravo/.git"),
                 root: PathBuf::from("/tmp/bravo"),
                 label: "bravo".to_owned(),
                 stats: Some((7, 2)),

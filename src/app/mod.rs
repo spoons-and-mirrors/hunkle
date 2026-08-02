@@ -217,10 +217,9 @@ impl App {
                 .then_some(0),
         );
         let mut linked_worktrees = LinkedWorktreeCatalog::new(known_repositories_path);
-        if let Some(repository) = session.data()
-            && let Some(common_dir) = repository.common_dir.as_deref()
-        {
-            let _ = linked_worktrees.remember_repository(common_dir, &repository.root);
+        if let Some(repository) = session.data() {
+            let _ = linked_worktrees
+                .remember_workspace(repository.common_dir.as_deref(), &repository.root);
         }
         let mut herdr = HerdrSession::detect(workspace_config_dir);
         herdr.set_cross_workspace_agents(settings.cross_workspace_agents);
@@ -976,11 +975,9 @@ impl App {
                         ));
                     }
                     let remember_error = self.session.data().and_then(|repository| {
-                        repository.common_dir.as_deref().and_then(|common_dir| {
-                            self.linked_worktrees
-                                .remember_repository(common_dir, &repository.root)
-                                .err()
-                        })
+                        self.linked_worktrees
+                            .remember_workspace(repository.common_dir.as_deref(), &repository.root)
+                            .err()
                     });
                     self.linked_worktrees.refresh();
                     let _activity =
@@ -1748,13 +1745,10 @@ impl App {
         self.header_picker.close();
         match item {
             HeaderPickerItem::BranchBase(_) => unreachable!(),
-            HeaderPickerItem::Repository {
-                common_dir, path, ..
-            } => {
+            HeaderPickerItem::Repository { path, .. } => {
                 if self
-                    .git_repository()
-                    .and_then(|repository| repository.common_dir.as_deref())
-                    .is_some_and(|current| same_path(current, &common_dir))
+                    .repository()
+                    .is_some_and(|repository| same_path(&repository.root, &path))
                 {
                     return;
                 }

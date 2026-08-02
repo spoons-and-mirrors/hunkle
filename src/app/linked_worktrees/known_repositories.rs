@@ -23,7 +23,7 @@ pub(super) struct KnownRepositoryStore {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RecentRepository {
-    pub(super) common_dir: PathBuf,
+    pub(super) common_dir: Option<PathBuf>,
     pub(super) root: PathBuf,
     pub(super) stats: Option<(u64, u64)>,
 }
@@ -62,7 +62,7 @@ impl KnownRepositoryStore {
 
     pub(super) fn remember_and_save(
         &mut self,
-        common_dir: PathBuf,
+        common_dir: Option<PathBuf>,
         root: PathBuf,
     ) -> Result<(), String> {
         let previous_repositories = self.repositories.clone();
@@ -72,8 +72,13 @@ impl KnownRepositoryStore {
             .iter()
             .find(|recent| recent.common_dir == common_dir && recent.root == root)
             .and_then(|recent| recent.stats);
-        self.insert(common_dir.clone());
-        self.recent.retain(|recent| recent.common_dir != common_dir);
+        if let Some(common_dir) = common_dir.as_ref() {
+            self.insert(common_dir.clone());
+        }
+        self.recent.retain(|recent| match common_dir.as_ref() {
+            Some(common_dir) => recent.common_dir.as_ref() != Some(common_dir),
+            None => recent.common_dir.is_some() || recent.root != root,
+        });
         self.recent.insert(
             0,
             RecentRepository {
@@ -128,9 +133,10 @@ impl KnownRepositoryStore {
         self.repositories
             .retain(|path| !repositories.iter().any(|pruned| pruned == path));
         self.recent.retain(|recent| {
-            !repositories
-                .iter()
-                .any(|pruned| pruned == &recent.common_dir)
+            recent
+                .common_dir
+                .as_ref()
+                .is_none_or(|common_dir| !repositories.iter().any(|pruned| pruned == common_dir))
         });
         if self.repositories == previous_repositories && self.recent == previous_recent {
             return Ok(());
@@ -190,7 +196,7 @@ impl KnownRepositoryStore {
             .iter()
             .map(|recent| {
                 serde_json::json!({
-                    "common_dir": stored_path_value(&recent.common_dir),
+                    "common_dir": recent.common_dir.as_deref().map(stored_path_value),
                     "root": stored_path_value(&recent.root),
                     "stats": recent.stats.map(|(additions, deletions)| serde_json::json!({
                         "additions": additions,
@@ -292,9 +298,13 @@ fn stored_path_value(path: &Path) -> Value {
 }
 
 fn recent_repository(value: &Value) -> Result<RecentRepository, String> {
-    if let (Some(common_dir), Some(root)) = (value.get("common_dir"), value.get("root")) {
+    if let Some(root) = value.get("root") {
         return Ok(RecentRepository {
-            common_dir: stored_path(common_dir)?,
+            common_dir: value
+                .get("common_dir")
+                .filter(|common_dir| !common_dir.is_null())
+                .map(stored_path)
+                .transpose()?,
             root: stored_path(root)?,
             stats: stored_stats(value.get("stats"))?,
         });
@@ -306,7 +316,7 @@ fn recent_repository(value: &Value) -> Result<RecentRepository, String> {
         common_dir.clone()
     };
     Ok(RecentRepository {
-        common_dir,
+        common_dir: Some(common_dir),
         root,
         stats: None,
     })

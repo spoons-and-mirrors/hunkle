@@ -27,7 +27,6 @@ pub(crate) struct LinkedWorktreeRepository {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RepositoryPickerItem {
-    pub(crate) common_dir: PathBuf,
     pub(crate) root: PathBuf,
     pub(crate) label: String,
     pub(crate) stats: Option<(u64, u64)>,
@@ -185,10 +184,13 @@ impl LinkedWorktreeCatalog {
             .recent
             .iter()
             .map(|recent| {
-                let repository = repositories.get(recent.common_dir.as_path()).copied();
+                let repository = recent
+                    .common_dir
+                    .as_deref()
+                    .and_then(|common_dir| repositories.get(common_dir).copied());
                 let label = repository
                     .map(|repository| repository.label.clone())
-                    .unwrap_or_else(|| repository_label(&recent.common_dir, &[]));
+                    .unwrap_or_else(|| workspace_label(&recent.root));
                 let branch = repository
                     .and_then(|repository| {
                         repository
@@ -204,7 +206,6 @@ impl LinkedWorktreeCatalog {
                             .to_owned()
                     });
                 RepositoryPickerItem {
-                    common_dir: recent.common_dir.clone(),
                     root: recent.root.clone(),
                     label,
                     stats: recent.stats,
@@ -214,13 +215,13 @@ impl LinkedWorktreeCatalog {
             .collect()
     }
 
-    pub(crate) fn remember_repository(
+    pub(crate) fn remember_workspace(
         &mut self,
-        common_dir: &Path,
+        common_dir: Option<&Path>,
         root: &Path,
     ) -> Result<(), String> {
         self.store
-            .remember_and_save(common_dir.to_owned(), root.to_owned())
+            .remember_and_save(common_dir.map(Path::to_owned), root.to_owned())
     }
 
     pub(crate) fn observe_herdr(&mut self, observation: LinkedWorktreeObservation) -> bool {
@@ -341,6 +342,7 @@ fn load_repository_stats(
 ) -> Vec<(PathBuf, (u64, u64))> {
     let roots = recent
         .into_iter()
+        .filter(|recent| recent.common_dir.is_some())
         .map(|recent| recent.root)
         .collect::<Vec<_>>();
     let worker_count = roots.len().min(
@@ -390,6 +392,12 @@ fn repository_label(common_dir: &Path, worktrees: &[LinkedWorktree]) -> String {
         .or_else(|| common_dir.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| common_dir.display().to_string())
+}
+
+fn workspace_label(root: &Path) -> String {
+    root.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string())
 }
 
 #[cfg(test)]

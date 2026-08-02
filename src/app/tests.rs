@@ -65,6 +65,7 @@ fn opens_a_nested_directory_as_a_local_workspace() {
     assert_eq!(repo.change_counts, (0, 0));
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.repository_picker_details()[0].root, repo.root);
 }
 
 #[test]
