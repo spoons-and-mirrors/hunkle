@@ -11,9 +11,7 @@ pub(crate) enum ShortcutAction {
     FindFile,
     Refresh,
     OpenExplorer,
-    OpenWorktrees,
     OpenSettings,
-    OpenRepositoryBrowser,
     OpenActions,
     OpenGitCommand,
     OpenHelp,
@@ -31,13 +29,6 @@ pub(crate) enum ShortcutAction {
     SaveOrFormat,
     SubmitCommit,
     ExplorerFavorite,
-    ExplorerTabFiles,
-    ExplorerTabWorktrees,
-    ExplorerTabBranches,
-    CreateWorktree,
-    DeleteWorktree,
-    RefreshWorktrees,
-    BranchDelete,
     AuthorEnableAll,
     AuthorDisableAll,
 }
@@ -172,9 +163,7 @@ const MAIN: u16 = 1 << 0;
 const COMMIT: u16 = 1 << 1;
 const FILE_EDIT: u16 = 1 << 2;
 const EXPLORER: u16 = 1 << 3;
-const WORKTREES: u16 = 1 << 4;
-const REPOSITORY_BROWSER: u16 = 1 << 5;
-const AUTHOR_FILTER: u16 = 1 << 6;
+const AUTHOR_FILTER: u16 = 1 << 4;
 
 const fn chord(code: KeyCode, modifiers: KeyModifiers) -> KeyChord {
     KeyChord { code, modifiers }
@@ -245,29 +234,12 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         KeyCode::F(3)
     ),
     shortcut!(
-        OpenWorktrees,
-        "open-worktrees",
-        "Linked worktrees",
-        "Navigation",
-        MAIN,
-        KeyCode::Char('w'),
-        KeyModifiers::SHIFT
-    ),
-    shortcut!(
         OpenSettings,
         "open-settings",
         "Settings",
         "Navigation",
         MAIN,
         KeyCode::Char('s')
-    ),
-    shortcut!(
-        OpenRepositoryBrowser,
-        "open-repository-browser",
-        "Branches / PRs / issues",
-        "Navigation",
-        MAIN,
-        KeyCode::Char('b')
     ),
     shortcut!(
         OpenActions,
@@ -421,64 +393,6 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         KeyModifiers::CONTROL
     ),
     shortcut!(
-        ExplorerTabFiles,
-        "explorer-tab-files",
-        "Explorer tab",
-        "Explorer",
-        EXPLORER | WORKTREES | REPOSITORY_BROWSER,
-        KeyCode::F(1)
-    ),
-    shortcut!(
-        ExplorerTabWorktrees,
-        "explorer-tab-worktrees",
-        "Worktrees tab",
-        "Explorer",
-        EXPLORER | WORKTREES | REPOSITORY_BROWSER,
-        KeyCode::F(2)
-    ),
-    shortcut!(
-        ExplorerTabBranches,
-        "explorer-tab-branches",
-        "Branches tab",
-        "Explorer",
-        EXPLORER | WORKTREES | REPOSITORY_BROWSER,
-        KeyCode::F(3)
-    ),
-    shortcut!(
-        CreateWorktree,
-        "create-worktree",
-        "Create linked worktree",
-        "Worktrees",
-        WORKTREES,
-        KeyCode::Char('n'),
-        KeyModifiers::SHIFT
-    ),
-    shortcut!(
-        DeleteWorktree,
-        "delete-worktree",
-        "Remove linked worktree",
-        "Worktrees",
-        WORKTREES,
-        KeyCode::Delete
-    ),
-    shortcut!(
-        RefreshWorktrees,
-        "refresh-worktrees",
-        "Refresh worktrees",
-        "Worktrees",
-        WORKTREES,
-        KeyCode::Char('r'),
-        KeyModifiers::CONTROL
-    ),
-    shortcut!(
-        BranchDelete,
-        "branch-delete",
-        "Delete local branch",
-        "Branches",
-        REPOSITORY_BROWSER,
-        KeyCode::Delete
-    ),
-    shortcut!(
         AuthorEnableAll,
         "author-enable-all",
         "Enable all authors",
@@ -531,14 +445,6 @@ impl Shortcuts {
 
     pub(crate) fn remap_explorer(&self, event: KeyEvent) -> KeyEvent {
         self.remap(event, EXPLORER)
-    }
-
-    pub(crate) fn remap_worktrees(&self, event: KeyEvent) -> KeyEvent {
-        self.remap(event, WORKTREES)
-    }
-
-    pub(crate) fn remap_repository_browser(&self, event: KeyEvent) -> KeyEvent {
-        self.remap(event, REPOSITORY_BROWSER)
     }
 
     pub(crate) fn remap_author_filter(&self, event: KeyEvent) -> KeyEvent {
@@ -710,14 +616,6 @@ mod tests {
                     KeyChord::new(KeyCode::Char('g'), KeyModifiers::NONE),
                 )
                 .is_ok()
-        );
-        assert!(
-            shortcuts
-                .set(
-                    ShortcutAction::ExplorerTabFiles,
-                    KeyChord::new(KeyCode::Delete, KeyModifiers::NONE),
-                )
-                .is_err()
         );
     }
 

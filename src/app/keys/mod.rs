@@ -6,4 +6,3 @@ mod file_editor;
 mod repo_ops;
 mod selection;
 mod settings;
-mod worktree_manager;

@@ -60,12 +60,6 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
         help_line("Home / End", "First / last"),
         shortcut_help(shortcuts, ShortcutAction::Refresh, "Refresh"),
         shortcut_help(shortcuts, ShortcutAction::OpenExplorer, "Explorer"),
-        shortcut_help(shortcuts, ShortcutAction::OpenWorktrees, "Linked worktrees"),
-        shortcut_help(
-            shortcuts,
-            ShortcutAction::OpenRepositoryBrowser,
-            "Branches / PRs / issues",
-        ),
         shortcut_help(shortcuts, ShortcutAction::OpenSettings, "Settings"),
         shortcut_help(shortcuts, ShortcutAction::OpenActions, "Git actions"),
         shortcut_help(shortcuts, ShortcutAction::OpenGitCommand, "Git command"),

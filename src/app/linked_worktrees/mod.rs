@@ -58,59 +58,17 @@ pub(crate) struct LinkedWorktreeCandidate {
     pub(crate) path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HerdrOwnedWorktree {
-    pub(crate) path: PathBuf,
-    pub(crate) workspace_id: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) enum HerdrOwnership {
-    #[default]
-    Disabled,
-    Unverified,
-    Verified(Vec<HerdrOwnedWorktree>),
-}
-
 pub(crate) struct LinkedWorktreeObservation {
     pub(crate) candidates: Vec<LinkedWorktreeCandidate>,
-    pub(crate) ownership: HerdrOwnership,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LinkedWorktreeRemovalPlan {
-    Native { common_dir: PathBuf, path: PathBuf },
-    Herdr { workspace_id: String, path: PathBuf },
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LinkedWorktreeCatalogSnapshot {
-    revision: u64,
     pub(crate) loading: bool,
     pub(crate) repositories: Vec<LinkedWorktreeRepository>,
-    active_path: Option<PathBuf>,
-    ownership: HerdrOwnership,
 }
 
 impl LinkedWorktreeCatalogSnapshot {
-    pub(crate) fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    pub(crate) fn is_active(&self, path: &Path) -> bool {
-        self.active_path
-            .as_deref()
-            .is_some_and(|active| same_path(active, path))
-    }
-
-    pub(crate) fn is_herdr_owned(&self, path: &Path) -> bool {
-        matches!(
-            &self.ownership,
-            HerdrOwnership::Verified(worktrees)
-                if worktrees.iter().any(|worktree| same_path(&worktree.path, path))
-        )
-    }
-
     pub(crate) fn repository(&self, common_dir: &Path) -> Option<&LinkedWorktreeRepository> {
         self.repositories
             .iter()
@@ -146,73 +104,11 @@ impl LinkedWorktreeCatalogSnapshot {
         })
     }
 
-    pub(crate) fn removal_plan(&self, path: &Path) -> Result<LinkedWorktreeRemovalPlan, String> {
-        let (repository, worktree) = self
-            .repositories
-            .iter()
-            .find_map(|repository| {
-                repository
-                    .worktrees
-                    .iter()
-                    .find(|worktree| same_path(&worktree.path, path))
-                    .map(|worktree| (repository, worktree))
-            })
-            .ok_or_else(|| "This worktree is no longer in the Git inventory".to_owned())?;
-        if worktree.is_main {
-            return Err("The primary worktree cannot be removed".to_owned());
-        }
-        if worktree.locked {
-            return Err(worktree.locked_reason.as_ref().map_or_else(
-                || "Unlock this worktree before removing it".to_owned(),
-                |reason| format!("Worktree is locked: {reason}"),
-            ));
-        }
-        if worktree.prunable {
-            return Err("This missing worktree requires repository metadata pruning".to_owned());
-        }
-        if self.is_active(path) {
-            return Err("Open another worktree before removing the current one".to_owned());
-        }
-        match &self.ownership {
-            HerdrOwnership::Unverified => {
-                Err("Waiting for Herdr to verify linked worktree ownership".to_owned())
-            }
-            HerdrOwnership::Verified(worktrees) => worktrees
-                .iter()
-                .find(|worktree| same_path(&worktree.path, path))
-                .map_or_else(
-                    || {
-                        Ok(LinkedWorktreeRemovalPlan::Native {
-                            common_dir: repository.common_dir.clone(),
-                            path: worktree.path.clone(),
-                        })
-                    },
-                    |owned| {
-                        Ok(LinkedWorktreeRemovalPlan::Herdr {
-                            workspace_id: owned.workspace_id.clone(),
-                            path: worktree.path.clone(),
-                        })
-                    },
-                ),
-            HerdrOwnership::Disabled => Ok(LinkedWorktreeRemovalPlan::Native {
-                common_dir: repository.common_dir.clone(),
-                path: worktree.path.clone(),
-            }),
-        }
-    }
-
     #[cfg(test)]
-    pub(crate) fn for_test(
-        repositories: Vec<LinkedWorktreeRepository>,
-        active_path: Option<PathBuf>,
-        ownership: HerdrOwnership,
-    ) -> Self {
+    pub(crate) fn for_test(repositories: Vec<LinkedWorktreeRepository>) -> Self {
         Self {
-            revision: 1,
             loading: false,
             repositories,
-            active_path,
-            ownership,
         }
     }
 }
@@ -278,10 +174,6 @@ impl LinkedWorktreeCatalog {
         self.snapshot.agent_destination(path)
     }
 
-    pub(crate) fn removal_plan(&self, path: &Path) -> Result<LinkedWorktreeRemovalPlan, String> {
-        self.snapshot.removal_plan(path)
-    }
-
     pub(crate) fn recent_repository_picker_items(&self) -> Vec<RepositoryPickerItem> {
         let repositories = self
             .snapshot
@@ -331,22 +223,9 @@ impl LinkedWorktreeCatalog {
             .remember_and_save(common_dir.to_owned(), root.to_owned())
     }
 
-    pub(crate) fn set_active_path(&mut self, path: Option<PathBuf>) {
-        if self.snapshot.active_path == path {
-            return;
-        }
-        self.snapshot.active_path = path;
-        self.bump_revision();
-    }
-
     pub(crate) fn observe_herdr(&mut self, observation: LinkedWorktreeObservation) -> bool {
         let candidates_changed = self.candidates != observation.candidates;
-        let ownership_changed = self.snapshot.ownership != observation.ownership;
         self.candidates = observation.candidates;
-        self.snapshot.ownership = observation.ownership;
-        if ownership_changed {
-            self.bump_revision();
-        }
         candidates_changed
     }
 
@@ -359,7 +238,6 @@ impl LinkedWorktreeCatalog {
         let sender = self.sender.clone();
         let stats_sender = self.stats_sender.clone();
         self.snapshot.loading = true;
-        self.bump_revision();
         thread::spawn(move || {
             let mut common_dirs = known;
             let mut seen = common_dirs.iter().cloned().collect::<HashSet<_>>();
@@ -440,7 +318,6 @@ impl LinkedWorktreeCatalog {
             {
                 result.notice = Some(error);
             }
-            self.bump_revision();
             result.changed = true;
         }
         while let Ok(completion) = self.stats_receiver.try_recv() {
@@ -449,7 +326,6 @@ impl LinkedWorktreeCatalog {
             }
             match self.store.update_stats_and_save(&completion.stats) {
                 Ok(true) => {
-                    self.bump_revision();
                     result.changed = true;
                 }
                 Ok(false) => {}
@@ -457,10 +333,6 @@ impl LinkedWorktreeCatalog {
             }
         }
         result
-    }
-
-    fn bump_revision(&mut self) {
-        self.snapshot.revision = self.snapshot.revision.wrapping_add(1);
     }
 }
 

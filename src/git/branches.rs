@@ -1,48 +1,5 @@
 use super::*;
 
-pub(crate) fn delete_branch(
-    root: &Path,
-    branch: &str,
-    remote: Option<(&str, &str)>,
-    force: bool,
-) -> Result<()> {
-    if let Some(branch) = repository_branches(root)?
-        .iter()
-        .find(|candidate| !candidate.remote && candidate.name == branch)
-        && let Some(reason) = branch_delete_protection(branch)
-    {
-        bail!(reason);
-    }
-    let mut args = vec!["branch", "--delete"];
-    if force {
-        args.push("--force");
-    }
-    args.extend(["--", branch]);
-    run_ok(root, &args)?;
-    if let Some((remote, remote_branch)) = remote {
-        let refspec = format!(":refs/heads/{remote_branch}");
-        let output = process::run(
-            base_command(root)
-                .arg("push")
-                .arg("--")
-                .arg(remote)
-                .arg(&refspec),
-            Limits::new(COMMAND_OUTPUT_LIMIT, GIT_STDERR_LIMIT, GIT_NETWORK_TIMEOUT),
-        )
-        .with_context(|| format!("could not delete {remote}/{remote_branch}"))?;
-        if output.timed_out {
-            bail!("Timed out deleting {remote}/{remote_branch}");
-        }
-        if !output.status.success() {
-            bail!(
-                "Deleted local branch {branch}, but could not delete {remote}/{remote_branch}: {}",
-                clean_stderr(&output)
-            );
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn checkout_branch(root: &Path, branch: &str, remote: bool) -> Result<CommandOutput> {
     let output = if remote {
         run(root, &["switch", "--track", "--", branch])?

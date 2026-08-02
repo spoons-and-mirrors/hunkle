@@ -36,7 +36,7 @@ The completed mode should let a user answer: what commits will this branch contr
 
 - Branch Review is read-only apart from running the configured check command and changing session-local checklist state.
 - Do not include staged or unstaged work in the cumulative branch diff.
-- Do not require GitHub or an open pull request. Existing `gh` integration may enrich the mode later but is not the source of truth for this ticket.
+- Do not require GitHub or an open pull request. A future `gh` integration may enrich the mode later but is not the source of truth for this ticket.
 - Do not overload the existing single-commit preview cache with range results keyed only by commit OID; review results need an identity that includes repository, base, merge base, and head.
 - New background work must declare its compatibility with current repository operations and its refresh/invalidation policy, following the operation-state and scoped-refresh ADRs.
 

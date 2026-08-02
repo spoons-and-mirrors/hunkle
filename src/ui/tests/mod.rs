@@ -12,11 +12,10 @@ pub(super) use ratatui::{
 pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::app::{
-    AgentPaneDirection, App, BrowserTab, ChangesHitTarget, CommitMessageGenerator,
-    ExplorerHitTarget, ExplorerTab, GraphColumn, GraphHitTarget, HeaderPickerItem,
-    HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget, LeftPane, Mode,
-    PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings, SettingsPage, SettingsStore,
-    ShortcutAction, SqliteFocus, View, WorktreeManagerHitTarget, WorktreeManagerRow,
+    AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget,
+    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout,
+    HerdrPaneRect, HerdrSession, HitTarget, LeftPane, Mode, Settings, SettingsPage, SettingsStore,
+    ShortcutAction, SqliteFocus, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
@@ -31,7 +30,6 @@ mod files;
 mod header;
 mod media;
 mod sqlite;
-mod worktree_manager;
 
 fn assert_black_underlay(terminal: &Terminal<TestBackend>) {
     let background = &terminal.backend().buffer()[(0, 0)];
@@ -1346,33 +1344,12 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(explorer_screen.contains("EXPLORER"));
-    assert!(explorer_screen.contains("F1  EXPLORER"));
-    assert!(explorer_screen.contains("F2  WORKTREES"));
-    assert!(explorer_screen.contains("F3  BRANCHES"));
     assert!(explorer_screen.contains("Switch working directory"));
     assert!(explorer_screen.contains("AROUND HERE"));
     assert!(explorer_screen.contains("CONTENTS"));
     assert!(explorer_screen.contains("★ Project"));
     assert!(!explorer_screen.contains("OPEN REPOSITORY"));
     assert!(!explorer_screen.contains('┌'));
-    let worktrees_tab = app
-        .regions
-        .hit_target_rect(HitTarget::ExplorerTab(ExplorerTab::Worktrees))
-        .unwrap();
-    click(&mut app, worktrees_tab.x + 1, worktrees_tab.y);
-    assert_eq!(app.mode, Mode::Explorer);
-    assert_eq!(app.explorer_tab, ExplorerTab::Worktrees);
-    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-    assert_eq!(app.explorer_tab, ExplorerTab::Explorer);
-    let branches_tab = app
-        .regions
-        .hit_target_rect(HitTarget::ExplorerTab(ExplorerTab::Branches))
-        .unwrap();
-    click(&mut app, branches_tab.x + 1, branches_tab.y);
-    assert_eq!(app.mode, Mode::Explorer);
-    assert_eq!(app.explorer_tab, ExplorerTab::Branches);
-    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-    assert_eq!(app.explorer_tab, ExplorerTab::Explorer);
     assert!(
         app.regions
             .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane))
@@ -1450,169 +1427,6 @@ fn renders_every_primary_surface() {
             .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::PreviewPane))
             .is_some()
     );
-
-    app.mode = Mode::Normal;
-    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::Explorer);
-    assert_eq!(app.explorer_tab, ExplorerTab::Branches);
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let browser_screen: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(browser_screen.contains("PULL REQUESTS"));
-    assert!(browser_screen.contains("LOCAL & REMOTE"));
-    assert!(browser_screen.contains("F3  BRANCHES"));
-    assert!(browser_screen.contains("Navigate repository work"));
-    assert!(browser_screen.contains("FILTER  TYPE TO SEARCH"));
-    assert!(browser_screen.contains("BRANCH DETAILS"));
-    assert!(browser_screen.contains("LATEST COMMIT"));
-    assert!(browser_screen.contains("CURRENT"));
-    assert!(browser_screen.contains("main"));
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::RepositoryBrowser(
-                RepositoryBrowserHitTarget::List,
-            ))
-            .is_some()
-    );
-    let browser_overlay = app
-        .regions
-        .hit_target_rect(HitTarget::RepositoryBrowser(
-            RepositoryBrowserHitTarget::Overlay,
-        ))
-        .unwrap();
-    let buffer = terminal.backend().buffer();
-    let background = &buffer[(0, 0)];
-    let modal = &buffer[(browser_overlay.x, browser_overlay.y)];
-    assert_eq!(background.bg, Color::Rgb(0, 0, 0));
-    assert!(background.modifier.contains(Modifier::DIM));
-    assert_eq!(modal.bg, super::palette().surface_alt);
-    assert!(!modal.modifier.contains(Modifier::DIM));
-
-    let target_oid = app.repository().unwrap().commits[1].oid.clone();
-    let mut target_branch = app.repository_browser.branches[0].clone();
-    target_branch.name = "test/hover-target".to_owned();
-    target_branch.oid = target_oid;
-    target_branch.current = false;
-    app.repository_browser.branches.push(target_branch);
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let list = app
-        .regions
-        .hit_target_rect(HitTarget::RepositoryBrowser(
-            RepositoryBrowserHitTarget::List,
-        ))
-        .unwrap();
-    app.handle_mouse(MouseEvent {
-        kind: MouseEventKind::Moved,
-        column: list.x + 4,
-        row: list.y + 1,
-        modifiers: KeyModifiers::NONE,
-    });
-    assert_eq!(app.repository_browser.state.selected(), Some(1));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(
-        terminal.backend().buffer()[(list.x + 4, list.y + 1)].bg,
-        super::palette().selected
-    );
-    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-    assert!(app.repository_browser.branch_delete_open());
-    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-    assert_eq!(app.explorer_tab, ExplorerTab::Branches);
-    assert!(app.repository_browser.branch_delete_open());
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let delete_screen: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(delete_screen.contains("DELETE BRANCH"));
-    assert!(delete_screen.contains("Delete local branch test/hover-target?"));
-    assert!(delete_screen.contains("Local only"));
-    assert!(delete_screen.contains("Force local"));
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(!app.repository_browser.branch_delete_open());
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.view, View::Graph);
-    assert_eq!(app.graph_state.selected(), Some(1));
-    assert_eq!(app.graph_state.offset(), 0);
-    assert!(!app.graph_scroll_to_selection);
-
-    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let list = app
-        .regions
-        .hit_target_rect(HitTarget::RepositoryBrowser(
-            RepositoryBrowserHitTarget::List,
-        ))
-        .unwrap();
-    let branch_oid = app.repository_browser.branches[0].oid.clone();
-    let branch_tip = app
-        .repository()
-        .unwrap()
-        .commits
-        .iter()
-        .position(|commit| commit.oid.starts_with(&branch_oid))
-        .unwrap();
-    app.graph_state
-        .select(Some(usize::from(branch_tip == 0).min(1)));
-    click(&mut app, list.x + 4, list.y);
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.view, View::Graph);
-    assert_eq!(app.graph_state.selected(), Some(branch_tip));
-    assert_eq!(app.graph_state.offset(), branch_tip.saturating_sub(5));
-
-    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-
-    app.repository_browser.pull_requests = RemoteItems::ready(vec![
-        PullRequest {
-            number: 42,
-            title: "Improve browser readability".to_owned(),
-            branch: "feature/browser".to_owned(),
-            author: "octocat".to_owned(),
-            draft: true,
-        },
-        PullRequest {
-            number: 43,
-            title: "Polish metadata colors".to_owned(),
-            branch: "feature/colors".to_owned(),
-            author: "hubot".to_owned(),
-            draft: false,
-        },
-    ]);
-    app.repository_browser.set_tab(BrowserTab::PullRequests);
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let pull_request_screen: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(pull_request_screen.contains("PULL REQUEST  selected"));
-    assert!(pull_request_screen.contains("HEAD BRANCH"));
-    assert!(pull_request_screen.contains("feature/browser"));
-    let list = app
-        .regions
-        .hit_target_rect(HitTarget::RepositoryBrowser(
-            RepositoryBrowserHitTarget::List,
-        ))
-        .unwrap();
-    let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(list.x + 4, list.y + 1)].fg, super::palette().ink);
-    assert_eq!(buffer[(list.x + 4, list.y + 3)].fg, super::palette().cyan);
-    click(&mut app, list.x + 4, list.y + 2);
-    assert_eq!(app.repository_browser.state.selected(), Some(1));
-    app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
-    assert_eq!(app.repository_browser.query, "m");
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::Normal);
 
     app.mode = Mode::Settings;
     app.settings = Settings::default();

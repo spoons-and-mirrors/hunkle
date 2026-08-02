@@ -158,7 +158,6 @@ fn main() -> Result<()> {
                         app.actions.selection,
                         app.graph_state.selected(),
                         app.author_filter.state.selected(),
-                        app.repository_browser.state.selected(),
                         app.hovered_hit_target,
                     );
                     app.handle_mouse(mouse);
@@ -169,7 +168,6 @@ fn main() -> Result<()> {
                                 app.actions.selection,
                                 app.graph_state.selected(),
                                 app.author_filter.state.selected(),
-                                app.repository_browser.state.selected(),
                                 app.hovered_hit_target,
                             );
                     (changed, false)

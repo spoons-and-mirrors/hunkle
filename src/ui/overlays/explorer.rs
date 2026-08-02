@@ -226,7 +226,6 @@ pub(crate) fn draw_explorer(
         Rect::new(area.x, area.y, area.width, 3),
         palette().surface_alt,
     );
-    let tab_targets = draw_explorer_tabs(frame, area, ExplorerTab::Explorer, shortcuts);
     fill(
         frame,
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -646,7 +645,6 @@ pub(crate) fn draw_explorer(
         (HitTarget::Explorer(ExplorerHitTarget::Path), path_area),
         (HitTarget::Explorer(ExplorerHitTarget::Splitter), divider),
     ];
-    targets.extend(tab_targets);
     targets.extend(favorite_targets);
     if explorer.editing_path {
         targets.push((
@@ -717,54 +715,6 @@ pub(crate) fn draw_explorer(
         }
     }
     targets
-}
-
-pub(super) fn draw_explorer_tabs(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    active: ExplorerTab,
-    shortcuts: &Shortcuts,
-) -> Vec<(HitTarget, Rect)> {
-    let mut x = area.x.saturating_add(2);
-    ExplorerTab::ALL
-        .into_iter()
-        .enumerate()
-        .map(|(index, tab)| {
-            let (action, title) = match tab {
-                ExplorerTab::Explorer => (ShortcutAction::ExplorerTabFiles, "EXPLORER"),
-                ExplorerTab::Worktrees => (ShortcutAction::ExplorerTabWorktrees, "WORKTREES"),
-                ExplorerTab::Branches => (ShortcutAction::ExplorerTabBranches, "BRANCHES"),
-            };
-            let label = format!("{}  {title}", shortcuts.label(action));
-            let width =
-                u16::try_from(UnicodeWidthStr::width(label.as_str()) + 2).unwrap_or(u16::MAX);
-            let rect = Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1);
-            let selected = tab == active;
-            frame.render_widget(
-                Paragraph::new(format!(" {label} ")).style(
-                    Style::default()
-                        .fg(if selected {
-                            palette().accent
-                        } else {
-                            palette().muted
-                        })
-                        .bg(if selected {
-                            palette().raised
-                        } else {
-                            palette().surface_alt
-                        })
-                        .add_modifier(if selected {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-                rect,
-            );
-            x = rect.right().saturating_add(u16::from(index == 0));
-            (HitTarget::ExplorerTab(tab), rect)
-        })
-        .collect()
 }
 
 pub(crate) fn draw_file_search(

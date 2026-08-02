@@ -13,11 +13,9 @@ mod herdr_prompt;
 mod herdr_session;
 mod linked_worktrees;
 mod mouse;
-mod repository_browser;
 mod settings;
 mod shortcuts;
 mod text_input;
-mod worktree_manager;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandRecord, CommandStatus};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
@@ -39,21 +37,12 @@ pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::HerdrPaneRect;
 pub(crate) use herdr_session::{AgentEntryState, AgentStatus, HerdrPaneLayout, HerdrSession};
 pub(crate) use linked_worktrees::{
-    AgentDestinationMetadata, HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate,
-    LinkedWorktreeCatalog, LinkedWorktreeCatalogSnapshot, LinkedWorktreeObservation,
-    LinkedWorktreeRemovalPlan, LinkedWorktreeRepository, RepositoryPickerItem,
-};
-pub(crate) use repository_browser::{
-    BranchDeleteDialog, BrowserTab, Issue, PullRequest, RemoteItems, RepositoryBrowser,
-    RepositoryBrowserEffect,
+    AgentDestinationMetadata, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
+    LinkedWorktreeObservation, RepositoryPickerItem,
 };
 pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use settings::{SettingsStore, valid_opencode_model};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
-pub(crate) use worktree_manager::{
-    WorktreeCreateDialog, WorktreeCreateField, WorktreeManager, WorktreeManagerEffect,
-    WorktreeManagerRow, WorktreeRemoveDialog, short_head, worktree_label,
-};
 
 pub(super) use std::{
     collections::HashMap,
@@ -118,14 +107,11 @@ pub struct App {
     pub(crate) dragging_graph_column: Option<GraphColumnDrag>,
     diff_scroll_drag_offset: u16,
     pub workspace_explorer: Explorer,
-    pub(crate) explorer_tab: ExplorerTab,
     pub(crate) file_search: FileSearch,
     pub(crate) actions: ActionsState,
     pub(crate) herdr_prompt: HerdrPrompt,
-    pub(crate) repository_browser: RepositoryBrowser,
     pub(crate) header_picker: HeaderPicker,
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
-    pub(crate) worktree_manager: WorktreeManager,
     pub(crate) herdr: HerdrSession,
     pub(crate) agents_visible: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
@@ -224,17 +210,12 @@ impl App {
                 .is_some_and(|repo| !repo.commits.is_empty())
                 .then_some(0),
         );
-        let mut repository_browser = RepositoryBrowser::default();
-        if let Some(repo) = session.data().filter(|repo| repo.github_remote) {
-            repository_browser.prefetch(&repo.root);
-        }
         let mut linked_worktrees = LinkedWorktreeCatalog::new(known_repositories_path);
         if let Some(repository) = session.data()
             && let Some(common_dir) = repository.common_dir.as_deref()
         {
             let _ = linked_worktrees.remember_repository(common_dir, &repository.root);
         }
-        linked_worktrees.set_active_path(session.data().map(|repository| repository.root.clone()));
         let mut herdr = HerdrSession::detect(workspace_config_dir);
         herdr.set_cross_workspace_agents(settings.cross_workspace_agents);
         linked_worktrees.observe_herdr(herdr.linked_worktree_observation());
@@ -268,14 +249,11 @@ impl App {
             dragging_graph_column: None,
             diff_scroll_drag_offset: 0,
             workspace_explorer,
-            explorer_tab: ExplorerTab::Explorer,
             file_search,
             actions: ActionsState::default(),
             herdr_prompt: HerdrPrompt::default(),
-            repository_browser,
             header_picker: HeaderPicker::default(),
             linked_worktrees,
-            worktree_manager: WorktreeManager::new(),
             herdr,
             agents_visible: true,
             hovered_hit_target: None,
@@ -364,6 +342,7 @@ impl App {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn visible_graph_indices(&self) -> &[usize] {
         if self.repository().is_some() {
             self.author_filter.visible_indices()
@@ -449,7 +428,6 @@ impl App {
     pub(crate) fn can_restart(&self) -> bool {
         self.session.can_restart()
             && !self.commit_message_running()
-            && !self.worktree_removal_running()
             && !self.file_editor.as_ref().is_some_and(FileEditor::dirty)
     }
 
@@ -507,49 +485,11 @@ impl App {
             }
             return;
         }
-        let explorer_dialog_open = match self.explorer_tab {
-            ExplorerTab::Worktrees => self.worktree_manager.dialog_open(),
-            ExplorerTab::Branches => self.repository_browser.branch_delete_open(),
-            ExplorerTab::Explorer => {
-                self.workspace_explorer.editing_path || self.workspace_explorer.naming_favorite
-            }
-        };
-        if self.mode == Mode::Explorer && !explorer_dialog_open {
-            let tab = if self
-                .settings
-                .shortcuts
-                .matches(ShortcutAction::ExplorerTabFiles, key)
-            {
-                Some(ExplorerTab::Explorer)
-            } else if self
-                .settings
-                .shortcuts
-                .matches(ShortcutAction::ExplorerTabWorktrees, key)
-            {
-                Some(ExplorerTab::Worktrees)
-            } else if self
-                .settings
-                .shortcuts
-                .matches(ShortcutAction::ExplorerTabBranches, key)
-            {
-                Some(ExplorerTab::Branches)
-            } else {
-                None
-            };
-            if let Some(tab) = tab {
-                self.select_explorer_tab(tab);
-                return;
-            }
-        }
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Commit => self.handle_commit_input(key),
             Mode::FileSearch => self.handle_file_search(key),
-            Mode::Explorer => match self.explorer_tab {
-                ExplorerTab::Explorer => self.handle_explorer(key),
-                ExplorerTab::Worktrees => self.handle_worktree_manager(key),
-                ExplorerTab::Branches => self.handle_repository_browser(key),
-            },
+            Mode::Explorer => self.handle_explorer(key),
             Mode::Settings => self.handle_settings(key),
             Mode::AuthorFilter => self.handle_author_filter(key),
             Mode::ActionMenu => self.handle_action_menu(key),
@@ -633,11 +573,7 @@ impl App {
                     self.file_search.paste(text, &repo.files);
                 }
             }
-            Mode::Explorer => match self.explorer_tab {
-                ExplorerTab::Explorer => self.workspace_explorer.paste(text),
-                ExplorerTab::Worktrees => self.worktree_manager.paste(text),
-                ExplorerTab::Branches => self.repository_browser.paste(text),
-            },
+            Mode::Explorer => self.workspace_explorer.paste(text),
             Mode::Command if self.actions.status != CommandStatus::Running => {
                 self.actions.input.push_str(text);
                 if self.actions.status == CommandStatus::Input {
@@ -675,10 +611,8 @@ impl App {
     }
 
     pub fn poll_worker(&mut self) -> bool {
-        let mut changed = self.mode == Mode::Explorer
-            && self.explorer_tab == ExplorerTab::Explorer
-            && self.workspace_explorer.poll_index();
-        if self.herdr.is_enabled() || self.herdr.destructive_action_running() {
+        let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
+        if self.herdr.is_enabled() {
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
                 self.herdr.poll()
@@ -709,24 +643,6 @@ impl App {
         changed |= catalog_poll.changed;
         if let Some(notice) = catalog_poll.notice {
             self.notice = Some(notice);
-        }
-        self.worktree_manager
-            .replace_catalog(self.linked_worktrees.snapshot());
-        changed |= self.repository_browser.poll();
-        let worktree_poll = {
-            let _activity = diagnostics::activity("poll-worktree-manager", "");
-            self.worktree_manager.poll()
-        };
-        changed |= worktree_poll.changed;
-        if let Some(notice) = worktree_poll.notice {
-            self.notice = Some(notice);
-        }
-        if let Some(path) = worktree_poll.open_path {
-            self.mode = Mode::Normal;
-            self.queue_workspace_restore(path);
-        }
-        if worktree_poll.refresh_catalog {
-            self.linked_worktrees.refresh();
         }
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
@@ -760,6 +676,17 @@ impl App {
                     self.linked_worktrees.refresh();
                 }
                 Err(error) => self.notice = Some(format!("Could not clone repository: {error}")),
+            }
+        }
+        if let Some(result) = self.header_picker.poll_worktree_creation() {
+            changed = true;
+            match result {
+                Ok(path) => {
+                    self.notice = Some(format!("Created {}; opening workspace…", path.display()));
+                    self.queue_workspace_restore(path);
+                    self.linked_worktrees.refresh();
+                }
+                Err(error) => self.notice = Some(format!("Could not create worktree: {error}")),
             }
         }
         if let Some(done) = self
@@ -964,35 +891,6 @@ impl App {
                         Err(error) => self.notice = Some(error),
                     }
                 }
-                WorkerOutcome::BranchDelete(done) => {
-                    self.notice = Some(match done.result {
-                        Ok(()) => done.remote.map_or_else(
-                            || {
-                                format!(
-                                    "{} local branch {}",
-                                    if done.force {
-                                        "Force deleted"
-                                    } else {
-                                        "Deleted"
-                                    },
-                                    done.branch
-                                )
-                            },
-                            |(remote, remote_branch)| {
-                                format!(
-                                    "{} {} locally and {remote}/{remote_branch}",
-                                    if done.force {
-                                        "Force deleted"
-                                    } else {
-                                        "Deleted"
-                                    },
-                                    done.branch
-                                )
-                            },
-                        ),
-                        Err(error) => error,
-                    });
-                }
                 WorkerOutcome::BranchCheckout(done) => match done.result {
                     Ok(output) if output.success => {
                         self.notice = Some(format!("Checked out {}", done.branch));
@@ -1039,11 +937,6 @@ impl App {
                             repository.root.display()
                         ));
                     }
-                    self.linked_worktrees.set_active_path(
-                        self.session
-                            .data()
-                            .map(|repository| repository.root.clone()),
-                    );
                     let remember_error = self.session.data().and_then(|repository| {
                         repository.common_dir.as_deref().and_then(|common_dir| {
                             self.linked_worktrees
@@ -1159,12 +1052,7 @@ impl App {
                         } else {
                             self.file_search.invalidate();
                         }
-                        if self.mode == Mode::Explorer && self.explorer_tab == ExplorerTab::Branches
-                        {
-                            self.repository_browser.sync_branches(&repo.branches);
-                        }
                     }
-                    self.prefetch_repository_browser();
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());
                     } else if self
@@ -1430,9 +1318,7 @@ impl App {
             ShortcutAction::OpenHerdr => self.open_herdr_prompt(),
             ShortcutAction::Refresh => self.reload(RefreshScope::ALL),
             ShortcutAction::OpenExplorer => self.open_explorer(),
-            ShortcutAction::OpenWorktrees => self.open_worktree_manager(),
             ShortcutAction::OpenSettings => self.open_settings(),
-            ShortcutAction::OpenRepositoryBrowser => self.open_repository_browser(),
             ShortcutAction::OpenActions => self.open_actions(),
             ShortcutAction::OpenGitCommand => self.open_git_command(),
             ShortcutAction::OpenHelp => self.mode = Mode::Help,
@@ -1850,10 +1736,16 @@ impl App {
                     self.notice = Some(format!("{} is already checked out", branch.name));
                     return;
                 }
-                self.apply_repository_browser_effect(RepositoryBrowserEffect::CheckoutBranch {
-                    branch: branch.name,
-                    remote: branch.remote,
-                });
+                let branch_name = branch.name;
+                if self
+                    .session
+                    .start_branch_checkout(branch_name.clone(), branch.remote)
+                {
+                    self.changes.clear_branch_comparison();
+                    self.notice = Some(format!("Checking out {branch_name}…"));
+                } else {
+                    self.notice = Some("Another repository operation is running".to_owned());
+                }
             }
             HeaderPickerItem::DiffTarget(branch) => {
                 let Some(repository) = self.git_repository() else {
@@ -1885,20 +1777,6 @@ impl App {
                     self.notice = Some("Loading active Herdr tab layout".to_owned());
                 }
             }
-        }
-    }
-
-    pub(crate) fn select_explorer_tab(&mut self, tab: ExplorerTab) {
-        if self.mode == Mode::Explorer && self.explorer_tab == tab {
-            return;
-        }
-        match tab {
-            ExplorerTab::Explorer => {
-                self.explorer_tab = tab;
-                self.mode = Mode::Explorer;
-            }
-            ExplorerTab::Worktrees => self.open_worktree_manager(),
-            ExplorerTab::Branches => self.open_repository_browser(),
         }
     }
 

@@ -29,13 +29,6 @@ pub enum Mode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExplorerTab {
-    Explorer,
-    Worktrees,
-    Branches,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsPage {
     General,
     OpenCode,
@@ -58,10 +51,6 @@ impl SettingsPage {
             Self::Shortcuts => Self::OpenCode,
         }
     }
-}
-
-impl ExplorerTab {
-    pub(crate) const ALL: [Self; 3] = [Self::Explorer, Self::Worktrees, Self::Branches];
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,10 +93,7 @@ pub(crate) enum HitTarget {
     CommitMessageGenerate,
     MarkdownPreviewToggle,
     Graph(GraphHitTarget),
-    ExplorerTab(ExplorerTab),
     Explorer(ExplorerHitTarget),
-    RepositoryBrowser(RepositoryBrowserHitTarget),
-    WorktreeManager(WorktreeManagerHitTarget),
     Agent(usize),
     AgentTooltip { agent: usize, message: usize },
     AgentMessage { agent: usize, message: usize },
@@ -130,13 +116,6 @@ impl AgentPaneDirection {
             Self::Right => "right",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorktreeManagerHitTarget {
-    Overlay,
-    List,
-    Item { generation: u64, row: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,14 +163,6 @@ pub(crate) struct GraphColumnDrag {
     pub origin_x: u16,
     pub left_width: u16,
     pub right_width: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RepositoryBrowserHitTarget {
-    Overlay,
-    List,
-    Tab(BrowserTab),
-    Item(usize),
 }
 
 #[derive(Debug, Clone, Copy)]

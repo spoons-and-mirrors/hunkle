@@ -1,93 +1,6 @@
 use super::super::*;
 
 impl App {
-    pub(crate) fn open_browser_branch(&mut self, oid: &str) {
-        let Some((author, actual_index)) = self.repository().and_then(|repo| {
-            repo.commits
-                .iter()
-                .position(|commit| commit.oid.starts_with(oid))
-                .map(|index| (repo.commits[index].author.clone(), index))
-        }) else {
-            self.mode = Mode::Normal;
-            self.notice = Some("Branch tip is outside the loaded graph".to_owned());
-            return;
-        };
-        self.author_filter.ensure_enabled(&author);
-        let Some(index) = self
-            .visible_graph_indices()
-            .iter()
-            .position(|index| *index == actual_index)
-        else {
-            return;
-        };
-        self.graph_state.select(Some(index));
-        *self.graph_state.offset_mut() = index.saturating_sub(5);
-        self.graph_scroll_to_selection = false;
-        self.show_graph();
-        self.mode = Mode::Normal;
-    }
-
-    pub(crate) fn apply_repository_browser_effect_option(
-        &mut self,
-        effect: Option<RepositoryBrowserEffect>,
-    ) {
-        if let Some(effect) = effect {
-            self.apply_repository_browser_effect(effect);
-        }
-    }
-
-    pub(crate) fn apply_repository_browser_effect(&mut self, effect: RepositoryBrowserEffect) {
-        match effect {
-            RepositoryBrowserEffect::Close => self.mode = Mode::Normal,
-            RepositoryBrowserEffect::OpenBranch(oid) => self.open_browser_branch(&oid),
-            RepositoryBrowserEffect::CheckoutBranch { branch, remote } => {
-                if self.session.start_branch_checkout(branch.clone(), remote) {
-                    self.changes.clear_branch_comparison();
-                    self.mode = Mode::Normal;
-                    self.notice = Some(format!("Checking out {branch}…"));
-                } else {
-                    self.notice = Some("Another repository operation is running".to_owned());
-                }
-            }
-            RepositoryBrowserEffect::DeleteBranch {
-                branch,
-                remote,
-                force,
-            } => {
-                if self.session.start_branch_delete(branch, remote, force) {
-                    self.notice = Some(if force {
-                        "Force deleting branch…".to_owned()
-                    } else {
-                        "Deleting branch…".to_owned()
-                    });
-                } else {
-                    self.notice = Some("Another repository operation is running".to_owned());
-                }
-            }
-            RepositoryBrowserEffect::Notice(notice) => self.notice = Some(notice),
-        }
-    }
-
-    pub(crate) fn open_repository_browser(&mut self) {
-        if self.mode == Mode::Explorer && self.explorer_tab == ExplorerTab::Branches {
-            return;
-        }
-        let Some(repo) = self.git_repository() else {
-            self.require_git_repository();
-            return;
-        };
-        if !repo.details_ready {
-            self.notice = Some("Repository details are still loading".to_owned());
-            return;
-        }
-        let root = repo.root.clone();
-        let branches = repo.branches.clone();
-        let prefetch = repo.github_remote;
-        self.repository_browser.open(&root, &branches, prefetch);
-        self.explorer_tab = ExplorerTab::Branches;
-        self.mode = Mode::Explorer;
-    }
-
     pub(crate) fn open_header_repositories(&mut self) {
         let details = self.repository_picker_details();
         let items = details
@@ -455,7 +368,7 @@ impl App {
     }
 
     pub(crate) fn begin_header_worktree_creation(&mut self) {
-        if self.worktree_manager.operation_running() || self.herdr.destructive_action_running() {
+        if self.header_picker.worktree_creation_running() {
             self.header_picker.message = Some("Wait for the current Herdr operation".to_owned());
             return;
         }
@@ -494,9 +407,7 @@ impl App {
                     self.header_picker.message = Some("Starting branch is required".to_owned());
                     return;
                 }
-                if self.worktree_manager.operation_running()
-                    || self.herdr.destructive_action_running()
-                {
+                if self.header_picker.worktree_creation_running() {
                     self.header_picker.message =
                         Some("Wait for the current Herdr operation".to_owned());
                     return;
@@ -511,8 +422,8 @@ impl App {
                 let name = name.to_owned();
                 let base = base.to_owned();
                 if self
-                    .worktree_manager
-                    .start_create(cwd, None, name.clone(), base)
+                    .header_picker
+                    .start_worktree_creation(cwd, name.clone(), base)
                 {
                     self.header_picker.close();
                     self.notice = Some(format!("Creating worktree {name}…"));
@@ -707,25 +618,5 @@ impl App {
         {
             self.notice = Some(error);
         }
-    }
-
-    pub(crate) fn prefetch_repository_browser(&mut self) {
-        let root = self
-            .git_repository()
-            .filter(|repo| repo.github_remote)
-            .map(|repo| repo.root.clone());
-        if let Some(root) = root {
-            self.repository_browser.prefetch(&root);
-        }
-    }
-
-    pub(crate) fn handle_repository_browser(&mut self, key: KeyEvent) {
-        let key = if self.repository_browser.branch_delete_open() {
-            key
-        } else {
-            self.settings.shortcuts.remap_repository_browser(key)
-        };
-        let effect = self.repository_browser.handle_key(key);
-        self.apply_repository_browser_effect_option(effect);
     }
 }

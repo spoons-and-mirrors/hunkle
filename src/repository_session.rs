@@ -34,7 +34,6 @@ pub(crate) enum WorkerOutcome {
     FileOperation(FileOperationCompletion),
     DiscardUnstaged(DiscardUnstagedCompletion),
     Format(FormatCompletion),
-    BranchDelete(BranchDeleteCompletion),
     BranchCheckout(BranchCheckoutCompletion),
     BranchCreate(BranchCreateCompletion),
 }
@@ -66,7 +65,6 @@ impl WorkerCompletion {
             WorkerOutcome::DiscardUnstaged(_) => Some(RefreshScope::WORKTREE_AND_INVENTORY),
             // A formatter may rewrite a file before returning a failure.
             WorkerOutcome::Format(_) => Some(RefreshScope::WORKTREE),
-            WorkerOutcome::BranchDelete(_) => Some(RefreshScope::HISTORY_AND_REFS),
             // A failed switch can still update the index or working tree.
             WorkerOutcome::BranchCheckout(_) => Some(RefreshScope::ALL),
             WorkerOutcome::BranchCreate(_) => Some(RefreshScope::ALL),
@@ -91,13 +89,6 @@ impl WorkerCompletion {
     pub(crate) fn refresh_request(&self) -> Option<RefreshRequest> {
         self.refresh_request
     }
-}
-
-pub(crate) struct BranchDeleteCompletion {
-    pub(crate) branch: String,
-    pub(crate) remote: Option<(String, String)>,
-    pub(crate) force: bool,
-    pub(crate) result: Result<(), String>,
 }
 
 pub(crate) struct BranchCheckoutCompletion {
@@ -214,11 +205,6 @@ enum WorkerKind {
     Format {
         path: RepoPath,
         formatter: &'static str,
-    },
-    BranchDelete {
-        branch: String,
-        remote: Option<(String, String)>,
-        force: bool,
     },
     BranchCheckout {
         branch: String,
@@ -601,48 +587,6 @@ impl RepositorySession {
         true
     }
 
-    pub(crate) fn start_branch_delete(
-        &mut self,
-        branch: String,
-        remote: Option<(String, String)>,
-        force: bool,
-    ) -> bool {
-        if !self.operations.can_start(Operation::Mutation) {
-            return false;
-        }
-        let Some(root) = self.git_root() else {
-            return false;
-        };
-
-        self.operations.start(Operation::Mutation);
-        let sender = self.worker_tx.clone();
-        let worker_branch = branch.clone();
-        let worker_remote = remote.clone();
-        thread::spawn(move || {
-            let remote_ref = worker_remote
-                .as_ref()
-                .map(|(remote, branch)| (remote.as_str(), branch.as_str()));
-            let result = git::delete_branch(&root, &worker_branch, remote_ref, force)
-                .map(|()| CommandOutput {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    success: true,
-                    exit_code: Some(0),
-                })
-                .map_err(|error| error.to_string());
-            let _ = sender.send(WorkerResult {
-                kind: WorkerKind::BranchDelete {
-                    branch,
-                    remote,
-                    force,
-                },
-                root,
-                result,
-            });
-        });
-        true
-    }
-
     pub(crate) fn start_branch_checkout(&mut self, branch: String, remote: bool) -> bool {
         if !self.operations.can_start(Operation::Mutation) {
             return false;
@@ -862,26 +806,6 @@ impl RepositorySession {
                                 formatter,
                                 result: done.result,
                             })),
-                            fetch_interval,
-                        ));
-                    }
-                }
-                WorkerKind::BranchDelete {
-                    branch,
-                    remote,
-                    force,
-                } => {
-                    self.operations.finish(Operation::Mutation);
-                    if active {
-                        return Some(self.schedule_completion_refresh(
-                            WorkerCompletion::new(WorkerOutcome::BranchDelete(
-                                BranchDeleteCompletion {
-                                    branch,
-                                    remote,
-                                    force,
-                                    result: done.result.map(|_| ()),
-                                },
-                            )),
                             fetch_interval,
                         ));
                     }

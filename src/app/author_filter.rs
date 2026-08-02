@@ -88,15 +88,6 @@ impl AuthorFilter {
             .collect()
     }
 
-    pub fn ensure_enabled(&mut self, author: &str) {
-        if self.disabled.remove(author)
-            && let Some(entry) = self.entries.iter_mut().find(|entry| entry.name == author)
-        {
-            entry.enabled = true;
-            self.rebuild_visible_indices();
-        }
-    }
-
     pub fn select(&mut self, index: usize) {
         if index < self.entries.len() {
             self.state.select(Some(index));

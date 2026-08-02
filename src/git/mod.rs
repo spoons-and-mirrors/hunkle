@@ -51,7 +51,6 @@ struct GraphData {
 #[derive(Debug)]
 struct RefsData {
     branches: Vec<Branch>,
-    github_remote: bool,
 }
 
 const GIT_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
@@ -102,7 +101,6 @@ pub struct RepositoryData {
     pub graph_width: usize,
     pub graph_truncated: bool,
     pub branches: Vec<Branch>,
-    pub github_remote: bool,
     pub(crate) worktree_signature: Option<WorktreeSignature>,
     pub(crate) details_ready: bool,
 }
@@ -181,10 +179,6 @@ pub struct RepositoryUpdate {
 #[derive(Debug, Clone)]
 pub struct Branch {
     pub name: String,
-    pub upstream: String,
-    pub oid: String,
-    pub date: String,
-    pub subject: String,
     pub remote: bool,
     pub current: bool,
     pub default: bool,
@@ -198,21 +192,6 @@ impl Branch {
             format!("refs/heads/{}", self.name)
         }
     }
-}
-
-pub(crate) fn branch_delete_protection(branch: &Branch) -> Option<String> {
-    if branch.current {
-        return Some("Cannot delete the checked-out branch".to_owned());
-    }
-    if matches!(branch.name.as_str(), "main" | "master" | "dev") {
-        return Some(format!("Cannot delete protected branch {}", branch.name));
-    }
-    branch.default.then(|| {
-        format!(
-            "Cannot delete the repository's default branch {}",
-            branch.name
-        )
-    })
 }
 
 impl RepositoryData {
@@ -246,7 +225,6 @@ impl RepositoryData {
         }
         if let Some(refs) = update.refs {
             self.branches = refs.branches;
-            self.github_remote = refs.github_remote;
         }
     }
 }

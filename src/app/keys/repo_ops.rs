@@ -42,18 +42,6 @@ impl App {
         self.start_repository_open(path, false);
     }
 
-    pub(crate) fn open_repository_with_fetch(&mut self, path: PathBuf) {
-        if self
-            .repository()
-            .is_some_and(|repository| repository.root == path)
-        {
-            self.workspace_fetch_pending = true;
-            self.maybe_start_workspace_fetch();
-            return;
-        }
-        self.start_repository_open(path, true);
-    }
-
     pub(crate) fn queue_workspace_restore(&mut self, path: PathBuf) {
         self.pending_workspace_restore = Some(path);
         self.try_start_workspace_restore();
@@ -90,10 +78,6 @@ impl App {
             "workspace open requested path={} fetch_if_stale={fetch_if_stale}",
             path.display()
         ));
-        if self.worktree_removal_running() {
-            self.notice = Some("Wait for the worktree removal to finish".to_owned());
-            return false;
-        }
         if self.file_editor.is_some() {
             self.notice = Some("Save or close the editor before opening a workspace".to_owned());
             return false;

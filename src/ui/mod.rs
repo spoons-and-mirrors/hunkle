@@ -21,8 +21,8 @@ pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::{
     app::{
-        AgentDestinationKind, App, BranchPickerStep, CloneField, ExplorerTab, FileDialogKind,
-        GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode, Regions,
+        AgentDestinationKind, App, BranchPickerStep, CloneField, FileDialogKind, GraphHitTarget,
+        HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode, Regions,
         RepositoryPickerStep, ShortcutAction, TAB_WIDTH, TextInput, View, WorktreePickerField,
         WorktreePickerStep,
     },
@@ -167,39 +167,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Explorer => {
             dim(frame);
-            let targets = match app.explorer_tab {
-                ExplorerTab::Explorer => overlays::draw_explorer(
-                    frame,
-                    &mut app.workspace_explorer,
-                    &app.settings.shortcuts,
-                ),
-                ExplorerTab::Worktrees => overlays::draw_worktree_manager(
-                    frame,
-                    &mut app.worktree_manager,
-                    &app.settings.shortcuts,
-                ),
-                ExplorerTab::Branches => overlays::draw_repository_browser(
-                    frame,
-                    &mut app.repository_browser,
-                    &app.settings.shortcuts,
-                ),
-            };
+            let targets = overlays::draw_explorer(
+                frame,
+                &mut app.workspace_explorer,
+                &app.settings.shortcuts,
+            );
             for (target, rect) in targets {
                 app.regions.register_hit_target(target, rect);
-            }
-            if app.explorer_tab == ExplorerTab::Worktrees {
-                if let Some(dialog) = &app.worktree_manager.create_dialog {
-                    dim(frame);
-                    overlays::draw_worktree_create_dialog(frame, dialog);
-                } else if let Some(dialog) = &app.worktree_manager.remove_dialog {
-                    dim(frame);
-                    overlays::draw_worktree_remove_dialog(frame, dialog);
-                }
-            } else if app.explorer_tab == ExplorerTab::Branches
-                && let Some(dialog) = &app.repository_browser.branch_delete
-            {
-                dim(frame);
-                overlays::draw_branch_delete_dialog(frame, dialog);
             }
         }
         Mode::Settings => {

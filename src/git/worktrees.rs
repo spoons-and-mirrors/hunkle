@@ -31,21 +31,6 @@ pub(crate) fn list_worktrees(repository: &Path) -> Result<Vec<LinkedWorktree>> {
     parse_worktrees(&output.stdout)
 }
 
-pub(crate) fn remove_worktree(repository: &Path, worktree: &Path) -> Result<()> {
-    let output = process::run(
-        base_command(repository)
-            .args(["worktree", "remove", "--"])
-            .arg(worktree),
-        git_limits(),
-    )
-    .context("could not run git worktree remove")?;
-    ensure_complete(&output, "git worktree remove")?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    Ok(())
-}
-
 pub(super) fn parse_worktrees(bytes: &[u8]) -> Result<Vec<LinkedWorktree>> {
     let mut worktrees = Vec::new();
     let mut remaining = bytes;

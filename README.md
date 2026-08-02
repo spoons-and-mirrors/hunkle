@@ -14,8 +14,6 @@
 - An all-refs commit graph showing branches, remotes, tags, authors, dates,
   hashes, lazy-loaded line-change totals, and interactive author filtering. Drag
   any vertical header separator to resize the adjacent columns.
-- A filterable repository browser for local and remote branches plus open GitHub
-  pull requests and issues.
 - Herdr-aware agent launching from any known repository or linked worktree into
   a selected pane in the active tab.
 - Source-aware diffs with changed-file and line-count summaries, line numbers,
@@ -27,9 +25,7 @@
 ## Run
 
 A recent Rust toolchain is required. Git is required for repository status,
-history, staging, and repository actions. GitHub CLI (`gh`) is optional and
-supplies pull requests and issues in the repository browser when installed and
-authenticated. GitHub data is prefetched and cached in memory for 15 minutes.
+history, staging, and repository actions.
 
 ```sh
 cargo run -p hunkle
@@ -84,11 +80,6 @@ emergency quit command elsewhere.
 | `Ctrl+Backspace`, `Alt+Backspace` | Delete the previous commit-message word                                                                                                                                              |
 | `r`                               | Refresh                                                                                                                                                                              |
 | `o`                               | Open Explorer                                                                                                                                                                        |
-| `W`                               | Manage linked Git worktrees from known repositories                                                                                                                                  |
-| `F1`, `F2`, `F3` in Explorer      | Switch between Explorer, Worktrees, and Branches tabs                                                                                                                                |
-| `N` in Worktrees                  | Create a linked worktree from the selected checkout                                                                                                                                  |
-| `b`                               | Open the Explorer modal's Branches tab for branches, pull requests, and issues                                                                                                       |
-| `Delete` in Branches              | Delete a local branch, optionally including its tracked remote branch or forcing deletion of unmerged work; checked-out, default, `main`, `master`, and `dev` branches are protected |
 | `s`                               | Open settings                                                                                                                                                                        |
 | `x`                               | Open repository Actions                                                                                                                                                              |
 | `G`                               | Open Git command                                                                                                                                                                     |
@@ -101,9 +92,7 @@ Folder names use the primary text tier, ordinary files use a softer intermediate
 tier, and tree connectors stay faint; filename colors remain reserved for Git
 status, so type and repository state stay independently visible.
 
-Explorer is the shared modal for workspace-level tools. Click its top tabs or
-press `F1`, `F2`, and `F3` to switch between Explorer, Worktrees, and Branches.
-In the Explorer tab, **Around Here** shows the ancestor branch, current
+Explorer's **Around Here** pane shows the ancestor branch, current
 directory, and its child directories while **Contents** lists the directories
 and files inside the current location; `Tab` switches panes. Start typing and
 Explorer immediately captures the text as a new PATH query instead of applying
@@ -274,12 +263,10 @@ own:
 | `app::commit_summary`           | Lazy, repository-scoped cache of commit file and line-change summaries                                     |
 | `app::explorer`                 | Workspace discovery, navigation, fuzzy search, and semantic interaction targets                            |
 | `app::file_editor`              | Bounded UTF-8 editor state, selections, undo/redo, indentation, and safe atomic persistence                 |
-| `app::linked_worktrees`         | Git-authoritative linked-worktree catalog, discovery memory, Herdr ownership, and removal planning          |
-| `app::repository_browser`       | Branch, pull-request, and issue interaction plus cached remote data                                        |
+| `app::linked_worktrees`         | Git-authoritative linked-worktree catalog, discovery memory, and destination metadata                       |
 | `app::settings`                 | Settings discovery, legacy fallback, validation, and persistence                                           |
 | `app::shortcuts`                | Named command registry, contextual conflict checks, key normalization, overrides, and labels               |
-| `app::worktree_manager`         | Linked-worktree interaction, creation, filtering, opening, and semantic removal requests                   |
-| `app::herdr_session`            | Herdr session snapshots, agent activity, timing, pane layouts, and linked-worktree ownership                |
+| `app::herdr_session`            | Herdr session snapshots, agent activity, timing, pane layouts, and linked-worktree observations             |
 | `app::herdr_session::client`    | Typed Herdr environment, command, pane-layout, agent replacement, and session-snapshot adapter              |
 | `repository_session`            | Active workspace lifecycle, background operations, and completion invalidation policy                      |
 | `git`                           | Installed-Git facade, refresh orchestration, worktree operations, and history loading                      |
@@ -292,7 +279,7 @@ own:
 | `ui::changes`                   | Changes, Files, Diff, and commit workspace                                                                 |
 | `ui::editor`                    | Inline-editor layout, cursor, selection, wrapping, and gutter presentation                                 |
 | `ui::history`                   | Current-branch history and all-refs graph                                                                  |
-| `ui::overlays`                  | Explorer, worktree manager, repository browser, settings, and help overlays                                |
+| `ui::overlays`                  | Explorer, settings, help, actions, command, and file-operation overlays                                    |
 | `ui::agents`                    | Agent activity, destination metadata, timing, and layout-switching controls                                 |
 | `ui::text`                      | Deterministic source and diff presentation                                                                 |
 | `theme`                         | Theme discovery, resolution, and palette data                                                              |

@@ -24,13 +24,13 @@ The tracked and untracked changes shown in the left CHANGES pane. Staging action
 
 ## Linked worktree
 
-A Git checkout registered through `git worktree`. The Worktrees interaction lists linked worktrees from repositories Hunkle knows about and can open or safely remove them. This is distinct from the CHANGES-pane Worktree.
+A Git checkout registered through `git worktree`. This is distinct from the CHANGES-pane Worktree.
 
-Git inventory is authoritative for whether a linked worktree exists and for its checkout state. Herdr may own an existing linked worktree and therefore determine how Hunkle removes it, but Herdr observations do not create catalog entries. Known repositories are discovery memory rather than authoritative topology.
+Git inventory is authoritative for whether a linked worktree exists and for its checkout state. Herdr observations do not create catalog entries. Known repositories are discovery memory rather than authoritative topology.
 
 ## Linked worktree catalog
 
-The application-owned catalog that reconciles Git inventory, known repository discovery, Herdr ownership, and the active workspace. Interactions consume its snapshot and ask it to plan destructive removal; they do not independently reconstruct ownership or safety policy.
+The application-owned catalog that reconciles Git inventory, known repository discovery, and Herdr observations. Header pickers and agent destinations consume its snapshot rather than independently reconstructing topology.
 
 ## Files
 
@@ -38,11 +38,7 @@ The complete filesystem tree inside the workspace, including Git-ignored content
 
 ## Explorer
 
-The `o` interaction for finding and opening another workspace. Explorer is not the repository browser. Confirming a file path opens the file's parent directory as a workspace and selects the file.
-
-## Repository browser
-
-The `b` interaction for branches, pull requests, and issues belonging to the active repository.
+The `o` interaction for finding and opening another workspace. Confirming a file path opens the file's parent directory as a workspace and selects the file.
 
 ## Agent destination
 
@@ -50,7 +46,7 @@ A Git-inventoried Repository or Linked worktree where Hunkle can launch an OpenC
 
 ## Interaction
 
-A focused user flow that owns its transient state and interprets input. An interaction may emit an application effect, such as opening a branch tip in Graph.
+A focused user flow that owns its transient state and interprets input. An interaction may emit an application effect, such as opening a selected workspace.
 
 ## Hit target
 

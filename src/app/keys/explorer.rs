@@ -71,7 +71,6 @@ impl App {
             self.workspace_explorer.navigate(start);
         }
         self.workspace_explorer.editing_path = false;
-        self.explorer_tab = ExplorerTab::Explorer;
         self.mode = Mode::Explorer;
     }
 

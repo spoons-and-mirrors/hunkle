@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    AgentPaneDirection, HerdrOwnedWorktree, HerdrOwnership, LinkedWorktreeCandidate,
-    LinkedWorktreeObservation, settings::AgentTimeDisplay,
+    AgentPaneDirection, LinkedWorktreeCandidate, LinkedWorktreeObservation,
+    settings::AgentTimeDisplay,
 };
 use crate::{filesystem::atomic_write, git};
 
@@ -102,9 +102,6 @@ pub(crate) struct HerdrWorkspace {
     pub(crate) path: Option<PathBuf>,
     pub(crate) branch: Option<String>,
     pub(crate) parent_workspace_id: Option<String>,
-    pub(crate) pane_count: usize,
-    pub(crate) focused: bool,
-    pub(crate) status: AgentStatus,
     repo_root: Option<PathBuf>,
     linked_worktree: bool,
 }
@@ -277,11 +274,6 @@ enum Completion {
         event: client::Event,
         observed_at_ms: u64,
     },
-    Action {
-        result: Result<(), String>,
-        reopen_path: Option<PathBuf>,
-        warning: Option<String>,
-    },
     AgentDisplay {
         result: Result<Box<client::DisplayAgentResult>, String>,
         selected_key: AgentTimingKey,
@@ -302,7 +294,6 @@ pub(crate) struct HerdrSession {
     pub(crate) agent_scroll: usize,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
-    inventory_verified: bool,
     host_workspace_id: Option<String>,
     host_tab_id: Option<String>,
     host_pane_id: Option<String>,
@@ -313,7 +304,6 @@ pub(crate) struct HerdrSession {
     next_agent_change_stats: Instant,
     latest_user_messages: HashMap<AgentSessionIdentity, Vec<String>>,
     latest_user_message_requests: HashSet<AgentSessionIdentity>,
-    destructive_actions_running: usize,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
     next_refresh: Instant,
@@ -362,7 +352,6 @@ impl HerdrSession {
             agent_scroll: 0,
             loading: false,
             error: None,
-            inventory_verified: !enabled,
             host_workspace_id: None,
             host_tab_id: None,
             host_pane_id: None,
@@ -373,7 +362,6 @@ impl HerdrSession {
             next_agent_change_stats: Instant::now(),
             latest_user_messages: HashMap::new(),
             latest_user_message_requests: HashSet::new(),
-            destructive_actions_running: 0,
             sender,
             receiver,
             next_refresh: Instant::now(),
@@ -402,34 +390,7 @@ impl HerdrSession {
                     .map(|path| LinkedWorktreeCandidate { path })
             })
             .collect();
-        let ownership = if !self.enabled {
-            HerdrOwnership::Disabled
-        } else if !self.inventory_verified {
-            HerdrOwnership::Unverified
-        } else {
-            HerdrOwnership::Verified(
-                self.workspaces
-                    .iter()
-                    .filter(|workspace| workspace.linked_worktree)
-                    .filter_map(|workspace| {
-                        workspace.path.clone().map(|path| HerdrOwnedWorktree {
-                            path,
-                            workspace_id: workspace.id.clone(),
-                        })
-                    })
-                    .collect(),
-            )
-        };
-        LinkedWorktreeObservation {
-            candidates,
-            ownership,
-        }
-    }
-
-    pub(crate) fn refresh_worktree_inventory(&mut self) {
-        if self.enabled && !self.loading {
-            self.start_snapshot();
-        }
+        LinkedWorktreeObservation { candidates }
     }
 
     pub(crate) fn poll(&mut self) -> HerdrSessionPoll {
@@ -450,11 +411,9 @@ impl HerdrSession {
                             self.workspaces = workspaces;
                             self.apply_agent_snapshot_at(agents, observed_at_ms);
                             self.error = None;
-                            self.inventory_verified = true;
                         }
                         Err(error) => {
                             self.error = Some(error);
-                            self.inventory_verified = false;
                         }
                     }
                 }
@@ -465,23 +424,6 @@ impl HerdrSession {
                     let client::Event::AgentStatus(event) = event;
                     self.apply_agent_status_event_at(event, observed_at_ms);
                     self.next_refresh = Instant::now();
-                }
-                Completion::Action {
-                    result,
-                    reopen_path,
-                    warning,
-                } => {
-                    self.destructive_actions_running =
-                        self.destructive_actions_running.saturating_sub(1);
-                    self.next_refresh = Instant::now();
-                    match result {
-                        Ok(()) => {
-                            self.inventory_verified = false;
-                            poll.reopen_path = reopen_path;
-                            poll.notice = warning;
-                        }
-                        Err(error) => poll.notice = Some(error),
-                    }
                 }
                 Completion::AgentDisplay {
                     result,
@@ -506,7 +448,6 @@ impl HerdrSession {
                                     "Agent displayed, but its layout could not be saved: {error}"
                                 ));
                             }
-                            self.inventory_verified = false;
                             poll.reopen_path = reopen_path;
                         }
                         Err(error) => poll.notice = Some(error),
@@ -764,44 +705,6 @@ impl HerdrSession {
         self.next_refresh = Instant::now();
     }
 
-    pub(crate) fn delete_worktree(&mut self, workspace_id: &str, reopen_path: Option<PathBuf>) {
-        self.destructive_actions_running = self.destructive_actions_running.saturating_add(1);
-        let restore_focus = self
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.focused && workspace.id != workspace_id)
-            .map(|workspace| workspace.id.clone());
-        let action = client::Action::RemoveWorktree {
-            workspace_id: workspace_id.to_owned(),
-        };
-        let sender = self.sender.clone();
-        thread::spawn(move || {
-            let result = client::perform(action);
-            let warning = if result.is_ok() {
-                restore_focus.and_then(|workspace_id| {
-                    client::perform(client::Action::FocusWorkspace { workspace_id })
-                        .err()
-                        .map(|error| {
-                            format!(
-                                "Worktree removed, but Herdr focus could not be restored: {error}"
-                            )
-                        })
-                })
-            } else {
-                None
-            };
-            let _ = sender.send(Completion::Action {
-                result,
-                reopen_path,
-                warning,
-            });
-        });
-    }
-
-    pub(crate) fn destructive_action_running(&self) -> bool {
-        self.destructive_actions_running > 0
-    }
-
     pub(crate) fn scroll_agents(&mut self, delta: isize) {
         self.agent_scroll = self.agent_scroll.saturating_add_signed(delta);
     }
@@ -904,7 +807,6 @@ impl HerdrSession {
         let (mut workspaces, agents) = client::parse_snapshot(value).unwrap();
         populate_workspace_branches(&mut workspaces);
         session.workspaces = workspaces;
-        session.inventory_verified = true;
         session.apply_agent_snapshot_at(agents, unix_time_ms());
         session
     }

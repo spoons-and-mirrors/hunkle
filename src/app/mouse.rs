@@ -5,11 +5,9 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, CloneField, ExplorerHitTarget, ExplorerTab, GraphColumnDrag, GraphHitTarget,
-    HeaderPickerKind, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
-    RepositoryBrowserHitTarget, SettingsPage, Shortcuts, View, WorktreeManagerEffect,
-    WorktreeManagerHitTarget, WorktreePickerField, changes::ChangesEffect, file_editor::FileEditor,
-    scroll_table,
+    ACTION_ITEMS, App, CloneField, ExplorerHitTarget, GraphColumnDrag, GraphHitTarget,
+    HeaderPickerKind, HitTarget, LeftPane, Mode, SettingsPage, Shortcuts, View,
+    WorktreePickerField, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -124,12 +122,6 @@ impl App {
             return;
         }
 
-        if self.mode == Mode::Explorer
-            && self.explorer_tab == ExplorerTab::Worktrees
-            && self.worktree_manager.dialog_open()
-        {
-            return;
-        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             match self.regions.hit_target_at(point) {
                 Some(HitTarget::HeaderRepository) => {
@@ -207,12 +199,6 @@ impl App {
             }
             return;
         }
-        if self.mode == Mode::Explorer
-            && self.explorer_tab == ExplorerTab::Branches
-            && self.repository_browser.branch_delete_open()
-        {
-            return;
-        }
         if self.mode == Mode::FileEdit {
             self.handle_file_editor_mouse(mouse, point);
             return;
@@ -283,11 +269,7 @@ impl App {
             return;
         }
         if self.mode == Mode::Explorer {
-            match self.explorer_tab {
-                ExplorerTab::Explorer => self.handle_explorer_mouse(mouse),
-                ExplorerTab::Worktrees => self.handle_worktree_manager_mouse(mouse),
-                ExplorerTab::Branches => self.handle_repository_browser_mouse(mouse),
-            }
+            self.handle_explorer_mouse(mouse);
             return;
         }
         if self.mode == Mode::Command {
@@ -442,7 +424,6 @@ impl App {
 
     fn begin_mouse_control(&mut self, point: Position) -> bool {
         if self.mode == Mode::Explorer
-            && self.explorer_tab == ExplorerTab::Explorer
             && matches!(
                 self.regions.hit_target_at(point),
                 Some(HitTarget::Explorer(ExplorerHitTarget::Splitter))
@@ -532,12 +513,6 @@ impl App {
             self.regions.action_menu,
             self.regions
                 .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterOverlay)),
-            self.regions.hit_target_rect(HitTarget::RepositoryBrowser(
-                RepositoryBrowserHitTarget::Overlay,
-            )),
-            self.regions.hit_target_rect(HitTarget::WorktreeManager(
-                WorktreeManagerHitTarget::Overlay,
-            )),
             self.regions.diff,
             self.regions.worktree,
             self.regions.graph_table,
@@ -562,11 +537,7 @@ impl App {
             Mode::Command => self.handle_command_mouse(mouse),
             Mode::HerdrPrompt => {}
             Mode::FileEdit => self.place_file_editor_cursor(point, false),
-            Mode::Explorer => match self.explorer_tab {
-                ExplorerTab::Explorer => self.handle_explorer_mouse(mouse),
-                ExplorerTab::Worktrees => self.handle_worktree_manager_mouse(mouse),
-                ExplorerTab::Branches => self.handle_repository_browser_mouse(mouse),
-            },
+            Mode::Explorer => self.handle_explorer_mouse(mouse),
             Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::AuthorFilter => self.handle_author_filter_mouse(mouse),
@@ -982,153 +953,6 @@ impl App {
         }
     }
 
-    fn handle_repository_browser_mouse(&mut self, mouse: MouseEvent) {
-        if self.repository_browser.branch_delete_open() {
-            return;
-        }
-        let point = Position::new(mouse.column, mouse.row);
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && !self
-                .regions
-                .hit_target_rect(HitTarget::RepositoryBrowser(
-                    RepositoryBrowserHitTarget::Overlay,
-                ))
-                .is_some_and(|area| area.contains(point))
-        {
-            self.apply_repository_browser_effect(RepositoryBrowserEffect::Close);
-            return;
-        }
-        match mouse.kind {
-            MouseEventKind::ScrollDown => self.repository_browser.move_selection(1),
-            MouseEventKind::ScrollUp => self.repository_browser.move_selection(-1),
-            MouseEventKind::Moved => {
-                if let Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Item(index))) =
-                    self.regions.hit_target_at(point)
-                {
-                    self.repository_browser.select(index);
-                }
-            }
-            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
-                Some(HitTarget::ExplorerTab(tab)) => self.select_explorer_tab(tab),
-                Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Tab(tab))) => {
-                    self.repository_browser.set_tab(tab);
-                }
-                Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Item(index))) => {
-                    let effect = self.repository_browser.activate(index);
-                    self.apply_repository_browser_effect_option(effect);
-                }
-                Some(HitTarget::RepositoryBrowser(
-                    RepositoryBrowserHitTarget::Overlay | RepositoryBrowserHitTarget::List,
-                )) => {}
-                None => {}
-                Some(HitTarget::WorktreeManager(_)) => {}
-                Some(HitTarget::Graph(_)) => {}
-                Some(HitTarget::Explorer(_)) => {}
-                Some(
-                    HitTarget::Agent(_)
-                    | HitTarget::AgentTooltip { .. }
-                    | HitTarget::AgentMessage { .. },
-                ) => {}
-                Some(HitTarget::Changes(_)) => {}
-                Some(HitTarget::CommitMessageGenerate) => {}
-                Some(HitTarget::MarkdownPreviewToggle) => {}
-                Some(
-                    HitTarget::HeaderRepository
-                    | HitTarget::HeaderWorktrees
-                    | HitTarget::HeaderBranch
-                    | HitTarget::HeaderDiff
-                    | HitTarget::HeaderAgent
-                    | HitTarget::AgentPanePickerOverlay
-                    | HitTarget::AgentPane(_)
-                    | HitTarget::AgentPaneSplit(_, _)
-                    | HitTarget::HeaderPickerOverlay
-                    | HitTarget::HeaderPickerNewBranch
-                    | HitTarget::HeaderPickerClone
-                    | HitTarget::HeaderPickerCloneDirectory
-                    | HitTarget::HeaderPickerCloneUrl
-                    | HitTarget::HeaderPickerNewWorktree
-                    | HitTarget::HeaderPickerWorktreeName
-                    | HitTarget::HeaderPickerWorktreeBase
-                    | HitTarget::HeaderPickerItem(_),
-                ) => {}
-            },
-            _ => {}
-        }
-    }
-
-    fn handle_worktree_manager_mouse(&mut self, mouse: MouseEvent) {
-        let point = Position::new(mouse.column, mouse.row);
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && !self
-                .regions
-                .hit_target_rect(HitTarget::WorktreeManager(
-                    WorktreeManagerHitTarget::Overlay,
-                ))
-                .is_some_and(|area| area.contains(point))
-        {
-            self.apply_worktree_manager_effect(WorktreeManagerEffect::Close);
-            return;
-        }
-        match mouse.kind {
-            MouseEventKind::ScrollDown => self.worktree_manager.move_selection(1),
-            MouseEventKind::ScrollUp => self.worktree_manager.move_selection(-1),
-            MouseEventKind::Moved => {
-                if let Some(HitTarget::WorktreeManager(WorktreeManagerHitTarget::Item {
-                    generation,
-                    row,
-                })) = self.regions.hit_target_at(point)
-                {
-                    self.worktree_manager.select_row(generation, row);
-                }
-            }
-            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
-                Some(HitTarget::ExplorerTab(tab)) => self.select_explorer_tab(tab),
-                Some(HitTarget::WorktreeManager(WorktreeManagerHitTarget::Item {
-                    generation,
-                    row,
-                })) => {
-                    let effect = self.worktree_manager.click_row(generation, row);
-                    self.apply_worktree_manager_effect_option(effect);
-                }
-                None => {}
-                Some(HitTarget::WorktreeManager(
-                    WorktreeManagerHitTarget::Overlay | WorktreeManagerHitTarget::List,
-                )) => {}
-                Some(HitTarget::RepositoryBrowser(_)) => {}
-                Some(HitTarget::Graph(_)) => {}
-                Some(HitTarget::Explorer(_)) => {}
-                Some(
-                    HitTarget::Agent(_)
-                    | HitTarget::AgentTooltip { .. }
-                    | HitTarget::AgentMessage { .. },
-                ) => {}
-                Some(HitTarget::Changes(_)) => {}
-                Some(HitTarget::CommitMessageGenerate) => {}
-                Some(HitTarget::MarkdownPreviewToggle) => {}
-                Some(
-                    HitTarget::HeaderRepository
-                    | HitTarget::HeaderWorktrees
-                    | HitTarget::HeaderBranch
-                    | HitTarget::HeaderDiff
-                    | HitTarget::HeaderAgent
-                    | HitTarget::AgentPanePickerOverlay
-                    | HitTarget::AgentPane(_)
-                    | HitTarget::AgentPaneSplit(_, _)
-                    | HitTarget::HeaderPickerOverlay
-                    | HitTarget::HeaderPickerNewBranch
-                    | HitTarget::HeaderPickerClone
-                    | HitTarget::HeaderPickerCloneDirectory
-                    | HitTarget::HeaderPickerCloneUrl
-                    | HitTarget::HeaderPickerNewWorktree
-                    | HitTarget::HeaderPickerWorktreeName
-                    | HitTarget::HeaderPickerWorktreeBase
-                    | HitTarget::HeaderPickerItem(_),
-                ) => {}
-            },
-            _ => {}
-        }
-    }
-
     fn handle_explorer_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
@@ -1152,7 +976,6 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
-                Some(HitTarget::ExplorerTab(tab)) => self.select_explorer_tab(tab),
                 Some(HitTarget::Explorer(target)) => {
                     let command = self.workspace_explorer.activate_target(target);
                     self.apply_explorer_command(command);

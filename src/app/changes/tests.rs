@@ -11,7 +11,6 @@ fn repository_data() -> RepositoryData {
         kind: RepositoryKind::Git,
         branch: "main".to_owned(),
         branches: Vec::new(),
-        github_remote: false,
         worktree_signature: None,
         changes: vec![Change {
             path: "src/main.rs".into(),
@@ -176,20 +175,12 @@ fn repository_refresh_preserves_an_active_branch_comparison() {
     repo.branches = vec![
         Branch {
             name: "main".to_owned(),
-            upstream: String::new(),
-            oid: "1111111".to_owned(),
-            date: String::new(),
-            subject: String::new(),
             remote: false,
             current: true,
             default: true,
         },
         Branch {
             name: "topic".to_owned(),
-            upstream: String::new(),
-            oid: "2222222".to_owned(),
-            date: String::new(),
-            subject: String::new(),
             remote: false,
             current: false,
             default: false,

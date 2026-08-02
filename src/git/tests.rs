@@ -117,7 +117,7 @@ fn preserves_non_utf8_worktree_paths() {
 }
 
 #[test]
-fn lists_and_safely_removes_a_real_linked_worktree() {
+fn lists_a_real_linked_worktree() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("main repository");
     let linked = directory.path().join("linked worktree");
@@ -143,15 +143,6 @@ fn lists_and_safely_removes_a_real_linked_worktree() {
     assert_eq!(listed[1].path, fs::canonicalize(&linked).unwrap());
     assert!(!listed[1].is_main);
     assert_eq!(listed[1].branch.as_deref(), Some("refs/heads/topic"));
-
-    fs::write(linked.join("tracked.txt"), "dirty\n").unwrap();
-    assert!(remove_worktree(&common, &linked).is_err());
-    assert!(linked.exists());
-    git(&linked, &["restore", "tracked.txt"]);
-
-    remove_worktree(&common, &linked).unwrap();
-    assert!(!linked.exists());
-    assert_eq!(list_worktrees(&common).unwrap().len(), 1);
 }
 
 #[test]
@@ -411,14 +402,6 @@ fn bootstrap_defers_repository_facets_until_full_refresh() {
     workspace.apply(update);
     assert!(workspace.details_ready);
     assert_eq!(workspace.files, ["local.txt"]);
-}
-
-#[test]
-fn recognizes_github_remote_urls() {
-    assert!(is_github_remote_url("git@github.com:owner/repo.git"));
-    assert!(is_github_remote_url("https://github.com/owner/repo.git"));
-    assert!(is_github_remote_url("ssh://git@github.com/owner/repo.git"));
-    assert!(!is_github_remote_url("https://gitlab.com/owner/repo.git"));
 }
 
 #[test]
@@ -1055,111 +1038,6 @@ fn refuses_to_discard_an_unresolved_conflict() {
             .unwrap()
             .stdout
             .is_empty()
-    );
-}
-
-#[test]
-fn protects_checked_out_conventional_and_default_branches() {
-    let branch = |name: &str, current: bool, default: bool| Branch {
-        name: name.to_owned(),
-        upstream: String::new(),
-        oid: String::new(),
-        date: String::new(),
-        subject: String::new(),
-        remote: false,
-        current,
-        default,
-    };
-
-    assert!(branch_delete_protection(&branch("topic", true, false)).is_some());
-    for name in ["main", "master", "dev"] {
-        assert!(branch_delete_protection(&branch(name, false, false)).is_some());
-    }
-    assert!(branch_delete_protection(&branch("stable", false, true)).is_some());
-    assert!(branch_delete_protection(&branch("topic", false, false)).is_none());
-}
-
-#[test]
-fn deletes_a_local_branch_and_its_remote_ref() {
-    let directory = tempfile::tempdir().unwrap();
-    let remote = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    git(root, &["init", "-b", "main"]);
-    git(root, &["config", "user.name", "Test Author"]);
-    git(root, &["config", "user.email", "test@example.com"]);
-    fs::write(root.join("tracked.txt"), "tracked\n").unwrap();
-    git(root, &["add", "tracked.txt"]);
-    git(root, &["commit", "-m", "initial"]);
-    git(root, &["branch", "cleanup"]);
-    git(root, &["switch", "cleanup"]);
-    fs::write(root.join("trash.txt"), "unmerged\n").unwrap();
-    git(root, &["add", "trash.txt"]);
-    git(root, &["commit", "-m", "unmerged cleanup work"]);
-    git(root, &["switch", "main"]);
-    git(remote.path(), &["init", "--bare"]);
-    git(
-        root,
-        &["remote", "add", "origin", remote.path().to_str().unwrap()],
-    );
-    git(root, &["push", "origin", "cleanup"]);
-
-    git(root, &["branch", "dev"]);
-    assert!(delete_branch(root, "dev", None, true).is_err());
-    assert!(
-        run(root, &["show-ref", "--verify", "refs/heads/dev"])
-            .unwrap()
-            .status
-            .success()
-    );
-
-    git(root, &["branch", "stable"]);
-    git(
-        root,
-        &[
-            "update-ref",
-            "refs/remotes/origin/stable",
-            "refs/heads/stable",
-        ],
-    );
-    git(
-        root,
-        &[
-            "symbolic-ref",
-            "refs/remotes/origin/HEAD",
-            "refs/remotes/origin/stable",
-        ],
-    );
-    let stable = repository_branches(root)
-        .unwrap()
-        .into_iter()
-        .find(|branch| branch.name == "stable" && !branch.remote)
-        .unwrap();
-    assert!(stable.default);
-    assert!(delete_branch(root, "stable", None, true).is_err());
-    assert!(
-        run(root, &["show-ref", "--verify", "refs/heads/stable"])
-            .unwrap()
-            .status
-            .success()
-    );
-
-    assert!(delete_branch(root, "cleanup", Some(("origin", "cleanup")), false).is_err());
-    delete_branch(root, "cleanup", Some(("origin", "cleanup")), true).unwrap();
-
-    assert!(
-        !run(root, &["show-ref", "--verify", "refs/heads/cleanup"])
-            .unwrap()
-            .status
-            .success()
-    );
-    assert!(
-        !run(
-            remote.path(),
-            &["show-ref", "--verify", "refs/heads/cleanup"]
-        )
-        .unwrap()
-        .status
-        .success()
     );
 }
 

@@ -36,8 +36,7 @@ fn repository() -> LinkedWorktreeRepository {
 
 #[test]
 fn resolves_agent_destination_metadata_from_its_worktree() {
-    let snapshot =
-        LinkedWorktreeCatalogSnapshot::for_test(vec![repository()], None, HerdrOwnership::Disabled);
+    let snapshot = LinkedWorktreeCatalogSnapshot::for_test(vec![repository()]);
 
     let basetree = snapshot.agent_destination(Path::new("/repo")).unwrap();
     assert_eq!(basetree.repository(), "repo");
@@ -48,105 +47,6 @@ fn resolves_agent_destination_metadata_from_its_worktree() {
         .unwrap();
     assert_eq!(linked.repository(), "repo");
     assert_eq!(linked.branch(), "feature");
-}
-
-#[test]
-fn routes_removal_from_current_authority() {
-    let repositories = vec![repository()];
-    let path = Path::new("/repo-feature");
-
-    let native = LinkedWorktreeCatalogSnapshot::for_test(
-        repositories.clone(),
-        Some(PathBuf::from("/repo")),
-        HerdrOwnership::Disabled,
-    );
-    assert_eq!(
-        native.removal_plan(path),
-        Ok(LinkedWorktreeRemovalPlan::Native {
-            common_dir: PathBuf::from("/repo/.git"),
-            path: path.to_owned(),
-        })
-    );
-
-    let unverified = LinkedWorktreeCatalogSnapshot::for_test(
-        repositories.clone(),
-        Some(PathBuf::from("/repo")),
-        HerdrOwnership::Unverified,
-    );
-    assert!(
-        unverified
-            .removal_plan(path)
-            .unwrap_err()
-            .contains("Waiting for Herdr")
-    );
-    assert_eq!(unverified.repositories.len(), 1);
-
-    let owned = LinkedWorktreeCatalogSnapshot::for_test(
-        repositories.clone(),
-        Some(PathBuf::from("/repo")),
-        HerdrOwnership::Verified(vec![HerdrOwnedWorktree {
-            path: path.to_owned(),
-            workspace_id: "workspace-2".to_owned(),
-        }]),
-    );
-    assert_eq!(
-        owned.removal_plan(path),
-        Ok(LinkedWorktreeRemovalPlan::Herdr {
-            workspace_id: "workspace-2".to_owned(),
-            path: path.to_owned(),
-        })
-    );
-
-    let unowned = LinkedWorktreeCatalogSnapshot::for_test(
-        repositories,
-        Some(PathBuf::from("/repo")),
-        HerdrOwnership::Verified(Vec::new()),
-    );
-    assert!(matches!(
-        unowned.removal_plan(path),
-        Ok(LinkedWorktreeRemovalPlan::Native { .. })
-    ));
-}
-
-#[test]
-fn protects_git_topology_and_active_worktree() {
-    let snapshot = LinkedWorktreeCatalogSnapshot::for_test(
-        vec![repository()],
-        Some(PathBuf::from("/repo-feature")),
-        HerdrOwnership::Disabled,
-    );
-    assert!(
-        snapshot
-            .removal_plan(Path::new("/repo"))
-            .unwrap_err()
-            .contains("primary")
-    );
-    assert!(
-        snapshot
-            .removal_plan(Path::new("/repo-feature"))
-            .unwrap_err()
-            .contains("current")
-    );
-}
-
-#[test]
-fn herdr_only_paths_do_not_become_catalog_entries() {
-    let snapshot = LinkedWorktreeCatalogSnapshot::for_test(
-        vec![repository()],
-        None,
-        HerdrOwnership::Verified(vec![HerdrOwnedWorktree {
-            path: PathBuf::from("/not-in-git"),
-            workspace_id: "workspace-3".to_owned(),
-        }]),
-    );
-    assert!(snapshot.removal_plan(Path::new("/not-in-git")).is_err());
-    assert!(
-        !snapshot
-            .repositories
-            .iter()
-            .flat_map(|repository| &repository.worktrees)
-            .any(|worktree| worktree.path == Path::new("/not-in-git"))
-    );
 }
 
 #[test]
@@ -273,7 +173,6 @@ fn orders_repositories_by_observed_workspace_order() {
             LinkedWorktreeCandidate { path: zulu },
             LinkedWorktreeCandidate { path: alpha },
         ],
-        ownership: HerdrOwnership::Disabled,
     });
     catalog.refresh();
     let deadline = Instant::now() + Duration::from_secs(2);

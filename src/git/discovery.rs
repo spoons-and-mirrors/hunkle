@@ -115,7 +115,6 @@ fn bootstrap_data(
         graph_width: 0,
         graph_truncated: false,
         branches: Vec::new(),
-        github_remote: false,
         worktree_signature: None,
         details_ready: false,
     }
@@ -167,7 +166,6 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         graph_width: graph.width,
         graph_truncated: graph.truncated,
         branches: refs.branches,
-        github_remote: refs.github_remote,
         worktree_signature: Some(worktree.signature),
         details_ready: true,
     })
@@ -292,21 +290,8 @@ fn load_graph(root: &Path) -> Result<GraphData> {
 }
 
 fn load_refs(root: &Path) -> Result<RefsData> {
-    let (branches, github_remote) = thread::scope(|scope| {
-        let branches = scope.spawn(|| repository_branches(root));
-        let github_remote = scope.spawn(|| repository_has_github_remote(root));
-        Ok::<_, anyhow::Error>((
-            branches
-                .join()
-                .map_err(|_| anyhow!("branch list worker panicked"))??,
-            github_remote
-                .join()
-                .map_err(|_| anyhow!("remote worker panicked"))??,
-        ))
-    })?;
     Ok(RefsData {
-        branches,
-        github_remote,
+        branches: repository_branches(root)?,
     })
 }
 
@@ -330,7 +315,6 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
         graph_width: 0,
         graph_truncated: false,
         branches: Vec::new(),
-        github_remote: false,
         worktree_signature: None,
         details_ready: true,
     })
@@ -344,31 +328,12 @@ fn canonical_workspace_root(path: &Path) -> Result<PathBuf> {
     Ok(root)
 }
 
-fn repository_has_github_remote(root: &Path) -> Result<bool> {
-    let output = run(root, &["remote", "-v"])?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .any(is_github_remote_url))
-}
-
-pub(super) fn is_github_remote_url(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    value.starts_with("git@github.com:")
-        || value.starts_with("https://github.com/")
-        || value.starts_with("http://github.com/")
-        || value.starts_with("ssh://git@github.com/")
-        || value.starts_with("git://github.com/")
-}
-
 pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
     let output = run(
         root,
         &[
             "for-each-ref",
-            "--format=%(HEAD)%00%(refname)%00%(refname:short)%00%(objectname:short)%00%(upstream:short)%00%(committerdate:relative)%00%(subject)%00%(symref:short)%00",
+            "--format=%(HEAD)%00%(refname)%00%(refname:short)%00%(symref:short)%00",
             "refs/heads",
             "refs/remotes",
         ],
@@ -381,7 +346,7 @@ pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
     let fields = output.stdout.split(|byte| *byte == 0);
     let mut branches = fields
         .collect::<Vec<_>>()
-        .chunks_exact(8)
+        .chunks_exact(4)
         .filter_map(|fields| {
             let text = |field: &[u8]| String::from_utf8_lossy(field).into_owned();
             let refname = text(trim_ascii(fields[1]));
@@ -390,7 +355,7 @@ pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
                 .strip_prefix("refs/remotes/")
                 .and_then(|name| name.strip_suffix("/HEAD"))
             {
-                let symref = text(fields[7]);
+                let symref = text(fields[3]);
                 if let Some(target) = symref.strip_prefix(&format!("{remote}/")) {
                     let from_origin = remote == "origin";
                     if default_branch.is_none() || (from_origin && !default_from_origin) {
@@ -402,10 +367,6 @@ pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
             }
             Some(Branch {
                 name,
-                upstream: text(fields[4]),
-                oid: text(fields[3]),
-                date: text(fields[5]),
-                subject: text(fields[6]),
                 remote: refname.starts_with("refs/remotes/"),
                 current: trim_ascii(fields[0]) == b"*",
                 default: false,

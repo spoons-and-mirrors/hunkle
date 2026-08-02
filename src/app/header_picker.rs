@@ -116,6 +116,7 @@ pub(crate) struct HeaderPicker {
     pub(crate) worktree_base: TextInput,
     pub(crate) worktree_field: WorktreePickerField,
     clone_rx: Option<Receiver<Result<PathBuf, String>>>,
+    worktree_rx: Option<Receiver<Result<PathBuf, String>>>,
     change_details_rx: Option<Receiver<ChangeDetailsCompletion>>,
 }
 
@@ -533,6 +534,43 @@ impl HeaderPicker {
         };
         self.clone_rx = None;
         Some(result)
+    }
+
+    pub(crate) fn worktree_creation_running(&self) -> bool {
+        self.worktree_rx.is_some()
+    }
+
+    pub(crate) fn start_worktree_creation(
+        &mut self,
+        cwd: PathBuf,
+        name: String,
+        base: String,
+    ) -> bool {
+        if self.worktree_rx.is_some() {
+            return false;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.worktree_rx = Some(receiver);
+        thread::spawn(move || {
+            let result = super::herdr_session::create_managed_worktree(cwd, None, name, base);
+            let _ = sender.send(result);
+        });
+        true
+    }
+
+    pub(crate) fn poll_worktree_creation(&mut self) -> Option<Result<PathBuf, String>> {
+        let receiver = self.worktree_rx.as_ref()?;
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.worktree_rx = None;
+                Some(result)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.worktree_rx = None;
+                Some(Err("worktree worker disconnected".to_owned()))
+            }
+        }
     }
 
     pub(crate) fn apply_filter(&mut self) {

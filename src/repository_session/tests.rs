@@ -40,16 +40,6 @@ fn completions_declare_repository_invalidation_policy() {
         Some(RefreshScope::WORKTREE_AND_INVENTORY)
     );
     assert_eq!(
-        WorkerCompletion::new(WorkerOutcome::BranchDelete(BranchDeleteCompletion {
-            branch: "topic".to_owned(),
-            remote: None,
-            force: false,
-            result: Err("failed".to_owned()),
-        }))
-        .invalidation(),
-        Some(RefreshScope::HISTORY_AND_REFS)
-    );
-    assert_eq!(
         WorkerCompletion::new(WorkerOutcome::BranchCheckout(BranchCheckoutCompletion {
             branch: "topic".to_owned(),
             result: Err("failed".to_owned()),
@@ -484,7 +474,6 @@ fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
             kind: git::RepositoryKind::Git,
             branch: "main".to_owned(),
             branches: Vec::new(),
-            github_remote: false,
             changes: Vec::new(),
             files: Vec::new(),
             directories: Vec::new(),

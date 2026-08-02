@@ -234,12 +234,6 @@ pub(super) enum Action {
         branch: String,
         base: String,
     },
-    RemoveWorktree {
-        workspace_id: String,
-    },
-    FocusWorkspace {
-        workspace_id: String,
-    },
 }
 
 struct ParsedWorkspace {
@@ -255,10 +249,6 @@ pub(super) fn environment() -> Option<Environment> {
         std::env::var("HERDR_TAB_ID").ok(),
         std::env::var("HERDR_PANE_ID").ok(),
     )
-}
-
-pub(super) fn perform(action: Action) -> Result<(), String> {
-    run(&action_args(action)).map(|_| ())
 }
 
 pub(super) fn create_worktree(action: Action) -> Result<PathBuf, String> {
@@ -1226,15 +1216,6 @@ fn action_args(action: Action) -> Vec<String> {
             args.push("--no-focus".to_owned());
             args
         }
-        Action::RemoveWorktree { workspace_id } => vec![
-            "worktree".to_owned(),
-            "remove".to_owned(),
-            "--workspace".to_owned(),
-            workspace_id,
-        ],
-        Action::FocusWorkspace { workspace_id } => {
-            vec!["workspace".to_owned(), "focus".to_owned(), workspace_id]
-        }
     }
 }
 
@@ -1342,12 +1323,6 @@ fn parse_workspace(value: &Value, snapshot: &Value) -> Option<ParsedWorkspace> {
             path: workspace_path(value, snapshot),
             branch: None,
             parent_workspace_id: None,
-            pane_count: value.get("pane_count").and_then(Value::as_u64).unwrap_or(0) as usize,
-            focused: value
-                .get("focused")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            status: parse_agent_status(value.get("agent_status").and_then(Value::as_str)),
             repo_root: worktree
                 .and_then(|worktree| worktree.get("repo_root"))
                 .and_then(Value::as_str)
@@ -1709,18 +1684,6 @@ mod tests {
                 "--no-focus",
             ]
             .map(str::to_owned)
-        );
-        assert_eq!(
-            action_args(Action::RemoveWorktree {
-                workspace_id: "w3".to_owned(),
-            }),
-            ["worktree", "remove", "--workspace", "w3"].map(str::to_owned)
-        );
-        assert_eq!(
-            action_args(Action::FocusWorkspace {
-                workspace_id: "w1".to_owned(),
-            }),
-            ["workspace", "focus", "w1"].map(str::to_owned)
         );
     }
 
@@ -2697,13 +2660,11 @@ mod tests {
         });
 
         let (workspaces, agents) = parse_snapshot(&value).unwrap();
-        assert_eq!(workspaces[0].status, AgentStatus::Working);
         assert_eq!(workspaces[1].parent_workspace_id.as_deref(), Some("parent"));
         assert_eq!(
             workspaces[2].path.as_deref(),
             Some(Path::new("/foreground"))
         );
-        assert_eq!(workspaces[2].status, AgentStatus::Done);
         assert_eq!(agents[0].status, AgentStatus::Blocked);
         assert!(agents[0].focused);
         assert_eq!(agents[0].state_change_seq, 17);

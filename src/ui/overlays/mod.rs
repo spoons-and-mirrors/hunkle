@@ -8,16 +8,13 @@ pub(super) use ratatui::{
 
 pub(super) use unicode_width::UnicodeWidthStr;
 
-pub(super) use crate::{git::Branch, repo_path::RepoPath};
+pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use crate::app::{
-    ACTION_ITEMS, ActionsState, AgentPaneDirection, BranchDeleteDialog, BrowserTab, CommandRecord,
-    CommandStatus, Explorer, ExplorerHitTarget, ExplorerTab, FileDialog, FileDialogKind,
-    FileNameAction, FileSearch, HerdrPrompt, HitTarget, Issue, PickerAction, PickerEntry,
-    PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
-    SettingsPage, ShortcutAction, Shortcuts, SurroundingEntry, WorktreeCreateDialog,
-    WorktreeCreateField, WorktreeManager, WorktreeManagerHitTarget, WorktreeManagerRow,
-    WorktreeRemoveDialog, short_head, worktree_label,
+    ACTION_ITEMS, ActionsState, AgentPaneDirection, CommandRecord, CommandStatus, Explorer,
+    ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch, HerdrPrompt,
+    HitTarget, PickerAction, PickerEntry, Settings, SettingsPage, ShortcutAction, Shortcuts,
+    SurroundingEntry,
 };
 
 pub(super) use super::{
@@ -34,12 +31,8 @@ mod help;
 pub(super) use help::*;
 mod herdr;
 pub(super) use herdr::*;
-mod repository_browser;
-pub(super) use repository_browser::*;
 mod settings;
 pub(super) use settings::*;
-mod worktree_manager;
-pub(super) use worktree_manager::*;
 
 pub(super) struct FileSearchRegions {
     pub(super) overlay: Rect,
@@ -81,10 +74,6 @@ pub(super) struct FileDialogRegions {
     pub(super) overlay: Rect,
     pub(super) primary: Rect,
     pub(super) secondary: Rect,
-}
-
-fn status_row(message: &str, color: Color) -> ListItem<'_> {
-    ListItem::new(Line::styled(message, Style::default().fg(color)))
 }
 
 fn command_lines<'a>(
