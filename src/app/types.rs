@@ -77,6 +77,7 @@ pub(crate) enum HitTarget {
     HeaderBranch,
     HeaderDiff,
     HeaderAgent,
+    HeaderFullscreen,
     AgentPanePickerOverlay,
     AgentPane(usize),
     AgentPaneSplit(usize, AgentPaneDirection),
@@ -104,7 +105,6 @@ pub(crate) enum HitTarget {
     AgentPreviewPickerItem(usize),
     AgentPreviewPrevious(usize),
     AgentPreviewNext(usize),
-    AgentPreviewPlacement(usize),
     AgentTooltip { agent: usize, message: usize },
     AgentMessage { agent: usize, message: usize },
 }

@@ -586,19 +586,20 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(header_text.contains("first-repo"), "{header_text}");
-    assert!(header_text.contains("BACKGROUND"));
+    assert!(!header_text.contains("BACKGROUND"));
+    assert!(!header_text.contains("FOREGROUND"));
+    let fullscreen = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderFullscreen)
+        .unwrap();
+    assert_eq!(fullscreen.right(), 120);
+    assert_eq!(fullscreen.y, 0);
+    assert_eq!(
+        terminal.backend().buffer()[(fullscreen.x + 1, fullscreen.y)].symbol(),
+        "⛶"
+    );
     assert!(!header_text.contains("1/2"));
     assert!(app.agents_pane_pinned);
-    let placement = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPreviewPlacement(0))
-        .unwrap();
-    assert_eq!(placement.width, 12);
-    assert_eq!(
-        terminal.backend().buffer()[(placement.x, placement.y)].bg,
-        super::palette().raised
-    );
-
     let next = app
         .regions
         .hit_target_rect(HitTarget::AgentPreviewNext(0))
@@ -669,7 +670,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(background_header.contains("FOREGROUND"));
+    assert!(!background_header.contains("FOREGROUND"));
 
     let viewer = app.regions.diff.unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));

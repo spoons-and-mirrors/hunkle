@@ -163,7 +163,6 @@ pub(super) fn draw(
             | HitTarget::AgentPreviewPickerItem(agent)
             | HitTarget::AgentPreviewPrevious(agent)
             | HitTarget::AgentPreviewNext(agent)
-            | HitTarget::AgentPreviewPlacement(agent)
             | HitTarget::AgentTooltip { agent, .. }
             | HitTarget::AgentMessage { agent, .. },
         ) => Some(agent),
@@ -477,46 +476,6 @@ pub(super) fn draw_history(
         navigation_targets.push((HitTarget::AgentPreviewPrevious(index), previous_button));
         navigation_targets.push((HitTarget::AgentPreviewNext(index), next_button));
     }
-    let placement_running = herdr.agent_layout_running();
-    let placement_label = if placement_running {
-        " MOVING...  "
-    } else if herdr.agent_is_in_host_tab(index) {
-        " BACKGROUND "
-    } else {
-        " FOREGROUND "
-    };
-    let placement_width = 12.min(area.width);
-    let placement_button = Rect::new(
-        area.right().saturating_sub(placement_width),
-        area.y.saturating_add(1),
-        placement_width,
-        1,
-    );
-    let placement_hovered = hovered == Some(HitTarget::AgentPreviewPlacement(index));
-    frame.render_widget(
-        Paragraph::new(placement_label)
-            .alignment(ratatui::layout::Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(if placement_running {
-                        palette().faint
-                    } else if placement_hovered {
-                        palette().canvas
-                    } else {
-                        palette().accent
-                    })
-                    .bg(if placement_hovered && !placement_running {
-                        palette().selected
-                    } else {
-                        palette().raised
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        placement_button,
-    );
-    if !placement_running {
-        navigation_targets.push((HitTarget::AgentPreviewPlacement(index), placement_button));
-    }
     if messages.is_empty() {
         frame.render_widget(
             Paragraph::new("Waiting for conversation history…")
@@ -547,7 +506,7 @@ pub(super) fn draw_history(
     let message = &messages[selected_message];
     let turn = format!("TURN {} OF {}", selected_message + 1, messages.len());
     let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
-    let phase_right = placement_button.x.saturating_sub(1);
+    let phase_right = area.right();
     let phase_x = phase_right.saturating_sub(phase_width);
     frame.render_widget(
         Paragraph::new(truncate_width(

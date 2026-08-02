@@ -1210,6 +1210,27 @@ pub(super) fn pane_layout(pane_id: String) -> Result<HerdrPaneLayout, String> {
     pane_layout_with(pane_id, run)
 }
 
+pub(super) fn toggle_pane_zoom(pane_id: String) -> Result<bool, String> {
+    toggle_pane_zoom_with(pane_id, run)
+}
+
+fn toggle_pane_zoom_with(
+    pane_id: String,
+    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<bool, String> {
+    let value = runner(&[
+        "pane".to_owned(),
+        "zoom".to_owned(),
+        "--pane".to_owned(),
+        pane_id,
+        "--toggle".to_owned(),
+    ])?;
+    value
+        .pointer("/result/zoom/zoomed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "Herdr did not report the fullscreen state".to_owned())
+}
+
 fn pane_layout_with(
     pane_id: String,
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
@@ -1902,6 +1923,28 @@ mod tests {
             calls,
             vec![
                 ["pane", "layout", "--pane", "w2:p3"]
+                    .map(str::to_owned)
+                    .to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn toggles_hunkle_pane_zoom_and_reads_the_result() {
+        let mut calls = Vec::new();
+        let zoomed = toggle_pane_zoom_with("w2:p3".to_owned(), |args| {
+            calls.push(args.to_vec());
+            Ok(serde_json::json!({
+                "result": { "zoom": { "zoomed": true } }
+            }))
+        })
+        .unwrap();
+
+        assert!(zoomed);
+        assert_eq!(
+            calls,
+            vec![
+                ["pane", "zoom", "--pane", "w2:p3", "--toggle"]
                     .map(str::to_owned)
                     .to_vec()
             ]

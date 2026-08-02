@@ -34,7 +34,6 @@ impl App {
                     | HitTarget::AgentPreviewPickerItem(agent)
                     | HitTarget::AgentPreviewPrevious(agent)
                     | HitTarget::AgentPreviewNext(agent)
-                    | HitTarget::AgentPreviewPlacement(agent)
                     | HitTarget::AgentTooltip { agent, .. }
                     | HitTarget::AgentMessage { agent, .. } => Some(agent),
                     _ => None,
@@ -150,6 +149,12 @@ impl App {
                 }
                 Some(HitTarget::HeaderAgent) => {
                     self.start_header_agent();
+                    return;
+                }
+                Some(HitTarget::HeaderFullscreen) => {
+                    if let Err(error) = self.herdr.toggle_fullscreen() {
+                        self.notice = Some(format!("Could not toggle fullscreen: {error}"));
+                    }
                     return;
                 }
                 _ => {}
@@ -651,10 +656,6 @@ impl App {
             }
             Some(HitTarget::AgentPreviewNext(index)) => {
                 self.cycle_agent_preview(index, true);
-                return;
-            }
-            Some(HitTarget::AgentPreviewPlacement(index)) => {
-                self.toggle_agent_visibility(index);
                 return;
             }
             Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => return,

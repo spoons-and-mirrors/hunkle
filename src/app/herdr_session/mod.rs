@@ -294,6 +294,9 @@ enum Completion {
     AgentStashIdentity {
         result: Result<AgentSessionIdentity, String>,
     },
+    Fullscreen {
+        result: Result<bool, String>,
+    },
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     LatestUserMessage {
         identity: AgentSessionIdentity,
@@ -343,6 +346,8 @@ pub(crate) struct HerdrSession {
     cross_workspace_agents: bool,
     agent_layout_move_running: bool,
     agent_display_running: bool,
+    fullscreen_running: bool,
+    fullscreen: bool,
     agent_change_stats: HashMap<PathBuf, (u64, u64)>,
     agent_change_stats_loading: bool,
     next_agent_change_stats: Instant,
@@ -415,6 +420,8 @@ impl HerdrSession {
             cross_workspace_agents: false,
             agent_layout_move_running: false,
             agent_display_running: false,
+            fullscreen_running: false,
+            fullscreen: false,
             agent_change_stats: HashMap::new(),
             agent_change_stats_loading: false,
             next_agent_change_stats: Instant::now(),
@@ -625,6 +632,20 @@ impl HerdrSession {
                             poll.notice = Some(format!("Could not stash agent: {error}"));
                         }
                     }
+                }
+                Completion::Fullscreen { result } => {
+                    self.fullscreen_running = false;
+                    poll.notice = Some(match result {
+                        Ok(fullscreen) => {
+                            self.fullscreen = fullscreen;
+                            if fullscreen {
+                                "Hunkle is fullscreen".to_owned()
+                            } else {
+                                "Restored Herdr tab layout".to_owned()
+                            }
+                        }
+                        Err(error) => format!("Could not toggle fullscreen: {error}"),
+                    });
                 }
                 Completion::AgentChangeStats(stats) => {
                     self.agent_change_stats_loading = false;
@@ -1031,7 +1052,32 @@ impl HerdrSession {
     }
 
     pub(crate) fn agent_layout_running(&self) -> bool {
-        self.agent_layout_move_running || self.agent_display_running
+        self.agent_layout_move_running || self.agent_display_running || self.fullscreen_running
+    }
+
+    pub(crate) fn fullscreen_running(&self) -> bool {
+        self.fullscreen_running
+    }
+
+    pub(crate) fn fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
+    pub(crate) fn toggle_fullscreen(&mut self) -> Result<(), String> {
+        if self.agent_layout_running() {
+            return Err("Another Herdr layout change is still in progress".to_owned());
+        }
+        let pane_id = self
+            .host_pane_id
+            .clone()
+            .ok_or_else(|| "Hunkle is not attached to a Herdr pane".to_owned())?;
+        self.fullscreen_running = true;
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = client::toggle_pane_zoom(pane_id);
+            let _ = sender.send(Completion::Fullscreen { result });
+        });
+        Ok(())
     }
 
     pub(crate) fn toggle_agent_visibility(&mut self, index: usize) -> Result<(), String> {

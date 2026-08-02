@@ -6,10 +6,45 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Block::default().style(Style::default().bg(palette().surface_alt)),
         row,
     );
+    let fullscreen_rect = app.herdr.is_enabled().then(|| {
+        let label = " ⛶ ";
+        let width = UnicodeWidthStr::width(label) as u16;
+        let rect = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
+        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderFullscreen);
+        frame.render_widget(
+            Paragraph::new(label).alignment(Alignment::Center).style(
+                Style::default()
+                    .fg(if app.herdr.fullscreen_running() {
+                        palette().faint
+                    } else if hovered {
+                        palette().canvas
+                    } else {
+                        palette().cyan
+                    })
+                    .bg(if hovered && !app.herdr.fullscreen_running() {
+                        palette().selected
+                    } else if app.herdr.fullscreen() {
+                        palette().accent
+                    } else {
+                        palette().raised
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            rect,
+        );
+        if !app.herdr.fullscreen_running() {
+            app.regions
+                .register_hit_target(HitTarget::HeaderFullscreen, rect);
+        }
+        rect
+    });
+    let header_right = fullscreen_rect
+        .map(|rect| rect.x.saturating_sub(1))
+        .unwrap_or_else(|| area.right());
     let Some(repo) = app.repository() else {
         frame.render_widget(
             Paragraph::new("  No workspace selected").style(Style::default().fg(palette().muted)),
-            row,
+            Rect::new(row.x, row.y, header_right.saturating_sub(row.x), 1),
         );
         return;
     };
@@ -40,7 +75,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let requested_comparison_width = comparison
         .as_deref()
         .map_or(0, |comparison| UnicodeWidthStr::width(comparison).min(40));
-    let available = usize::from(area.width);
+    let available = usize::from(header_right.saturating_sub(area.x));
     let comparison_width = if is_local {
         0
     } else {
@@ -87,7 +122,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let notice_width = notice
         .as_deref()
         .map_or(0, |notice| UnicodeWidthStr::width(notice) + 2);
-    let content_right = area.right().saturating_sub(notice_width as u16);
+    let content_right = header_right.saturating_sub(notice_width as u16);
     let mut x = area.x.saturating_add(1);
     let render = |frame: &mut Frame<'_>, x: &mut u16, text: String, style: Style, limit: u16| {
         let width = (UnicodeWidthStr::width(text.as_str()) as u16).min(limit);
@@ -244,7 +279,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Rect::new(
                 content_right,
                 area.y,
-                area.right().saturating_sub(content_right),
+                header_right.saturating_sub(content_right),
                 1,
             ),
         );
