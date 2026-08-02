@@ -17,39 +17,50 @@ impl App {
         let point = Position::new(mouse.column, mouse.row);
         if mouse.kind == MouseEventKind::Moved {
             let target = self.regions.hit_target_at(point);
-            let open_message = match self.hovered_hit_target {
-                Some(HitTarget::Agent(agent)) => self
-                    .herdr
-                    .agent_user_messages(agent)
-                    .filter(|messages| !messages.is_empty())
-                    .map(|messages| (agent, messages.len() - 1)),
-                Some(
-                    HitTarget::AgentTooltip { agent, message }
-                    | HitTarget::AgentMessage { agent, message },
-                ) => Some((agent, message)),
-                _ => None,
-            };
-            self.hovered_hit_target = match (target, open_message) {
-                (
+            let suppress_agent_hover = self.suppressed_agent_hover.is_some_and(|index| {
+                self.regions
+                    .hit_target_rect(HitTarget::Agent(index))
+                    .is_some_and(|card| card.contains(point))
+            });
+            if suppress_agent_hover {
+                self.hovered_hit_target = None;
+            } else {
+                self.suppressed_agent_hover = None;
+                let open_message = match self.hovered_hit_target {
+                    Some(HitTarget::Agent(agent)) => self
+                        .herdr
+                        .agent_user_messages(agent)
+                        .filter(|messages| !messages.is_empty())
+                        .map(|messages| (agent, messages.len() - 1)),
                     Some(
-                        target @ (HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }),
-                    ),
-                    _,
-                ) => Some(target),
-                (Some(HitTarget::Agent(index)), Some((agent, message))) if index == agent => {
-                    Some(HitTarget::AgentTooltip { agent, message })
-                }
-                (Some(target @ HitTarget::Agent(_)), _) => Some(target),
-                (_, Some((agent, message)))
-                    if self
-                        .regions
-                        .worktree
-                        .is_some_and(|sidebar| sidebar.contains(point)) =>
-                {
-                    Some(HitTarget::AgentTooltip { agent, message })
-                }
-                _ => target,
-            };
+                        HitTarget::AgentTooltip { agent, message }
+                        | HitTarget::AgentMessage { agent, message },
+                    ) => Some((agent, message)),
+                    _ => None,
+                };
+                self.hovered_hit_target = match (target, open_message) {
+                    (
+                        Some(
+                            target @ (HitTarget::AgentTooltip { .. }
+                            | HitTarget::AgentMessage { .. }),
+                        ),
+                        _,
+                    ) => Some(target),
+                    (Some(HitTarget::Agent(index)), Some((agent, message))) if index == agent => {
+                        Some(HitTarget::AgentTooltip { agent, message })
+                    }
+                    (Some(target @ HitTarget::Agent(_)), _) => Some(target),
+                    (_, Some((agent, message)))
+                        if self
+                            .regions
+                            .worktree
+                            .is_some_and(|sidebar| sidebar.contains(point)) =>
+                    {
+                        Some(HitTarget::AgentTooltip { agent, message })
+                    }
+                    _ => target,
+                };
+            }
             if let Some(target) = self.hovered_hit_target {
                 let agent = match target {
                     HitTarget::Agent(index) => Some(index),
@@ -908,6 +919,9 @@ impl App {
             .get(index)
             .map(|agent| agent.pane_id.clone())
         {
+            self.suppressed_agent_hover = Some(index);
+            self.hovered_hit_target = None;
+            self.agents_pane_pinned = false;
             self.herdr.display_agent(pane_id);
         }
     }

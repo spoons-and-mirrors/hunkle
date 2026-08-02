@@ -285,7 +285,25 @@ fn renders_and_targets_agents_in_the_normal_view() {
 
     click(&mut app, area.x + 2, area.y);
     assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.hovered_hit_target, None);
+    assert!(!app.agents_pane_visible());
 
+    app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
+    assert_eq!(app.hovered_hit_target, None);
+    assert!(!app.agents_pane_visible());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentTooltip {
+                agent: 0,
+                message: 4,
+            })
+            .is_none()
+    );
+
+    app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
+    app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
     app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
