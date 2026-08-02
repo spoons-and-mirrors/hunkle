@@ -1,6 +1,6 @@
 pub(super) use std::{
     cmp::Reverse,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
@@ -18,6 +18,7 @@ pub(super) use super::{
     LinkedWorktreeObservation, TextInput, settings::AgentTimeDisplay,
 };
 pub(super) use crate::filesystem::atomic_write;
+use crate::git;
 
 mod focus;
 mod herdr;
@@ -77,6 +78,7 @@ pub(crate) fn create_managed_worktree(
 }
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const AGENT_CHANGE_STATS_INTERVAL: Duration = Duration::from_secs(5);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
@@ -313,6 +315,9 @@ pub(crate) struct WorkspacePanel {
     host_pane_id: Option<String>,
     cross_workspace_agents: bool,
     agent_display_running: bool,
+    agent_change_stats: HashMap<PathBuf, (u64, u64)>,
+    agent_change_stats_loading: bool,
+    next_agent_change_stats: Instant,
     destructive_actions_running: usize,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
@@ -427,6 +432,9 @@ impl WorkspacePanel {
             host_pane_id: None,
             cross_workspace_agents: false,
             agent_display_running: false,
+            agent_change_stats: HashMap::new(),
+            agent_change_stats_loading: false,
+            next_agent_change_stats: Instant::now(),
             destructive_actions_running: 0,
             sender,
             receiver,
@@ -590,6 +598,53 @@ impl WorkspacePanel {
         rows
     }
 
+    pub(crate) fn agent_change_stats(&self, index: usize) -> Option<(u64, u64)> {
+        self.agents
+            .get(index)
+            .and_then(|agent| agent.destination_cwd.as_ref())
+            .and_then(|path| self.agent_change_stats.get(path))
+            .copied()
+    }
+
+    fn start_agent_change_stats_if_due(&mut self, now: Instant) {
+        if self.agent_change_stats_loading || now < self.next_agent_change_stats {
+            return;
+        }
+        let paths = self
+            .agents
+            .iter()
+            .filter_map(|agent| agent.destination_cwd.clone())
+            .collect::<HashSet<_>>();
+        if paths.is_empty() {
+            self.next_agent_change_stats = now + AGENT_CHANGE_STATS_INTERVAL;
+            return;
+        }
+        self.agent_change_stats_loading = true;
+        let sender = self.sender.clone();
+        if thread::Builder::new()
+            .name("agent-change-stats".to_owned())
+            .spawn(move || {
+                let stats = paths
+                    .into_iter()
+                    .map(|path| {
+                        let stats = git::load_change_line_counts(&path).ok();
+                        (path, stats)
+                    })
+                    .collect();
+                let _ = sender.send(Completion::AgentChangeStats(stats));
+            })
+            .is_err()
+        {
+            self.agent_change_stats_loading = false;
+            self.next_agent_change_stats = now + AGENT_CHANGE_STATS_INTERVAL;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_agent_change_stats_for_test(&mut self, path: PathBuf, stats: (u64, u64)) {
+        self.agent_change_stats.insert(path, stats);
+    }
+
     pub(crate) fn poll(&mut self) -> WorkspacePanelPoll {
         if !self.enabled {
             return WorkspacePanelPoll::default();
@@ -688,6 +743,14 @@ impl WorkspacePanel {
                         Err(error) => action_error = Some(error),
                     }
                 }
+                Completion::AgentChangeStats(stats) => {
+                    self.agent_change_stats_loading = false;
+                    self.next_agent_change_stats = Instant::now() + AGENT_CHANGE_STATS_INTERVAL;
+                    self.agent_change_stats = stats
+                        .into_iter()
+                        .filter_map(|(path, stats)| stats.map(|stats| (path, stats)))
+                        .collect();
+                }
                 Completion::SnapshotRecall { name, result } => match result {
                     Ok(result) => {
                         self.snapshot_loading = false;
@@ -710,6 +773,7 @@ impl WorkspacePanel {
             self.start_snapshot();
             changed = true;
         }
+        self.start_agent_change_stats_if_due(Instant::now());
         changed |= self.poll_spinner(Instant::now());
         WorkspacePanelPoll {
             changed,

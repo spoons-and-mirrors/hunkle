@@ -477,9 +477,14 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut spans = Vec::new();
     let start_x = area.right().saturating_sub(total_width).max(area.x);
     if start_x > area.x
-        && let Some(path) = app
-            .repository()
-            .map(|repository| repository.root.display().to_string())
+        && let Some(path) = app.repository().map(|repository| {
+            let path = repository.root.display().to_string();
+            if repository.is_local() || repository.branch.is_empty() {
+                path
+            } else {
+                format!("{path}:{}", repository.branch)
+            }
+        })
     {
         let width = usize::from(start_x.saturating_sub(area.x));
         frame.render_widget(

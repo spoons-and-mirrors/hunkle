@@ -138,8 +138,8 @@ Git-inventoried repository or linked worktree, then choose which non-Hunkle pane
 in the active Herdr tab to replace with an OpenCode agent. The destination
 picker can be filtered by repository, branch, or path. After the agent starts,
 Hunkle opens that destination as its active repository. The displaced pane is
-parked in its own background tab so it cannot be merged into another agent's
-saved layout.
+parked in its own tab, named after its starting directory, so it cannot be
+merged into another agent's saved layout.
 
 The Agents section acts as a live layout switcher. Each Herdr tab is a saved
 agent layout, shared by every agent in that tab. Clicking an agent restores its

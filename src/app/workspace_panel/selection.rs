@@ -67,6 +67,7 @@ pub(super) enum Completion {
         result: Result<(), String>,
         reopen_path: Option<PathBuf>,
     },
+    AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     SnapshotRecall {
         name: String,
         result: Result<SnapshotRecallResult, String>,

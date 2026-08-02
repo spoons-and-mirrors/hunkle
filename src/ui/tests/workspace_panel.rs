@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 
 #[test]
 fn renders_the_workspace_manager_as_a_bottom_drawer() {
@@ -283,6 +284,10 @@ fn clicking_an_agent_displays_it_without_opening_the_workspace_manager() {
         }
     }));
     app.workspace_panel.workspaces[0].branch = Some("feature/agents".to_owned());
+    let stats_path = PathBuf::from("/agent/stats");
+    app.workspace_panel.agents[0].destination_cwd = Some(stats_path.clone());
+    app.workspace_panel
+        .set_agent_change_stats_for_test(stats_path, (128, 34));
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.mode, Mode::Normal);
@@ -332,12 +337,14 @@ fn clicking_an_agent_displays_it_without_opening_the_workspace_manager() {
         .map(|column| terminal.backend().buffer()[(column, agent.y + 1)].symbol())
         .collect();
     assert!(
-        session_row.contains("Refine workspace timers"),
+        session_row.contains("Refine workspace tim"),
         "session row was: {session_row:?}"
     );
     assert!(!session_row.contains('⠋'));
     assert!(!session_row.contains("0s"));
     assert!(!session_row.contains("WORKING"));
+    assert!(session_row.contains("+128"));
+    assert!(session_row.contains("-34"));
     let padding_row = agent.bottom();
     assert!(padding_row < agents.bottom());
     assert!(

@@ -204,7 +204,7 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(footer.contains("Tab Files"));
-    assert!(footer.contains(root.to_str().unwrap()));
+    assert!(footer.contains(&format!("{}:main", root.display())));
     assert!(!footer.contains("e Edit"));
     assert!(footer.contains("g Git Graph"));
     assert!(!footer.contains("W Worktrees"));
@@ -267,7 +267,7 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(footer.contains("Tab Changes"));
-    assert!(footer.contains(root.to_str().unwrap()));
+    assert!(footer.contains(&format!("{}:main", root.display())));
     assert!(!footer.contains("e Edit"));
     let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);

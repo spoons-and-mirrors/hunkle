@@ -1141,6 +1141,14 @@ fn replace_pane_with_agent_with(
     pane_id: String,
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
 ) -> Result<String, String> {
+    let pane = runner(&["pane".to_owned(), "get".to_owned(), pane_id.clone()])?;
+    let parked_tab_label = pane
+        .pointer("/result/pane/cwd")
+        .and_then(Value::as_str)
+        .and_then(|cwd| Path::new(cwd).file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "agent".to_owned());
     let split = runner(&[
         "pane".to_owned(),
         "split".to_owned(),
@@ -1173,7 +1181,7 @@ fn replace_pane_with_agent_with(
         "--workspace".to_owned(),
         workspace_id,
         "--label".to_owned(),
-        "background".to_owned(),
+        parked_tab_label,
         "--no-focus".to_owned(),
     ];
     if let Err(error) = runner(&move_args) {
@@ -2498,7 +2506,10 @@ mod tests {
             |args| {
                 calls.push(args.to_vec());
                 Ok(match calls.len() {
-                    1 => {
+                    1 => serde_json::json!({
+                        "result": { "pane": { "cwd": "/tmp/displaced" } }
+                    }),
+                    2 => {
                         serde_json::json!({ "result": { "pane": { "pane_id": "w1:p4" } } })
                     }
                     _ => Value::Null,
@@ -2511,6 +2522,7 @@ mod tests {
         assert_eq!(
             calls,
             vec![
+                ["pane", "get", "w1:p2"].map(str::to_owned).to_vec(),
                 [
                     "pane",
                     "split",
@@ -2534,7 +2546,7 @@ mod tests {
                     "--workspace",
                     "w1",
                     "--label",
-                    "background",
+                    "displaced",
                     "--no-focus",
                 ]
                 .map(str::to_owned)
@@ -2585,7 +2597,7 @@ mod tests {
     }
 
     #[test]
-    fn gives_each_displaced_pane_its_own_background_tab() {
+    fn names_each_displaced_layout_from_its_pane_directory() {
         let mut calls = Vec::new();
         replace_pane_with_agent_with(
             PathBuf::from("/tmp/feature"),
@@ -2594,7 +2606,10 @@ mod tests {
             |args| {
                 calls.push(args.to_vec());
                 Ok(match calls.len() {
-                    1 => {
+                    1 => serde_json::json!({
+                        "result": { "pane": { "cwd": "/home/spoon/code/hunkle" } }
+                    }),
+                    2 => {
                         serde_json::json!({ "result": { "pane": { "pane_id": "w1:p4" } } })
                     }
                     _ => Value::Null,
@@ -2604,7 +2619,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            calls[2],
+            calls[3],
             [
                 "pane",
                 "move",
@@ -2613,7 +2628,7 @@ mod tests {
                 "--workspace",
                 "w1",
                 "--label",
-                "background",
+                "hunkle",
                 "--no-focus",
             ]
             .map(str::to_owned)
@@ -2632,9 +2647,12 @@ mod tests {
                 calls.push(args.to_vec());
                 match calls.len() {
                     1 => Ok(serde_json::json!({
+                        "result": { "pane": { "cwd": "/tmp/displaced" } }
+                    })),
+                    2 => Ok(serde_json::json!({
                         "result": { "pane": { "pane_id": "w1:p4" } }
                     })),
-                    2 => Err("agent failed".to_owned()),
+                    3 => Err("agent failed".to_owned()),
                     _ => Ok(Value::Null),
                 }
             },
@@ -2643,7 +2661,7 @@ mod tests {
 
         assert_eq!(error, "agent failed");
         assert_eq!(
-            calls[2],
+            calls[3],
             ["pane", "close", "w1:p4"].map(str::to_owned).to_vec()
         );
     }

@@ -571,6 +571,7 @@ fn draw_agent_section(
                 let elapsed = panel
                     .agent_elapsed(index, settings.agent_time_display)
                     .map(format_duration);
+                let change_stats = panel.agent_change_stats(index);
                 let session = panel
                     .agent_display_name(index)
                     .unwrap_or("terminal session");
@@ -605,6 +606,7 @@ fn draw_agent_section(
                     destination.worktree,
                     destination.branch,
                     session,
+                    change_stats,
                     elapsed.as_deref(),
                     agent.status,
                     panel.spinner_frame(),
@@ -874,6 +876,7 @@ pub(super) fn draw_agents_pane(
         let elapsed = panel
             .agent_elapsed(index, settings.agent_time_display)
             .map(format_duration);
+        let change_stats = panel.agent_change_stats(index);
         let background = agents_pane_row_background(&state, hovered == Some(index));
         if row_area.y > list.y {
             let previous_background = screen_row
@@ -900,6 +903,7 @@ pub(super) fn draw_agents_pane(
             destination.worktree,
             destination.branch,
             session,
+            change_stats,
             elapsed.as_deref(),
             agent.status,
             panel.spinner_frame(),
@@ -1043,30 +1047,61 @@ fn draw_agent_card_detail(
     area: Rect,
     session: &str,
     worktree: &str,
+    change_stats: Option<(u64, u64)>,
     background: Color,
 ) {
     if area.width < 2 || area.height == 0 {
         return;
     }
+    let stats = change_stats
+        .map(|(additions, deletions)| (format!("+{additions}"), format!("-{deletions}")));
+    let stats_width = stats.as_ref().map_or(0, |(additions, deletions)| {
+        u16::try_from(
+            UnicodeWidthStr::width(additions.as_str())
+                + 1
+                + UnicodeWidthStr::width(deletions.as_str()),
+        )
+        .unwrap_or(u16::MAX)
+        .min(area.width.saturating_sub(2))
+    });
+    let stats_area = Rect::new(
+        area.right().saturating_sub(stats_width),
+        area.y,
+        stats_width,
+        1,
+    );
+    let stats_gap = u16::from(stats_width > 0);
     let worktree_width = if worktree == "basetree" {
         0
     } else {
-        badge_width(worktree)
-            .min(18)
-            .min(area.width.saturating_sub(4))
+        badge_width(worktree).min(18).min(
+            stats_area
+                .x
+                .saturating_sub(area.x)
+                .saturating_sub(stats_gap)
+                .saturating_sub(4),
+        )
     };
     let worktree_area = Rect::new(
-        area.right().saturating_sub(worktree_width),
+        stats_area
+            .x
+            .saturating_sub(stats_gap)
+            .saturating_sub(worktree_width),
         area.y,
         worktree_width,
         1,
     );
     let session_x = area.x.saturating_add(1);
-    let session_width = if worktree_width == 0 {
-        area.right().saturating_sub(session_x)
+    let trailing_x = if worktree_width > 0 {
+        worktree_area.x
+    } else if stats_width > 0 {
+        stats_area.x
     } else {
-        worktree_area.x.saturating_sub(session_x).saturating_sub(1)
+        area.right()
     };
+    let session_width = trailing_x
+        .saturating_sub(session_x)
+        .saturating_sub(u16::from(worktree_width > 0 || stats_width > 0));
     frame.render_widget(
         Paragraph::new(truncate_width(session, usize::from(session_width)))
             .style(Style::default().fg(palette().muted).bg(background)),
@@ -1082,6 +1117,17 @@ fn draw_agent_card_detail(
             background,
         );
     }
+    if let Some((additions, deletions)) = stats {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(additions, Style::default().fg(palette().green)),
+                Span::raw(" "),
+                Span::styled(deletions, Style::default().fg(palette().red)),
+            ]))
+            .style(Style::default().bg(background)),
+            stats_area,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1092,6 +1138,7 @@ fn draw_agents_pane_row(
     worktree: &str,
     branch: &str,
     session: &str,
+    change_stats: Option<(u64, u64)>,
     elapsed: Option<&str>,
     status: AgentStatus,
     spinner_frame: usize,
@@ -1135,6 +1182,7 @@ fn draw_agents_pane_row(
             Rect::new(content.x, content.y.saturating_add(1), content.width, 1),
             session,
             worktree,
+            change_stats,
             background,
         );
     }
@@ -1301,6 +1349,7 @@ fn draw_agent_card(
     worktree: &str,
     branch: &str,
     session: &str,
+    change_stats: Option<(u64, u64)>,
     elapsed: Option<&str>,
     status: AgentStatus,
     spinner_frame: usize,
@@ -1346,6 +1395,7 @@ fn draw_agent_card(
             Rect::new(content.x, content.y.saturating_add(1), content.width, 1),
             session,
             worktree,
+            change_stats,
             background,
         );
     }
