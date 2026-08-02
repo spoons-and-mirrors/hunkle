@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ratatui::{
     Frame,
@@ -24,6 +24,7 @@ pub(super) fn draw(
     herdr: &mut HerdrSession,
     linked_worktrees: &LinkedWorktreeCatalog,
     settings: &Settings,
+    controls: Rect,
     header: Rect,
     list: Rect,
     dragging: bool,
@@ -33,11 +34,60 @@ pub(super) fn draw(
     if header.width == 0 || header.height == 0 {
         return targets;
     }
-    let title = truncate_width(
-        &format!("AGENTS {}", herdr.agents.len()),
-        usize::from(header.width),
+    let toggle_label = if herdr.showing_stash {
+        " LIVE "
+    } else {
+        " STASH "
+    };
+    let toggle_width = u16::try_from(UnicodeWidthStr::width(toggle_label)).unwrap_or(0);
+    let toggle = Rect::new(
+        controls
+            .right()
+            .saturating_sub(toggle_width)
+            .saturating_sub(1),
+        controls.y,
+        toggle_width.min(controls.width),
+        1,
     );
-    let separator_width = usize::from(header.width)
+    frame.render_widget(
+        Paragraph::new(toggle_label).style(
+            Style::default()
+                .fg(if hovered == Some(HitTarget::AgentStashToggle) {
+                    palette().canvas
+                } else {
+                    palette().cyan
+                })
+                .bg(if hovered == Some(HitTarget::AgentStashToggle) {
+                    palette().selected
+                } else {
+                    palette().raised
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        toggle,
+    );
+    targets.push((HitTarget::AgentStashToggle, toggle));
+    if header.height == 0 || list.height == 0 {
+        return targets;
+    }
+    let count = if herdr.showing_stash {
+        herdr.stashed_agents().len()
+    } else {
+        herdr.agents.len()
+    };
+    let section_header = header;
+    let title = truncate_width(
+        &format!(
+            "{} {count}",
+            if herdr.showing_stash {
+                "STASHED"
+            } else {
+                "AGENTS"
+            }
+        ),
+        usize::from(section_header.width),
+    );
+    let separator_width = usize::from(section_header.width)
         .saturating_sub(UnicodeWidthStr::width(title.as_str()).saturating_add(1));
     let mut header_spans = vec![Span::styled(
         title,
@@ -56,7 +106,11 @@ pub(super) fn draw(
             }),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(header_spans)), header);
+    frame.render_widget(Paragraph::new(Line::from(header_spans)), section_header);
+    if herdr.showing_stash {
+        draw_stashed_agents(frame, herdr, list, hovered, &mut targets);
+        return targets;
+    }
     if herdr.agents.is_empty() {
         let message = herdr.error.as_deref().unwrap_or(if herdr.loading {
             "Loading Herdr agents…"
@@ -99,7 +153,7 @@ pub(super) fn draw(
         .agent_scroll
         .min(herdr.agents.len().saturating_sub(viewport));
     let hovered_agent = match hovered {
-        Some(HitTarget::Agent(index)) => Some(index),
+        Some(HitTarget::Agent(index) | HitTarget::AgentStash(index)) => Some(index),
         Some(
             HitTarget::AgentPreviewPicker(agent)
             | HitTarget::AgentPreviewPickerItem(agent)
@@ -181,6 +235,19 @@ pub(super) fn draw(
         );
         last_card = Some((full_row_area, background));
         targets.push((HitTarget::Agent(index), full_row_area));
+        if is_hovered && full_row_area.width >= 7 {
+            let stash = Rect::new(full_row_area.right() - 7, full_row_area.y, 7, 1);
+            frame.render_widget(
+                Paragraph::new(" STASH ").style(
+                    Style::default()
+                        .fg(palette().canvas)
+                        .bg(palette().red)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                stash,
+            );
+            targets.push((HitTarget::AgentStash(index), stash));
+        }
     }
     if let Some((card, background)) = last_card {
         let gap = Rect::new(card.x, card.bottom(), card.width, 1);
@@ -189,6 +256,114 @@ pub(super) fn draw(
         }
     }
     targets
+}
+
+fn draw_stashed_agents(
+    frame: &mut Frame<'_>,
+    herdr: &mut HerdrSession,
+    list: Rect,
+    hovered: Option<HitTarget>,
+    targets: &mut Vec<(HitTarget, Rect)>,
+) {
+    if herdr.stashed_agents().is_empty() {
+        frame.render_widget(
+            Paragraph::new("  No stashed agents").style(
+                Style::default()
+                    .fg(palette().faint)
+                    .bg(palette().surface_alt),
+            ),
+            list,
+        );
+        return;
+    }
+    let card_height = if list.height >= 2 { 2 } else { 1 };
+    let card_gap = 1;
+    let top_padding = u16::from(list.height > card_height);
+    let card_list = Rect::new(
+        list.x,
+        list.y.saturating_add(top_padding),
+        list.width.saturating_sub(1),
+        list.height.saturating_sub(top_padding),
+    );
+    let item_step = card_height + card_gap;
+    let viewport = usize::from((card_list.height + card_gap) / item_step).max(1);
+    let scroll = herdr
+        .stash_scroll
+        .min(herdr.stashed_agents().len().saturating_sub(viewport));
+    let hovered_agent = match hovered {
+        Some(HitTarget::StashedAgent(index)) => Some(index),
+        _ => None,
+    };
+    let now_ms = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
+    let mut last_card = None;
+    for (screen_row, index) in (scroll..herdr.stashed_agents().len()).enumerate() {
+        if screen_row >= viewport {
+            break;
+        }
+        let offset = u16::try_from(screen_row).unwrap_or(0) * item_step;
+        let row_area = Rect::new(
+            card_list.x,
+            card_list.y.saturating_add(offset),
+            card_list.width,
+            card_height.min(card_list.height.saturating_sub(offset)),
+        );
+        let full_row_area = Rect::new(list.x, row_area.y, list.width, row_area.height);
+        let agent = &herdr.stashed_agents()[index];
+        let is_hovered = hovered_agent == Some(index);
+        let background = if is_hovered {
+            palette().selected
+        } else {
+            palette().surface_alt
+        };
+        if row_area.y > list.y {
+            let previous_background = index.checked_sub(1).map_or(palette().panel, |previous| {
+                if hovered_agent == Some(previous) {
+                    palette().selected
+                } else {
+                    palette().surface_alt
+                }
+            });
+            draw_agent_gap(
+                frame,
+                Rect::new(list.x, row_area.y - 1, list.width, 1),
+                previous_background,
+                background,
+            );
+        }
+        fill(frame, full_row_area, background);
+        draw_row(
+            frame,
+            row_area,
+            AgentCardDestination {
+                repository: &agent.repository_label,
+                branch: &agent.branch,
+            },
+            agent.session_name.as_deref().unwrap_or(&agent.harness),
+            None,
+            Some(&format_duration(Duration::from_millis(
+                now_ms.saturating_sub(agent.stashed_at_ms),
+            ))),
+            AgentStatus::Idle,
+            herdr.spinner_frame(),
+            AgentEntryState::default(),
+            false,
+            is_hovered,
+        );
+        last_card = Some((full_row_area, background));
+        targets.push((HitTarget::StashedAgent(index), full_row_area));
+    }
+    if let Some((card, background)) = last_card {
+        let gap = Rect::new(card.x, card.bottom(), card.width, 1);
+        if gap.bottom() <= list.bottom() {
+            draw_agent_gap(frame, gap, background, palette().panel);
+        }
+    }
 }
 
 pub(super) fn draw_history(

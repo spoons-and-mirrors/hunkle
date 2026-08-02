@@ -35,6 +35,82 @@ fn open_agents_pane(app: &mut App) {
 }
 
 #[test]
+fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    app.settings.agents_height = 9;
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    let stash = StashedAgent {
+        harness: "opencode".to_owned(),
+        agent_name: "opencode".to_owned(),
+        session_source: "env".to_owned(),
+        session_kind: "session_id".to_owned(),
+        session_id: "ses_stashed".to_owned(),
+        session_name: Some("Pick this up next week".to_owned()),
+        repository: root.to_path_buf(),
+        repository_label: "hunkle".to_owned(),
+        worktree: root.to_path_buf(),
+        branch: "feature/stash".to_owned(),
+        workspace_id: "w1".to_owned(),
+        tab_id: "w1:t1".to_owned(),
+        pane_id: "w1:p2".to_owned(),
+        cwd: Some(root.to_path_buf()),
+        destination_cwd: Some(root.to_path_buf()),
+        focused: false,
+        status: crate::app::AgentStatus::Idle,
+        stashed_at_ms: 42,
+    };
+    let mut second_stash = stash.clone();
+    second_stash.session_id = "ses_stashed_2".to_owned();
+    second_stash.session_name = Some("Another saved agent".to_owned());
+    app.herdr
+        .set_stashed_agents_for_test(vec![stash, second_stash]);
+    let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let live_height = app.settings.agents_height;
+    let live_card = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
+    let controls = app.regions.agents_controls.unwrap();
+    let toggle = app
+        .regions
+        .hit_target_rect(HitTarget::AgentStashToggle)
+        .unwrap();
+    assert_eq!(toggle.right().saturating_add(1), controls.right());
+    let toggle_text = (toggle.x..toggle.right())
+        .map(|x| terminal.backend().buffer()[(x, toggle.y)].symbol())
+        .collect::<String>();
+    assert_eq!(toggle_text, " STASH ");
+    let list = app.regions.agents_list.unwrap();
+    assert!(
+        (list.x..list.right())
+            .any(|x| terminal.backend().buffer()[(x, list.bottom() - 1)].symbol() == "▀")
+    );
+    click(&mut app, toggle.x, toggle.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert!(app.herdr.showing_stash);
+    assert_eq!(app.settings.agents_height, live_height);
+    assert!(app.regions.hit_target_rect(HitTarget::Agent(0)).is_none());
+    let stashed_card = app
+        .regions
+        .hit_target_rect(HitTarget::StashedAgent(0))
+        .unwrap();
+    assert_eq!(stashed_card, live_card);
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(screen.contains("STASHED 2"));
+    assert!(screen.contains("Pick this up next week"));
+    assert!(screen.contains("feature/s"));
+}
+
+#[test]
 fn renders_and_targets_agents_in_the_normal_view() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -569,7 +645,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(second_header.contains("second-repo"));
+    assert!(second_header.contains("second-re"));
     assert!(!second_header.contains("first-repo"));
 
     app.herdr.agents[1].tab_id = "w1:t2".to_owned();
@@ -594,7 +670,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(stable_header.contains("second-repo"));
+    assert!(stable_header.contains("second-re"));
     assert!(!stable_header.contains("first-repo"));
 
     let previous = app
@@ -777,10 +853,10 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
 
     app.herdr = HerdrSession::ready_for_test(&snapshot(1));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.settings.agents_height, 5);
+    assert_eq!(app.settings.agents_height, 6);
     app.herdr = HerdrSession::ready_for_test(&snapshot(2));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.settings.agents_height, 8);
+    assert_eq!(app.settings.agents_height, 9);
 
     let splitter = app.regions.agents_splitter.unwrap();
     let bounds = app.regions.agents_bounds.unwrap();
@@ -798,4 +874,31 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
     ));
     app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, target));
     assert_eq!(app.settings.agents_height, 10);
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let splitter = app.regions.agents_splitter.unwrap();
+    let bounds = app.regions.agents_bounds.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        column,
+        bounds.bottom(),
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        bounds.bottom(),
+    ));
+    assert_eq!(app.settings.agents_height, 6);
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.agents_list.unwrap();
+    assert!(
+        (list.x..list.right())
+            .any(|x| terminal.backend().buffer()[(x, list.bottom() - 1)].symbol() == "▀")
+    );
 }

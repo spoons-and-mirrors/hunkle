@@ -667,13 +667,13 @@ fn fuzzy_searches_and_opens_repository_files() {
     let mut app = App::new(root.to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT));
     assert_eq!(app.mode, Mode::FileSearch);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     app.view = View::Graph;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT));
     for character in "profile card".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }

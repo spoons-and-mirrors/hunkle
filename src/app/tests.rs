@@ -204,7 +204,7 @@ fn creates_renames_drags_and_deletes_files_from_the_files_pane() {
     app.view = View::Changes;
     app.changes.pane = LeftPane::Files;
 
-    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT));
     assert_eq!(app.mode, Mode::Files);
     app.handle_paste(renamed);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -657,6 +657,24 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
     assert!(app.changes.diff_wrap);
     assert_eq!(app.changes.diff_scroll, 37);
+}
+
+#[test]
+fn function_keys_select_changes_files_and_agents() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert!(!app.agents_pane_visible());
+
+    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    assert!(app.agents_pane_visible());
+
+    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    assert!(!app.agents_pane_visible());
 }
 
 #[test]

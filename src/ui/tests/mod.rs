@@ -15,7 +15,7 @@ pub(super) use crate::app::{
     AgentActivityPreview, AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator,
     ExplorerHitTarget, GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind,
     HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget, LeftPane, Mode, Settings,
-    SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, View,
+    SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, StashedAgent, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
@@ -171,7 +171,7 @@ fn renders_every_primary_surface() {
     assert!(app.regions.graph.unwrap().x > 0);
     assert_eq!(app.regions.help.unwrap().right(), 120);
     let buffer = terminal.backend().buffer();
-    let agents = app.regions.agents_splitter.unwrap();
+    let agents = app.regions.agents_controls.unwrap();
     let agents_offset = usize::from(agents.y) * 120 + usize::from(agents.x);
     assert_eq!(buffer.content[0].bg, super::palette().surface_alt);
     assert_eq!(
@@ -182,13 +182,23 @@ fn renders_every_primary_surface() {
     let agents_header: String = (agents.x..agents.right())
         .map(|x| terminal.backend().buffer()[(x, agents.y)].symbol())
         .collect();
-    assert!(agents_header.contains("AGENTS "));
-    assert!(agents_header.contains('─'));
+    assert!(agents_header.contains(" STASH "));
     assert!(!agents_header.contains("click focus"));
+    let stash_toggle = app
+        .regions
+        .hit_target_rect(HitTarget::AgentStashToggle)
+        .unwrap();
     assert!(
-        (agents.x..agents.right())
+        (agents.x..stash_toggle.x)
+            .chain(stash_toggle.right()..agents.right())
             .all(|x| { terminal.backend().buffer()[(x, agents.y)].bg == super::palette().panel })
     );
+    let agents_splitter = app.regions.agents_splitter.unwrap();
+    let agents_title: String = (agents_splitter.x..agents_splitter.right())
+        .map(|x| terminal.backend().buffer()[(x, agents_splitter.y)].symbol())
+        .collect();
+    assert!(agents_title.contains("AGENTS "));
+    assert!(agents_title.contains('─'));
     let header: String = terminal.backend().buffer().content[..120]
         .iter()
         .map(|cell| cell.symbol())
@@ -199,7 +209,7 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(footer.contains("Tab Files"));
+    assert!(footer.contains("F2 Files"));
     assert!(footer.contains(&format!("{}:main", root.display())));
     assert!(!footer.contains("e Edit"));
     assert!(footer.contains("g Git Graph"));
@@ -208,7 +218,7 @@ fn renders_every_primary_surface() {
     assert!(!footer.contains("r Refresh"));
     assert!(!footer.contains("1 Changes"));
     assert!(!footer.contains("2 Graph"));
-    for shortcut in ["g Git Graph", "Tab Files", "o Explorer"] {
+    for shortcut in ["g Git Graph", "F2 Files", "o Explorer"] {
         let offset = footer.find(shortcut).unwrap();
         assert_eq!(
             terminal.backend().buffer().content[35 * 120 + offset].fg,
@@ -262,12 +272,12 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(footer.contains("Tab Changes"));
+    assert!(footer.contains("F3 Agents"));
     assert!(footer.contains(&format!("{}:main", root.display())));
     assert!(!footer.contains("e Edit"));
     let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
-    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    assert!(app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let files_tab = app
@@ -588,9 +598,10 @@ fn renders_every_primary_surface() {
     let worktree = app.regions.worktree_list.unwrap();
     assert_eq!(actions.y, commit.bottom());
     assert_eq!(actions.right(), commit.right());
-    assert_eq!(actions.bottom(), worktree.y);
+    assert_eq!(actions.bottom().saturating_add(1), worktree.y);
     assert!(commit.bottom() <= agents_splitter.y);
     let agents_bounds = app.regions.agents_bounds.unwrap();
+    assert_eq!(agents_bounds.y, worktree.y.saturating_add(1));
     let agents_target = agents_bounds.bottom().saturating_sub(9);
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),

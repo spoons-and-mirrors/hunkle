@@ -1,5 +1,29 @@
 use super::*;
-use crate::app::{WorktreePickerField, WorktreePickerStep};
+use crate::app::WorktreePickerStep;
+
+#[test]
+fn errors_use_the_full_footer_instead_of_the_header() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    let error = "Could not create worktree: branch 'main' is already checked out elsewhere";
+    app.notice = Some(error.to_owned());
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let header = (0..120)
+        .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+        .collect::<String>();
+    let footer = (0..120)
+        .map(|x| terminal.backend().buffer()[(x, 35)].symbol())
+        .collect::<String>();
+    assert!(!header.contains("Could not"));
+    assert!(footer.contains(error));
+    assert!(!footer.contains("Git Graph"));
+    assert_eq!(terminal.backend().buffer()[(1, 35)].fg, palette().red);
+}
 
 #[test]
 fn repository_picker_labels_linked_worktrees_by_repository() {
@@ -492,24 +516,25 @@ fn header_cards_open_pickers_and_checkout_branches() {
         terminal.backend().buffer()[(new_worktree.x, new_worktree.y)].bg,
         palette().green
     );
-    let current_branch = app.repository().unwrap().branch.clone();
     click(&mut app, new_worktree.x, new_worktree.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.header_picker.creating_worktree());
-    assert_eq!(app.header_picker.worktree_base.text(), current_branch);
-    let name_input = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderPickerWorktreeName)
-        .unwrap();
-    let base_input = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderPickerWorktreeBase)
-        .unwrap();
-    assert_eq!(name_input.y + 2, base_input.y);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderPickerWorktreeName)
+            .is_some()
+    );
     app.handle_paste("feature/new-tree");
     assert_eq!(app.header_picker.worktree_name.text(), "feature/new-tree");
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.header_picker.worktree_field, WorktreePickerField::Base);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.header_picker.selecting_worktree_base());
+    assert!(matches!(
+        app.header_picker.items.get(app.header_picker.selected),
+        Some(HeaderPickerItem::BranchBase(branch)) if branch.current
+    ));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.header_picker.creating_worktree());
+    assert_eq!(app.header_picker.worktree_name.text(), "feature/new-tree");
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(
         app.header_picker.worktree_step,

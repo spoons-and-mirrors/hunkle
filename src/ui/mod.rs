@@ -23,7 +23,7 @@ pub(super) use crate::{
     app::{
         App, BranchPickerStep, CloneField, FileDialogKind, GraphHitTarget, HeaderPickerItem,
         HeaderPickerKind, HitTarget, LeftPane, Mode, Regions, RepositoryPickerStep, ShortcutAction,
-        TAB_WIDTH, TextInput, View, WorktreePickerField, WorktreePickerStep,
+        TAB_WIDTH, TextInput, View, WorktreePickerStep,
     },
     theme::{Palette, load_theme},
 };
@@ -347,14 +347,34 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Block::default().style(Style::default().bg(palette().surface_alt)),
         area,
     );
+    if let Some(error) = app
+        .notice
+        .as_deref()
+        .filter(|notice| notice_is_error(notice))
+    {
+        frame.render_widget(
+            Paragraph::new(truncate_width(
+                &format!(" ERROR  {error}"),
+                usize::from(area.width),
+            ))
+            .style(
+                Style::default()
+                    .fg(palette().red)
+                    .bg(palette().surface_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            area,
+        );
+        return;
+    }
 
     let compact = area.width < 100;
-    let left_pane_label = if app.agents_pane_visible() {
-        "Changes"
+    let (left_pane_action, left_pane_label) = if app.agents_pane_visible() {
+        (ShortcutAction::ShowChanges, "Changes")
     } else if app.changes.pane == LeftPane::Worktree {
-        "Files"
+        (ShortcutAction::ShowFiles, "Files")
     } else {
-        "Agents"
+        (ShortcutAction::ShowAgents, "Agents")
     };
     let mut labels = vec![
         (
@@ -362,7 +382,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             "Git Graph",
         ),
         (
-            app.settings.shortcuts.label(ShortcutAction::TogglePane),
+            app.settings.shortcuts.label(left_pane_action),
             left_pane_label,
         ),
     ];
@@ -470,6 +490,24 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Paragraph::new(Line::from(spans)),
         Rect::new(start_x, area.y, area.right().saturating_sub(start_x), 1),
     );
+}
+
+fn notice_is_error(notice: &str) -> bool {
+    let notice = notice.to_ascii_lowercase();
+    [
+        "could not",
+        "cannot",
+        "can't",
+        "failed",
+        "fatal:",
+        "error:",
+        "not a git",
+    ]
+    .iter()
+    .any(|prefix| notice.starts_with(prefix))
+        || [" failed", " error", " unavailable", " disconnected"]
+            .iter()
+            .any(|marker| notice.contains(marker))
 }
 
 fn truncate_width(value: &str, width: usize) -> String {

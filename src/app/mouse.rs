@@ -7,7 +7,7 @@ use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 use super::{
     ACTION_ITEMS, App, CloneField, ExplorerHitTarget, GraphColumnDrag, GraphHitTarget,
     HeaderPickerKind, HitTarget, LeftPane, Mode, SettingsPage, Shortcuts, View,
-    WorktreePickerField, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
+    changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -29,7 +29,7 @@ impl App {
             self.hovered_hit_target = self.regions.hit_target_at(point);
             if let Some(target) = self.hovered_hit_target {
                 let agent = match target {
-                    HitTarget::Agent(index) => Some(index),
+                    HitTarget::Agent(index) | HitTarget::AgentStash(index) => Some(index),
                     HitTarget::AgentPreviewPicker(agent)
                     | HitTarget::AgentPreviewPickerItem(agent)
                     | HitTarget::AgentPreviewPrevious(agent)
@@ -210,12 +210,9 @@ impl App {
                         Some(HitTarget::HeaderPickerCancelDeleteWorktree) => {
                             self.open_header_worktrees()
                         }
-                        Some(HitTarget::HeaderPickerWorktreeName) => self
-                            .header_picker
-                            .set_worktree_field(WorktreePickerField::Name),
-                        Some(HitTarget::HeaderPickerWorktreeBase) => self
-                            .header_picker
-                            .set_worktree_field(WorktreePickerField::Base),
+                        Some(HitTarget::HeaderPickerWorktreeName) => {
+                            self.header_picker.worktree_name.focus()
+                        }
                         Some(HitTarget::HeaderPickerOverlay) => {}
                         _ => self.header_picker.close(),
                     }
@@ -237,12 +234,28 @@ impl App {
             return;
         }
 
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(HitTarget::Agent(index)) = self.regions.hit_target_at(point)
-        {
-            self.selection.clear();
-            self.toggle_agent_visibility(index);
-            return;
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            match self.regions.hit_target_at(point) {
+                Some(HitTarget::Agent(index)) => {
+                    self.selection.clear();
+                    self.toggle_agent_visibility(index);
+                    return;
+                }
+                Some(HitTarget::AgentStashToggle) => {
+                    self.herdr.toggle_stash();
+                    self.agents_height_fit_for = None;
+                    return;
+                }
+                Some(HitTarget::AgentStash(index)) => {
+                    self.stash_agent(index);
+                    return;
+                }
+                Some(HitTarget::StashedAgent(index)) => {
+                    self.restore_stashed_agent(index);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         if self.file_drag.is_some() {
@@ -610,6 +623,19 @@ impl App {
             }
             Some(HitTarget::Agent(index)) => {
                 self.toggle_agent_visibility(index);
+                return;
+            }
+            Some(HitTarget::AgentStashToggle) => {
+                self.herdr.toggle_stash();
+                self.agents_height_fit_for = None;
+                return;
+            }
+            Some(HitTarget::AgentStash(index)) => {
+                self.stash_agent(index);
+                return;
+            }
+            Some(HitTarget::StashedAgent(index)) => {
+                self.restore_stashed_agent(index);
                 return;
             }
             Some(HitTarget::AgentPreviewPicker(index)) => {
@@ -1504,8 +1530,8 @@ impl App {
         let Some(bounds) = self.regions.agents_bounds else {
             return;
         };
-        let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(5));
-        self.settings.agents_height = bounds.bottom().saturating_sub(top).max(5);
+        let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(6));
+        self.settings.agents_height = bounds.bottom().saturating_sub(top).max(6);
     }
 
     fn resize_graph_column(&mut self, drag: GraphColumnDrag, column: u16) {

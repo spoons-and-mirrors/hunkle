@@ -134,6 +134,12 @@ the section lists and operates on agents in Hunkle's Herdr workspace only; enabl
 **Cross-workspace agents** in Settings to include agents from other Herdr
 workspaces. Zoomed tabs must be unzoomed before their layouts can be exchanged.
 
+Hover a live agent card and choose **STASH** to save its repository, worktree,
+branch, harness, and session before closing its Herdr pane and process. The
+**STASH** control above the Agents section replaces the live cards with saved
+agents. Click a saved card to choose a pane and resume that exact OpenCode
+session; the saved entry is removed only after the agent starts successfully.
+
 Hunkle remembers the last repository opened in each Herdr pane. Relaunching it
 from the same shell directory restores that repository; changing the shell
 directory or passing an explicit path starts from the requested location instead.

@@ -1290,28 +1290,45 @@ pub(super) fn replace_pane_with_agent(
     path: PathBuf,
     workspace_id: String,
     pane_id: String,
+    session_id: Option<String>,
 ) -> Result<String, String> {
     if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
         return Err("Agents can only be started inside Herdr".to_owned());
     }
-    replace_pane_with_agent_with(path, workspace_id, pane_id, run)
+    replace_pane_with_agent_with(path, workspace_id, pane_id, session_id, run)
 }
 
 pub(super) fn split_pane_with_agent(
     path: PathBuf,
     pane_id: String,
     direction: AgentPaneDirection,
+    session_id: Option<String>,
 ) -> Result<String, String> {
     if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
         return Err("Agents can only be started inside Herdr".to_owned());
     }
-    split_pane_with_agent_with(path, pane_id, direction, run)
+    split_pane_with_agent_with(path, pane_id, direction, session_id, run)
+}
+
+pub(super) fn close_pane(pane_id: String) -> Result<(), String> {
+    if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
+        return Err("Agents can only be managed inside Herdr".to_owned());
+    }
+    close_pane_with(pane_id, run)
+}
+
+fn close_pane_with(
+    pane_id: String,
+    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<(), String> {
+    runner(&["pane".to_owned(), "close".to_owned(), pane_id]).map(|_| ())
 }
 
 fn split_pane_with_agent_with(
     path: PathBuf,
     pane_id: String,
     direction: AgentPaneDirection,
+    session_id: Option<String>,
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
 ) -> Result<String, String> {
     let split = runner(&[
@@ -1329,12 +1346,16 @@ fn split_pane_with_agent_with(
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| "Herdr did not identify the new pane".to_owned())?;
-    if let Err(error) = runner(&[
+    let mut run_args = vec![
         "pane".to_owned(),
         "run".to_owned(),
         pane_id.clone(),
         "opencode".to_owned(),
-    ]) {
+    ];
+    if let Some(session_id) = session_id {
+        run_args.extend(["--session".to_owned(), session_id]);
+    }
+    if let Err(error) = runner(&run_args) {
         let _ = runner(&["pane".to_owned(), "close".to_owned(), pane_id]);
         return Err(error);
     }
@@ -1345,6 +1366,7 @@ fn replace_pane_with_agent_with(
     path: PathBuf,
     workspace_id: String,
     pane_id: String,
+    session_id: Option<String>,
     mut runner: impl FnMut(&[String]) -> Result<Value, String>,
 ) -> Result<String, String> {
     let pane = runner(&["pane".to_owned(), "get".to_owned(), pane_id.clone()])?;
@@ -1370,12 +1392,16 @@ fn replace_pane_with_agent_with(
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| "Herdr did not identify the new pane".to_owned())?;
-    if let Err(error) = runner(&[
+    let mut run_args = vec![
         "pane".to_owned(),
         "run".to_owned(),
         replacement_pane_id.clone(),
         "opencode".to_owned(),
-    ]) {
+    ];
+    if let Some(session_id) = session_id {
+        run_args.extend(["--session".to_owned(), session_id]);
+    }
+    if let Err(error) = runner(&run_args) {
         let _ = runner(&["pane".to_owned(), "close".to_owned(), replacement_pane_id]);
         return Err(error);
     }
@@ -2576,6 +2602,7 @@ mod tests {
             PathBuf::from("/tmp/feature"),
             "w1".to_owned(),
             "w1:p2".to_owned(),
+            None,
             |args| {
                 calls.push(args.to_vec());
                 Ok(match calls.len() {
@@ -2629,12 +2656,13 @@ mod tests {
     }
 
     #[test]
-    fn splits_next_to_a_pane_and_starts_an_opencode_agent() {
+    fn splits_next_to_a_pane_and_resumes_an_opencode_agent() {
         let mut calls = Vec::new();
         let pane_id = split_pane_with_agent_with(
             PathBuf::from("/tmp/feature"),
             "w1:p2".to_owned(),
             AgentPaneDirection::Up,
+            Some("ses_123".to_owned()),
             |args| {
                 calls.push(args.to_vec());
                 Ok(if calls.len() == 1 {
@@ -2662,10 +2690,26 @@ mod tests {
                 ]
                 .map(str::to_owned)
                 .to_vec(),
-                ["pane", "run", "w1:p4", "opencode"]
+                ["pane", "run", "w1:p4", "opencode", "--session", "ses_123"]
                     .map(str::to_owned)
                     .to_vec(),
             ]
+        );
+    }
+
+    #[test]
+    fn closes_a_stashed_agent_pane() {
+        let mut calls = Vec::new();
+
+        close_pane_with("w1:p4".to_owned(), |args| {
+            calls.push(args.to_vec());
+            Ok(Value::Null)
+        })
+        .unwrap();
+
+        assert_eq!(
+            calls,
+            vec![["pane", "close", "w1:p4"].map(str::to_owned).to_vec()]
         );
     }
 
@@ -2676,6 +2720,7 @@ mod tests {
             PathBuf::from("/tmp/feature"),
             "w1".to_owned(),
             "w1:p2".to_owned(),
+            None,
             |args| {
                 calls.push(args.to_vec());
                 Ok(match calls.len() {
@@ -2716,6 +2761,7 @@ mod tests {
             PathBuf::from("/tmp/feature"),
             "w1".to_owned(),
             "w1:p2".to_owned(),
+            None,
             |args| {
                 calls.push(args.to_vec());
                 match calls.len() {

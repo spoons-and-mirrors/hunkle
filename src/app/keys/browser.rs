@@ -243,6 +243,9 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::Esc if self.header_picker.selecting_worktree_base() => {
+                self.header_picker.return_to_worktree_name();
+            }
             KeyCode::Esc if self.header_picker.branch_step == BranchPickerStep::Base => {
                 self.open_header_branches();
             }
@@ -331,12 +334,11 @@ impl App {
             self.header_picker.message = Some("Wait for the current worktree operation".to_owned());
             return;
         }
-        let Some(repository) = self.git_repository() else {
+        if self.git_repository().is_none() {
             self.header_picker.message = Some("Not a Git repository".to_owned());
             return;
-        };
-        let base = repository.branch.clone();
-        self.header_picker.begin_worktree_creation(&base);
+        }
+        self.header_picker.begin_worktree_creation();
     }
 
     pub(crate) fn begin_header_worktree_deletion(&mut self, index: usize) {
@@ -403,83 +405,84 @@ impl App {
     pub(crate) fn handle_worktree_creation(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.open_header_worktrees(),
-            KeyCode::Tab | KeyCode::Up | KeyCode::Down => {
-                let field = match self.header_picker.worktree_field {
-                    WorktreePickerField::Name => WorktreePickerField::Base,
-                    WorktreePickerField::Base => WorktreePickerField::Name,
-                };
-                self.header_picker.set_worktree_field(field);
-            }
-            KeyCode::Enter if self.header_picker.worktree_field == WorktreePickerField::Name => {
-                self.header_picker
-                    .set_worktree_field(WorktreePickerField::Base);
-            }
             KeyCode::Enter => {
                 let name = self.header_picker.worktree_name.text().trim();
-                let base = self.header_picker.worktree_base.text().trim();
                 if name.is_empty() {
-                    self.header_picker.message = Some("Worktree name is required".to_owned());
-                    self.header_picker
-                        .set_worktree_field(WorktreePickerField::Name);
+                    self.header_picker.message = Some("New branch name is required".to_owned());
                     return;
                 }
-                if base.is_empty() {
-                    self.header_picker.message = Some("Starting branch is required".to_owned());
-                    return;
-                }
-                if self.header_picker.worktree_creation_running() {
-                    self.header_picker.message =
-                        Some("Wait for the current worktree creation".to_owned());
-                    return;
-                }
-                let Some(cwd) = self
-                    .git_repository()
-                    .map(|repository| repository.root.clone())
-                else {
-                    self.header_picker.message = Some("Not a Git repository".to_owned());
-                    return;
-                };
-                let name = name.to_owned();
-                let base = base.to_owned();
-                if self
-                    .header_picker
-                    .start_worktree_creation(cwd, name.clone(), base)
-                {
-                    self.header_picker.close();
-                    self.notice = Some(format!("Creating worktree {name}…"));
-                }
+                self.open_header_worktree_bases();
             }
-            KeyCode::Backspace => self.header_picker.worktree_input_mut().backspace(),
-            KeyCode::Delete => self.header_picker.worktree_input_mut().delete(),
-            KeyCode::Left => self.header_picker.worktree_input_mut().move_left(),
-            KeyCode::Right => self.header_picker.worktree_input_mut().move_right(),
-            KeyCode::Home => self.header_picker.worktree_input_mut().move_home(),
-            KeyCode::End => self.header_picker.worktree_input_mut().move_end(),
+            KeyCode::Backspace => self.header_picker.worktree_name.backspace(),
+            KeyCode::Delete => self.header_picker.worktree_name.delete(),
+            KeyCode::Left => self.header_picker.worktree_name.move_left(),
+            KeyCode::Right => self.header_picker.worktree_name.move_right(),
+            KeyCode::Home => self.header_picker.worktree_name.move_home(),
+            KeyCode::End => self.header_picker.worktree_name.move_end(),
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.header_picker.worktree_input_mut().select_all();
+                self.header_picker.worktree_name.select_all();
             }
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.header_picker.worktree_input_mut().move_end();
+                self.header_picker.worktree_name.move_end();
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.header_picker.worktree_input_mut().clear();
+                self.header_picker.worktree_name.clear();
             }
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.header_picker.worktree_input_mut().delete_word();
+                self.header_picker.worktree_name.delete_word();
             }
             KeyCode::Char(character)
                 if !key
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                self.header_picker
-                    .worktree_input_mut()
-                    .insert_char(character);
+                self.header_picker.worktree_name.insert_char(character);
             }
             _ => {}
         }
         if !matches!(key.code, KeyCode::Enter) {
             self.header_picker.message = None;
+        }
+    }
+
+    fn open_header_worktree_bases(&mut self) {
+        let Some(repository) = self.git_repository() else {
+            self.header_picker.message = Some("Not a Git repository".to_owned());
+            return;
+        };
+        let selected = repository
+            .branches
+            .iter()
+            .position(|branch| branch.current)
+            .unwrap_or(0);
+        let items = repository
+            .branches
+            .iter()
+            .cloned()
+            .map(HeaderPickerItem::BranchBase)
+            .collect();
+        self.header_picker.open_worktree_bases(items, selected);
+    }
+
+    pub(crate) fn create_header_worktree(&mut self, base: Branch) {
+        if self.header_picker.worktree_creation_running() {
+            self.header_picker.message = Some("Wait for the current worktree creation".to_owned());
+            return;
+        }
+        let Some(cwd) = self
+            .git_repository()
+            .map(|repository| repository.root.clone())
+        else {
+            self.header_picker.message = Some("Not a Git repository".to_owned());
+            return;
+        };
+        let name = self.header_picker.worktree_name.text().trim().to_owned();
+        if self
+            .header_picker
+            .start_worktree_creation(cwd, name.clone(), base.revision())
+        {
+            self.header_picker.close();
+            self.notice = Some(format!("Creating worktree {name}…"));
         }
     }
 

@@ -51,6 +51,9 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
                 .add_modifier(Modifier::BOLD),
         ),
         shortcut_help(shortcuts, ShortcutAction::TogglePane, "Cycle sidebar panes"),
+        shortcut_help(shortcuts, ShortcutAction::ShowChanges, "Show Changes"),
+        shortcut_help(shortcuts, ShortcutAction::ShowFiles, "Show Files"),
+        shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Show Agents"),
         shortcut_help(
             shortcuts,
             ShortcutAction::ToggleGraph,

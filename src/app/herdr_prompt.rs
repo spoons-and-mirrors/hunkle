@@ -15,6 +15,7 @@ pub(crate) struct HerdrPromptPoll {
 pub(crate) struct HerdrPromptCompletion {
     pub(crate) message: String,
     pub(crate) reopen_path: Option<PathBuf>,
+    pub(crate) restored_session_id: Option<String>,
 }
 
 pub(crate) struct HerdrPrompt {
@@ -35,6 +36,7 @@ struct PendingAgent {
     branch: String,
     host_pane_id: String,
     layout: Option<HerdrPaneLayout>,
+    session_id: Option<String>,
 }
 
 impl Default for HerdrPrompt {
@@ -66,6 +68,7 @@ impl HerdrPrompt {
             .send(Ok(HerdrPromptCompletion {
                 message: message.into(),
                 reopen_path,
+                restored_session_id: None,
             }))
             .unwrap();
     }
@@ -85,6 +88,7 @@ impl HerdrPrompt {
             branch,
             host_pane_id,
             layout: Some(layout),
+            session_id: None,
         });
     }
 
@@ -116,12 +120,31 @@ impl HerdrPrompt {
                 herdr_session::send_command_below(command).map(|pane_id| HerdrPromptCompletion {
                     message: format!("Sent to Herdr pane {pane_id}"),
                     reopen_path: None,
+                    restored_session_id: None,
                 });
             let _ = sender.send(result);
         });
     }
 
     pub(crate) fn prepare_agent(&mut self, path: PathBuf, branch: String) -> Result<(), String> {
+        self.prepare_agent_session(path, branch, None)
+    }
+
+    pub(crate) fn prepare_stashed_agent(
+        &mut self,
+        path: PathBuf,
+        branch: String,
+        session_id: String,
+    ) -> Result<(), String> {
+        self.prepare_agent_session(path, branch, Some(session_id))
+    }
+
+    fn prepare_agent_session(
+        &mut self,
+        path: PathBuf,
+        branch: String,
+        session_id: Option<String>,
+    ) -> Result<(), String> {
         if self.sending {
             return Err("Another Herdr command is still running".to_owned());
         }
@@ -139,6 +162,7 @@ impl HerdrPrompt {
             branch,
             host_pane_id: host_pane_id.clone(),
             layout: None,
+            session_id,
         });
         let sender = self.layout_sender.clone();
         thread::spawn(move || {
@@ -206,13 +230,17 @@ impl HerdrPrompt {
                 pending.path.display()
             ));
             let reopen_path = pending.path.clone();
-            let result =
-                herdr_session::replace_pane_with_agent(pending.path, workspace_id, pane_id).map(
-                    |pane_id| HerdrPromptCompletion {
-                        message: format!("Started agent in Herdr pane {pane_id}"),
-                        reopen_path: Some(reopen_path),
-                    },
-                );
+            let result = herdr_session::replace_pane_with_agent(
+                pending.path,
+                workspace_id,
+                pane_id,
+                pending.session_id.clone(),
+            )
+            .map(|pane_id| HerdrPromptCompletion {
+                message: format!("Started agent in Herdr pane {pane_id}"),
+                reopen_path: Some(reopen_path),
+                restored_session_id: pending.session_id,
+            });
             let _ = sender.send(result);
         });
         Ok(())
@@ -248,11 +276,17 @@ impl HerdrPrompt {
                 pending.path.display()
             ));
             let reopen_path = pending.path.clone();
-            let result = herdr_session::split_pane_with_agent(pending.path, pane_id, direction)
-                .map(|pane_id| HerdrPromptCompletion {
-                    message: format!("Started agent in new Herdr pane {pane_id}"),
-                    reopen_path: Some(reopen_path),
-                });
+            let result = herdr_session::split_pane_with_agent(
+                pending.path,
+                pane_id,
+                direction,
+                pending.session_id.clone(),
+            )
+            .map(|pane_id| HerdrPromptCompletion {
+                message: format!("Started agent in new Herdr pane {pane_id}"),
+                reopen_path: Some(reopen_path),
+                restored_session_id: pending.session_id,
+            });
             let _ = sender.send(result);
         });
         Ok(())

@@ -5,6 +5,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum ShortcutAction {
     TogglePane,
+    ShowChanges,
+    ShowFiles,
+    ShowAgents,
     ToggleGraph,
     Quit,
     OpenHerdr,
@@ -203,6 +206,30 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         KeyCode::Tab
     ),
     shortcut!(
+        ShowChanges,
+        "show-changes",
+        "Show Changes",
+        "Navigation",
+        MAIN | COMMIT,
+        KeyCode::F(1)
+    ),
+    shortcut!(
+        ShowFiles,
+        "show-files",
+        "Show Files",
+        "Navigation",
+        MAIN | COMMIT,
+        KeyCode::F(2)
+    ),
+    shortcut!(
+        ShowAgents,
+        "show-agents",
+        "Show Agents",
+        "Navigation",
+        MAIN | COMMIT,
+        KeyCode::F(3)
+    ),
+    shortcut!(
         ToggleGraph,
         "toggle-graph",
         "Show / hide Git graph",
@@ -232,7 +259,8 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         "Find repository file",
         "Navigation",
         MAIN,
-        KeyCode::F(3)
+        KeyCode::F(3),
+        KeyModifiers::SHIFT
     ),
     shortcut!(
         OpenSettings,
@@ -265,7 +293,8 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         "Send to Herdr pane",
         "Navigation",
         MAIN,
-        KeyCode::F(1)
+        KeyCode::F(1),
+        KeyModifiers::SHIFT
     ),
     shortcut!(
         StartAgent,
@@ -307,7 +336,8 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         "Rename file / folder",
         "Changes / files",
         MAIN,
-        KeyCode::F(2)
+        KeyCode::F(2),
+        KeyModifiers::SHIFT
     ),
     shortcut!(
         DeleteFile,
@@ -621,6 +651,24 @@ mod tests {
 
         assert_eq!(shortcuts.main_action(key), Some(ShortcutAction::StartAgent));
         assert_eq!(shortcuts.label(ShortcutAction::StartAgent), "Ctrl+Space");
+    }
+
+    #[test]
+    fn function_keys_select_sidebar_panes_by_default() {
+        let shortcuts = Shortcuts::default();
+
+        assert_eq!(
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+            Some(ShortcutAction::ShowChanges)
+        );
+        assert_eq!(
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+            Some(ShortcutAction::ShowFiles)
+        );
+        assert_eq!(
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
+            Some(ShortcutAction::ShowAgents)
+        );
     }
 
     #[test]

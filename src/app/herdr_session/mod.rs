@@ -21,7 +21,10 @@ use crate::git;
 
 mod client;
 mod latest_message;
+mod stash;
 mod timings;
+
+pub(crate) use stash::StashedAgent;
 
 pub(crate) use client::HerdrPaneLayout;
 #[cfg(test)]
@@ -43,16 +46,18 @@ pub(super) fn replace_pane_with_agent(
     path: PathBuf,
     workspace_id: String,
     pane_id: String,
+    session_id: Option<String>,
 ) -> Result<String, String> {
-    client::replace_pane_with_agent(path, workspace_id, pane_id)
+    client::replace_pane_with_agent(path, workspace_id, pane_id, session_id)
 }
 
 pub(super) fn split_pane_with_agent(
     path: PathBuf,
     pane_id: String,
     direction: AgentPaneDirection,
+    session_id: Option<String>,
 ) -> Result<String, String> {
-    client::split_pane_with_agent(path, pane_id, direction)
+    client::split_pane_with_agent(path, pane_id, direction, session_id)
 }
 
 pub(super) fn pane_layout(pane_id: String) -> Result<HerdrPaneLayout, String> {
@@ -281,6 +286,11 @@ enum Completion {
         selected_workspace_id: String,
         selected_tab_id: String,
     },
+    AgentStash {
+        session_id: String,
+        name: String,
+        result: Result<(), String>,
+    },
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     LatestUserMessage {
         identity: AgentSessionIdentity,
@@ -338,6 +348,10 @@ pub(crate) struct HerdrSession {
     agent_layouts: HashMap<AgentTimingKey, client::AgentLayout>,
     agent_layouts_path: Option<PathBuf>,
     displayed_agent_key: Option<AgentTimingKey>,
+    stash: stash::AgentStashStore,
+    pub(crate) showing_stash: bool,
+    pub(crate) stash_scroll: usize,
+    agent_stash_running: bool,
 }
 
 impl HerdrSession {
@@ -350,6 +364,7 @@ impl HerdrSession {
         let mut session = Self::new(
             enabled,
             config_dir.map(|path| path.join("agent-timings.json")),
+            config_dir.map(|path| path.join("agent-stash.json")),
         );
         if let Some(environment) = environment {
             session.host_workspace_id = environment.workspace_id;
@@ -367,7 +382,11 @@ impl HerdrSession {
         session
     }
 
-    fn new(enabled: bool, agent_timings_path: Option<PathBuf>) -> Self {
+    fn new(
+        enabled: bool,
+        agent_timings_path: Option<PathBuf>,
+        agent_stash_path: Option<PathBuf>,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
             enabled,
@@ -399,6 +418,10 @@ impl HerdrSession {
             agent_layouts: HashMap::new(),
             agent_layouts_path: None,
             displayed_agent_key: None,
+            stash: stash::AgentStashStore::new(agent_stash_path),
+            showing_stash: false,
+            stash_scroll: 0,
+            agent_stash_running: false,
         }
     }
 
@@ -551,6 +574,31 @@ impl HerdrSession {
                         Err(error) => poll.notice = Some(error),
                     }
                 }
+                Completion::AgentStash {
+                    session_id,
+                    name,
+                    result,
+                } => {
+                    self.agent_stash_running = false;
+                    self.next_refresh = Instant::now();
+                    poll.notice = Some(match result {
+                        Ok(()) => {
+                            self.agents.retain(|agent| {
+                                agent.session_timing_key.as_ref().is_none_or(|key| {
+                                    !matches!(key, AgentTimingKey::Session(identity) if identity.value == session_id)
+                                })
+                            });
+                            format!("Stashed agent {name}")
+                        }
+                        Err(error) => {
+                            let rollback = self.stash.remove(&session_id).err();
+                            rollback.map_or_else(
+                                || format!("Could not stash agent: {error}"),
+                                |rollback| format!("Could not stash agent: {error}; {rollback}"),
+                            )
+                        }
+                    });
+                }
                 Completion::AgentChangeStats(stats) => {
                     self.agent_change_stats_loading = false;
                     self.next_agent_change_stats = Instant::now() + AGENT_CHANGE_STATS_INTERVAL;
@@ -604,6 +652,19 @@ impl HerdrSession {
             )
         });
         self.agents = ranked.into_iter().map(|(_, agent)| agent).collect();
+        if !self.agent_stash_running {
+            let live_sessions = self
+                .agents
+                .iter()
+                .filter_map(|agent| match agent.session_timing_key.as_ref() {
+                    Some(AgentTimingKey::Session(identity)) => Some(identity.value.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let _ = self
+                .stash
+                .remove_live(live_sessions.iter().map(String::as_str));
+        }
         let displayed_is_present = self.displayed_agent_key.as_ref().is_some_and(|key| {
             self.agents.iter().any(|agent| {
                 &agent.timing_key == key
@@ -637,6 +698,84 @@ impl HerdrSession {
 
     pub(crate) fn agent_display_name(&self, index: usize) -> Option<&str> {
         self.agents.get(index)?.session_name.as_deref()
+    }
+
+    pub(crate) fn stashed_agents(&self) -> &[StashedAgent] {
+        &self.stash.agents
+    }
+
+    pub(crate) fn toggle_stash(&mut self) {
+        self.showing_stash = !self.showing_stash;
+        self.stash_scroll = 0;
+        self.agent_scroll = 0;
+    }
+
+    pub(crate) fn stash_agent(
+        &mut self,
+        index: usize,
+        repository: PathBuf,
+        repository_label: String,
+        branch: String,
+    ) -> Result<(), String> {
+        if self.agent_stash_running || self.agent_layout_running() {
+            return Err("Another agent operation is still in progress".to_owned());
+        }
+        let agent = self
+            .agents
+            .get(index)
+            .ok_or_else(|| "Agent is no longer available".to_owned())?;
+        let AgentTimingKey::Session(identity) = agent
+            .session_timing_key
+            .as_ref()
+            .ok_or_else(|| "Agent has not reported a resumable session".to_owned())?
+        else {
+            return Err("Agent has not reported a resumable session".to_owned());
+        };
+        if identity.agent != "opencode" {
+            return Err(format!("{} sessions cannot be restored yet", agent.name));
+        }
+        let worktree = agent
+            .destination_cwd
+            .clone()
+            .or_else(|| agent.cwd.clone())
+            .ok_or_else(|| "Agent has not reported its working directory".to_owned())?;
+        let record = StashedAgent {
+            harness: identity.agent.clone(),
+            agent_name: agent.name.clone(),
+            session_source: identity.source.clone(),
+            session_kind: identity.kind.clone(),
+            session_id: identity.value.clone(),
+            session_name: agent.session_name.clone(),
+            repository,
+            repository_label,
+            worktree,
+            branch,
+            workspace_id: agent.workspace_id.clone(),
+            tab_id: agent.tab_id.clone(),
+            pane_id: agent.pane_id.clone(),
+            cwd: agent.cwd.clone(),
+            destination_cwd: agent.destination_cwd.clone(),
+            focused: agent.focused,
+            status: agent.status,
+            stashed_at_ms: unix_time_ms(),
+        };
+        self.stash.add(record.clone())?;
+        let pane_id = agent.pane_id.clone();
+        let sender = self.sender.clone();
+        self.agent_stash_running = true;
+        thread::spawn(move || {
+            let result = client::close_pane(pane_id);
+            let _ = sender.send(Completion::AgentStash {
+                session_id: record.session_id,
+                name: record.session_name.unwrap_or(record.harness),
+                result,
+            });
+        });
+        Ok(())
+    }
+
+    pub(crate) fn restored_stash(&mut self, session_id: &str) -> Result<(), String> {
+        self.stash.remove(session_id)
     }
 
     pub(crate) fn agent_user_messages(&self, index: usize) -> Option<&[AgentUserMessage]> {
@@ -708,6 +847,11 @@ impl HerdrSession {
             .and_then(|agent| agent.destination_cwd.as_ref())
             .and_then(|path| self.agent_change_stats.get(path))
             .copied()
+    }
+
+    pub(crate) fn agent_destination(&self, index: usize) -> Option<&Path> {
+        let agent = self.agents.get(index)?;
+        agent.destination_cwd.as_deref().or(agent.cwd.as_deref())
     }
 
     fn start_agent_change_stats_if_due(&mut self, now: Instant) {
@@ -926,7 +1070,11 @@ impl HerdrSession {
     }
 
     pub(crate) fn scroll_agents(&mut self, delta: isize) {
-        self.agent_scroll = self.agent_scroll.saturating_add_signed(delta);
+        if self.showing_stash {
+            self.stash_scroll = self.stash_scroll.saturating_add_signed(delta);
+        } else {
+            self.agent_scroll = self.agent_scroll.saturating_add_signed(delta);
+        }
     }
 
     pub(crate) fn spinner_frame(&self) -> usize {
@@ -1022,7 +1170,7 @@ impl HerdrSession {
 
     #[cfg(test)]
     pub(crate) fn ready_for_test(value: &Value) -> Self {
-        let mut session = Self::new(true, None);
+        let mut session = Self::new(true, None, None);
         session.cross_workspace_agents = true;
         let (mut workspaces, agents) = client::parse_snapshot(value).unwrap();
         populate_workspace_branches(&mut workspaces);
@@ -1041,6 +1189,11 @@ impl HerdrSession {
     #[cfg(test)]
     pub(crate) fn set_agent_change_stats_for_test(&mut self, path: PathBuf, stats: (u64, u64)) {
         self.agent_change_stats.insert(path, stats);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_stashed_agents_for_test(&mut self, agents: Vec<StashedAgent>) {
+        self.stash.agents = agents;
     }
 
     #[cfg(test)]

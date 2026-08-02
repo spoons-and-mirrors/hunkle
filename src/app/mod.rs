@@ -30,14 +30,14 @@ pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use header_picker::{
     BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
-    RepositoryPickerStep, WorktreePickerField, WorktreePickerStep,
+    RepositoryPickerStep, WorktreePickerStep,
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
-#[cfg(test)]
-pub(crate) use herdr_session::HerdrPaneRect;
 pub(crate) use herdr_session::{
     AgentActivityPreview, AgentEntryState, AgentStatus, HerdrPaneLayout, HerdrSession,
 };
+#[cfg(test)]
+pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
 pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
     LinkedWorktreeObservation, RepositoryPickerItem,
@@ -563,7 +563,7 @@ impl App {
                 .chars()
                 .filter(|character| !matches!(character, '\r' | '\n'))
                 .collect::<String>();
-            self.header_picker.worktree_input_mut().insert(&text);
+            self.header_picker.worktree_name.insert(&text);
             self.header_picker.message = None;
             return;
         }
@@ -695,12 +695,10 @@ impl App {
             .clone_url
             .poll_blink(cloning_repository && self.header_picker.clone_field == CloneField::Url);
         let creating_worktree = self.header_picker.creating_worktree();
-        changed |= self.header_picker.worktree_name.poll_blink(
-            creating_worktree && self.header_picker.worktree_field == WorktreePickerField::Name,
-        );
-        changed |= self.header_picker.worktree_base.poll_blink(
-            creating_worktree && self.header_picker.worktree_field == WorktreePickerField::Base,
-        );
+        changed |= self
+            .header_picker
+            .worktree_name
+            .poll_blink(creating_worktree);
         let filtering_header_picker = self.header_picker.filtering();
         changed |= self.header_picker.query.poll_blink(filtering_header_picker);
         changed |= self.header_picker.poll_change_details();
@@ -786,7 +784,15 @@ impl App {
                         ));
                         self.queue_workspace_restore(path);
                     }
-                    self.notice = Some(completion.message);
+                    self.notice = if let Some(session_id) = completion.restored_session_id
+                        && let Err(error) = self.herdr.restored_stash(&session_id)
+                    {
+                        Some(format!(
+                            "Agent resumed, but its stash could not be removed: {error}"
+                        ))
+                    } else {
+                        Some(completion.message)
+                    };
                 }
                 Err(error) if self.mode == Mode::HerdrPrompt => {
                     self.herdr_prompt.error = Some(error);
@@ -1327,7 +1333,12 @@ impl App {
             return false;
         };
         match action {
-            ShortcutAction::TogglePane | ShortcutAction::ToggleGraph | ShortcutAction::FindFile => {
+            ShortcutAction::TogglePane
+            | ShortcutAction::ShowChanges
+            | ShortcutAction::ShowFiles
+            | ShortcutAction::ShowAgents
+            | ShortcutAction::ToggleGraph
+            | ShortcutAction::FindFile => {
                 return false;
             }
             ShortcutAction::Quit if self.format_running() => {
@@ -1725,6 +1736,12 @@ impl App {
         let Some(item) = self.header_picker.items.get(index).cloned() else {
             return;
         };
+        if self.header_picker.selecting_worktree_base()
+            && let HeaderPickerItem::BranchBase(branch) = item
+        {
+            self.create_header_worktree(branch);
+            return;
+        }
         if let HeaderPickerItem::BranchBase(branch) = item {
             self.header_picker.open_branch_name(branch);
             return;
@@ -1857,6 +1874,9 @@ impl App {
     fn handle_main_navigation(&mut self, key: KeyEvent) -> bool {
         match self.settings.shortcuts.main_action(key) {
             Some(ShortcutAction::TogglePane) => self.toggle_left_pane(),
+            Some(ShortcutAction::ShowChanges) => self.show_sidebar_pane(LeftPane::Worktree),
+            Some(ShortcutAction::ShowFiles) => self.show_sidebar_pane(LeftPane::Files),
+            Some(ShortcutAction::ShowAgents) => self.show_agents_pane(),
             Some(ShortcutAction::ToggleGraph) if self.mode == Mode::Normal => self.toggle_graph(),
             _ => return false,
         }
@@ -1890,6 +1910,9 @@ impl App {
             self.hovered_hit_target,
             Some(
                 HitTarget::Agent(_)
+                    | HitTarget::AgentStashToggle
+                    | HitTarget::AgentStash(_)
+                    | HitTarget::StashedAgent(_)
                     | HitTarget::AgentPreviewPicker(_)
                     | HitTarget::AgentPreviewPickerItem(_)
                     | HitTarget::AgentPreviewPrevious(_)
@@ -1900,6 +1923,52 @@ impl App {
             )
         ) {
             self.hovered_hit_target = None;
+        }
+    }
+
+    fn stash_agent(&mut self, index: usize) {
+        let Some(path) = self.herdr.agent_destination(index).map(Path::to_path_buf) else {
+            self.notice = Some("Agent has not reported its working directory".to_owned());
+            return;
+        };
+        let destination = self.linked_worktrees.agent_destination(&path);
+        let repository = destination.as_ref().map_or_else(
+            || {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string())
+            },
+            |destination| destination.repository().to_owned(),
+        );
+        let branch = destination
+            .as_ref()
+            .map_or("unknown", AgentDestinationMetadata::branch)
+            .to_owned();
+        let repository_root = destination.as_ref().map_or_else(
+            || path.clone(),
+            |destination| destination.repository_root().to_owned(),
+        );
+        match self
+            .herdr
+            .stash_agent(index, repository_root, repository, branch)
+        {
+            Ok(()) => self.notice = Some("Closing and stashing agent".to_owned()),
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    fn restore_stashed_agent(&mut self, index: usize) {
+        let Some(agent) = self.herdr.stashed_agents().get(index).cloned() else {
+            self.notice = Some("Stashed agent is no longer available".to_owned());
+            return;
+        };
+        match self.herdr_prompt.prepare_stashed_agent(
+            agent.worktree,
+            agent.branch,
+            agent.session_id,
+        ) {
+            Ok(()) => self.notice = Some("Loading active Herdr tab layout".to_owned()),
+            Err(error) => self.notice = Some(error),
         }
     }
 

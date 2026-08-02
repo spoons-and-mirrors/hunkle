@@ -82,6 +82,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let notice = (available >= 100 && notice_budget > 0)
         .then_some(app.notice.as_deref())
         .flatten()
+        .filter(|notice| !notice_is_error(notice))
         .map(|notice| truncate_width(notice, notice_budget));
     let notice_width = notice
         .as_deref()
@@ -354,8 +355,10 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let item_offset = if filtering { 3 } else { 1 };
     let visible_items =
         header_picker_visible_items(frame.area().height, available_height, picker_chrome);
-    let row_count = if cloning_repository || creating_worktree {
+    let row_count = if cloning_repository {
         5
+    } else if creating_worktree {
+        3
     } else if deleting_worktree {
         3
     } else if naming_branch {
@@ -395,6 +398,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         HeaderPickerKind::Worktrees => match app.header_picker.worktree_step {
             WorktreePickerStep::Worktrees => " WORKTREES".to_owned(),
             WorktreePickerStep::Create => " NEW WORKTREE".to_owned(),
+            WorktreePickerStep::Base => " NEW WORKTREE · SELECT BASE".to_owned(),
             WorktreePickerStep::Delete => " DELETE WORKTREE".to_owned(),
         },
         HeaderPickerKind::Branches => match app.header_picker.branch_step {
@@ -610,39 +614,22 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
 
     if creating_worktree {
         frame.render_widget(
-            Paragraph::new(" NAME").style(Style::default().fg(palette().muted)),
+            Paragraph::new(" NEW BRANCH / WORKTREE NAME")
+                .style(Style::default().fg(palette().muted)),
             Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
         );
         let name_row = Rect::new(area.x, area.y.saturating_add(2), area.width, 1);
-        draw_picker_input(
-            frame,
-            &app.header_picker.worktree_name,
-            name_row,
-            app.header_picker.worktree_field == WorktreePickerField::Name,
-        );
+        draw_picker_input(frame, &app.header_picker.worktree_name, name_row, true);
         app.regions
             .register_hit_target(HitTarget::HeaderPickerWorktreeName, name_row);
-        frame.render_widget(
-            Paragraph::new(" START FROM").style(Style::default().fg(palette().muted)),
-            Rect::new(area.x, area.y.saturating_add(3), area.width, 1),
-        );
-        let base_row = Rect::new(area.x, area.y.saturating_add(4), area.width, 1);
-        draw_picker_input(
-            frame,
-            &app.header_picker.worktree_base,
-            base_row,
-            app.header_picker.worktree_field == WorktreePickerField::Base,
-        );
-        app.regions
-            .register_hit_target(HitTarget::HeaderPickerWorktreeBase, base_row);
         let (hint, color) = app.header_picker.message.as_ref().map_or(
-            (" Enter create · Tab switch · Esc back", palette().muted),
+            (" Enter select base · Esc back", palette().muted),
             |message| (message.as_str(), palette().red),
         );
         frame.render_widget(
             Paragraph::new(truncate_width(hint, usize::from(area.width)))
                 .style(Style::default().fg(color)),
-            Rect::new(area.x, area.y.saturating_add(5), area.width, 1),
+            Rect::new(area.x, area.y.saturating_add(3), area.width, 1),
         );
         return;
     }

@@ -43,6 +43,16 @@ impl<'a> AgentDestinationMetadata<'a> {
         &self.repository.label
     }
 
+    pub(crate) fn repository_root(&self) -> &'a Path {
+        self.repository
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.is_main)
+            .unwrap_or(self.worktree)
+            .path
+            .as_path()
+    }
+
     pub(crate) fn branch(&self) -> &'a str {
         self.worktree
             .branch

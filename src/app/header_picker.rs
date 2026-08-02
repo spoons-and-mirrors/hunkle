@@ -67,14 +67,8 @@ pub(crate) enum WorktreePickerStep {
     #[default]
     Worktrees,
     Create,
-    Delete,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorktreePickerField {
-    #[default]
-    Name,
     Base,
+    Delete,
 }
 
 #[derive(Debug, Default)]
@@ -100,8 +94,6 @@ pub(crate) struct HeaderPicker {
     pub(crate) clone_field: CloneField,
     pub(crate) worktree_step: WorktreePickerStep,
     pub(crate) worktree_name: TextInput,
-    pub(crate) worktree_base: TextInput,
-    pub(crate) worktree_field: WorktreePickerField,
     pub(crate) worktree_delete: Option<PathBuf>,
     clone_rx: Option<Receiver<Result<PathBuf, String>>>,
     worktree_rx: Option<Receiver<Result<PathBuf, String>>>,
@@ -142,8 +134,6 @@ impl HeaderPicker {
         self.clone_url.clear();
         self.worktree_step = WorktreePickerStep::Worktrees;
         self.worktree_name.clear();
-        self.worktree_base.clear();
-        self.worktree_field = WorktreePickerField::Name;
         self.worktree_delete = None;
     }
 
@@ -171,8 +161,6 @@ impl HeaderPicker {
         self.clone_url.clear();
         self.worktree_step = WorktreePickerStep::Worktrees;
         self.worktree_name.clear();
-        self.worktree_base.clear();
-        self.worktree_field = WorktreePickerField::Name;
         self.worktree_delete = None;
     }
 
@@ -242,8 +230,6 @@ impl HeaderPicker {
         self.clone_url.clear();
         self.worktree_step = WorktreePickerStep::Worktrees;
         self.worktree_name.clear();
-        self.worktree_base.clear();
-        self.worktree_field = WorktreePickerField::Name;
         self.worktree_delete = None;
     }
 
@@ -456,28 +442,47 @@ impl HeaderPicker {
         self.message = None;
     }
 
-    pub(crate) fn begin_worktree_creation(&mut self, base: &str) {
+    pub(crate) fn begin_worktree_creation(&mut self) {
         self.worktree_step = WorktreePickerStep::Create;
         self.worktree_name.clear();
         self.worktree_name.focus();
-        self.worktree_base.set(base);
-        self.worktree_field = WorktreePickerField::Name;
         self.message = None;
     }
 
-    pub(crate) fn set_worktree_field(&mut self, field: WorktreePickerField) {
-        self.worktree_field = field;
-        match field {
-            WorktreePickerField::Name => self.worktree_name.focus(),
-            WorktreePickerField::Base => self.worktree_base.focus(),
-        }
+    pub(crate) fn open_worktree_bases(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
+        self.kind = Some(HeaderPickerKind::Worktrees);
+        self.default_selected = selected.min(items.len().saturating_sub(1));
+        self.searchable = true;
+        self.selected = self.default_selected;
+        self.scroll = 0;
+        self.viewport_rows = 0;
+        self.scroll_follows_selection = true;
+        self.searchable_items = items
+            .iter()
+            .map(HeaderPickerItem::normalized_search_text)
+            .collect();
+        self.items.clone_from(&items);
+        self.all_items = items;
+        self.message = None;
+        self.query.clear();
+        self.query.focus();
+        self.worktree_step = WorktreePickerStep::Base;
     }
 
-    pub(crate) fn worktree_input_mut(&mut self) -> &mut TextInput {
-        match self.worktree_field {
-            WorktreePickerField::Name => &mut self.worktree_name,
-            WorktreePickerField::Base => &mut self.worktree_base,
-        }
+    pub(crate) fn return_to_worktree_name(&mut self) {
+        self.items.clear();
+        self.all_items.clear();
+        self.searchable_items.clear();
+        self.searchable = false;
+        self.message = None;
+        self.query.clear();
+        self.worktree_step = WorktreePickerStep::Create;
+        self.worktree_name.focus();
+    }
+
+    pub(crate) fn selecting_worktree_base(&self) -> bool {
+        self.kind == Some(HeaderPickerKind::Worktrees)
+            && self.worktree_step == WorktreePickerStep::Base
     }
 
     pub(crate) fn filtering(&self) -> bool {
