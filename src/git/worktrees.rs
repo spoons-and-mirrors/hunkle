@@ -1,5 +1,7 @@
 use super::*;
 
+const WORKTREE_REPOSITORY_ID_BITS: u32 = 20;
+
 pub(crate) fn common_git_dir(root: &Path) -> Result<PathBuf> {
     let output = run(root, &["rev-parse", "--git-common-dir"])?;
     if !output.status.success() {
@@ -79,7 +81,8 @@ pub(super) fn create_worktree_in(
         .context("the main worktree has no directory name")?;
     let common_dir = common_git_dir(&main.path)?;
     let mut repository_directory = repository_name.to_os_string();
-    repository_directory.push(format!("-{:016x}", path_hash(&common_dir)));
+    let repository_id = path_hash(&common_dir) >> (u64::BITS - WORKTREE_REPOSITORY_ID_BITS);
+    repository_directory.push(format!("-{:05x}", repository_id));
     let path = storage_root
         .join(repository_directory)
         .join(branch.replace('/', "-"));
