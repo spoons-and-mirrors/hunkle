@@ -94,6 +94,7 @@ pub struct ChangesState {
     loading_directories: HashSet<RepoPath>,
     failed_directories: HashSet<RepoPath>,
     pending_explorer_selection: Option<(RepoPath, usize)>,
+    pending_preview_line: Option<(RepoPath, usize)>,
     worktree_tree: Option<WorktreeTree>,
     worktree_tree_fingerprint: Option<u64>,
     change_codes: HashMap<RepoPath, char>,
@@ -167,6 +168,7 @@ impl ChangesState {
             loading_directories: HashSet::new(),
             failed_directories: HashSet::new(),
             pending_explorer_selection: None,
+            pending_preview_line: None,
             worktree_tree: repo.map(|repo| WorktreeTree::new(&repo.changes)),
             worktree_tree_fingerprint: repo.map(|repo| repo.changes_fingerprint),
             change_codes: repo.map_or_else(HashMap::new, |repo| change_codes(&repo.changes)),
@@ -216,6 +218,7 @@ impl ChangesState {
         self.loading_directories.clear();
         self.failed_directories.clear();
         self.pending_explorer_selection = None;
+        self.pending_preview_line = None;
         if let Some(prepared) = prepared_file_tree {
             let tree = prepared.into_tree();
             if let Some(previous) = self.file_tree.replace(tree) {
@@ -407,6 +410,13 @@ impl ChangesState {
         path: &RepoPath,
         viewport: usize,
     ) -> bool {
+        if self
+            .pending_preview_line
+            .as_ref()
+            .is_some_and(|(pending, _)| pending != path)
+        {
+            self.pending_preview_line = None;
+        }
         expand_ancestors(&mut self.expanded_explorer_directories, path);
         self.request_explorer_ancestors(repo, path);
         self.rebuild_explorer_rows(Some(repo));
@@ -808,23 +818,11 @@ impl ChangesState {
             return false;
         }
         self.pending_explorer_selection = None;
+        self.pending_preview_line = None;
         self.explorer_state.select(Some(index));
         self.preview_pane = LeftPane::Files;
         self.refresh_diff(Some(repo));
         true
-    }
-
-    pub(super) fn select_explorer_file(
-        &mut self,
-        repo: &RepositoryData,
-        file_index: usize,
-        viewport: usize,
-    ) -> bool {
-        let Some(path) = repo.files.get(file_index) else {
-            return false;
-        };
-        let path = path.clone();
-        self.select_explorer_path(repo, &path, viewport)
     }
 
     pub(super) fn move_selection(
@@ -859,6 +857,7 @@ impl ChangesState {
             );
         }
         if self.preview_selection() != previous {
+            self.pending_preview_line = None;
             self.preview_pane = self.pane;
             self.refresh_diff(Some(repo));
         }
@@ -1587,6 +1586,26 @@ impl ChangesState {
         self.sqlite_browser = None;
         self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
         self.preview_presentation.clear();
+    }
+
+    pub(crate) fn pin_preview_line(&mut self, path: RepoPath, line: usize) {
+        self.pending_preview_line = Some((path, line.max(1)));
+        self.markdown_rendered = false;
+    }
+
+    pub(crate) fn take_preview_line(&mut self, path: &RepoPath) -> Option<usize> {
+        if self.diff == "Loading preview…" {
+            return None;
+        }
+        if self
+            .pending_preview_line
+            .as_ref()
+            .is_some_and(|(pending, _)| pending == path)
+        {
+            self.pending_preview_line.take().map(|(_, line)| line)
+        } else {
+            None
+        }
     }
 
     fn set_database(&mut self, path: RepoPath, database: SqliteDatabase) {

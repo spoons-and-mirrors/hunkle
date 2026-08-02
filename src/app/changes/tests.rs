@@ -25,6 +25,7 @@ fn repository_data() -> RepositoryData {
             "src/main.rs".into(),
             "README.md".into(),
         ],
+        ignored_files: Vec::new(),
         directories: Vec::new(),
         history: Vec::new(),
         commits: Vec::new(),

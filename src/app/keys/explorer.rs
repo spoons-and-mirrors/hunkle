@@ -15,27 +15,52 @@ impl App {
     }
 
     pub(crate) fn handle_file_search(&mut self, key: KeyEvent) {
-        if self
-            .settings
-            .shortcuts
-            .matches(ShortcutAction::FindFile, key)
-        {
-            self.mode = Mode::Normal;
-            return;
-        }
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Esc => {
+                self.file_search.close();
+                self.mode = Mode::Normal;
+            }
             KeyCode::Enter => self.activate_file_search_result(),
             KeyCode::Down | KeyCode::Tab => self.file_search.move_selection(1),
             KeyCode::Up | KeyCode::BackTab => self.file_search.move_selection(-1),
+            KeyCode::Left => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.move_scope(-1, repo);
+                }
+            }
+            KeyCode::Right => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.move_scope(1, repo);
+                }
+            }
             KeyCode::Backspace => {
                 if let Some(repo) = self.session.data() {
-                    self.file_search.backspace(&repo.files);
+                    self.file_search.backspace(repo);
                 }
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(repo) = self.session.data() {
-                    self.file_search.clear(&repo.files);
+                    self.file_search.clear(repo);
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.toggle_case(repo);
+                }
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::ALT) => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.toggle_whole_word(repo);
+                }
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::ALT) => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.toggle_regex(repo);
+                }
+            }
+            KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::ALT) => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.toggle_ignored(repo);
                 }
             }
             KeyCode::Char(character)
@@ -44,7 +69,7 @@ impl App {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 if let Some(repo) = self.session.data() {
-                    self.file_search.push(character, &repo.files);
+                    self.file_search.push(character, repo);
                 }
             }
             _ => {}
@@ -82,15 +107,22 @@ impl App {
             self.notice = Some("Workspace files are still being indexed".to_owned());
             return;
         }
-        self.file_search
-            .reindex(&repository.files, Some(repository.files_fingerprint));
-        self.file_search.open();
+        self.file_search.reindex(
+            &repository.files,
+            &repository.ignored_files,
+            Some(repository.files_fingerprint),
+        );
+        self.file_search.open(repository.inventory_truncated);
         self.mode = Mode::FileSearch;
     }
 
     pub(crate) fn activate_file_search_result(&mut self) {
-        let Some(file_index) = self.file_search.selected_file_index() else {
+        let Some(destination) = self.file_search.selected_destination() else {
             return;
+        };
+        let (path, line) = match destination {
+            SearchDestination::File(path) => (path, None),
+            SearchDestination::Text { path, line } => (path, Some(line)),
         };
         let viewport = self
             .regions
@@ -101,10 +133,11 @@ impl App {
         }
         self.show_left_pane(LeftPane::Files);
         let repo = self.session.data().expect("repository checked above");
-        if self
-            .changes
-            .select_explorer_file(repo, file_index, viewport)
-        {
+        if self.changes.select_explorer_path(repo, &path, viewport) {
+            if let Some(line) = line {
+                self.changes.pin_preview_line(path, line);
+            }
+            self.file_search.close();
             self.mode = Mode::Normal;
         }
     }

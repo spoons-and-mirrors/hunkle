@@ -8,13 +8,11 @@ pub(super) use ratatui::{
 
 pub(super) use unicode_width::UnicodeWidthStr;
 
-pub(super) use crate::repo_path::RepoPath;
-
 pub(super) use crate::app::{
     ACTION_ITEMS, ActionsState, AgentPaneDirection, CommandRecord, CommandStatus, Explorer,
-    ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch, HerdrPrompt,
-    HitTarget, PickerAction, PickerEntry, Settings, SettingsPage, ShortcutAction, Shortcuts,
-    SurroundingEntry,
+    ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch, FileSearchHitTarget,
+    FileSearchRow, HerdrPrompt, HitTarget, PickerAction, PickerEntry, SearchScope, Settings,
+    SettingsPage, ShortcutAction, Shortcuts, SurroundingEntry,
 };
 
 pub(super) use super::{
@@ -37,6 +35,7 @@ pub(super) use settings::*;
 pub(super) struct FileSearchRegions {
     pub(super) overlay: Rect,
     pub(super) list: Rect,
+    pub(super) targets: Vec<(HitTarget, Rect)>,
 }
 
 pub(super) struct SettingsRegions {

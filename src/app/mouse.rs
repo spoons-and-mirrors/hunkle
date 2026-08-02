@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, CloneField, ExplorerHitTarget, GraphColumnDrag, GraphHitTarget,
-    HeaderPickerKind, HitTarget, LeftPane, Mode, SettingsPage, Shortcuts, View,
+    ACTION_ITEMS, App, CloneField, ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag,
+    GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, Mode, SettingsPage, Shortcuts, View,
     changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
@@ -1114,19 +1114,27 @@ impl App {
                     .file_search_overlay
                     .is_some_and(|rect| !rect.contains(point))
                 {
+                    self.file_search.close();
                     self.mode = Mode::Normal;
                     return;
                 }
-                let Some(list) = self
-                    .regions
-                    .file_search_list
-                    .filter(|rect| rect.contains(point))
-                else {
+                let Some(HitTarget::FileSearch(target)) = self.regions.hit_target_at(point) else {
                     return;
                 };
-                let index = self.file_search.state.offset() + usize::from(point.y - list.y);
-                if self.file_search.select(index) {
-                    self.activate_file_search_result();
+                let Some(repo) = self.session.data() else {
+                    return;
+                };
+                match target {
+                    FileSearchHitTarget::Scope(scope) => self.file_search.set_scope(scope, repo),
+                    FileSearchHitTarget::CaseSensitive => self.file_search.toggle_case(repo),
+                    FileSearchHitTarget::WholeWord => self.file_search.toggle_whole_word(repo),
+                    FileSearchHitTarget::Regex => self.file_search.toggle_regex(repo),
+                    FileSearchHitTarget::IncludeIgnored => self.file_search.toggle_ignored(repo),
+                    FileSearchHitTarget::Result { generation, row } => {
+                        if self.file_search.select(generation, row) {
+                            self.activate_file_search_result();
+                        }
+                    }
                 }
             }
             _ => {}

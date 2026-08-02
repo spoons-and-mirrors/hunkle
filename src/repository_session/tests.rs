@@ -476,6 +476,7 @@ fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
             branches: Vec::new(),
             changes: Vec::new(),
             files: Vec::new(),
+            ignored_files: Vec::new(),
             directories: Vec::new(),
             history: Vec::new(),
             commits: Vec::new(),

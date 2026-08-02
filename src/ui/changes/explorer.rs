@@ -290,8 +290,18 @@ pub(super) fn draw_explorer_changes(
         let path = editable_path
             .as_ref()
             .map_or_else(String::new, RepoPath::display);
-        let preview =
+        let mut preview =
             prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered, 0);
+        if let Some(editable_path) = editable_path.as_ref()
+            && let Some(line) = app.changes.take_preview_line(editable_path)
+            && let Some(row) = app
+                .changes
+                .preview_presentation
+                .rendered_row_for_source_line(line)
+        {
+            app.changes.diff_scroll = row;
+            preview = prepare_preview_lines(app, preview_body, &path, false, false, false, 0);
+        }
         if !markdown_rendered {
             app.regions.preview_body = Some(preview_body);
             app.regions.preview_path = editable_path;

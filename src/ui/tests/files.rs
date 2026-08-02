@@ -667,13 +667,16 @@ fn fuzzy_searches_and_opens_repository_files() {
     let mut app = App::new(root.to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT));
+    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::FileSearch);
+    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(app.file_search.query, "/");
     assert_eq!(app.mode, Mode::FileSearch);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     app.view = View::Graph;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT));
+    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     for character in "profile card".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
@@ -689,7 +692,9 @@ fn fuzzy_searches_and_opens_repository_files() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(screen.contains("FIND FILE"));
+    assert!(screen.contains("REPO SEARCH"));
+    assert!(screen.contains("FILES"));
+    assert!(screen.contains("TEXT"));
     assert!(screen.contains("profile_card.rs"));
     assert!(screen.contains("src/components"));
     assert!(app.regions.file_search_overlay.is_some());
@@ -711,6 +716,63 @@ fn fuzzy_searches_and_opens_repository_files() {
             .iter()
             .any(|row| row.label == "profile_card.rs")
     );
+}
+
+#[test]
+fn repository_text_search_opens_the_matching_source_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let content = (1..=40)
+        .map(|line| {
+            if line == 30 {
+                "pub struct Needle;".to_owned()
+            } else {
+                format!("// source line {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(root.join("symbols.rs"), format!("{content}\n")).unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    for character in "Needle".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    for _ in 0..100 {
+        let _ = app.poll_worker();
+        if !app.file_search.searching {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!app.file_search.searching);
+    assert_eq!(app.file_search.text_match_count, 1);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("symbols.rs:30"));
+    assert!(screen.contains("Needle"));
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for_preview(&mut app);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(
+        app.selected_explorer_file_path().map(RepoPath::display),
+        Some("symbols.rs".to_owned())
+    );
+    assert!(app.changes.diff_scroll > 0);
 }
 
 #[test]

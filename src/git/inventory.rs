@@ -19,7 +19,9 @@ const MAX_IGNORED_FILES: usize = 10_000;
 const MAX_IGNORED_FILE_PATH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_IGNORED_DIRECTORIES: usize = 10_000;
 
-pub(super) fn git_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, bool)> {
+pub(super) type GitEntries = (Vec<RepoPath>, Vec<RepoPath>, Vec<RepoPath>, bool);
+
+pub(super) fn git_entries(root: &Path) -> Result<GitEntries> {
     let mut truncated = false;
     let output = inventory_output(
         root,
@@ -63,7 +65,10 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, 
         .into_iter()
         .filter_map(|(path, (present, deleted))| (present && !deleted).then_some(path))
         .collect();
-    let (ignored_files, ignored_directories, ignored_truncated) = ignored_entries(root)?;
+    let (mut ignored_files, ignored_directories, ignored_truncated) = ignored_entries(root)?;
+    ignored_files.sort_unstable();
+    ignored_files.dedup();
+    let search_ignored_files = ignored_files.clone();
     truncated |= ignored_truncated;
     let remaining = MAX_INVENTORY_ENTRIES.saturating_sub(files.len());
     if ignored_files.len() > remaining {
@@ -140,7 +145,7 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, 
     files.retain(|path| !submodules.contains(path));
     directories.extend(submodules);
     normalize_inventory(&mut files, &mut directories, &mut truncated);
-    Ok((files, directories, truncated))
+    Ok((files, directories, search_ignored_files, truncated))
 }
 
 fn ignored_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, bool)> {

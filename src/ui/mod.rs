@@ -130,18 +130,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     match app.mode {
         Mode::FileSearch => {
             dim(frame);
-            let files = app
-                .session
-                .data()
-                .map_or(&[][..], |repo| repo.files.as_slice());
-            let regions = overlays::draw_file_search(
-                frame,
-                &mut app.file_search,
-                files,
-                &app.settings.shortcuts,
-            );
+            let regions =
+                overlays::draw_file_search(frame, &mut app.file_search, &app.settings.shortcuts);
             app.regions.file_search_overlay = Some(regions.overlay);
             app.regions.file_search_list = Some(regions.list);
+            for (target, rect) in regions.targets {
+                app.regions.register_hit_target(target, rect);
+            }
         }
         Mode::Explorer => {
             dim(frame);

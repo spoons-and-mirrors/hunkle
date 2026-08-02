@@ -30,6 +30,7 @@ struct WorktreeData {
 #[derive(Debug)]
 struct InventoryData {
     files: Vec<RepoPath>,
+    ignored_files: Vec<RepoPath>,
     directories: Vec<RepoPath>,
     fingerprint: u64,
     truncated: bool,
@@ -91,6 +92,7 @@ pub struct RepositoryData {
     pub branch: String,
     pub changes: Vec<Change>,
     pub files: Vec<RepoPath>,
+    pub(crate) ignored_files: Vec<RepoPath>,
     pub directories: Vec<RepoPath>,
     pub history: Vec<Commit>,
     pub commits: Vec<Commit>,
@@ -210,6 +212,7 @@ impl RepositoryData {
         }
         if let Some(inventory) = update.inventory {
             self.files = inventory.files;
+            self.ignored_files = inventory.ignored_files;
             self.directories = inventory.directories;
             self.files_fingerprint = inventory.fingerprint;
             self.inventory_truncated = inventory.truncated;

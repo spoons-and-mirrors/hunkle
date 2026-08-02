@@ -256,11 +256,10 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
     shortcut!(
         FindFile,
         "find-file",
-        "Find repository file",
+        "Search repository",
         "Navigation",
         MAIN,
-        KeyCode::F(3),
-        KeyModifiers::SHIFT
+        KeyCode::Char('/')
     ),
     shortcut!(
         OpenSettings,

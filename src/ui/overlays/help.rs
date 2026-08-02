@@ -83,7 +83,11 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
             ShortcutAction::ToggleMarkdown,
             "Markdown preview / source",
         ),
-        shortcut_help(shortcuts, ShortcutAction::FindFile, "Find repository file"),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::FindFile,
+            "Search repository files and text",
+        ),
         shortcut_help(
             shortcuts,
             ShortcutAction::ToggleWrap,

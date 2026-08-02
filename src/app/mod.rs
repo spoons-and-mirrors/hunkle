@@ -26,7 +26,7 @@ pub(crate) use commit_summary::CommitSummaryCache;
 pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use explorer::{ExplorerHitTarget, SurroundingEntry};
 pub(crate) use file_editor::{FileEditor, TAB_WIDTH};
-pub(crate) use file_search::FileSearch;
+pub(crate) use file_search::{FileSearch, FileSearchRow, SearchDestination, SearchScope};
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use header_picker::{
     BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
@@ -207,6 +207,9 @@ impl App {
         let initial_pane_pending = session.data().is_none_or(|repo| !repo.details_ready);
         let file_search = FileSearch::new(
             session.data().map_or(&[], |repo| repo.files.as_slice()),
+            session
+                .data()
+                .map_or(&[], |repo| repo.ignored_files.as_slice()),
             session.data().map(|repo| repo.files_fingerprint),
         );
         let mut graph_state = TableState::default();
@@ -464,6 +467,7 @@ impl App {
     }
 
     pub(crate) fn shutdown(&mut self) {
+        self.file_search.shutdown();
         self.changes.shutdown();
         self.commit_summaries.shutdown();
         self.workspace_explorer.shutdown();
@@ -598,7 +602,7 @@ impl App {
             }
             Mode::FileSearch => {
                 if let Some(repo) = self.session.data() {
-                    self.file_search.paste(text, &repo.files);
+                    self.file_search.paste(text, repo);
                 }
             }
             Mode::Explorer => self.workspace_explorer.paste(text),
@@ -649,6 +653,7 @@ impl App {
             changed = true;
         }
         changed |= self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
+        changed |= self.file_search.poll(self.session.data());
         if self.herdr.is_enabled() {
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
@@ -1075,8 +1080,7 @@ impl App {
                             self.initial_pane_pending = false;
                         }
                         if self.mode == Mode::FileSearch {
-                            self.file_search
-                                .reindex(&repo.files, Some(repo.files_fingerprint));
+                            self.file_search.repository_refreshed(repo);
                         } else {
                             self.file_search.invalidate();
                         }

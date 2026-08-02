@@ -685,7 +685,7 @@ fn git_files_include_untracked_and_ignored_files_but_exclude_deleted_tracked_fil
     fs::write(root.join("config/.env.production"), "SECRET=prod\n").unwrap();
     fs::remove_file(root.join("tracked.txt")).unwrap();
 
-    let (files, directories, truncated) = inventory::git_entries(root).unwrap();
+    let (files, directories, ignored_files, truncated) = inventory::git_entries(root).unwrap();
     assert!(!truncated);
     assert_eq!(
         files,
@@ -702,6 +702,16 @@ fn git_files_include_untracked_and_ignored_files_but_exclude_deleted_tracked_fil
     assert_eq!(
         directories,
         ["config", "empty", "empty/ignored", "empty/nested", "logs"]
+    );
+    assert_eq!(
+        ignored_files,
+        [
+            ".env",
+            ".env.local",
+            ".envrc",
+            "config/.env.production",
+            "logs/debug.log"
+        ]
     );
 }
 
@@ -721,7 +731,7 @@ fn gitlinks_are_exposed_as_directories() {
     git(root, &["update-index", "--add", "--cacheinfo", &cache_info]);
     fs::create_dir(root.join("module")).unwrap();
 
-    let (files, directories, truncated) = inventory::git_entries(root).unwrap();
+    let (files, directories, _ignored_files, truncated) = inventory::git_entries(root).unwrap();
     assert!(!truncated);
     assert!(!files.iter().any(|path| path == "module"));
     assert!(directories.iter().any(|path| path == "module"));

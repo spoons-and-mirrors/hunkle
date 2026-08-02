@@ -97,6 +97,7 @@ fn bootstrap_data(
 ) -> RepositoryData {
     let changes = Vec::<Change>::new();
     let files = Vec::<RepoPath>::new();
+    let ignored_files = Vec::<RepoPath>::new();
     let directories = Vec::<RepoPath>::new();
     RepositoryData {
         root,
@@ -104,9 +105,10 @@ fn bootstrap_data(
         kind,
         branch,
         changes_fingerprint: fingerprint(&changes),
-        files_fingerprint: fingerprint(&(&files, &directories)),
+        files_fingerprint: fingerprint(&(&files, &directories, &ignored_files)),
         changes,
         files,
+        ignored_files,
         directories,
         history: Vec::new(),
         commits: Vec::new(),
@@ -156,6 +158,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         branch: history.branch,
         changes: worktree.changes,
         files: inventory.files,
+        ignored_files: inventory.ignored_files,
         directories: inventory.directories,
         history: history.commits,
         commits: graph.commits,
@@ -245,10 +248,11 @@ pub(crate) fn load_change_line_counts(root: &Path) -> Result<(u64, u64)> {
 }
 
 fn load_git_inventory(root: &Path) -> Result<InventoryData> {
-    let (files, directories, truncated) = inventory::git_entries(root)?;
+    let (files, directories, ignored_files, truncated) = inventory::git_entries(root)?;
     Ok(InventoryData {
-        fingerprint: fingerprint(&(&files, &directories)),
+        fingerprint: fingerprint(&(&files, &directories, &ignored_files)),
         files,
+        ignored_files,
         directories,
         truncated,
     })
@@ -259,6 +263,7 @@ fn load_local_inventory(root: &Path) -> Result<InventoryData> {
     Ok(InventoryData {
         fingerprint: fingerprint(&(&files, &directories)),
         files,
+        ignored_files: Vec::new(),
         directories,
         truncated,
     })
@@ -305,6 +310,7 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
         branch: "local".to_owned(),
         changes: Vec::new(),
         files: inventory.files,
+        ignored_files: inventory.ignored_files,
         directories: inventory.directories,
         history: Vec::new(),
         commits: Vec::new(),

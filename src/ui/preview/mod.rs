@@ -327,6 +327,20 @@ impl PreviewPresentation {
         }
     }
 
+    pub(crate) fn rendered_row_for_source_line(&self, line: usize) -> Option<usize> {
+        let cache = self.cache.as_ref()?;
+        if cache.is_diff || cache.markdown || line == 0 || line > cache.display_count {
+            return None;
+        }
+        let display_line = line - 1;
+        Some(
+            cache
+                .wrapped_line_starts
+                .as_ref()
+                .map_or(display_line, |starts| starts[display_line]),
+        )
+    }
+
     pub(crate) fn hide_media(&mut self) {
         if self.active_kitty_image.take().is_some() {
             self.pending_terminal_cleanup

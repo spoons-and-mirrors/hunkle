@@ -97,6 +97,7 @@ pub(crate) enum HitTarget {
     MarkdownPreviewToggle,
     Graph(GraphHitTarget),
     Explorer(ExplorerHitTarget),
+    FileSearch(FileSearchHitTarget),
     Agent(usize),
     AgentStashToggle,
     AgentStash(usize),
@@ -107,6 +108,16 @@ pub(crate) enum HitTarget {
     AgentPreviewNext(usize),
     AgentTooltip { agent: usize, message: usize },
     AgentMessage { agent: usize, message: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileSearchHitTarget {
+    Scope(SearchScope),
+    CaseSensitive,
+    WholeWord,
+    Regex,
+    IncludeIgnored,
+    Result { generation: u64, row: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
