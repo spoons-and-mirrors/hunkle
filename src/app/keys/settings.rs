@@ -28,13 +28,12 @@ impl App {
             return;
         }
         if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
-            self.settings_page = if key.code == KeyCode::BackTab {
+            let page = if key.code == KeyCode::BackTab {
                 self.settings_page.previous()
             } else {
                 self.settings_page.next()
             };
-            self.shortcut_error = None;
-            self.opencode_error = None;
+            self.set_settings_page(page);
             return;
         }
         if self.settings_page == SettingsPage::Shortcuts {
@@ -61,9 +60,6 @@ impl App {
                 self.settings_selection =
                     (self.settings_selection + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
             }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 0 => {
-                self.toggle_auto_fetch();
-            }
             KeyCode::Left | KeyCode::Char('-') if self.settings_selection == 1 => {
                 self.change_fetch_interval(-1);
             }
@@ -72,26 +68,11 @@ impl App {
             {
                 self.change_fetch_interval(1);
             }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 2 => {
-                self.toggle_format_on_save();
-            }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 3 => {
-                self.toggle_cross_workspace_agents();
-            }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 4 => {
-                self.toggle_agent_harness();
-            }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 5 => {
-                self.toggle_agent_time_display();
-            }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 6 => {
-                self.clear_agent_timing_history();
-            }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 7 => {
-                self.toggle_media_preview_protocol();
-            }
-            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 8 => {
-                self.open_editor_setting();
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(target) = SettingsHitTarget::from_general_index(self.settings_selection)
+                {
+                    self.activate_settings_target(target);
+                }
             }
             _ => {}
         }
@@ -193,6 +174,15 @@ impl App {
     pub(crate) fn open_settings(&mut self) {
         self.mode = Mode::Settings;
         self.settings_page = SettingsPage::General;
+        self.reset_settings_input();
+    }
+
+    pub(crate) fn set_settings_page(&mut self, page: SettingsPage) {
+        self.settings_page = page;
+        self.reset_settings_input();
+    }
+
+    fn reset_settings_input(&mut self) {
         self.shortcut_capture = false;
         self.shortcut_error = None;
         self.opencode_model_input = None;
@@ -201,10 +191,45 @@ impl App {
 
     pub(crate) fn close_settings(&mut self) {
         self.mode = Mode::Normal;
-        self.shortcut_capture = false;
-        self.shortcut_error = None;
-        self.opencode_model_input = None;
-        self.opencode_error = None;
+        self.reset_settings_input();
+    }
+
+    pub(crate) fn activate_settings_target(&mut self, target: SettingsHitTarget) {
+        if let Some(index) = target.general_index() {
+            self.settings_selection = index;
+        }
+        match target {
+            SettingsHitTarget::Overlay | SettingsHitTarget::FetchInterval => {}
+            SettingsHitTarget::Page(page) => self.set_settings_page(page),
+            SettingsHitTarget::Shortcut(action) => {
+                if let Some(index) = Shortcuts::definitions()
+                    .iter()
+                    .position(|definition| definition.action == action)
+                {
+                    self.shortcut_selection = index;
+                    self.shortcut_capture = true;
+                    self.shortcut_error = None;
+                }
+            }
+            SettingsHitTarget::OpenCodeModel => {
+                self.opencode_selection = 0;
+                self.begin_opencode_model_input();
+            }
+            SettingsHitTarget::OpenCodeReasoning => {
+                self.opencode_selection = 1;
+                self.change_opencode_reasoning(1);
+            }
+            SettingsHitTarget::AutoFetch => self.toggle_auto_fetch(),
+            SettingsHitTarget::FetchIntervalDown => self.change_fetch_interval(-1),
+            SettingsHitTarget::FetchIntervalUp => self.change_fetch_interval(1),
+            SettingsHitTarget::FormatOnSave => self.toggle_format_on_save(),
+            SettingsHitTarget::CrossWorkspaceAgents => self.toggle_cross_workspace_agents(),
+            SettingsHitTarget::AgentHarness => self.toggle_agent_harness(),
+            SettingsHitTarget::AgentTime => self.toggle_agent_time_display(),
+            SettingsHitTarget::ClearAgentTimings => self.clear_agent_timing_history(),
+            SettingsHitTarget::MediaPreview => self.toggle_media_preview_protocol(),
+            SettingsHitTarget::Editor => self.open_editor_setting(),
+        }
     }
 
     pub(crate) fn handle_shortcut_settings(&mut self, key: KeyEvent) {
@@ -243,7 +268,7 @@ impl App {
     }
 
     pub(crate) fn keep_shortcut_selection_visible(&mut self) {
-        let viewport = self.regions.shortcut_rows.len().max(1);
+        let viewport = self.regions.settings_shortcut_rows().max(1);
         if self.shortcut_selection < self.shortcut_scroll {
             self.shortcut_scroll = self.shortcut_selection;
         } else if self.shortcut_selection >= self.shortcut_scroll + viewport {

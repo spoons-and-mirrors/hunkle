@@ -159,7 +159,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Settings => {
             dim(frame);
-            let regions = overlays::draw_settings(
+            let targets = overlays::draw_settings(
                 frame,
                 overlays::SettingsView {
                     settings: &app.settings,
@@ -175,24 +175,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 },
                 app.fetch_running(),
             );
-            app.regions.settings_overlay = Some(regions.overlay);
-            app.regions.settings_general_tab = Some(regions.general_tab);
-            app.regions.settings_shortcuts_tab = Some(regions.shortcuts_tab);
-            app.regions.settings_opencode_tab = Some(regions.opencode_tab);
-            app.regions.auto_fetch = regions.auto_fetch;
-            app.regions.fetch_interval = regions.fetch_interval;
-            app.regions.fetch_interval_down = regions.fetch_interval_down;
-            app.regions.fetch_interval_up = regions.fetch_interval_up;
-            app.regions.format_on_save_setting = regions.format_on_save;
-            app.regions.opencode_model_setting = regions.opencode_model;
-            app.regions.opencode_reasoning_setting = regions.opencode_reasoning;
-            app.regions.cross_workspace_agents_setting = regions.cross_workspace_agents;
-            app.regions.agent_harness_setting = regions.agent_harness;
-            app.regions.agent_time_setting = regions.agent_time;
-            app.regions.clear_agent_timings_setting = regions.clear_agent_timings;
-            app.regions.media_preview_setting = regions.media_preview;
-            app.regions.editor_setting = regions.editor;
-            app.regions.shortcut_rows = regions.shortcut_rows;
+            for (target, rect) in targets {
+                app.regions.register_hit_target(target, rect);
+            }
         }
         Mode::AuthorFilter => {
             let anchor = app

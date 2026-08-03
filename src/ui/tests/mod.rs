@@ -15,7 +15,8 @@ pub(super) use crate::app::{
     AgentActivityPreview, AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator,
     ExplorerHitTarget, GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind,
     HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget, LeftPane, MagicCommitRunner, Mode,
-    Settings, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, StashedAgent, View,
+    Settings, SettingsHitTarget, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus,
+    StashedAgent, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
@@ -1498,7 +1499,10 @@ fn renders_every_primary_surface() {
     assert!(settings_screen.contains("Auto"));
     assert!(settings_screen.contains("Editor command"));
     assert!(!settings_screen.contains('┌'));
-    let auto_fetch = app.regions.auto_fetch.unwrap();
+    let auto_fetch = app
+        .regions
+        .hit_target_rect(HitTarget::Settings(SettingsHitTarget::AutoFetch))
+        .unwrap();
     let auto_switch_x = auto_fetch.right().saturating_sub(6);
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer[(auto_switch_x + 1, auto_fetch.y)].symbol(), "◼");
@@ -1506,14 +1510,23 @@ fn renders_every_primary_surface() {
         (auto_switch_x..auto_switch_x + 5)
             .all(|x| buffer[(x, auto_fetch.y)].bg == super::palette().faint)
     );
-    assert!(app.regions.fetch_interval_up.is_some());
-    let format_on_save_setting = app.regions.format_on_save_setting.unwrap();
-    let cross_workspace_setting = app.regions.cross_workspace_agents_setting.unwrap();
-    let agent_harness_setting = app.regions.agent_harness_setting.unwrap();
-    let agent_time_setting = app.regions.agent_time_setting.unwrap();
-    let clear_agent_timings_setting = app.regions.clear_agent_timings_setting.unwrap();
-    let media_preview_setting = app.regions.media_preview_setting.unwrap();
-    let editor_setting = app.regions.editor_setting.unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Settings(SettingsHitTarget::FetchIntervalUp))
+            .is_some()
+    );
+    let setting_rect = |target| {
+        app.regions
+            .hit_target_rect(HitTarget::Settings(target))
+            .unwrap()
+    };
+    let format_on_save_setting = setting_rect(SettingsHitTarget::FormatOnSave);
+    let cross_workspace_setting = setting_rect(SettingsHitTarget::CrossWorkspaceAgents);
+    let agent_harness_setting = setting_rect(SettingsHitTarget::AgentHarness);
+    let agent_time_setting = setting_rect(SettingsHitTarget::AgentTime);
+    let clear_agent_timings_setting = setting_rect(SettingsHitTarget::ClearAgentTimings);
+    let media_preview_setting = setting_rect(SettingsHitTarget::MediaPreview);
+    let editor_setting = setting_rect(SettingsHitTarget::Editor);
     assert_eq!(cross_workspace_setting.y, format_on_save_setting.y + 4);
     assert_eq!(agent_harness_setting.y, cross_workspace_setting.y + 2);
     assert_eq!(agent_time_setting.y, agent_harness_setting.y + 2);
@@ -1543,7 +1556,10 @@ fn renders_every_primary_surface() {
     assert!(opencode_screen.contains("deepseek-v4-flash-free"));
     assert!(opencode_screen.contains("Reasoning"));
     assert!(opencode_screen.contains("Max"));
-    let model_row = app.regions.opencode_model_setting.unwrap();
+    let model_row = app
+        .regions
+        .hit_target_rect(HitTarget::Settings(SettingsHitTarget::OpenCodeModel))
+        .unwrap();
     click(&mut app, model_row.x + 1, model_row.y);
     assert!(app.opencode_model_input.is_some());
     app.opencode_model_input = None;
@@ -1560,13 +1576,12 @@ fn renders_every_primary_surface() {
     assert!(shortcuts_screen.contains("Shortcuts"));
     assert!(shortcuts_screen.contains("Changes / files"));
     assert!(shortcuts_screen.contains("Show / hide Git graph"));
-    assert!(!app.regions.shortcut_rows.is_empty());
+    assert!(app.regions.settings_shortcut_rows() > 0);
     let explorer_row = app
         .regions
-        .shortcut_rows
-        .iter()
-        .find(|(action, _)| *action == ShortcutAction::OpenExplorer)
-        .map(|(_, rect)| *rect)
+        .hit_target_rect(HitTarget::Settings(SettingsHitTarget::Shortcut(
+            ShortcutAction::OpenExplorer,
+        )))
         .unwrap();
     click(&mut app, explorer_row.x + 1, explorer_row.y);
     assert!(app.shortcut_capture);

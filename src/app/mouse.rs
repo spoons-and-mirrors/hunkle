@@ -6,8 +6,8 @@ use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
     ACTION_ITEMS, App, CloneField, ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag,
-    GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, Mode, SettingsPage, Shortcuts, View,
-    changes::ChangesEffect, file_editor::FileEditor, scroll_table,
+    GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, Mode, SettingsHitTarget, SettingsPage,
+    View, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -551,7 +551,8 @@ impl App {
             self.regions.file_dialog_overlay,
             self.regions
                 .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Overlay)),
-            self.regions.settings_overlay,
+            self.regions
+                .hit_target_rect(HitTarget::Settings(SettingsHitTarget::Overlay)),
             self.regions.action_menu,
             self.regions
                 .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterOverlay)),
@@ -1219,148 +1220,11 @@ impl App {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
             return;
         }
-        if self
-            .regions
-            .settings_overlay
-            .is_some_and(|rect| !rect.contains(point))
-        {
+        let Some(HitTarget::Settings(target)) = self.regions.hit_target_at(point) else {
             self.close_settings();
-        } else if self
-            .regions
-            .settings_general_tab
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_page = SettingsPage::General;
-            self.shortcut_capture = false;
-            self.shortcut_error = None;
-            self.opencode_model_input = None;
-            self.opencode_error = None;
-        } else if self
-            .regions
-            .settings_shortcuts_tab
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_page = SettingsPage::Shortcuts;
-            self.shortcut_capture = false;
-            self.shortcut_error = None;
-            self.opencode_model_input = None;
-            self.opencode_error = None;
-        } else if self
-            .regions
-            .settings_opencode_tab
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_page = SettingsPage::OpenCode;
-            self.shortcut_capture = false;
-            self.shortcut_error = None;
-            self.opencode_model_input = None;
-            self.opencode_error = None;
-        } else if self
-            .regions
-            .opencode_model_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.opencode_selection = 0;
-            self.begin_opencode_model_input();
-        } else if self
-            .regions
-            .opencode_reasoning_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.opencode_selection = 1;
-            self.change_opencode_reasoning(1);
-        } else if let Some((action, _)) = self
-            .regions
-            .shortcut_rows
-            .iter()
-            .find(|(_, rect)| rect.contains(point))
-            .copied()
-        {
-            if let Some(index) = Shortcuts::definitions()
-                .iter()
-                .position(|definition| definition.action == action)
-            {
-                self.shortcut_selection = index;
-                self.shortcut_capture = true;
-                self.shortcut_error = None;
-            }
-        } else if self
-            .regions
-            .auto_fetch
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 0;
-            self.toggle_auto_fetch();
-        } else if self
-            .regions
-            .fetch_interval_down
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 1;
-            self.change_fetch_interval(-1);
-        } else if self
-            .regions
-            .fetch_interval_up
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 1;
-            self.change_fetch_interval(1);
-        } else if self
-            .regions
-            .fetch_interval
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 1;
-        } else if self
-            .regions
-            .format_on_save_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 2;
-            self.toggle_format_on_save();
-        } else if self
-            .regions
-            .cross_workspace_agents_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 3;
-            self.toggle_cross_workspace_agents();
-        } else if self
-            .regions
-            .agent_harness_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 4;
-            self.toggle_agent_harness();
-        } else if self
-            .regions
-            .agent_time_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 5;
-            self.toggle_agent_time_display();
-        } else if self
-            .regions
-            .clear_agent_timings_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 6;
-            self.clear_agent_timing_history();
-        } else if self
-            .regions
-            .media_preview_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 7;
-            self.toggle_media_preview_protocol();
-        } else if self
-            .regions
-            .editor_setting
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.settings_selection = 8;
-            self.open_editor_setting();
-        }
+            return;
+        };
+        self.activate_settings_target(target);
     }
 
     fn select_explorer_row(&mut self, point: Position) -> bool {

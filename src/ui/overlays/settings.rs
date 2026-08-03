@@ -17,7 +17,7 @@ pub(crate) fn draw_settings(
     frame: &mut Frame<'_>,
     view: SettingsView<'_>,
     fetch_running: bool,
-) -> SettingsRegions {
+) -> Vec<(HitTarget, Rect)> {
     let SettingsView {
         settings,
         page,
@@ -71,6 +71,21 @@ pub(crate) fn draw_settings(
     );
     let opencode_tab = Rect::new(shortcuts_tab.x.saturating_sub(13), shortcuts_tab.y, 12, 1);
     let general_tab = Rect::new(opencode_tab.x.saturating_sub(11), opencode_tab.y, 10, 1);
+    let mut targets = vec![
+        (HitTarget::Settings(SettingsHitTarget::Overlay), area),
+        (
+            HitTarget::Settings(SettingsHitTarget::Page(SettingsPage::General)),
+            general_tab,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::Page(SettingsPage::OpenCode)),
+            opencode_tab,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::Page(SettingsPage::Shortcuts)),
+            shortcuts_tab,
+        ),
+    ];
     for (label, rect, active) in [
         (" General ", general_tab, page == SettingsPage::General),
         (" OpenCode ", opencode_tab, page == SettingsPage::OpenCode),
@@ -105,7 +120,6 @@ pub(crate) fn draw_settings(
             area.height.saturating_sub(6),
         );
         let definitions = Shortcuts::definitions();
-        let mut shortcut_rows = Vec::new();
         for (row, (index, definition)) in definitions
             .iter()
             .enumerate()
@@ -148,7 +162,10 @@ pub(crate) fn draw_settings(
                 })),
                 rect,
             );
-            shortcut_rows.push((definition.action, rect));
+            targets.push((
+                HitTarget::Settings(SettingsHitTarget::Shortcut(definition.action)),
+                rect,
+            ));
         }
         let footer = shortcut_error.unwrap_or(if shortcut_capture {
             "Press a key   Esc cancel"
@@ -173,26 +190,7 @@ pub(crate) fn draw_settings(
                 1,
             ),
         );
-        return SettingsRegions {
-            overlay: area,
-            general_tab,
-            shortcuts_tab,
-            opencode_tab,
-            auto_fetch: None,
-            fetch_interval: None,
-            fetch_interval_down: None,
-            fetch_interval_up: None,
-            format_on_save: None,
-            opencode_model: None,
-            opencode_reasoning: None,
-            cross_workspace_agents: None,
-            agent_harness: None,
-            agent_time: None,
-            clear_agent_timings: None,
-            media_preview: None,
-            editor: None,
-            shortcut_rows,
-        };
+        return targets;
     }
     if page == SettingsPage::OpenCode {
         let inner = Rect::new(
@@ -293,26 +291,17 @@ pub(crate) fn draw_settings(
                 1,
             ),
         );
-        return SettingsRegions {
-            overlay: area,
-            general_tab,
-            shortcuts_tab,
-            opencode_tab,
-            auto_fetch: None,
-            fetch_interval: None,
-            fetch_interval_down: None,
-            fetch_interval_up: None,
-            format_on_save: None,
-            opencode_model: Some(model_row),
-            opencode_reasoning: Some(reasoning_row),
-            cross_workspace_agents: None,
-            agent_harness: None,
-            agent_time: None,
-            clear_agent_timings: None,
-            media_preview: None,
-            editor: None,
-            shortcut_rows: Vec::new(),
-        };
+        targets.extend([
+            (
+                HitTarget::Settings(SettingsHitTarget::OpenCodeModel),
+                model_row,
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::OpenCodeReasoning),
+                reasoning_row,
+            ),
+        ]);
+        return targets;
     }
     frame.render_widget(
         Paragraph::new("Space toggle   ←/→ interval   Enter edit   Esc close")
@@ -638,26 +627,47 @@ pub(crate) fn draw_settings(
         editor_row,
     );
 
-    SettingsRegions {
-        overlay: area,
-        general_tab,
-        shortcuts_tab,
-        opencode_tab,
-        auto_fetch: Some(auto_row),
-        fetch_interval: Some(interval_row),
-        fetch_interval_down: Some(interval_down),
-        fetch_interval_up: Some(interval_up),
-        format_on_save: Some(format_on_save_row),
-        opencode_model: None,
-        opencode_reasoning: None,
-        cross_workspace_agents: Some(cross_workspace_agents_row),
-        agent_harness: Some(agent_harness_row),
-        agent_time: Some(agent_time_row),
-        clear_agent_timings: Some(clear_agent_timings_row),
-        media_preview: Some(media_preview_row),
-        editor: Some(editor_row),
-        shortcut_rows: Vec::new(),
-    }
+    targets.extend([
+        (HitTarget::Settings(SettingsHitTarget::AutoFetch), auto_row),
+        (
+            HitTarget::Settings(SettingsHitTarget::FetchInterval),
+            interval_row,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::FetchIntervalDown),
+            interval_down,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::FetchIntervalUp),
+            interval_up,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::FormatOnSave),
+            format_on_save_row,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::CrossWorkspaceAgents),
+            cross_workspace_agents_row,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::AgentHarness),
+            agent_harness_row,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::AgentTime),
+            agent_time_row,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::ClearAgentTimings),
+            clear_agent_timings_row,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::MediaPreview),
+            media_preview_row,
+        ),
+        (HitTarget::Settings(SettingsHitTarget::Editor), editor_row),
+    ]);
+    targets
 }
 
 fn media_preview_protocol_label(protocol: crate::media::MediaPreviewProtocol) -> &'static str {

@@ -99,6 +99,7 @@ pub(crate) enum HitTarget {
     Graph(GraphHitTarget),
     Explorer(ExplorerHitTarget),
     FileSearch(FileSearchHitTarget),
+    Settings(SettingsHitTarget),
     Agent(usize),
     AgentStashToggle,
     AgentStash(usize),
@@ -109,6 +110,63 @@ pub(crate) enum HitTarget {
     AgentPreviewNext(usize),
     AgentTooltip { agent: usize, message: usize },
     AgentMessage { agent: usize, message: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsHitTarget {
+    Overlay,
+    Page(SettingsPage),
+    Shortcut(ShortcutAction),
+    OpenCodeModel,
+    OpenCodeReasoning,
+    AutoFetch,
+    FetchInterval,
+    FetchIntervalDown,
+    FetchIntervalUp,
+    FormatOnSave,
+    CrossWorkspaceAgents,
+    AgentHarness,
+    AgentTime,
+    ClearAgentTimings,
+    MediaPreview,
+    Editor,
+}
+
+impl SettingsHitTarget {
+    pub(crate) fn from_general_index(index: usize) -> Option<Self> {
+        [
+            Self::AutoFetch,
+            Self::FetchInterval,
+            Self::FormatOnSave,
+            Self::CrossWorkspaceAgents,
+            Self::AgentHarness,
+            Self::AgentTime,
+            Self::ClearAgentTimings,
+            Self::MediaPreview,
+            Self::Editor,
+        ]
+        .get(index)
+        .copied()
+    }
+
+    pub(crate) fn general_index(self) -> Option<usize> {
+        match self {
+            Self::AutoFetch => Some(0),
+            Self::FetchInterval | Self::FetchIntervalDown | Self::FetchIntervalUp => Some(1),
+            Self::FormatOnSave => Some(2),
+            Self::CrossWorkspaceAgents => Some(3),
+            Self::AgentHarness => Some(4),
+            Self::AgentTime => Some(5),
+            Self::ClearAgentTimings => Some(6),
+            Self::MediaPreview => Some(7),
+            Self::Editor => Some(8),
+            Self::Overlay
+            | Self::Page(_)
+            | Self::Shortcut(_)
+            | Self::OpenCodeModel
+            | Self::OpenCodeReasoning => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,11 +302,6 @@ pub struct Regions {
     pub commit_scroll_max: usize,
     pub graph_table: Option<Rect>,
     pub(crate) graph_columns: Vec<GraphColumnRegion>,
-    pub settings_overlay: Option<Rect>,
-    pub settings_general_tab: Option<Rect>,
-    pub settings_shortcuts_tab: Option<Rect>,
-    pub settings_opencode_tab: Option<Rect>,
-    pub shortcut_rows: Vec<(ShortcutAction, Rect)>,
     pub action_menu: Option<Rect>,
     pub action_list: Option<Rect>,
     pub command_overlay: Option<Rect>,
@@ -262,19 +315,6 @@ pub struct Regions {
     pub file_dialog_overlay: Option<Rect>,
     pub file_dialog_primary: Option<Rect>,
     pub file_dialog_secondary: Option<Rect>,
-    pub editor_setting: Option<Rect>,
-    pub media_preview_setting: Option<Rect>,
-    pub format_on_save_setting: Option<Rect>,
-    pub opencode_model_setting: Option<Rect>,
-    pub opencode_reasoning_setting: Option<Rect>,
-    pub auto_fetch: Option<Rect>,
-    pub cross_workspace_agents_setting: Option<Rect>,
-    pub agent_harness_setting: Option<Rect>,
-    pub agent_time_setting: Option<Rect>,
-    pub clear_agent_timings_setting: Option<Rect>,
-    pub fetch_interval: Option<Rect>,
-    pub fetch_interval_down: Option<Rect>,
-    pub fetch_interval_up: Option<Rect>,
     pub diff_hunks: Vec<DiffHunkRegion>,
     hit_regions: Vec<HitRegion>,
 }
@@ -290,6 +330,18 @@ impl Regions {
             .rev()
             .find(|region| region.rect.contains(point))
             .map(|region| region.target)
+    }
+
+    pub(crate) fn settings_shortcut_rows(&self) -> usize {
+        self.hit_regions
+            .iter()
+            .filter(|region| {
+                matches!(
+                    region.target,
+                    HitTarget::Settings(SettingsHitTarget::Shortcut(_))
+                )
+            })
+            .count()
     }
 
     pub(crate) fn hit_target_rect(&self, target: HitTarget) -> Option<Rect> {

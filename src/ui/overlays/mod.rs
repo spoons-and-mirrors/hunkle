@@ -12,7 +12,7 @@ pub(super) use crate::app::{
     ACTION_ITEMS, ActionsState, AgentPaneDirection, CommandRecord, CommandStatus, Explorer,
     ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch, FileSearchHitTarget,
     FileSearchRow, HerdrPrompt, HitTarget, PickerAction, PickerEntry, SearchScope, Settings,
-    SettingsPage, ShortcutAction, Shortcuts, SurroundingEntry,
+    SettingsHitTarget, SettingsPage, ShortcutAction, Shortcuts, SurroundingEntry,
 };
 
 pub(super) use super::{
@@ -36,27 +36,6 @@ pub(super) struct FileSearchRegions {
     pub(super) overlay: Rect,
     pub(super) list: Rect,
     pub(super) targets: Vec<(HitTarget, Rect)>,
-}
-
-pub(super) struct SettingsRegions {
-    pub(super) overlay: Rect,
-    pub(super) general_tab: Rect,
-    pub(super) shortcuts_tab: Rect,
-    pub(super) opencode_tab: Rect,
-    pub(super) auto_fetch: Option<Rect>,
-    pub(super) fetch_interval: Option<Rect>,
-    pub(super) fetch_interval_down: Option<Rect>,
-    pub(super) fetch_interval_up: Option<Rect>,
-    pub(super) format_on_save: Option<Rect>,
-    pub(super) opencode_model: Option<Rect>,
-    pub(super) opencode_reasoning: Option<Rect>,
-    pub(super) cross_workspace_agents: Option<Rect>,
-    pub(super) agent_harness: Option<Rect>,
-    pub(super) agent_time: Option<Rect>,
-    pub(super) clear_agent_timings: Option<Rect>,
-    pub(super) media_preview: Option<Rect>,
-    pub(super) editor: Option<Rect>,
-    pub(super) shortcut_rows: Vec<(ShortcutAction, Rect)>,
 }
 
 pub(super) struct ActionMenuRegions {
