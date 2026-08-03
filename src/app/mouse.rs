@@ -155,6 +155,7 @@ impl App {
                         Some(
                             HitTarget::HeaderPickerOverlay
                                 | HitTarget::HeaderPickerItem(_)
+                                | HitTarget::HeaderPickerDeleteBranch(_)
                                 | HitTarget::HeaderPickerDeleteWorktree(_),
                         )
                     ) =>
@@ -168,6 +169,7 @@ impl App {
                         Some(
                             HitTarget::HeaderPickerOverlay
                                 | HitTarget::HeaderPickerItem(_)
+                                | HitTarget::HeaderPickerDeleteBranch(_)
                                 | HitTarget::HeaderPickerDeleteWorktree(_),
                         )
                     ) =>
@@ -200,6 +202,15 @@ impl App {
                         }
                         Some(HitTarget::HeaderPickerDeleteWorktree(index)) => {
                             self.begin_header_worktree_deletion(index)
+                        }
+                        Some(HitTarget::HeaderPickerDeleteBranch(index)) => {
+                            self.begin_header_branch_deletion(index)
+                        }
+                        Some(HitTarget::HeaderPickerConfirmDeleteBranch) => {
+                            self.confirm_header_branch_deletion()
+                        }
+                        Some(HitTarget::HeaderPickerCancelDeleteBranch) => {
+                            self.open_header_branches()
                         }
                         Some(HitTarget::HeaderPickerConfirmDeleteWorktree) => {
                             self.confirm_header_worktree_deletion()
@@ -478,6 +489,7 @@ impl App {
                 Some(
                     HitTarget::HeaderPickerOverlay
                         | HitTarget::HeaderPickerItem(_)
+                        | HitTarget::HeaderPickerDeleteBranch(_)
                         | HitTarget::HeaderPickerDeleteWorktree(_),
                 )
             ) {

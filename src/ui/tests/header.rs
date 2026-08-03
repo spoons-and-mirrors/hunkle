@@ -271,6 +271,123 @@ fn worktree_picker_deletes_a_clean_linked_worktree_after_confirmation() {
 }
 
 #[test]
+fn branch_picker_deletes_a_merged_local_branch_after_confirmation() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Header Test"]);
+    run_git(root, &["config", "user.email", "header@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "tracked.txt"]);
+    run_git(root, &["commit", "-m", "initial"]);
+    run_git(root, &["branch", "topic"]);
+
+    let mut app = App::new(root.to_path_buf());
+    wait_for(&mut app, |app| {
+        app.repository().is_some_and(|repository| {
+            repository.details_ready
+                && repository
+                    .branches
+                    .iter()
+                    .any(|branch| branch.name == "topic")
+        })
+    });
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let branches = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderBranch)
+        .unwrap();
+    click(&mut app, branches.x, branches.y);
+    let topic_index = app
+        .header_picker
+        .items
+        .iter()
+        .position(|item| matches!(item, HeaderPickerItem::Branch(branch) if branch.name == "topic"))
+        .unwrap();
+    let current_index = app
+        .header_picker
+        .items
+        .iter()
+        .position(|item| matches!(item, HeaderPickerItem::Branch(branch) if branch.current))
+        .unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let current_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(current_index))
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        current_row.x.saturating_add(1),
+        current_row.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderPickerDeleteBranch(current_index))
+            .is_none()
+    );
+
+    let topic_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(topic_index))
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        topic_row.x.saturating_add(1),
+        topic_row.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let delete = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerDeleteBranch(topic_index))
+        .unwrap();
+    assert_eq!(delete.right(), topic_row.right());
+    assert_eq!(
+        terminal.backend().buffer()[(delete.x + 1, delete.y)].symbol(),
+        "X"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(delete.x + 1, delete.y)].bg,
+        palette().red
+    );
+
+    click(&mut app, delete.x + 1, delete.y);
+    assert!(app.header_picker.deleting_branch());
+    assert_eq!(app.header_picker.branch_delete.as_deref(), Some("topic"));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let confirmation = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerConfirmDeleteBranch)
+        .unwrap();
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("DELETE BRANCH"));
+    assert!(rendered.contains("Unmerged branches cannot be deleted"));
+
+    click(&mut app, confirmation.x, confirmation.y);
+    wait_for(&mut app, |app| {
+        app.notice.as_deref() == Some("Deleted branch topic")
+    });
+    assert!(run_git_output(root, &["branch", "--list", "topic"]).is_empty());
+    wait_for(&mut app, |app| {
+        app.repository().is_some_and(|repository| {
+            repository.details_ready
+                && !repository
+                    .branches
+                    .iter()
+                    .any(|branch| branch.name == "topic")
+        })
+    });
+}
+
+#[test]
 fn repository_picker_clones_and_opens_a_repository() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");

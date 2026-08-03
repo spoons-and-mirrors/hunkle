@@ -1024,6 +1024,15 @@ impl App {
                     }
                     Err(error) => self.notice = Some(error),
                 },
+                WorkerOutcome::BranchDelete(done) => match done.result {
+                    Ok(output) if output.success => {
+                        self.notice = Some(format!("Deleted branch {}", done.branch));
+                    }
+                    Ok(output) => {
+                        self.notice = Some(first_error(&output.stderr, "Branch deletion failed"));
+                    }
+                    Err(error) => self.notice = Some(error),
+                },
             }
         }
         while let Some(request) = self.session.next_worktree_change(interval) {

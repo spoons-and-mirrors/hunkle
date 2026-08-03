@@ -36,6 +36,7 @@ pub(crate) enum WorkerOutcome {
     Format(FormatCompletion),
     BranchCheckout(BranchCheckoutCompletion),
     BranchCreate(BranchCreateCompletion),
+    BranchDelete(BranchDeleteCompletion),
 }
 
 pub(crate) struct WorkerCompletion {
@@ -68,11 +69,17 @@ impl WorkerCompletion {
             // A failed switch can still update the index or working tree.
             WorkerOutcome::BranchCheckout(_) => Some(RefreshScope::ALL),
             WorkerOutcome::BranchCreate(_) => Some(RefreshScope::ALL),
+            WorkerOutcome::BranchDelete(done)
+                if done.result.as_ref().is_ok_and(|output| output.success) =>
+            {
+                Some(RefreshScope::HISTORY_AND_REFS)
+            }
             WorkerOutcome::Commit(_)
             | WorkerOutcome::Fetch(_)
             | WorkerOutcome::Command(_)
             | WorkerOutcome::Mutation(_)
-            | WorkerOutcome::FileOperation(_) => None,
+            | WorkerOutcome::FileOperation(_)
+            | WorkerOutcome::BranchDelete(_) => None,
         };
         Self {
             outcome,
@@ -97,6 +104,11 @@ pub(crate) struct BranchCheckoutCompletion {
 }
 
 pub(crate) struct BranchCreateCompletion {
+    pub(crate) branch: String,
+    pub(crate) result: Result<CommandOutput, String>,
+}
+
+pub(crate) struct BranchDeleteCompletion {
     pub(crate) branch: String,
     pub(crate) result: Result<CommandOutput, String>,
 }
@@ -210,6 +222,9 @@ enum WorkerKind {
         branch: String,
     },
     BranchCreate {
+        branch: String,
+    },
+    BranchDelete {
         branch: String,
     },
 }
@@ -633,6 +648,29 @@ impl RepositorySession {
         true
     }
 
+    pub(crate) fn start_branch_delete(&mut self, branch: String) -> bool {
+        if !self.operations.can_start(Operation::Mutation) {
+            return false;
+        }
+        let Some(root) = self.git_root() else {
+            return false;
+        };
+
+        self.operations.start(Operation::Mutation);
+        let sender = self.worker_tx.clone();
+        let worker_branch = branch.clone();
+        thread::spawn(move || {
+            let result =
+                git::delete_branch(&root, &worker_branch).map_err(|error| error.to_string());
+            let _ = sender.send(WorkerResult {
+                kind: WorkerKind::BranchDelete { branch },
+                root,
+                result,
+            });
+        });
+        true
+    }
+
     pub(crate) fn start_format(&mut self, path: RepoPath, command: FormatCommand) -> bool {
         if !self.operations.can_start(Operation::Format) {
             return false;
@@ -830,6 +868,20 @@ impl RepositorySession {
                         return Some(self.schedule_completion_refresh(
                             WorkerCompletion::new(WorkerOutcome::BranchCreate(
                                 BranchCreateCompletion {
+                                    branch,
+                                    result: done.result,
+                                },
+                            )),
+                            fetch_interval,
+                        ));
+                    }
+                }
+                WorkerKind::BranchDelete { branch } => {
+                    self.operations.finish(Operation::Mutation);
+                    if active {
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::BranchDelete(
+                                BranchDeleteCompletion {
                                     branch,
                                     result: done.result,
                                 },
