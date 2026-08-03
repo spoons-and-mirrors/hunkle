@@ -508,11 +508,11 @@ fn renders_every_primary_surface() {
     wait_for_preview(&mut app);
     assert_eq!(app.selected_explorer_file_path(), Some(&selected_file));
     assert_eq!(
-        app.changes.diff,
+        app.changes.preview.text().unwrap(),
         fs::read_to_string(root.join(&selected_file)).unwrap()
     );
     let selected_before_scroll = app.changes.explorer_state.selected();
-    let preview_before_scroll = app.changes.diff.clone();
+    let preview_before_scroll = app.changes.preview.text().unwrap().to_owned();
     app.handle_mouse(mouse(
         MouseEventKind::ScrollDown,
         explorer.x + 2,
@@ -523,7 +523,10 @@ fn renders_every_primary_surface() {
         app.changes.explorer_state.selected(),
         selected_before_scroll
     );
-    assert_eq!(app.changes.diff, preview_before_scroll);
+    assert_eq!(
+        app.changes.preview.text(),
+        Some(preview_before_scroll.as_str())
+    );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let visible_file = app.changes.explorer_rows()[app.changes.explorer_scroll..]
         .iter()
@@ -606,10 +609,22 @@ fn renders_every_primary_surface() {
         Some(crate::tree::WorktreeSection::Staged)
     );
     wait_for(&mut app, |app| {
-        app.changes.diff.matches("diff --git").count() == 2
+        app.changes
+            .preview
+            .text()
+            .unwrap_or_default()
+            .matches("diff --git")
+            .count()
+            == 2
     });
-    assert!(app.changes.diff.contains("tracked.txt"));
-    assert!(app.changes.diff.contains("untracked.txt"));
+    assert!(app.changes.preview.text().unwrap().contains("tracked.txt"));
+    assert!(
+        app.changes
+            .preview
+            .text()
+            .unwrap()
+            .contains("untracked.txt")
+    );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let section_screen: String = terminal
         .backend()
@@ -831,7 +846,7 @@ fn renders_every_primary_surface() {
     let tracked_y = worktree.y + (tracked_row - app.changes.worktree_scroll) as u16;
     click(&mut app, worktree.x + 2, tracked_y);
     wait_for_preview(&mut app);
-    assert!(app.changes.diff.contains("tracked.txt"));
+    assert!(app.changes.preview.text().unwrap().contains("tracked.txt"));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let diff = app.regions.diff.unwrap();
     let summary_row: String = (diff.x..diff.right())
@@ -845,8 +860,8 @@ fn renders_every_primary_surface() {
     assert!(summary_row.contains("-1"));
     assert!(files_row.contains("FILES"));
     assert!(files_row.contains("tracked.txt"));
-    let tracked_diff = app.changes.diff.clone();
-    app.changes.set_diff(
+    let tracked_diff = app.changes.preview.text().unwrap().to_owned();
+    app.changes.set_diff_for_test(
         concat!(
             "diff --git a/tracked.txt b/tracked.txt\n",
             "--- a/tracked.txt\n",
@@ -913,7 +928,7 @@ fn renders_every_primary_surface() {
     assert_eq!(app.changes.hunk_selection, Some(1));
     app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
     assert_eq!(app.changes.hunk_selection, None);
-    app.changes.set_diff(format!(
+    app.changes.set_diff_for_test(format!(
         "@@ -1,80 +1,80 @@\n{}",
         (0..80)
             .map(|line| format!(" line {line}\n"))
@@ -931,7 +946,7 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.changes.diff_scroll, 0);
     app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-    app.changes.set_diff(tracked_diff);
+    app.changes.set_diff_for_test(tracked_diff);
     app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     assert_eq!(app.changes.hunk_selection, Some(0));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -961,7 +976,7 @@ fn renders_every_primary_surface() {
     assert!(rows.iter().any(|row| row.label == "STAGED"));
     assert!(rows.iter().any(|row| row.label == "UNSTAGED"));
 
-    app.changes.set_diff(
+    app.changes.set_diff_for_test(
         (0..100)
             .map(|line| format!("+scrollbar line {line}"))
             .collect::<Vec<_>>()
@@ -1006,7 +1021,7 @@ fn renders_every_primary_surface() {
     assert_eq!(app.changes.diff_scroll, 0);
     assert!(!app.dragging_diff_scrollbar);
 
-    app.changes.set_diff(
+    app.changes.set_diff_for_test(
         (0..30_001)
             .map(|line| format!("+{line:05} {}", "x".repeat(200)))
             .collect::<Vec<_>>()
@@ -1390,7 +1405,7 @@ fn renders_every_primary_surface() {
     assert_eq!(app.graph_state.selected(), Some(1));
     assert!(app.graph_commit_open);
     wait_for_preview(&mut app);
-    assert!(app.changes.diff.contains("tracked.txt"));
+    assert!(app.changes.preview.text().unwrap().contains("tracked.txt"));
     let commit_oid = app.repository().unwrap().commits[1].oid.clone();
     wait_for(&mut app, |app| {
         app.commit_summaries.get(&commit_oid).is_some()
@@ -1522,7 +1537,7 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.graph_commit_open);
     wait_for_preview(&mut app);
-    assert!(app.changes.diff.contains("second.txt"));
+    assert!(app.changes.preview.text().unwrap().contains("second.txt"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
@@ -1781,7 +1796,9 @@ fn renders_every_primary_surface() {
 fn wait_for_preview(app: &mut App) {
     for _ in 0..100 {
         let _ = app.poll_worker();
-        if app.changes.diff != "Loading preview…" || app.changes.preview_image.is_some() {
+        if app.changes.preview.text() != Some("Loading preview…")
+            || app.changes.preview.image().is_some()
+        {
             return;
         }
         thread::sleep(Duration::from_millis(2));

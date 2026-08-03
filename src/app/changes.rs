@@ -15,7 +15,7 @@ use crate::{
     git::{Branch, Change, Commit, InventoryRefresh, RepositoryData},
     repo_path::RepoPath,
     tree::{ExplorerRow, FileTree, PreparedFileTree, WorktreeRow, WorktreeSection, WorktreeTree},
-    ui::preview::PreviewPresentation,
+    ui::preview::{DiffDocument, PreviewPresentation},
 };
 
 use directory_loader::DirectoryLoader;
@@ -69,14 +69,13 @@ pub(super) struct ExplorerEntry {
 
 pub struct ChangesState {
     pub(crate) pane: LeftPane,
-    pub(crate) preview_pane: LeftPane,
+    pub(crate) preview: PreviewState,
     pub(crate) worktree_state: ListState,
     pub(crate) explorer_state: ListState,
     pub(crate) worktree_scroll: usize,
     pub(crate) worktree_scroll_to_selection: bool,
     pub(crate) explorer_scroll: usize,
     explorer_scroll_to_selection: bool,
-    pub(crate) diff: String,
     pub(crate) diff_scroll: usize,
     pub(crate) diff_wrap: bool,
     pub(crate) markdown_rendered: bool,
@@ -99,13 +98,51 @@ pub struct ChangesState {
     worktree_tree: Option<WorktreeTree>,
     worktree_tree_fingerprint: Option<u64>,
     change_codes: HashMap<RepoPath, char>,
-    pub(crate) preview_content_generation: u64,
-    pub(crate) preview_image: Option<Arc<DynamicImage>>,
-    pub(crate) sqlite_browser: Option<SqliteBrowser>,
-    pub(crate) issue_preview: Option<IssuePreview>,
     pub(crate) preview_presentation: PreviewPresentation,
     preview_loader: PreviewLoader,
-    branch_comparison: Option<BranchComparison>,
+}
+
+pub(crate) struct PreviewState {
+    generation: u64,
+    origin: PreviewOrigin,
+    payload: PreviewPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreviewOrigin {
+    IdlePane(LeftPane),
+    ExplorerFile {
+        path: RepoPath,
+    },
+    ExplorerDirectory {
+        path: RepoPath,
+    },
+    WorktreeChange {
+        path: RepoPath,
+        staged: bool,
+        untracked: bool,
+    },
+    WorktreeSection(WorktreeSection),
+    WorktreeDirectory {
+        path: RepoPath,
+        section: WorktreeSection,
+    },
+    Commit {
+        oid: String,
+    },
+    BranchComparison(BranchComparison),
+    Issue(IssuePreview),
+}
+
+pub(crate) enum PreviewPayload {
+    Empty,
+    Loading,
+    Message(String),
+    Source(String),
+    Diff(DiffDocument),
+    Image(Arc<DynamicImage>),
+    Database(SqliteBrowser),
+    Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +163,152 @@ pub(crate) struct IssuePreview {
 struct PendingHunkSelection {
     path: RepoPath,
     index: usize,
+}
+
+impl PreviewState {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn origin(&self) -> &PreviewOrigin {
+        &self.origin
+    }
+
+    pub(crate) fn pane(&self) -> LeftPane {
+        match self.origin {
+            PreviewOrigin::ExplorerFile { .. }
+            | PreviewOrigin::ExplorerDirectory { .. }
+            | PreviewOrigin::Issue(_) => LeftPane::Files,
+            PreviewOrigin::IdlePane(pane) => pane,
+            _ => LeftPane::Worktree,
+        }
+    }
+
+    pub(crate) fn text(&self) -> Option<&str> {
+        match &self.payload {
+            PreviewPayload::Empty => Some(""),
+            PreviewPayload::Loading => Some("Loading preview…"),
+            PreviewPayload::Message(message) | PreviewPayload::Error(message) => Some(message),
+            PreviewPayload::Source(source) => Some(source),
+            PreviewPayload::Diff(document) => Some(document.as_str()),
+            PreviewPayload::Image(_) | PreviewPayload::Database(_) => None,
+        }
+    }
+
+    pub(crate) fn content(&self) -> Option<crate::ui::preview::PreviewContent<'_>> {
+        match &self.payload {
+            PreviewPayload::Diff(document) => {
+                Some(crate::ui::preview::PreviewContent::Diff(document))
+            }
+            PreviewPayload::Empty => Some(crate::ui::preview::PreviewContent::Source("")),
+            PreviewPayload::Loading => Some(crate::ui::preview::PreviewContent::Source(
+                "Loading preview…",
+            )),
+            PreviewPayload::Message(message)
+            | PreviewPayload::Source(message)
+            | PreviewPayload::Error(message) => {
+                Some(crate::ui::preview::PreviewContent::Source(message))
+            }
+            PreviewPayload::Image(_) | PreviewPayload::Database(_) => None,
+        }
+    }
+
+    pub(crate) fn document(&self) -> Option<&DiffDocument> {
+        let PreviewPayload::Diff(document) = &self.payload else {
+            return None;
+        };
+        Some(document)
+    }
+
+    pub(crate) fn image(&self) -> Option<&Arc<DynamicImage>> {
+        let PreviewPayload::Image(image) = &self.payload else {
+            return None;
+        };
+        Some(image)
+    }
+
+    pub(crate) fn database(&self) -> Option<&SqliteBrowser> {
+        let PreviewPayload::Database(browser) = &self.payload else {
+            return None;
+        };
+        Some(browser)
+    }
+
+    pub(crate) fn database_mut(&mut self) -> Option<&mut SqliteBrowser> {
+        let PreviewPayload::Database(browser) = &mut self.payload else {
+            return None;
+        };
+        Some(browser)
+    }
+
+    pub(crate) fn issue(&self) -> Option<&IssuePreview> {
+        let PreviewOrigin::Issue(issue) = &self.origin else {
+            return None;
+        };
+        Some(issue)
+    }
+
+    pub(crate) fn branch_comparison(&self) -> Option<&BranchComparison> {
+        let PreviewOrigin::BranchComparison(comparison) = &self.origin else {
+            return None;
+        };
+        Some(comparison)
+    }
+
+    pub(crate) fn show_file_headers(&self) -> bool {
+        matches!(
+            self.origin,
+            PreviewOrigin::Commit { .. }
+                | PreviewOrigin::WorktreeSection(_)
+                | PreviewOrigin::WorktreeDirectory { .. }
+                | PreviewOrigin::BranchComparison(_)
+        )
+    }
+
+    pub(crate) fn markdown_available(&self) -> bool {
+        matches!(self.origin, PreviewOrigin::Issue(_))
+            || matches!(&self.origin, PreviewOrigin::ExplorerFile { path } if crate::app::is_markdown_path(path))
+                && matches!(self.payload, PreviewPayload::Source(_))
+    }
+
+    pub(crate) fn wrappable(&self) -> bool {
+        !matches!(
+            self.payload,
+            PreviewPayload::Image(_) | PreviewPayload::Database(_)
+        )
+    }
+
+    pub(crate) fn editable(&self) -> bool {
+        matches!(
+            (&self.origin, &self.payload),
+            (
+                PreviewOrigin::ExplorerFile { .. },
+                PreviewPayload::Source(_)
+            ) | (
+                PreviewOrigin::WorktreeChange { .. },
+                PreviewPayload::Diff(_)
+            ) | (
+                PreviewOrigin::WorktreeSection(_)
+                    | PreviewOrigin::WorktreeDirectory { .. }
+                    | PreviewOrigin::BranchComparison(_),
+                PreviewPayload::Diff(_),
+            )
+        )
+    }
+
+    pub(crate) fn hunk_actions(&self) -> bool {
+        matches!(
+            (&self.origin, &self.payload),
+            (
+                PreviewOrigin::WorktreeChange {
+                    staged: false,
+                    untracked: false,
+                    ..
+                },
+                PreviewPayload::Diff(_)
+            )
+        )
+    }
 }
 
 pub(super) struct ChangesSelection {
@@ -152,14 +335,17 @@ impl ChangesState {
         let initial_pane = Self::initial_pane(repo);
         let mut state = Self {
             pane: initial_pane,
-            preview_pane: initial_pane,
+            preview: PreviewState {
+                generation: 0,
+                origin: PreviewOrigin::IdlePane(initial_pane),
+                payload: PreviewPayload::Empty,
+            },
             worktree_state: ListState::default(),
             explorer_state: ListState::default(),
             worktree_scroll: 0,
             worktree_scroll_to_selection: true,
             explorer_scroll: 0,
             explorer_scroll_to_selection: false,
-            diff: String::new(),
             diff_scroll: 0,
             diff_wrap: true,
             markdown_rendered: false,
@@ -182,13 +368,8 @@ impl ChangesState {
             worktree_tree: repo.map(|repo| WorktreeTree::new(&repo.changes)),
             worktree_tree_fingerprint: repo.map(|repo| repo.changes_fingerprint),
             change_codes: repo.map_or_else(HashMap::new, |repo| change_codes(&repo.changes)),
-            preview_content_generation: 0,
-            preview_image: None,
-            sqlite_browser: None,
-            issue_preview: None,
             preview_presentation: PreviewPresentation::default(),
             preview_loader: PreviewLoader::new(),
-            branch_comparison: None,
         };
         state.rebuild_worktree_rows(repo);
         state.rebuild_explorer_rows(repo);
@@ -210,21 +391,19 @@ impl ChangesState {
         repo: Option<&RepositoryData>,
         prepared_file_tree: Option<PreparedFileTree>,
     ) {
-        self.issue_preview = None;
         self.pane = Self::initial_pane(repo);
-        self.preview_pane = self.pane;
+        self.preview.origin = PreviewOrigin::IdlePane(self.pane);
         self.worktree_state = ListState::default();
         self.explorer_state = ListState::default();
         self.worktree_scroll = 0;
         self.worktree_scroll_to_selection = true;
         self.explorer_scroll = 0;
         self.explorer_scroll_to_selection = false;
-        self.set_diff(String::new());
+        self.set_preview_payload(PreviewPayload::Empty);
         self.diff_scroll = 0;
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
-        self.branch_comparison = None;
         self.collapsed_directories.clear();
         self.expanded_explorer_directories.clear();
         self.directory_generation = self.directory_generation.wrapping_add(1);
@@ -276,7 +455,7 @@ impl ChangesState {
         selection: ChangesSelection,
         inventory_refresh: InventoryRefresh,
     ) {
-        let branch_comparison = self.branch_comparison.clone();
+        let branch_comparison = self.branch_comparison().cloned();
         self.rebuild_worktree_rows(Some(repo));
         self.refresh_explorer_directories(repo, inventory_refresh);
 
@@ -451,15 +630,15 @@ impl ChangesState {
             }
             self.pending_explorer_selection = Some((path.clone(), viewport));
             if repo.files.iter().any(|candidate| candidate == path) {
-                self.preview_pane = LeftPane::Files;
+                self.preview.origin = PreviewOrigin::ExplorerFile { path: path.clone() };
                 self.preview_loader.invalidate();
-                self.set_diff("Loading preview…".to_owned());
+                self.set_preview_payload(PreviewPayload::Loading);
             }
             return true;
         };
         self.pending_explorer_selection = None;
         self.explorer_state.select(Some(row));
-        self.preview_pane = LeftPane::Files;
+        self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Files);
         ensure_selection_visible(&mut self.explorer_scroll, Some(row), viewport);
         self.explorer_scroll = self
             .explorer_scroll
@@ -485,12 +664,14 @@ impl ChangesState {
     }
 
     pub(super) fn set_pane(&mut self, pane: LeftPane, repo: Option<&RepositoryData>) -> bool {
-        self.clear_issue_preview();
         let changed = self.set_pane_preserving_preview(pane);
-        if !changed && self.preview_pane == pane {
+        if !changed
+            && self.preview.pane() == pane
+            && !matches!(self.preview.origin, PreviewOrigin::Issue(_))
+        {
             return false;
         }
-        self.preview_pane = pane;
+        self.preview.origin = PreviewOrigin::IdlePane(pane);
         self.refresh_diff(repo);
         true
     }
@@ -515,7 +696,7 @@ impl ChangesState {
         }
         self.clear_issue_preview();
         self.worktree_state.select(Some(index));
-        self.preview_pane = LeftPane::Worktree;
+        self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Worktree);
         self.refresh_diff(Some(repo));
         true
     }
@@ -565,12 +746,12 @@ impl ChangesState {
                     })
             }
             ChangesHitTarget::WorktreeStage { .. } => self.stage_target(target, repo),
-            ChangesHitTarget::HunkAction { generation, index } => (generation
-                == self.preview_content_generation)
-                .then_some(ChangesEffect::StageHunk(index)),
+            ChangesHitTarget::HunkAction { generation, index } => {
+                (generation == self.preview.generation()).then_some(ChangesEffect::StageHunk(index))
+            }
             ChangesHitTarget::DiffFileHeader { generation, index } => (generation
-                == self.preview_content_generation)
-                .then_some(ChangesEffect::OpenDiffFileHeader(index)),
+                == self.preview.generation())
+            .then_some(ChangesEffect::OpenDiffFileHeader(index)),
             ChangesHitTarget::SqliteObjectsPane { generation } => {
                 let browser = self.current_sqlite_target(generation)?;
                 browser.active = true;
@@ -652,39 +833,39 @@ impl ChangesState {
 
     pub(crate) fn hunk_action_target(&self, index: usize) -> ChangesHitTarget {
         ChangesHitTarget::HunkAction {
-            generation: self.preview_content_generation,
+            generation: self.preview.generation(),
             index,
         }
     }
 
     pub(crate) fn sqlite_objects_target(&self) -> Option<ChangesHitTarget> {
         Some(ChangesHitTarget::SqliteObjectsPane {
-            generation: self.sqlite_browser.as_ref()?.generation,
+            generation: self.preview.database()?.generation,
         })
     }
 
     pub(crate) fn sqlite_rows_target(&self) -> Option<ChangesHitTarget> {
         Some(ChangesHitTarget::SqliteRowsPane {
-            generation: self.sqlite_browser.as_ref()?.generation,
+            generation: self.preview.database()?.generation,
         })
     }
 
     pub(crate) fn sqlite_object_target(&self, index: usize) -> Option<ChangesHitTarget> {
         Some(ChangesHitTarget::SqliteObject {
-            generation: self.sqlite_browser.as_ref()?.generation,
+            generation: self.preview.database()?.generation,
             index,
         })
     }
 
     pub(crate) fn sqlite_row_target(&self, index: usize) -> Option<ChangesHitTarget> {
         Some(ChangesHitTarget::SqliteRow {
-            generation: self.sqlite_browser.as_ref()?.generation,
+            generation: self.preview.database()?.generation,
             index,
         })
     }
 
     pub(crate) fn sqlite_page_target(&self, next: bool) -> Option<ChangesHitTarget> {
-        let generation = self.sqlite_browser.as_ref()?.generation;
+        let generation = self.preview.database()?.generation;
         Some(if next {
             ChangesHitTarget::SqliteNextPage { generation }
         } else {
@@ -693,13 +874,13 @@ impl ChangesState {
     }
 
     pub(super) fn sqlite_active(&self) -> bool {
-        self.sqlite_browser
-            .as_ref()
+        self.preview
+            .database()
             .is_some_and(|browser| browser.active)
     }
 
     pub(super) fn activate_sqlite(&mut self) -> bool {
-        let Some(browser) = &mut self.sqlite_browser else {
+        let Some(browser) = self.preview.database_mut() else {
             return false;
         };
         browser.active = true;
@@ -707,13 +888,13 @@ impl ChangesState {
     }
 
     pub(super) fn deactivate_sqlite(&mut self) {
-        if let Some(browser) = &mut self.sqlite_browser {
+        if let Some(browser) = self.preview.database_mut() {
             browser.active = false;
         }
     }
 
     pub(super) fn toggle_sqlite_focus(&mut self) {
-        let Some(browser) = &mut self.sqlite_browser else {
+        let Some(browser) = self.preview.database_mut() else {
             return;
         };
         browser.focus = match browser.focus {
@@ -723,13 +904,13 @@ impl ChangesState {
     }
 
     pub(super) fn focus_sqlite_rows(&mut self) {
-        if let Some(browser) = &mut self.sqlite_browser {
+        if let Some(browser) = self.preview.database_mut() {
             browser.focus = SqliteFocus::Rows;
         }
     }
 
     pub(super) fn focus_sqlite_objects(&mut self) {
-        if let Some(browser) = &mut self.sqlite_browser {
+        if let Some(browser) = self.preview.database_mut() {
             browser.focus = SqliteFocus::Objects;
         }
     }
@@ -741,7 +922,7 @@ impl ChangesState {
         object_viewport: usize,
         row_viewport: usize,
     ) {
-        let Some(browser) = &mut self.sqlite_browser else {
+        let Some(browser) = self.preview.database_mut() else {
             return;
         };
         let key = match browser.focus {
@@ -763,7 +944,7 @@ impl ChangesState {
         object_viewport: usize,
         row_viewport: usize,
     ) {
-        let Some(browser) = &mut self.sqlite_browser else {
+        let Some(browser) = self.preview.database_mut() else {
             return;
         };
         let key = match browser.focus {
@@ -790,8 +971,8 @@ impl ChangesState {
 
     pub(super) fn page_sqlite(&mut self, repo: &RepositoryData, delta: isize) {
         let key = self
-            .sqlite_browser
-            .as_mut()
+            .preview
+            .database_mut()
             .and_then(|browser| browser.page_by(delta));
         if let Some(key) = key {
             self.request_sqlite_page(repo, key);
@@ -799,13 +980,13 @@ impl ChangesState {
     }
 
     pub(super) fn shift_sqlite_columns(&mut self, delta: isize) {
-        if let Some(browser) = &mut self.sqlite_browser {
+        if let Some(browser) = self.preview.database_mut() {
             browser.shift_columns(delta);
         }
     }
 
     pub(super) fn scroll_sqlite_objects(&mut self, viewport: usize, delta: isize) {
-        let Some(browser) = &mut self.sqlite_browser else {
+        let Some(browser) = self.preview.database_mut() else {
             return;
         };
         scroll_viewport(
@@ -817,7 +998,7 @@ impl ChangesState {
     }
 
     pub(super) fn scroll_sqlite_rows(&mut self, viewport: usize, delta: isize) {
-        let Some(browser) = &mut self.sqlite_browser else {
+        let Some(browser) = self.preview.database_mut() else {
             return;
         };
         let len = browser.page.as_ref().map_or(0, |page| page.rows.len());
@@ -825,17 +1006,12 @@ impl ChangesState {
     }
 
     fn current_sqlite_target(&mut self, generation: u64) -> Option<&mut SqliteBrowser> {
-        let browser = self.sqlite_browser.as_mut()?;
-        (self.preview_pane == LeftPane::Files && browser.generation == generation)
-            .then_some(browser)
+        let browser = self.preview.database_mut()?;
+        (browser.generation == generation).then_some(browser)
     }
 
     fn request_sqlite_page(&mut self, repo: &RepositoryData, key: SqlitePageKey) {
-        let Some(path) = self
-            .sqlite_browser
-            .as_ref()
-            .map(|browser| browser.path.clone())
-        else {
+        let Some(path) = self.preview.database().map(|browser| browser.path.clone()) else {
             return;
         };
         self.preview_loader
@@ -854,7 +1030,7 @@ impl ChangesState {
         self.pending_explorer_selection = None;
         self.pending_preview_line = None;
         self.explorer_state.select(Some(index));
-        self.preview_pane = LeftPane::Files;
+        self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Files);
         self.refresh_diff(Some(repo));
         true
     }
@@ -893,7 +1069,7 @@ impl ChangesState {
         if self.preview_selection() != previous {
             self.clear_issue_preview();
             self.pending_preview_line = None;
-            self.preview_pane = self.pane;
+            self.preview.origin = PreviewOrigin::IdlePane(self.pane);
             self.refresh_diff(Some(repo));
         }
     }
@@ -927,7 +1103,7 @@ impl ChangesState {
         }
         if self.preview_selection() != previous {
             self.clear_issue_preview();
-            self.preview_pane = self.pane;
+            self.preview.origin = PreviewOrigin::IdlePane(self.pane);
             self.refresh_diff(Some(repo));
         }
     }
@@ -961,7 +1137,7 @@ impl ChangesState {
         }
         if self.preview_selection() != previous {
             self.clear_issue_preview();
-            self.preview_pane = self.pane;
+            self.preview.origin = PreviewOrigin::IdlePane(self.pane);
             self.refresh_diff(Some(repo));
         }
     }
@@ -1035,24 +1211,31 @@ impl ChangesState {
 
     pub(super) fn preview_commit(&mut self, repo: &RepositoryData, commit: &Commit) {
         self.clear_issue_preview();
-        self.preview_pane = LeftPane::Worktree;
-        self.branch_comparison = None;
+        self.preview.origin = PreviewOrigin::Commit {
+            oid: commit.oid.clone(),
+        };
         self.diff_scroll = 0;
         self.markdown_alternate_scroll = None;
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
-        self.set_diff("Loading preview…".to_owned());
+        self.set_preview_payload(PreviewPayload::Loading);
         self.preview_loader
             .request_commit(&repo.root, commit.oid.clone());
     }
 
     pub(crate) fn branch_comparison(&self) -> Option<&BranchComparison> {
-        self.branch_comparison.as_ref()
+        self.preview.branch_comparison()
     }
 
     pub(super) fn clear_branch_comparison(&mut self) {
-        self.branch_comparison = None;
+        if matches!(self.preview.origin, PreviewOrigin::BranchComparison(_)) {
+            self.preview.origin = PreviewOrigin::IdlePane(self.pane);
+            self.preview_loader.invalidate();
+            self.set_preview_payload(PreviewPayload::Empty);
+            self.diff_scroll = 0;
+            self.hunk_selection = None;
+        }
     }
 
     pub(super) fn preview_branch_diff(
@@ -1070,25 +1253,33 @@ impl ChangesState {
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
         self.pending_explorer_selection = None;
-        self.branch_comparison = Some(BranchComparison {
+        self.preview.origin = PreviewOrigin::BranchComparison(BranchComparison {
             current,
             target: target.clone(),
             target_revision: target_revision.clone(),
             current_revision: current_revision.clone(),
         });
-        self.set_diff("Loading preview…".to_owned());
+        self.set_preview_payload(PreviewPayload::Loading);
         self.preview_loader
             .request_branch_diff(root, target_revision, current_revision);
     }
 
     pub(super) fn enter_hunk_selection(&mut self, repo: &RepositoryData) -> bool {
+        if !self.preview.hunk_actions() {
+            return false;
+        }
         let Some(change) = self
             .selected_change_index(repo)
             .and_then(|index| repo.changes.get(index))
         else {
             return false;
         };
-        if change.staged || hunk_count(&self.diff) == 0 {
+        if change.staged
+            || self
+                .preview
+                .document()
+                .is_none_or(|diff| diff.hunk_count() == 0)
+        {
             return false;
         }
         self.hunk_selection = Some(0);
@@ -1098,7 +1289,7 @@ impl ChangesState {
     }
 
     pub(super) fn move_hunk_selection(&mut self, delta: isize) {
-        let count = hunk_count(&self.diff);
+        let count = self.preview.document().map_or(0, DiffDocument::hunk_count);
         let Some(selected) = self.hunk_selection else {
             return;
         };
@@ -1115,7 +1306,7 @@ impl ChangesState {
 
     pub(super) fn select_hunk(&mut self, index: usize) -> bool {
         if self.hunk_selection.is_some()
-            && index < hunk_count(&self.diff)
+            && index < self.preview.document().map_or(0, DiffDocument::hunk_count)
             && self.hunk_selection != Some(index)
         {
             self.hunk_selection = Some(index);
@@ -1146,7 +1337,7 @@ impl ChangesState {
 
     pub(super) fn toggle_selected_explorer_directory(&mut self, repo: Option<&RepositoryData>) {
         self.clear_issue_preview();
-        self.preview_pane = LeftPane::Files;
+        self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Files);
         self.pending_explorer_selection = None;
         let Some(path) = self.selected_explorer_directory_path() else {
             return;
@@ -1164,7 +1355,7 @@ impl ChangesState {
 
     pub(super) fn expand_or_descend_explorer(&mut self, repo: Option<&RepositoryData>) {
         self.clear_issue_preview();
-        self.preview_pane = LeftPane::Files;
+        self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Files);
         self.pending_explorer_selection = None;
         let Some(index) = self.explorer_state.selected() else {
             return;
@@ -1196,7 +1387,7 @@ impl ChangesState {
 
     pub(super) fn collapse_or_ascend_explorer(&mut self, repo: Option<&RepositoryData>) {
         self.clear_issue_preview();
-        self.preview_pane = LeftPane::Files;
+        self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Files);
         self.pending_explorer_selection = None;
         let Some(index) = self.explorer_state.selected() else {
             return;
@@ -1226,7 +1417,7 @@ impl ChangesState {
 
     pub(super) fn toggle_selected_directory(&mut self, repo: Option<&RepositoryData>) {
         self.clear_issue_preview();
-        self.preview_pane = LeftPane::Worktree;
+        self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Worktree);
         let Some(repo) = repo else {
             return;
         };
@@ -1246,7 +1437,7 @@ impl ChangesState {
 
     pub(super) fn expand_or_descend_worktree(&mut self, repo: Option<&RepositoryData>) {
         self.clear_issue_preview();
-        self.preview_pane = LeftPane::Worktree;
+        self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Worktree);
         let Some(repo) = repo else {
             return;
         };
@@ -1279,7 +1470,7 @@ impl ChangesState {
 
     pub(super) fn collapse_or_ascend_worktree(&mut self, repo: Option<&RepositoryData>) {
         self.clear_issue_preview();
-        self.preview_pane = LeftPane::Worktree;
+        self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Worktree);
         let Some(repo) = repo else {
             return;
         };
@@ -1313,10 +1504,9 @@ impl ChangesState {
     }
 
     pub(super) fn refresh_diff(&mut self, repo: Option<&RepositoryData>) {
-        if self.issue_preview.is_some() {
+        if matches!(self.preview.origin, PreviewOrigin::Issue(_)) {
             return;
         }
-        self.branch_comparison = None;
         self.markdown_alternate_scroll = None;
         let preserve_hunk = self.pending_hunk_selection.as_ref().is_some_and(|pending| {
             repo.and_then(|repo| {
@@ -1333,46 +1523,55 @@ impl ChangesState {
         }
         self.preview_loader.invalidate();
         let Some(repo) = repo else {
-            self.set_diff(String::new());
+            self.preview.origin = PreviewOrigin::IdlePane(self.pane);
+            self.set_preview_payload(PreviewPayload::Empty);
             return;
         };
-        if self.preview_pane == LeftPane::Files {
+        if self.preview.pane() == LeftPane::Files {
             let Some(row) = self
                 .explorer_state
                 .selected()
                 .and_then(|index| self.explorer_rows_cache.get(index))
             else {
-                self.set_diff("Select a file to preview".to_owned());
+                self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Files);
+                self.set_preview_payload(PreviewPayload::Message(
+                    "Select a file to preview".to_owned(),
+                ));
                 return;
             };
             let file_path = row.file_path.clone();
             let directory = row.directory_path.clone();
             let descendant_count = row.descendant_count;
             if let Some(path) = file_path {
-                self.set_diff("Loading preview…".to_owned());
+                self.preview.origin = PreviewOrigin::ExplorerFile { path: path.clone() };
+                self.set_preview_payload(PreviewPayload::Loading);
                 self.preview_loader.request_file(&repo.root, path);
             } else if let Some(path) = directory {
+                self.preview.origin = PreviewOrigin::ExplorerDirectory { path: path.clone() };
                 let loaded = self
                     .file_tree
                     .as_ref()
                     .is_some_and(|tree| tree.has_directory(&path));
                 if loaded {
-                    self.set_diff(format!("{descendant_count} items in {path}/"));
+                    self.set_preview_payload(PreviewPayload::Message(format!(
+                        "{descendant_count} items in {path}/"
+                    )));
                 } else {
-                    self.set_diff(format!("Folder {path}/"));
+                    self.set_preview_payload(PreviewPayload::Message(format!("Folder {path}/")));
                 }
             }
             return;
         }
         if !repo.details_ready {
-            self.set_diff(
+            self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Worktree);
+            self.set_preview_payload(PreviewPayload::Message(
                 if repo.is_local() {
                     "Indexing workspace files…"
                 } else {
                     "Loading repository details…"
                 }
                 .to_owned(),
-            );
+            ));
             return;
         }
         let rows = self.worktree_rows(repo);
@@ -1381,22 +1580,41 @@ impl ChangesState {
             .selected()
             .and_then(|index| rows.get(index))
         else {
-            self.set_diff("Working tree clean".to_owned());
+            self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Worktree);
+            self.set_preview_payload(PreviewPayload::Message("Working tree clean".to_owned()));
             return;
         };
         if let Some(index) = row.change_index {
-            self.set_diff("Loading preview…".to_owned());
-            self.preview_loader
-                .request_diff(&repo.root, repo.changes[index].clone());
+            let change = &repo.changes[index];
+            self.preview.origin = PreviewOrigin::WorktreeChange {
+                path: change.path.clone(),
+                staged: change.staged,
+                untracked: change.code == '?',
+            };
+            self.set_preview_payload(PreviewPayload::Loading);
+            self.preview_loader.request_diff(&repo.root, change.clone());
         } else if let Some(section) = row.section.filter(|_| row.section_stats.is_some()) {
-            self.set_diff("Loading preview…".to_owned());
+            self.preview.origin = PreviewOrigin::WorktreeSection(section);
+            self.set_preview_payload(PreviewPayload::Loading);
             self.preview_loader.request_section_diff(
                 &repo.root,
                 repo.changes.clone(),
                 section == WorktreeSection::Staged,
             );
         } else if let Some(path) = &row.directory_path {
-            self.set_diff(format!("{} changed files in {path}/", row.descendant_count));
+            let path = path.clone();
+            let descendant_count = row.descendant_count;
+            let section = self
+                .selected_worktree_section()
+                .unwrap_or(WorktreeSection::Unstaged);
+            self.preview.origin = PreviewOrigin::WorktreeDirectory {
+                path: path.clone(),
+                section,
+            };
+            self.set_preview_payload(PreviewPayload::Message(format!(
+                "{} changed files in {path}/",
+                descendant_count
+            )));
         }
     }
 
@@ -1405,10 +1623,28 @@ impl ChangesState {
             return false;
         };
         match content {
-            LoadedPreview::Text(content) | LoadedPreview::Error(content) => self.set_diff(content),
+            LoadedPreview::Text(content) => {
+                let payload = match self.preview.origin {
+                    PreviewOrigin::ExplorerFile { .. } => PreviewPayload::Source(content),
+                    PreviewOrigin::WorktreeChange {
+                        untracked: true, ..
+                    } => PreviewPayload::Diff(DiffDocument::parse_untracked(content)),
+                    PreviewOrigin::WorktreeChange { .. }
+                    | PreviewOrigin::WorktreeSection(_)
+                    | PreviewOrigin::Commit { .. }
+                    | PreviewOrigin::BranchComparison(_) => {
+                        PreviewPayload::Diff(DiffDocument::parse(content))
+                    }
+                    _ => PreviewPayload::Message(content),
+                };
+                self.set_preview_payload(payload);
+            }
+            LoadedPreview::Error(content) => {
+                self.set_preview_payload(PreviewPayload::Error(content))
+            }
             LoadedPreview::Database { path, database } => self.set_database(path, database),
             LoadedPreview::DatabasePage { path, key, result } => {
-                if let Some(browser) = &mut self.sqlite_browser
+                if let Some(browser) = self.preview.database_mut()
                     && browser.path == path
                 {
                     browser.apply_page(&key, result);
@@ -1417,7 +1653,7 @@ impl ChangesState {
             LoadedPreview::Image(image) => self.set_image(image),
         }
         if let Some(pending) = self.pending_hunk_selection.take() {
-            let count = hunk_count(&self.diff);
+            let count = self.preview.document().map_or(0, DiffDocument::hunk_count);
             self.hunk_selection = (count > 0).then(|| pending.index.min(count - 1));
             self.hunk_pin_pending = self.hunk_selection.is_some();
         }
@@ -1455,11 +1691,11 @@ impl ChangesState {
                     if blocks_pending {
                         self.pending_explorer_selection = None;
                     }
-                    if self.branch_comparison.is_none()
+                    if self.branch_comparison().is_none()
                         && (completion.directory.is_empty() || blocks_pending || selected_directory)
                     {
                         self.preview_loader.invalidate();
-                        self.set_diff(error);
+                        self.set_preview_payload(PreviewPayload::Error(error));
                         changed = true;
                     }
                     continue;
@@ -1499,7 +1735,7 @@ impl ChangesState {
                 self.explorer_scroll = 0;
             }
         }
-        if directories_changed && self.branch_comparison.is_some() {
+        if directories_changed && self.branch_comparison().is_some() {
             return changed;
         }
         if directories_changed
@@ -1630,18 +1866,29 @@ impl ChangesState {
         self.change_codes.get(path).copied()
     }
 
-    pub(crate) fn set_diff(&mut self, content: String) {
-        self.diff = content;
-        self.preview_image = None;
-        self.sqlite_browser = None;
-        self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
+    pub(crate) fn set_preview_payload(&mut self, payload: PreviewPayload) {
+        self.preview.payload = payload;
+        self.preview.generation = self.preview.generation.wrapping_add(1);
         self.preview_presentation.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_source_for_test(&mut self, content: String) {
+        self.set_preview_payload(PreviewPayload::Source(content));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_diff_for_test(&mut self, content: String) {
+        self.set_preview_payload(PreviewPayload::Diff(DiffDocument::parse(content)));
     }
 
     pub(crate) fn show_issue(&mut self, number: u64, kind: &str, title: &str, body: &str) {
         self.preview_loader.invalidate();
-        self.preview_pane = LeftPane::Files;
-        self.branch_comparison = None;
+        self.preview.origin = PreviewOrigin::Issue(IssuePreview {
+            number,
+            kind: kind.to_owned(),
+            title: title.to_owned(),
+        });
         self.diff_scroll = 0;
         self.markdown_rendered = true;
         self.markdown_alternate_scroll = None;
@@ -1649,20 +1896,17 @@ impl ChangesState {
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
         self.pending_preview_line = None;
-        self.issue_preview = Some(IssuePreview {
-            number,
-            kind: kind.to_owned(),
-            title: title.to_owned(),
-        });
-        self.set_diff(if body.trim().is_empty() {
+        self.set_preview_payload(PreviewPayload::Source(if body.trim().is_empty() {
             "_No description provided._".to_owned()
         } else {
             body.to_owned()
-        });
+        }));
     }
 
     fn clear_issue_preview(&mut self) {
-        self.issue_preview = None;
+        if matches!(self.preview.origin, PreviewOrigin::Issue(_)) {
+            self.preview.origin = PreviewOrigin::IdlePane(self.pane);
+        }
     }
 
     pub(crate) fn pin_preview_line(&mut self, path: RepoPath, line: usize) {
@@ -1671,7 +1915,7 @@ impl ChangesState {
     }
 
     pub(crate) fn take_preview_line(&mut self, path: &RepoPath) -> Option<usize> {
-        if self.diff == "Loading preview…" {
+        if matches!(self.preview.payload, PreviewPayload::Loading) {
             return None;
         }
         if self
@@ -1686,27 +1930,18 @@ impl ChangesState {
     }
 
     fn set_database(&mut self, path: RepoPath, database: SqliteDatabase) {
-        self.diff.clear();
-        self.preview_image = None;
         self.diff_scroll = 0;
         self.markdown_rendered = false;
-        self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
-        self.preview_presentation.clear();
-        self.sqlite_browser = Some(SqliteBrowser::new(
-            path,
-            database,
-            self.preview_content_generation,
-        ));
+        let generation = self.preview.generation.wrapping_add(1);
+        self.set_preview_payload(PreviewPayload::Database(SqliteBrowser::new(
+            path, database, generation,
+        )));
     }
 
     fn set_image(&mut self, image: Arc<DynamicImage>) {
-        self.diff.clear();
-        self.preview_image = Some(image);
-        self.sqlite_browser = None;
         self.diff_scroll = 0;
         self.markdown_rendered = false;
-        self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
-        self.preview_presentation.clear();
+        self.set_preview_payload(PreviewPayload::Image(image));
     }
 
     fn select_initial_rows(&mut self, repo: Option<&RepositoryData>) {
@@ -1775,17 +2010,14 @@ impl ChangesState {
     }
 
     fn preview_selection(&self) -> (LeftPane, Option<usize>) {
-        let selected = if self.preview_pane == LeftPane::Files {
+        let pane = self.preview.pane();
+        let selected = if pane == LeftPane::Files {
             self.explorer_state.selected()
         } else {
             self.worktree_state.selected()
         };
-        (self.preview_pane, selected)
+        (pane, selected)
     }
-}
-
-fn hunk_count(diff: &str) -> usize {
-    diff.lines().filter(|line| line.starts_with("@@")).count()
 }
 
 fn change_codes(changes: &[Change]) -> HashMap<RepoPath, char> {

@@ -2,14 +2,14 @@ use super::*;
 
 pub(super) fn draw_scrolled_summary_card(
     frame: &mut Frame<'_>,
-    viewport: Rect,
-    scroll: usize,
+    layout: &PreviewLayout,
     height: u16,
     summary: Option<&DiffSummary>,
     summary_unavailable: bool,
     summary_height: u16,
 ) {
-    let scroll = scroll.min(usize::from(u16::MAX)) as u16;
+    let viewport = layout.viewport;
+    let scroll = layout.outer_scroll.min(usize::from(u16::MAX)) as u16;
     if scroll >= height {
         return;
     }
@@ -51,11 +51,11 @@ pub(super) struct CommitMetadata<'a> {
 
 pub(super) fn draw_scrolled_metadata_card(
     frame: &mut Frame<'_>,
-    viewport: Rect,
-    scroll: usize,
+    layout: &PreviewLayout,
     metadata: CommitMetadata<'_>,
 ) {
-    let scroll = scroll.min(usize::from(u16::MAX)) as u16;
+    let viewport = layout.viewport;
+    let scroll = layout.outer_scroll.min(usize::from(u16::MAX)) as u16;
     if scroll >= metadata.height {
         return;
     }

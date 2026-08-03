@@ -254,16 +254,16 @@ fn measures_wrapped_markdown_without_unbounded_allocation() {
 
     let preview = presentation.prepare(
         PreviewInput {
-            content: "# Heading\n\nA paragraph that wraps across multiple rows.",
+            content: PreviewContent::Source(
+                "# Heading\n\nA paragraph that wraps across multiple rows.",
+            ),
             generation: 1,
             path: "README.md",
-            is_diff: false,
             markdown: true,
             show_initial_diff_header: false,
             width: 16,
             viewport_height: 8,
             wrapped: true,
-            hunk_selected: false,
         },
         &mut scroll,
     );
@@ -279,16 +279,14 @@ fn maps_wrapped_preview_cells_to_exact_source_positions() {
     let mut scroll = 0;
     presentation.prepare(
         PreviewInput {
-            content: "alpha beta gamma",
+            content: PreviewContent::Source("alpha beta gamma"),
             generation: 1,
             path: "notes.txt",
-            is_diff: false,
             markdown: false,
             show_initial_diff_header: false,
             width: 10,
             viewport_height: 4,
             wrapped: true,
-            hunk_selected: false,
         },
         &mut scroll,
     );
@@ -299,23 +297,22 @@ fn maps_wrapped_preview_cells_to_exact_source_positions() {
     );
 
     let diff = "@@ -1 +1 @@\n+alpha beta gamma";
+    let document = DiffDocument::parse(diff.to_owned());
     presentation.prepare(
         PreviewInput {
-            content: diff,
+            content: PreviewContent::Diff(&document),
             generation: 2,
             path: "notes.txt",
-            is_diff: true,
             markdown: false,
             show_initial_diff_header: false,
             width: 11,
             viewport_height: 4,
             wrapped: true,
-            hunk_selected: false,
         },
         &mut scroll,
     );
     assert_eq!(
-        presentation.diff_position_at_rendered_position(diff, 2, 4, 1),
+        presentation.diff_position_at_rendered_position(&document, 2, 4, 1),
         Some((1, 14))
     );
 }
@@ -328,16 +325,14 @@ fn oversized_markdown_uses_the_windowed_source_cache() {
 
     presentation.prepare(
         PreviewInput {
-            content: &content,
+            content: PreviewContent::Source(&content),
             generation: 1,
             path: "README.md",
-            is_diff: false,
             markdown: true,
             show_initial_diff_header: false,
             width: 80,
             viewport_height: 8,
             wrapped: false,
-            hunk_selected: false,
         },
         &mut scroll,
     );
@@ -418,16 +413,14 @@ fn markdown_table_cache_tracks_wrap_mode() {
     let mut prepare = |presentation: &mut PreviewPresentation, wrapped| {
         presentation.prepare(
             PreviewInput {
-                content,
+                content: PreviewContent::Source(content),
                 generation: 1,
                 path: "README.md",
-                is_diff: false,
                 markdown: true,
                 show_initial_diff_header: false,
                 width: 30,
                 viewport_height: 30,
                 wrapped,
-                hunk_selected: false,
             },
             &mut scroll,
         )

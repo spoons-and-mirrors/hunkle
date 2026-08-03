@@ -443,7 +443,7 @@ impl App {
                 .explorer_list
                 .map_or(0, |rect| usize::from(rect.height));
             let already_selected = self.single_panel_layout()
-                && self.changes.preview_pane == LeftPane::Files
+                && self.changes.preview.pane() == LeftPane::Files
                 && !drag.source.is_directory
                 && self.changes.selected_explorer_file_path(repo) == Some(&drag.source.path);
             if already_selected

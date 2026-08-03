@@ -8,8 +8,8 @@ use super::{
     ACTION_ITEMS, AgentKey, AgentPreviewRequestSelection, AgentPreviewTranscriptScroll, App,
     CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag,
     GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, MobileDragAxis, MobileScrollDrag, Mode,
-    SettingsHitTarget, SettingsPage, View, changes::ChangesEffect, file_editor::FileEditor,
-    scroll_table,
+    PreviewOrigin, SettingsHitTarget, SettingsPage, View, changes::ChangesEffect,
+    file_editor::FileEditor, scroll_table,
 };
 
 const AGENT_PREVIEW_BUTTON_FLASH: Duration = Duration::from_millis(150);
@@ -1029,7 +1029,7 @@ impl App {
         let Some(body) = self.regions.preview_body else {
             return;
         };
-        if self.regions.preview_generation != self.changes.preview_content_generation {
+        if self.regions.preview_generation != self.changes.preview.generation() {
             self.notice = Some("Preview changed; click again to edit".to_owned());
             return;
         }
@@ -1040,8 +1040,14 @@ impl App {
         let width = usize::from(body.width);
         let rendered_column = usize::from(point.x.saturating_sub(body.x));
 
-        if self.changes.pane == LeftPane::Files {
+        if matches!(
+            self.changes.preview.origin(),
+            PreviewOrigin::ExplorerFile { .. }
+        ) {
             let Some(path) = self.regions.preview_path.clone() else {
+                return;
+            };
+            let Some(content) = self.changes.preview.text() else {
                 return;
             };
             let gutter = usize::from(width >= 72) * 7;
@@ -1049,7 +1055,7 @@ impl App {
                 .changes
                 .preview_presentation
                 .source_position_at_rendered_position(
-                    &self.changes.diff,
+                    content,
                     rendered_row,
                     rendered_column,
                     gutter,
@@ -1065,15 +1071,13 @@ impl App {
             let Some(path) = self.regions.preview_path.clone() else {
                 return;
             };
+            let Some(content) = self.changes.preview.text() else {
+                return;
+            };
             let Some((display_line, column)) = self
                 .changes
                 .preview_presentation
-                .source_position_at_rendered_position(
-                    &self.changes.diff,
-                    rendered_row,
-                    rendered_column,
-                    0,
-                )
+                .source_position_at_rendered_position(content, rendered_row, rendered_column, 0)
             else {
                 return;
             };
@@ -1081,12 +1085,11 @@ impl App {
                 self.notice = Some("Click a source line to edit this file".to_owned());
                 return;
             };
-            let displayed = self
-                .changes
-                .diff
-                .lines()
-                .nth(display_line.saturating_sub(1));
-            let next = self.changes.diff.lines().nth(display_line);
+            let Some(content) = self.changes.preview.text() else {
+                return;
+            };
+            let displayed = content.lines().nth(display_line.saturating_sub(1));
+            let next = content.lines().nth(display_line);
             if displayed.is_some_and(|line| line.starts_with("[Preview truncated"))
                 || displayed.is_some_and(str::is_empty)
                     && next.is_some_and(|line| line.starts_with("[Preview truncated"))
@@ -1098,22 +1101,20 @@ impl App {
             return;
         }
         let gutter = if width >= 72 { 7 } else { 1 };
+        let Some(document) = self.changes.preview.document() else {
+            return;
+        };
         let position = self.regions.preview_path.clone().and_then(|path| {
             self.changes
                 .preview_presentation
-                .diff_position_at_rendered_position(
-                    &self.changes.diff,
-                    rendered_row,
-                    rendered_column,
-                    gutter,
-                )
+                .diff_position_at_rendered_position(document, rendered_row, rendered_column, gutter)
                 .map(|(line, column)| (path, line, column))
         });
         let position = position.or_else(|| {
             self.changes
                 .preview_presentation
                 .diff_file_position_at_rendered_position(
-                    &self.changes.diff,
+                    document,
                     rendered_row,
                     rendered_column,
                     gutter,

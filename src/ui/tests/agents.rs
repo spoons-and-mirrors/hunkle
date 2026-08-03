@@ -243,12 +243,15 @@ fn renders_and_targets_agents_in_the_normal_view() {
             })
             .is_none()
     );
-    let viewer_before_sidebar_cycle = app.changes.diff.clone();
+    let viewer_before_sidebar_cycle = app.changes.preview.text().unwrap().to_owned();
     let view_before_sidebar_cycle = app.view;
     open_agents_pane(&mut app);
     assert!(app.agents_pane_pinned);
     assert!(app.agents_pane_visible());
-    assert_eq!(app.changes.diff, viewer_before_sidebar_cycle);
+    assert_eq!(
+        app.changes.preview.text(),
+        Some(viewer_before_sidebar_cycle.as_str())
+    );
     assert_eq!(app.view, view_before_sidebar_cycle);
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

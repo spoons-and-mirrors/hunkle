@@ -160,16 +160,16 @@ fn boundary_navigation_keeps_the_current_preview() {
     state.explorer_state.select(Some(0));
 
     state.select_first(Some(&repo), 10, 10);
-    let first_generation = state.preview_content_generation;
+    let first_generation = state.preview.generation();
     state.select_first(Some(&repo), 10, 10);
     state.move_selection(Some(&repo), -1, 10, 10);
-    assert_eq!(state.preview_content_generation, first_generation);
+    assert_eq!(state.preview.generation(), first_generation);
 
     state.select_last(Some(&repo), 10, 10);
-    let last_generation = state.preview_content_generation;
+    let last_generation = state.preview.generation();
     state.select_last(Some(&repo), 10, 10);
     state.move_selection(Some(&repo), 1, 10, 10);
-    assert_eq!(state.preview_content_generation, last_generation);
+    assert_eq!(state.preview.generation(), last_generation);
 }
 
 #[test]
@@ -288,9 +288,9 @@ fn owns_semantic_worktree_target_transitions() {
     );
     assert_eq!(state.activate_target(stale_file_target, &repo), None);
 
-    state.set_diff("@@ -1 +1 @@\n-old\n+new\n".to_owned());
+    state.set_diff_for_test("@@ -1 +1 @@\n-old\n+new\n".to_owned());
     let stale_hunk_target = state.hunk_action_target(0);
-    state.set_diff("Loading preview…".to_owned());
+    state.set_preview_payload(PreviewPayload::Loading);
     assert_eq!(state.activate_target(stale_hunk_target, &repo), None);
 
     assert_eq!(
@@ -333,16 +333,13 @@ fn issue_preview_survives_refresh_and_clears_on_navigation() {
     let mut state = ChangesState::new(Some(&repo));
 
     state.show_issue(17, "ISSUE", "Render issue bodies", "# Body");
-    assert_eq!(state.diff, "# Body");
+    assert_eq!(state.preview.text(), Some("# Body"));
     assert!(state.markdown_rendered);
-    assert_eq!(state.preview_pane, LeftPane::Files);
-    assert_eq!(
-        state.issue_preview.as_ref().map(|issue| issue.number),
-        Some(17)
-    );
+    assert_eq!(state.preview.pane(), LeftPane::Files);
+    assert_eq!(state.preview.issue().map(|issue| issue.number), Some(17));
 
     state.refresh_diff(Some(&repo));
-    assert_eq!(state.diff, "# Body");
+    assert_eq!(state.preview.text(), Some("# Body"));
 
     let row = state
         .worktree_rows(&repo)
@@ -350,6 +347,40 @@ fn issue_preview_survives_refresh_and_clears_on_navigation() {
         .position(|row| row.change_index.is_some())
         .unwrap();
     assert!(state.select_worktree_row(&repo, row));
-    assert!(state.issue_preview.is_none());
-    assert_eq!(state.preview_pane, LeftPane::Worktree);
+    assert!(state.preview.issue().is_none());
+    assert_eq!(state.preview.pane(), LeftPane::Worktree);
+}
+
+#[test]
+fn setting_the_current_sidebar_pane_replaces_an_issue_preview() {
+    let repo = repository_data();
+    let mut state = ChangesState::new(Some(&repo));
+    state.pane = LeftPane::Worktree;
+    state.show_issue(17, "ISSUE", "Render issue bodies", "# Body");
+
+    assert!(state.set_pane(LeftPane::Worktree, Some(&repo)));
+    assert!(state.preview.issue().is_none());
+    assert_eq!(state.preview.pane(), LeftPane::Worktree);
+}
+
+#[test]
+fn hunk_selection_requires_a_stageable_preview_origin() {
+    let repo = repository_data();
+    let mut state = ChangesState::new(Some(&repo));
+    state.set_diff_for_test("@@ -1 +1 @@\n-old\n+new\n".to_owned());
+    state.preview.origin = PreviewOrigin::BranchComparison(BranchComparison {
+        current: "main".to_owned(),
+        target: "topic".to_owned(),
+        target_revision: "topic".to_owned(),
+        current_revision: "main".to_owned(),
+    });
+
+    assert!(!state.enter_hunk_selection(&repo));
+
+    state.preview.origin = PreviewOrigin::WorktreeChange {
+        path: RepoPath::from("new.txt"),
+        staged: false,
+        untracked: true,
+    };
+    assert!(!state.preview.hunk_actions());
 }

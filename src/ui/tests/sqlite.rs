@@ -14,7 +14,7 @@ fn renders_sqlite_databases_from_the_files_view() {
     drop(connection);
 
     let mut app = App::new(directory.path().to_path_buf());
-    wait_for(&mut app, |app| app.changes.sqlite_browser.is_some());
+    wait_for(&mut app, |app| app.changes.preview.database().is_some());
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen = terminal
@@ -51,21 +51,21 @@ fn explores_and_pages_sqlite_databases_with_keys_and_mouse() {
     drop(connection);
 
     let mut app = App::new(directory.path().to_path_buf());
-    wait_for(&mut app, |app| app.changes.sqlite_browser.is_some());
+    wait_for(&mut app, |app| app.changes.preview.database().is_some());
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(
-        app.changes.sqlite_browser.as_ref().unwrap().focus,
+        app.changes.preview.database().unwrap().focus,
         SqliteFocus::Rows
     );
     app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
     wait_for(&mut app, |app| {
         app.changes
-            .sqlite_browser
-            .as_ref()
+            .preview
+            .database()
             .and_then(|browser| browser.page.as_ref())
             .is_some_and(|page| page.key.offset == 100 && page.rows.len() == 5)
     });
@@ -74,11 +74,11 @@ fn explores_and_pages_sqlite_databases_with_keys_and_mouse() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let objects = app.regions.sqlite_objects.unwrap();
     click(&mut app, objects.x + 2, objects.y + 1);
-    assert!(app.changes.sqlite_browser.as_ref().unwrap().active);
+    assert!(app.changes.preview.database().unwrap().active);
     assert_eq!(
         app.changes
-            .sqlite_browser
-            .as_ref()
+            .preview
+            .database()
             .unwrap()
             .selected_object()
             .unwrap()
@@ -87,13 +87,13 @@ fn explores_and_pages_sqlite_databases_with_keys_and_mouse() {
     );
     wait_for(&mut app, |app| {
         app.changes
-            .sqlite_browser
-            .as_ref()
+            .preview
+            .database()
             .and_then(|browser| browser.page.as_ref())
             .is_some_and(|page| page.key.object == "people" && page.rows[0][1] == "Ada")
     });
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(!app.changes.sqlite_browser.as_ref().unwrap().active);
+    assert!(!app.changes.preview.database().unwrap().active);
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn narrow_sqlite_detail_returns_to_the_files_panel() {
     drop(connection);
 
     let mut app = App::new(directory.path().to_path_buf());
-    wait_for(&mut app, |app| app.changes.sqlite_browser.is_some());
+    wait_for(&mut app, |app| app.changes.preview.database().is_some());
     let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.explorer_list.is_some());
@@ -117,13 +117,13 @@ fn narrow_sqlite_detail_returns_to_the_files_panel() {
     click(&mut app, list.x + 2, list.y);
     click(&mut app, list.x + 2, list.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.changes.sqlite_browser.as_ref().unwrap().active);
+    assert!(app.changes.preview.database().unwrap().active);
     assert_eq!(app.regions.diff.unwrap().width, 49);
     assert!(app.regions.explorer_list.is_none());
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(!app.changes.sqlite_browser.as_ref().unwrap().active);
+    assert!(!app.changes.preview.database().unwrap().active);
     assert!(app.regions.explorer_list.is_some());
     assert!(app.regions.diff.is_none());
 }

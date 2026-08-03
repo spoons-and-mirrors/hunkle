@@ -246,7 +246,7 @@ fn decoupled_sidebar_passes_clear_inactive_content_and_targets() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.changes.pane, LeftPane::Files);
-    assert_eq!(app.changes.preview_pane, LeftPane::Worktree);
+    assert_eq!(app.changes.preview.pane(), LeftPane::Worktree);
     assert!(
         app.regions
             .hit_target_rect(HitTarget::Changes(ChangesHitTarget::StageAll))
@@ -274,7 +274,7 @@ fn decoupled_sidebar_passes_clear_inactive_content_and_targets() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.changes.pane, LeftPane::Worktree);
-    assert_eq!(app.changes.preview_pane, LeftPane::Files);
+    assert_eq!(app.changes.preview.pane(), LeftPane::Files);
     assert!(app.regions.files_add.is_none());
     assert!(app.regions.files_root.is_none());
     let mut sidebar_text = String::new();
@@ -716,7 +716,7 @@ fn opens_plain_directories_as_file_workspaces() {
     assert!(app.repository().unwrap().is_local());
     assert_eq!(app.changes.pane, LeftPane::Files);
     wait_for_preview(&mut app);
-    assert_eq!(app.changes.diff, "local workspace\n");
+    assert_eq!(app.changes.preview.text(), Some("local workspace\n"));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -900,7 +900,10 @@ fn fuzzy_searches_and_opens_repository_files() {
         app.selected_explorer_file_path().map(RepoPath::display),
         Some("src/components/profile_card.rs".to_owned())
     );
-    assert_eq!(app.changes.diff, "pub struct ProfileCard;\n");
+    assert_eq!(
+        app.changes.preview.text(),
+        Some("pub struct ProfileCard;\n")
+    );
     assert!(
         app.changes
             .explorer_rows()
@@ -1021,7 +1024,7 @@ fn left_pane_files_take_over_the_preview_from_graph() {
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.view, View::Changes);
     assert!(!app.graph_commit_open);
-    assert_eq!(app.changes.diff, "changed\n");
+    assert_eq!(app.changes.preview.text(), Some("changed\n"));
 }
 
 #[test]
@@ -1074,7 +1077,7 @@ fn double_clicking_worktree_files_opens_them_in_files() {
             app.selected_explorer_file_path().map(RepoPath::display),
             Some(path.to_owned())
         );
-        assert_eq!(app.changes.diff, content);
+        assert_eq!(app.changes.preview.text(), Some(content));
 
         app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         assert_eq!(app.changes.pane, LeftPane::Worktree);

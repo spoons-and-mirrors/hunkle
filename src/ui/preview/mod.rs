@@ -26,10 +26,12 @@ pub(super) use unicode_width::UnicodeWidthStr;
 pub(super) use crate::media::MediaPreviewProtocol;
 
 pub(super) use super::text::{
-    diff_display_line_count, markdown_prefix_style, styled_diff, styled_diff_window,
-    styled_markdown, styled_source, styled_source_window, wrapped_preview_line_starts,
+    markdown_prefix_style, styled_diff, styled_diff_window, styled_markdown, styled_source,
+    styled_source_window, wrapped_source_line_starts,
 };
 
+mod diff;
+pub(crate) use diff::{DiffDocument, DiffLineKind};
 mod wrap;
 use wrap::*;
 #[cfg(test)]
@@ -120,17 +122,35 @@ pub(crate) fn take_inline_transmission(
     Some(symbol.into_bytes())
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct PreviewInput<'a> {
-    pub(crate) content: &'a str,
+    pub(crate) content: PreviewContent<'a>,
     pub(crate) generation: u64,
     pub(crate) path: &'a str,
-    pub(crate) is_diff: bool,
     pub(crate) markdown: bool,
     pub(crate) show_initial_diff_header: bool,
     pub(crate) width: usize,
     pub(crate) viewport_height: usize,
     pub(crate) wrapped: bool,
-    pub(crate) hunk_selected: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PreviewContent<'a> {
+    Source(&'a str),
+    Diff(&'a DiffDocument),
+}
+
+impl<'a> PreviewContent<'a> {
+    fn as_str(self) -> &'a str {
+        match self {
+            Self::Source(source) => source,
+            Self::Diff(document) => document.as_str(),
+        }
+    }
+
+    fn is_diff(self) -> bool {
+        matches!(self, Self::Diff(_))
+    }
 }
 
 pub(crate) struct PreparedPreview {
@@ -249,15 +269,14 @@ impl PreviewPresentation {
 
     pub(crate) fn diff_position_at_rendered_position(
         &self,
-        diff: &str,
+        diff: &DiffDocument,
         row: usize,
         column: usize,
         gutter: usize,
     ) -> Option<(usize, usize)> {
         let cache = self.cache.as_ref()?;
         let (display_line, wrapped_row) = self.display_position_at_rendered_row(row)?;
-        let (source_line, payload) =
-            super::text::diff_new_line_and_payload_at_display_row(diff, display_line, false)?;
+        let (source_line, payload) = diff.display_new_position(display_line, false)?;
         let column = column.saturating_sub(gutter);
         let source_column = if cache.wrapped_line_starts.is_some() {
             super::text::word_wrapped_column_at(
@@ -274,18 +293,15 @@ impl PreviewPresentation {
 
     pub(crate) fn diff_file_position_at_rendered_position(
         &self,
-        diff: &str,
+        diff: &DiffDocument,
         row: usize,
         column: usize,
         gutter: usize,
     ) -> Option<(crate::repo_path::RepoPath, usize, usize)> {
         let cache = self.cache.as_ref()?;
         let (display_line, wrapped_row) = self.display_position_at_rendered_row(row)?;
-        let (path, source_line, payload) = super::text::diff_file_position_at_display_row(
-            diff,
-            display_line,
-            cache.show_initial_diff_header,
-        )?;
+        let (path, source_line, payload) =
+            diff.display_file_position(display_line, cache.show_initial_diff_header)?;
         let column = column.saturating_sub(gutter);
         let source_column = if cache.wrapped_line_starts.is_some() {
             super::text::word_wrapped_column_at(
@@ -302,16 +318,12 @@ impl PreviewPresentation {
 
     pub(crate) fn diff_file_header_at_rendered_row(
         &self,
-        diff: &str,
+        diff: &DiffDocument,
         row: usize,
     ) -> Option<(crate::repo_path::RepoPath, usize)> {
         let cache = self.cache.as_ref()?;
         let (display_line, _) = self.display_position_at_rendered_row(row)?;
-        super::text::diff_file_header_at_display_row(
-            diff,
-            display_line,
-            cache.show_initial_diff_header,
-        )
+        diff.display_file_header(display_line, cache.show_initial_diff_header)
     }
 
     fn display_position_at_rendered_row(&self, row: usize) -> Option<(usize, usize)> {
@@ -588,12 +600,14 @@ impl PreviewPresentation {
         input: PreviewInput<'_>,
         scroll: &mut usize,
     ) -> PreparedPreview {
-        let render_markdown = input.markdown && input.content.len() <= MAX_CACHED_PREVIEW_BYTES;
+        let raw = input.content.as_str();
+        let is_diff = input.content.is_diff();
+        let render_markdown = input.markdown && raw.len() <= MAX_CACHED_PREVIEW_BYTES;
         let cache_matches = self.cache.as_ref().is_some_and(|cache| {
             let markdown_wrapped = render_markdown && input.wrapped;
             cache.generation == input.generation
                 && cache.path == input.path
-                && cache.is_diff == input.is_diff
+                && cache.is_diff == is_diff
                 && cache.markdown == render_markdown
                 && cache.markdown_wrapped == markdown_wrapped
                 && cache.show_initial_diff_header == input.show_initial_diff_header
@@ -603,28 +617,29 @@ impl PreviewPresentation {
             let (display_count, fully_styled, lines) = if render_markdown {
                 let content_width = markdown_content_width(input.width);
                 let lines = numbered_markdown_lines(
-                    styled_markdown(input.content, content_width, input.wrapped),
+                    styled_markdown(raw, content_width, input.wrapped),
                     input.width,
                 );
                 (lines.len(), true, lines)
             } else {
-                let display_count = if input.is_diff {
-                    diff_display_line_count(input.content, input.show_initial_diff_header)
-                } else {
-                    input.content.lines().count()
+                let display_count = match input.content {
+                    PreviewContent::Diff(document) => {
+                        document.display_len(input.show_initial_diff_header)
+                    }
+                    PreviewContent::Source(source) => source.lines().count(),
                 };
                 let fully_styled = display_count <= MAX_CACHED_PREVIEW_LINES
-                    && input.content.len() <= MAX_CACHED_PREVIEW_BYTES;
+                    && raw.len() <= MAX_CACHED_PREVIEW_BYTES;
                 let lines = if fully_styled {
-                    if input.is_diff {
+                    if let PreviewContent::Diff(document) = input.content {
                         styled_diff(
-                            input.content,
+                            document,
                             input.path,
                             input.width,
                             input.show_initial_diff_header,
                         )
                     } else {
-                        styled_source(input.content, input.path, input.width)
+                        styled_source(raw, input.path, input.width)
                     }
                 } else {
                     Vec::new()
@@ -634,7 +649,7 @@ impl PreviewPresentation {
             self.cache = Some(PreviewCache {
                 generation: input.generation,
                 path: input.path.to_owned(),
-                is_diff: input.is_diff,
+                is_diff,
                 markdown: render_markdown,
                 markdown_wrapped: render_markdown && input.wrapped,
                 show_initial_diff_header: input.show_initial_diff_header,
@@ -666,12 +681,13 @@ impl PreviewPresentation {
                         input.width,
                     )
                 } else {
-                    wrapped_preview_line_starts(
-                        input.content,
-                        input.is_diff,
-                        input.width,
-                        input.show_initial_diff_header,
-                    )
+                    match input.content {
+                        PreviewContent::Diff(document) => document
+                            .wrapped_line_starts(input.width, input.show_initial_diff_header),
+                        PreviewContent::Source(source) => {
+                            wrapped_source_line_starts(source, input.width)
+                        }
+                    }
                 };
                 self.cache
                     .as_mut()
@@ -685,11 +701,7 @@ impl PreviewPresentation {
                 .expect("wrapped line starts were initialized");
             let display_count = starts.len().saturating_sub(1);
             let rendered_height = starts.last().copied().unwrap_or(0);
-            let scroll_limit = if input.hunk_selected {
-                rendered_height.saturating_sub(1)
-            } else {
-                rendered_height.saturating_sub(input.viewport_height)
-            };
+            let scroll_limit = rendered_height.saturating_sub(1);
             *scroll = (*scroll).min(scroll_limit);
             let first = starts
                 .partition_point(|start| *start <= *scroll)
@@ -729,7 +741,7 @@ impl PreviewPresentation {
                 input.width,
                 local_scroll,
                 input.viewport_height,
-                input.is_diff,
+                is_diff,
                 render_markdown,
             );
             self.cache
@@ -754,11 +766,7 @@ impl PreviewPresentation {
             .as_ref()
             .expect("preview cache was initialized")
             .display_count;
-        let max_scroll = if input.is_diff && input.hunk_selected {
-            height.saturating_sub(1)
-        } else {
-            height.saturating_sub(input.viewport_height)
-        };
+        let max_scroll = height.saturating_sub(1);
         *scroll = (*scroll).min(max_scroll);
         let lines = self.line_window(
             &input,
@@ -775,7 +783,7 @@ impl PreviewPresentation {
 
     pub(crate) fn hunk_rows(
         &mut self,
-        content: &str,
+        content: &DiffDocument,
         wrapped: bool,
     ) -> (Vec<(usize, usize)>, usize) {
         if let Some(cache) = &self.cache {
@@ -788,12 +796,11 @@ impl PreviewPresentation {
                 return cached.clone();
             }
         }
-        let rendered = rendered_hunk_rows(
-            content,
-            self.cache
-                .as_ref()
-                .and_then(|cache| cache.wrapped_line_starts.as_deref()),
+        let cache = self.cache.as_ref();
+        let rendered = content.hunk_rows(
+            cache.and_then(|cache| cache.wrapped_line_starts.as_deref()),
             wrapped,
+            cache.is_some_and(|cache| cache.show_initial_diff_header),
         );
         if let Some(cache) = &mut self.cache {
             if wrapped {
@@ -827,9 +834,9 @@ impl PreviewPresentation {
             let margin = viewport_height.saturating_mul(4).max(256);
             let window_start = start.saturating_sub(margin);
             let window_count = count.saturating_add(margin.saturating_mul(2));
-            let lines = if input.is_diff {
+            let lines = if let PreviewContent::Diff(document) = input.content {
                 styled_diff_window(
-                    input.content,
+                    document,
                     input.path,
                     input.width,
                     window_start,
@@ -838,7 +845,7 @@ impl PreviewPresentation {
                 )
             } else {
                 styled_source_window(
-                    input.content,
+                    input.content.as_str(),
                     input.path,
                     input.width,
                     window_start,
@@ -871,54 +878,4 @@ impl Drop for PreviewPresentation {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-fn rendered_hunk_rows(
-    diff: &str,
-    wrapped_line_starts: Option<&[usize]>,
-    wrapped: bool,
-) -> (Vec<(usize, usize)>, usize) {
-    let mut rendered_row: usize = 0;
-    let mut styled_index = 0;
-    let mut hunk_index = 0;
-    let mut rows = Vec::new();
-    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
-    let mut in_hunk = false;
-
-    for line in diff.lines() {
-        let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header {
-            continue;
-        }
-        if hunk_header {
-            if hunk_index > 0 {
-                if wrapped {
-                    let Some(line_height) = wrapped_line_starts.and_then(|starts| {
-                        Some(starts.get(styled_index + 1)? - starts.get(styled_index)?)
-                    }) else {
-                        break;
-                    };
-                    rendered_row = rendered_row.saturating_add(line_height);
-                    styled_index += 1;
-                } else {
-                    rendered_row += 1;
-                }
-            }
-            in_hunk = true;
-            rows.push((hunk_index, rendered_row));
-            hunk_index += 1;
-        }
-        if wrapped {
-            let Some(line_height) = wrapped_line_starts
-                .and_then(|starts| Some(starts.get(styled_index + 1)? - starts.get(styled_index)?))
-            else {
-                break;
-            };
-            rendered_row = rendered_row.saturating_add(line_height);
-            styled_index += 1;
-        } else {
-            rendered_row += 1;
-        }
-    }
-    (rows, rendered_row)
 }

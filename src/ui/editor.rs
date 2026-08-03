@@ -58,7 +58,7 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         return;
     };
     let line_markers = editor_line_markers(
-        &app.changes.diff,
+        app.changes.preview.document(),
         editor.path(),
         editor.locally_changed_lines(),
         editor.visible_line_count(),
@@ -307,15 +307,17 @@ fn editor_display_width(value: &str) -> usize {
 }
 
 fn editor_line_markers(
-    diff: &str,
+    diff: Option<&crate::ui::preview::DiffDocument>,
     path: &RepoPath,
     locally_changed_lines: &BTreeSet<usize>,
     line_count: usize,
 ) -> Vec<Option<char>> {
     let mut markers = vec![None; line_count];
-    for (line, marker) in text::diff_new_line_markers(diff, path) {
-        if let Some(slot) = markers.get_mut(line) {
-            *slot = Some(marker);
+    if let Some(diff) = diff {
+        for (line, marker) in diff.new_line_markers(path) {
+            if let Some(slot) = markers.get_mut(line) {
+                *slot = Some(marker);
+            }
         }
     }
     for line in locally_changed_lines {

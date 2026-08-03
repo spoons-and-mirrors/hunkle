@@ -753,7 +753,11 @@ fn header_cards_open_pickers_and_checkout_branches() {
         app.changes
             .branch_comparison()
             .is_some_and(|comparison| comparison.target == "topic")
-            && app.changes.diff.contains("feature.txt")
+            && app
+                .changes
+                .preview
+                .text()
+                .is_some_and(|text| text.contains("feature.txt"))
     });
     assert_eq!(app.visible_view(), View::Changes);
     assert_eq!(app.repository().unwrap().branch, long_branch);
