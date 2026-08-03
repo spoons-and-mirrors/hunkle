@@ -278,6 +278,7 @@ pub(super) fn display_agent(request: DisplayAgentRequest) -> Result<DisplayAgent
     display_agent_with(request, run, api_request)
 }
 
+#[cfg(test)]
 fn restore_agent_layout_with<F, A>(
     request: DisplayAgentRequest,
     mut runner: F,
