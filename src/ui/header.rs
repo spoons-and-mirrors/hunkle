@@ -263,7 +263,8 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 issue_badge.to_owned(),
                 header_badge_style(
                     palette().cyan,
-                    app.hovered_hit_target == Some(HitTarget::HeaderIssue),
+                    app.hovered_hit_target == Some(HitTarget::HeaderIssue)
+                        || app.header_picker.kind == Some(HeaderPickerKind::Issues),
                 ),
                 room.saturating_sub(agent_width.saturating_add(1)),
             );
@@ -369,7 +370,7 @@ pub(super) fn repository_root(repo: &crate::git::RepositoryData) -> &std::path::
 
 pub(super) fn header_badge_style(background: Color, hovered: bool) -> Style {
     let (foreground, background) = if hovered {
-        (palette().canvas, lighter(background))
+        (background, palette().raised)
     } else {
         (palette().ink, palette().surface_alt)
     };
@@ -382,23 +383,6 @@ pub(super) fn header_badge_style(background: Color, hovered: bool) -> Style {
 pub(super) fn draw_header_badge_border(frame: &mut Frame<'_>, rect: Rect, color: Color) {
     if let Some(cell) = frame.buffer_mut().cell_mut((rect.x, rect.y)) {
         cell.set_symbol("▌").set_fg(color);
-    }
-}
-
-pub(super) fn lighter(color: Color) -> Color {
-    match color {
-        Color::Rgb(red, green, blue) => Color::Rgb(
-            red.saturating_add((u8::MAX - red) / 3),
-            green.saturating_add((u8::MAX - green) / 3),
-            blue.saturating_add((u8::MAX - blue) / 3),
-        ),
-        Color::Red => Color::LightRed,
-        Color::Green => Color::LightGreen,
-        Color::Yellow => Color::LightYellow,
-        Color::Blue => Color::LightBlue,
-        Color::Magenta => Color::LightMagenta,
-        Color::Cyan => Color::LightCyan,
-        _ => Color::White,
     }
 }
 
@@ -440,6 +424,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     app.header_picker.set_viewport_rows(row_count);
     let maximum_width = match kind {
         HeaderPickerKind::Repositories => 80,
+        HeaderPickerKind::Issues => frame.area().width.saturating_mul(9) / 10,
         _ => 58,
     };
     let width = frame
@@ -482,7 +467,15 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             ),
         },
         HeaderPickerKind::DiffTargets => " DIFF AGAINST".to_owned(),
-        HeaderPickerKind::Issues => " ISSUES & PULL REQUESTS".to_owned(),
+        HeaderPickerKind::Issues => format!(
+            " ISSUES & PULL REQUESTS · {}{}",
+            app.header_picker.items.len(),
+            if app.issues.loading() {
+                " · LOADING"
+            } else {
+                ""
+            }
+        ),
     };
     let new_branch_action = kind == HeaderPickerKind::Branches
         && app.header_picker.branch_step == BranchPickerStep::Branches;
@@ -830,6 +823,39 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
+    if kind == HeaderPickerKind::Issues {
+        let start = app.header_picker.visible_start();
+        let rows = app
+            .header_picker
+            .items
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(row_count)
+            .filter_map(|(index, item)| {
+                matches!(item, HeaderPickerItem::Issue { .. }).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for (row, index) in rows.into_iter().enumerate() {
+            let rect = Rect::new(
+                area.x,
+                area.y.saturating_add(item_offset + row as u16),
+                area.width,
+                1,
+            );
+            let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerItem(index));
+            let background = if app.header_picker.selected == index || hovered {
+                palette().selected
+            } else {
+                palette().surface_alt
+            };
+            draw_issue_picker_row(frame, rect, &app.header_picker.items[index], background);
+            app.regions
+                .register_hit_target(HitTarget::HeaderPickerItem(index), rect);
+        }
+        return;
+    }
+
     let start = app.header_picker.visible_start();
     let current_root = app.repository().map(|repository| repository.root.as_path());
     let rows = app
@@ -920,15 +946,11 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                 HeaderPickerItem::Issue {
                     number,
                     title,
-                    detail,
-                    labels,
+                    status,
+                    ..
                 } => (
                     format!("#{number} {title}"),
-                    if labels.is_empty() {
-                        detail.clone()
-                    } else {
-                        format!("{} · {}", detail, labels.join(", "))
-                    },
+                    status.clone(),
                     None,
                     false,
                     Some(8),
@@ -1061,6 +1083,144 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             app.regions
                 .register_hit_target(HitTarget::HeaderPickerDeleteWorktree(index), delete);
         }
+    }
+}
+
+fn draw_issue_picker_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    item: &HeaderPickerItem,
+    background: Color,
+) {
+    let HeaderPickerItem::Issue {
+        number,
+        title,
+        pull_request,
+        status,
+        author,
+        changed_files,
+        additions,
+        deletions,
+        ..
+    } = item
+    else {
+        return;
+    };
+    const NUMBER_WIDTH: u16 = 7;
+    const KIND_WIDTH: u16 = 7;
+    const STATUS_WIDTH: u16 = 8;
+    const AUTHOR_WIDTH: u16 = 8;
+    const COLUMN_GAPS: u16 = 7;
+
+    fill(frame, area, background);
+    let spacious = area.width >= 80;
+    let outer_padding = u16::from(spacious);
+    let gutter = u16::from(spacious);
+    let files_width = if spacious { 10 } else { 8 };
+    let loc_width = if spacious { 9 } else { 7 };
+    let fixed_width = NUMBER_WIDTH
+        + KIND_WIDTH
+        + STATUS_WIDTH
+        + files_width
+        + loc_width * 2
+        + AUTHOR_WIDTH
+        + outer_padding * 2
+        + gutter * COLUMN_GAPS;
+    let title_width = area.width.saturating_sub(fixed_width);
+    let mut column_x = area.x.saturating_add(outer_padding);
+    let column = |x: &mut u16, width| {
+        let column = Rect::new(*x, area.y, width, 1);
+        *x = column.right().saturating_add(gutter);
+        column
+    };
+    let number_area = column(&mut column_x, NUMBER_WIDTH);
+    let kind_area = column(&mut column_x, KIND_WIDTH);
+    let title_area = column(&mut column_x, title_width);
+    let status_area = column(&mut column_x, STATUS_WIDTH);
+    let files_area = column(&mut column_x, files_width);
+    let additions_area = column(&mut column_x, loc_width);
+    let deletions_area = column(&mut column_x, loc_width);
+    let author_area = column(&mut column_x, AUTHOR_WIDTH);
+
+    frame.render_widget(
+        Paragraph::new(format!("#{number}"))
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted).bg(background)),
+        number_area,
+    );
+    let (kind, kind_color) = if *pull_request {
+        ("PR", palette().purple)
+    } else {
+        ("ISSUE", palette().cyan)
+    };
+    frame.render_widget(
+        Paragraph::new(format!(" {:^5} ", kind)).style(
+            Style::default()
+                .fg(kind_color)
+                .bg(palette().canvas)
+                .add_modifier(Modifier::BOLD),
+        ),
+        kind_area,
+    );
+    let title = if spacious {
+        title.clone()
+    } else {
+        format!(" {title}")
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_width(&title, usize::from(title_width)))
+            .style(Style::default().fg(palette().ink).bg(background)),
+        title_area,
+    );
+    let status_color = match status.as_str() {
+        "MERGED" => palette().purple,
+        "CLOSED" => palette().red,
+        "DRAFT" => palette().yellow,
+        "READY" => palette().green,
+        _ => palette().cyan,
+    };
+    frame.render_widget(
+        Paragraph::new(format!(" {:^6} ", status)).style(
+            Style::default()
+                .fg(status_color)
+                .bg(palette().canvas)
+                .add_modifier(Modifier::BOLD),
+        ),
+        status_area,
+    );
+    if let Some(files) = changed_files {
+        let noun = if *files == 1 { "file" } else { "files" };
+        frame.render_widget(
+            Paragraph::new(format!("{files} {noun}"))
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(palette().muted).bg(background)),
+            files_area,
+        );
+    }
+    if let Some(additions) = additions {
+        frame.render_widget(
+            Paragraph::new(format!("+{additions}"))
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(palette().green).bg(background)),
+            additions_area,
+        );
+    }
+    if let Some(deletions) = deletions {
+        frame.render_widget(
+            Paragraph::new(format!("-{deletions}"))
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(palette().red).bg(background)),
+            deletions_area,
+        );
+    }
+    if let Some(author) = author {
+        let author = author.chars().take(6).collect::<String>();
+        frame.render_widget(
+            Paragraph::new(format!("@{author}"))
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(palette().muted).bg(background)),
+            author_area,
+        );
     }
 }
 

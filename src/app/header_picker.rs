@@ -40,8 +40,13 @@ pub(crate) enum HeaderPickerItem {
     Issue {
         number: u64,
         title: String,
-        detail: String,
+        pull_request: bool,
+        status: String,
+        author: Option<String>,
         labels: Vec<String>,
+        changed_files: Option<u64>,
+        additions: Option<u64>,
+        deletions: Option<u64>,
     },
 }
 
@@ -627,12 +632,22 @@ impl HeaderPicker {
         self.ensure_selection_visible();
     }
 
+    pub(crate) fn move_selection_page(&mut self, direction: isize) {
+        let page = self.viewport_rows.saturating_sub(1).max(1);
+        self.move_selection(direction.saturating_mul(page as isize));
+    }
+
     pub(crate) fn scroll_by(&mut self, delta: isize) {
         self.scroll_follows_selection = false;
         self.scroll = self
             .scroll
             .saturating_add_signed(delta)
             .min(self.maximum_scroll());
+    }
+
+    pub(crate) fn scroll_to(&mut self, row: usize) {
+        self.scroll_follows_selection = false;
+        self.scroll = row.min(self.maximum_scroll());
     }
 
     pub(crate) fn set_viewport_rows(&mut self, rows: usize) {
@@ -696,9 +711,15 @@ impl HeaderPickerItem {
             Self::Issue {
                 number,
                 title,
-                detail,
+                status,
+                author,
                 labels,
-            } => format!("{number} {title} {detail} {}", labels.join(" ")),
+                ..
+            } => format!(
+                "{number} {title} {status} {} {}",
+                author.as_deref().unwrap_or_default(),
+                labels.join(" ")
+            ),
         }
     }
 }

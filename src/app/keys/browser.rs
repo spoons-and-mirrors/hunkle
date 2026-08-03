@@ -235,6 +235,16 @@ impl App {
     }
 
     pub(crate) fn refresh_header_issue_items(&mut self) {
+        let selected_number = self
+            .header_picker
+            .items
+            .get(self.header_picker.selected)
+            .and_then(issue_item_number);
+        let top_number = self
+            .header_picker
+            .items
+            .get(self.header_picker.visible_start())
+            .and_then(issue_item_number);
         let items = self
             .issues
             .issues()
@@ -243,8 +253,13 @@ impl App {
             .map(|issue| HeaderPickerItem::Issue {
                 number: issue.number,
                 title: issue.title.clone(),
-                detail: issue.detail(),
+                pull_request: issue.pull_request,
+                status: issue.status_label().to_owned(),
+                author: issue.author.clone(),
                 labels: issue.labels.clone(),
+                changed_files: issue.changed_files,
+                additions: issue.additions,
+                deletions: issue.deletions,
             })
             .collect::<Vec<_>>();
         let message = self.issues.error().map(str::to_owned).or_else(|| {
@@ -264,6 +279,24 @@ impl App {
         if !query.is_empty() {
             self.header_picker.query.insert(&query);
             self.header_picker.apply_filter();
+        }
+        if let Some(number) = selected_number
+            && let Some(selected) = self
+                .header_picker
+                .items
+                .iter()
+                .position(|item| issue_item_number(item) == Some(number))
+        {
+            self.header_picker.selected = selected;
+        }
+        if let Some(number) = top_number
+            && let Some(top) = self
+                .header_picker
+                .items
+                .iter()
+                .position(|item| issue_item_number(item) == Some(number))
+        {
+            self.header_picker.scroll_to(top);
         }
         self.header_picker.message = message;
     }
@@ -342,6 +375,14 @@ impl App {
             KeyCode::Down => {
                 self.hovered_hit_target = None;
                 self.header_picker.move_selection(1);
+            }
+            KeyCode::PageUp => {
+                self.hovered_hit_target = None;
+                self.header_picker.move_selection_page(-1);
+            }
+            KeyCode::PageDown => {
+                self.hovered_hit_target = None;
+                self.header_picker.move_selection_page(1);
             }
             KeyCode::Enter => self.activate_header_picker(self.header_picker.selected),
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -654,5 +695,12 @@ impl App {
         } else if let Some(error) = self.workspace_explorer.error.clone() {
             self.notice = Some(error);
         }
+    }
+}
+
+fn issue_item_number(item: &HeaderPickerItem) -> Option<u64> {
+    match item {
+        HeaderPickerItem::Issue { number, .. } => Some(*number),
+        _ => None,
     }
 }

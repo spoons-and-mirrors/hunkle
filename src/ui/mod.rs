@@ -303,6 +303,7 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
         HitTarget::HeaderWorktrees,
         HitTarget::HeaderBranch,
         HitTarget::HeaderDiff,
+        HitTarget::HeaderIssue,
         HitTarget::HeaderAgent,
         HitTarget::HeaderFullscreen,
     ] {

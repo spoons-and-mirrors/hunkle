@@ -31,16 +31,29 @@ fn issue_picker_renders_searchable_rows_and_scope_control() {
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
-    app.header_picker.open(
-        HeaderPickerKind::Issues,
-        vec![HeaderPickerItem::Issue {
-            number: 42,
-            title: "Keep Markdown fast".to_owned(),
-            detail: "open issue · @octo".to_owned(),
-            labels: vec!["performance".to_owned()],
-        }],
-        0,
-    );
+    let mut items = vec![HeaderPickerItem::Issue {
+        number: 42,
+        title: "Keep Markdown fast".to_owned(),
+        pull_request: true,
+        status: "READY".to_owned(),
+        author: Some("octocat-long".to_owned()),
+        labels: vec!["performance".to_owned()],
+        changed_files: Some(12),
+        additions: Some(345),
+        deletions: Some(67),
+    }];
+    items.extend((43..82).map(|number| HeaderPickerItem::Issue {
+        number,
+        title: format!("Issue {number}"),
+        pull_request: false,
+        status: "OPEN".to_owned(),
+        author: Some("octocat-long".to_owned()),
+        labels: Vec::new(),
+        changed_files: None,
+        additions: None,
+        deletions: None,
+    }));
+    app.header_picker.open(HeaderPickerKind::Issues, items, 0);
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -52,11 +65,24 @@ fn issue_picker_renders_searchable_rows_and_scope_control() {
     let row_text = (row.x..row.right())
         .map(|x| terminal.backend().buffer()[(x, row.y)].symbol())
         .collect::<String>();
+    assert_eq!(row.width, 90);
+    assert!(row_text.contains("#42"), "rendered row: {row_text:?}");
+    assert!(row_text.contains("PR"), "rendered row: {row_text:?}");
     assert!(
-        row_text.contains("#42 Keep Markdown"),
+        row_text.contains("Keep Markdown fast"),
         "rendered row: {row_text:?}"
     );
-    assert!(row_text.contains("performance"));
+    assert!(row_text.contains("READY"), "rendered row: {row_text:?}");
+    assert!(row_text.contains("12 files"), "rendered row: {row_text:?}");
+    assert!(row_text.contains("+345"), "rendered row: {row_text:?}");
+    assert!(row_text.contains("-67"), "rendered row: {row_text:?}");
+    assert!(row_text.contains("@octoca"), "rendered row: {row_text:?}");
+    for (label, color) in [("PR", palette().purple), ("READY", palette().green)] {
+        let x = row.x + u16::try_from(row_text.find(label).unwrap()).unwrap();
+        let cell = &terminal.backend().buffer()[(x, row.y)];
+        assert_eq!(cell.fg, color);
+        assert_eq!(cell.bg, palette().canvas);
+    }
     let scope = app
         .regions
         .hit_target_rect(HitTarget::HeaderPickerIssueScope)
@@ -65,6 +91,14 @@ fn issue_picker_renders_searchable_rows_and_scope_control() {
         .map(|x| terminal.backend().buffer()[(x, scope.y)].symbol())
         .collect::<String>();
     assert!(scope_text.contains("OPEN"));
+
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, row.x, row.y));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let scrolled_row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(3))
+        .unwrap();
+    assert_eq!(scrolled_row.y, row.y);
 
     app.issues.toggle_scope();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -444,9 +478,25 @@ fn header_cards_open_pickers_and_checkout_branches() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
         terminal.backend().buffer()[(repository.x + 1, repository.y)].bg,
-        super::lighter(super::palette().yellow)
+        super::palette().raised
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x + 1, repository.y)].fg,
+        super::palette().yellow
     );
     app.hovered_hit_target = None;
+    app.header_picker
+        .open(HeaderPickerKind::Issues, Vec::new(), 0);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(issue.x + 1, issue.y)].fg,
+        super::palette().cyan
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(issue.x + 1, issue.y)].bg,
+        super::palette().raised
+    );
+    app.header_picker.close();
     assert_eq!(worktrees.width, " basetree ".width() as u16);
     let worktree_text = (worktrees.x..worktrees.right())
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())

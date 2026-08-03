@@ -21,7 +21,7 @@ pub(super) use crate::app::{
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    BranchPickerStep, display_path, draw, lighter, palette, selected_display_range, text,
+    BranchPickerStep, display_path, draw, palette, selected_display_range, text,
     wrapped_editor_cursor,
 };
 
