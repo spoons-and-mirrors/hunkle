@@ -1099,12 +1099,7 @@ impl HerdrSession {
         if self.agent_layout_running() {
             return Err("Another agent layout change is still in progress".to_owned());
         }
-        if !self.agent_is_in_host_tab(index)
-            && self
-                .agents
-                .iter()
-                .any(|agent| self.agent_is_in_host_tab_by_agent(agent))
-        {
+        if !self.agent_is_in_host_tab(index) {
             return self.display_agent(index);
         }
         self.start_agent_layout_move(index)
