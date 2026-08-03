@@ -816,7 +816,7 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
 }
 
 fn slide_agent_preview(frame: &mut Frame<'_>, area: Rect, offset: i32, neighbor: &str) {
-    let maximum = i32::from(area.width.saturating_sub(2));
+    let maximum = i32::from(area.width / 2);
     let offset = offset.clamp(-maximum, maximum);
     if offset == 0 || area.is_empty() {
         return;

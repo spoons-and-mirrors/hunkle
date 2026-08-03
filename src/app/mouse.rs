@@ -262,6 +262,15 @@ impl App {
 
         if matches!(
             mouse.kind,
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+        ) && let Some(agent) = self.agent_preview_at(point)
+        {
+            self.cycle_agent_preview(&agent, mouse.kind == MouseEventKind::ScrollRight);
+            return;
+        }
+
+        if matches!(
+            mouse.kind,
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
         ) && (self.scroll_agent_preview_transcript(
             point,
@@ -466,7 +475,9 @@ impl App {
         let point = Position::new(mouse.column, mouse.row);
         if let Some(mut drag) = self.mobile_scroll_drag.clone() {
             match mouse.kind {
-                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+                MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Moved
+                | MouseEventKind::Up(MouseButton::Left) => {
                     if point != drag.previous {
                         drag.moved = true;
                         let horizontal = drag.start.x.abs_diff(point.x);
@@ -495,8 +506,14 @@ impl App {
                     }
                     let released = mouse.kind == MouseEventKind::Up(MouseButton::Left);
                     if released {
+                        self.mobile_scroll_drag = None;
                         if drag.axis == Some(MobileDragAxis::Horizontal) {
-                            if let Some(agent) = drag.agent_preview.as_ref() {
+                            let horizontal = drag.start.x.abs_diff(point.x);
+                            let vertical = drag.start.y.abs_diff(point.y);
+                            if horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD
+                                && horizontal > vertical
+                                && let Some(agent) = drag.agent_preview.as_ref()
+                            {
                                 self.cycle_agent_preview(agent, point.x < drag.start.x);
                             }
                         } else if !drag.moved {

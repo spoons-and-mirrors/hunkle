@@ -658,16 +658,57 @@ fn mobile_agent_preview_swipes_between_agents() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     let live_x = first_screen.find("LIVE").unwrap();
+    let drag_start = first.right().saturating_sub(3);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        drag_start,
+        first.y + 8,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        first.x.saturating_add(1),
+        first.y + 8,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let dragging_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert_eq!(
+        dragging_screen.find("LIVE").unwrap(),
+        live_x - usize::from(first.width / 2)
+    );
+    app.handle_mouse(mouse(MouseEventKind::Moved, drag_start, first.y + 8));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let returned_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert_eq!(returned_screen.find("LIVE").unwrap(), live_x);
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        drag_start,
+        first.y + 8,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
+            .is_some()
+    );
+
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
         first.x + 20,
         first.y + 8,
     ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Drag(MouseButton::Left),
-        first.x + 8,
-        first.y + 9,
-    ));
+    app.handle_mouse(mouse(MouseEventKind::Moved, first.x + 8, first.y + 9));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let dragging_screen = terminal
         .backend()
@@ -709,7 +750,7 @@ fn mobile_agent_preview_swipes_between_agents() {
     let second = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
-            agent: second_key,
+            agent: second_key.clone(),
             message: 0,
         })
         .unwrap();
@@ -727,6 +768,39 @@ fn mobile_agent_preview_swipes_between_agents() {
         MouseEventKind::Up(MouseButton::Left),
         second.x + 20,
         second.y + 7,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
+            .is_some()
+    );
+
+    let first = app
+        .regions
+        .hit_target_rect(HitTarget::AgentTooltip {
+            agent: first_key.clone(),
+            message: 0,
+        })
+        .unwrap();
+    app.handle_mouse(mouse(MouseEventKind::ScrollRight, first.x + 8, first.y + 8));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(second_key.clone()))
+            .is_some()
+    );
+    let second = app
+        .regions
+        .hit_target_rect(HitTarget::AgentTooltip {
+            agent: second_key,
+            message: 0,
+        })
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollLeft,
+        second.x + 8,
+        second.y + 8,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(

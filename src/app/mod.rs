@@ -109,6 +109,7 @@ pub struct App {
     pub view: View,
     search_return_view: View,
     pub(crate) graph_commit_open: bool,
+    graph_hidden: bool,
     single_panel_detail_open: bool,
     pub mode: Mode,
     pub changes: ChangesState,
@@ -266,6 +267,7 @@ impl App {
             view: View::Changes,
             search_return_view: View::Changes,
             graph_commit_open: false,
+            graph_hidden: false,
             single_panel_detail_open: false,
             mode,
             changes,
@@ -383,7 +385,8 @@ impl App {
             View::RepositorySearch
         } else if self.view == View::Graph
             || self.graph_commit_open
-            || (self.view == View::Changes
+            || (!self.graph_hidden
+                && self.view == View::Changes
                 && self.changes.preview_pane == LeftPane::Worktree
                 && self.changes.branch_comparison().is_none()
                 && self.repository().is_some_and(|repo| {
@@ -1097,6 +1100,7 @@ impl App {
                     self.pending_reload = None;
                     self.mode = Mode::Normal;
                     self.actions = ActionsState::default();
+                    self.graph_hidden = false;
                     let local = self.session.data().is_some_and(RepositoryData::is_local);
                     self.graph_state = TableState::default();
                     self.graph_scroll_to_selection = true;
@@ -2294,6 +2298,7 @@ impl App {
     fn show_graph(&mut self) {
         self.view = View::Graph;
         self.graph_commit_open = false;
+        self.graph_hidden = false;
         self.single_panel_detail_open = false;
     }
 
@@ -2310,8 +2315,9 @@ impl App {
     }
 
     fn toggle_graph(&mut self) {
-        if self.view == View::Graph {
+        if self.visible_view() == View::Graph {
             self.show_main_pane();
+            self.graph_hidden = true;
             return;
         }
         if self.require_git_repository() {

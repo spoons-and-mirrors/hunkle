@@ -533,6 +533,26 @@ fn graph_visibility_is_explicit_and_survives_reload() {
 }
 
 #[test]
+fn graph_can_be_hidden_after_returning_from_a_commit_diff() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    initialize_repository(root);
+    let mut app = App::new(root.to_path_buf());
+    let repo = app.repository().unwrap().clone();
+    app.changes.set_pane(LeftPane::Worktree, Some(&repo));
+
+    app.show_graph();
+    app.open_selected_graph_commit();
+    assert!(app.graph_commit_open);
+    app.show_previous_panel();
+    assert_eq!(app.visible_view(), View::Graph);
+
+    app.toggle_graph();
+    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.visible_view(), View::Changes);
+}
+
+#[test]
 fn background_startup_selects_the_pane_after_repository_details_load() {
     let clean_directory = tempfile::tempdir().unwrap();
     initialize_repository(clean_directory.path());
