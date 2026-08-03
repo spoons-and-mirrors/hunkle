@@ -668,7 +668,9 @@ impl App {
                 return;
             }
             Some(HitTarget::AgentPreviewPicker(index)) => {
-                self.agent_preview_selection = Some(index);
+                if let Some(key) = self.herdr.agent_key(index) {
+                    self.agent_preview_selection = Some(key);
+                }
                 self.agent_preview_picker_open = !self.agent_preview_picker_open;
                 return;
             }
@@ -1002,10 +1004,10 @@ impl App {
     }
 
     fn select_agent_preview(&mut self, index: usize) {
-        if index >= self.herdr.agents.len() {
+        let Some(key) = self.herdr.agent_key(index) else {
             return;
-        }
-        self.agent_preview_selection = Some(index);
+        };
+        self.agent_preview_selection = Some(key);
         self.agent_preview_picker_open = false;
         self.hovered_hit_target = self
             .herdr

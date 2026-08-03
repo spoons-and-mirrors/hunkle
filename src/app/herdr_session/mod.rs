@@ -115,6 +115,9 @@ enum AgentTimingKey {
     Pane(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentKey(AgentTimingKey);
+
 impl AgentTimingKey {
     fn stable_id(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
@@ -765,6 +768,18 @@ impl HerdrSession {
         self.agents.get(index)?.session_name.as_deref()
     }
 
+    pub(crate) fn agent_key(&self, index: usize) -> Option<AgentKey> {
+        self.agents
+            .get(index)
+            .map(|agent| AgentKey(agent.timing_key.clone()))
+    }
+
+    pub(crate) fn agent_index(&self, key: &AgentKey) -> Option<usize> {
+        self.agents
+            .iter()
+            .position(|agent| agent.timing_key == key.0)
+    }
+
     pub(crate) fn stashed_agents(&self) -> &[StashedAgent] {
         &self.stash.agents
     }
@@ -1348,6 +1363,14 @@ impl HerdrSession {
         session.workspaces = workspaces;
         session.apply_agent_snapshot_at(agents, unix_time_ms());
         session
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_snapshot_for_test(&mut self, value: &Value) {
+        let (mut workspaces, agents) = client::parse_snapshot(value).unwrap();
+        populate_workspace_branches(&mut workspaces);
+        self.workspaces = workspaces;
+        self.apply_agent_snapshot_at(agents, unix_time_ms());
     }
 
     #[cfg(test)]

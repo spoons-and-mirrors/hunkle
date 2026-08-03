@@ -35,7 +35,7 @@ pub(crate) use header_picker::{
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
-    AgentActivityPreview, AgentEntryState, AgentStatus, HerdrPaneLayout, HerdrSession,
+    AgentActivityPreview, AgentEntryState, AgentKey, AgentStatus, HerdrPaneLayout, HerdrSession,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -121,7 +121,7 @@ pub struct App {
     pub(crate) herdr: HerdrSession,
     pub(crate) agents_visible: bool,
     pub(crate) agents_pane_pinned: bool,
-    agent_preview_selection: Option<usize>,
+    agent_preview_selection: Option<AgentKey>,
     agent_preview_picker_open: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     agent_preview_button_flash: Option<(bool, Instant)>,
@@ -356,7 +356,8 @@ impl App {
             return None;
         }
         self.agent_preview_selection
-            .filter(|index| *index < self.herdr.agents.len())
+            .as_ref()
+            .and_then(|key| self.herdr.agent_index(key))
             .or_else(|| self.default_agent_preview_index())
     }
 
@@ -2021,7 +2022,8 @@ impl App {
     pub(super) fn show_agents_pane(&mut self) {
         let selection = self
             .agents_pane_index()
-            .or_else(|| self.default_agent_preview_index());
+            .or_else(|| self.default_agent_preview_index())
+            .and_then(|index| self.herdr.agent_key(index));
         self.initial_pane_pending = false;
         self.agents_visible = true;
         self.agents_pane_pinned = true;
