@@ -1,8 +1,16 @@
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditOutcome {
+    Unhandled,
+    Navigated,
+    Edited,
+}
 
 #[derive(Debug)]
 pub(crate) struct TextInput {
@@ -26,6 +34,48 @@ impl Default for TextInput {
 }
 
 impl TextInput {
+    pub(crate) fn handle_edit_key(&mut self, key: KeyEvent) -> EditOutcome {
+        match key.code {
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.select_all();
+                EditOutcome::Navigated
+            }
+            KeyCode::Left => {
+                self.move_left();
+                EditOutcome::Navigated
+            }
+            KeyCode::Right => {
+                self.move_right();
+                EditOutcome::Navigated
+            }
+            KeyCode::Home => {
+                self.move_home();
+                EditOutcome::Navigated
+            }
+            KeyCode::End => {
+                self.move_end();
+                EditOutcome::Navigated
+            }
+            KeyCode::Delete => {
+                self.delete();
+                EditOutcome::Edited
+            }
+            KeyCode::Backspace => {
+                self.backspace();
+                EditOutcome::Edited
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.insert_char(character);
+                EditOutcome::Edited
+            }
+            _ => EditOutcome::Unhandled,
+        }
+    }
+
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
@@ -72,6 +122,15 @@ impl TextInput {
         self.text.insert_str(self.cursor, text);
         self.cursor += text.len();
         self.reset_blink();
+    }
+
+    pub(crate) fn insert_single_line(&mut self, text: &str) {
+        self.insert(
+            &text
+                .chars()
+                .filter(|character| !matches!(character, '\r' | '\n'))
+                .collect::<String>(),
+        );
     }
 
     pub(crate) fn insert_char(&mut self, character: char) {
@@ -313,7 +372,9 @@ fn is_word_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::TextInput;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{EditOutcome, TextInput};
 
     #[test]
     fn edits_unicode_and_replaces_selection() {
@@ -369,5 +430,24 @@ mod tests {
         assert!(!input.cursor_visible());
         assert!(!input.poll_blink(false));
         assert!(input.cursor_visible());
+    }
+
+    #[test]
+    fn handles_common_editing_keys() {
+        let mut input = TextInput::default();
+        assert_eq!(
+            input.handle_edit_key(KeyEvent::new(KeyCode::Char('é'), KeyModifiers::NONE)),
+            EditOutcome::Edited
+        );
+        assert_eq!(
+            input.handle_edit_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            EditOutcome::Navigated
+        );
+        assert_eq!(
+            input.handle_edit_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            EditOutcome::Unhandled
+        );
+        input.insert_single_line(" one\r\ntwo");
+        assert_eq!(input.text(), " onetwoé");
     }
 }
