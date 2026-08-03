@@ -2,7 +2,7 @@ use std::{
     collections::{HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::mpsc::{self, Receiver, Sender, SyncSender},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::Instant,
@@ -75,13 +75,22 @@ pub struct Explorer {
     pub(crate) preview_entries: Vec<PickerEntry>,
     directory_index: Arc<Vec<IndexedDirectory>>,
     index_roots: Vec<PathBuf>,
-    index_rx: Option<Receiver<Vec<IndexedDirectory>>>,
+    index_generation: u64,
+    index_loading: bool,
+    index_pending: Arc<Mutex<Option<IndexRequest>>>,
+    index_wake: Option<SyncSender<()>>,
+    index_rx: Receiver<IndexCompletion>,
+    index_worker: Option<JoinHandle<()>>,
     match_generation: u64,
     match_pending: Arc<Mutex<Option<MatchRequest>>>,
     match_wake: Option<SyncSender<()>>,
     match_rx: Receiver<MatchResult>,
     match_worker: Option<JoinHandle<()>>,
-    browse_rx: Option<Receiver<Result<BrowseResult, String>>>,
+    browse_generation: u64,
+    browse_pending: Arc<Mutex<Option<BrowseRequest>>>,
+    browse_wake: Option<SyncSender<()>>,
+    browse_rx: Receiver<BrowseCompletion>,
+    browse_worker: Option<JoinHandle<()>>,
     content_generation: u64,
     last_row_click: Option<(PathBuf, Instant)>,
     pub(crate) left_pane_width: Option<u16>,
@@ -107,12 +116,34 @@ struct BrowseResult {
     selected_surrounding: Option<usize>,
 }
 
+#[derive(Debug)]
+struct BrowseRequest {
+    generation: u64,
+    directory: PathBuf,
+}
+
+struct BrowseCompletion {
+    generation: u64,
+    result: Result<BrowseResult, String>,
+}
+
 #[derive(Debug, Clone)]
 struct IndexedDirectory {
     path: PathBuf,
     name_lower: String,
     depth: usize,
     is_repo: bool,
+}
+
+#[derive(Debug)]
+struct IndexRequest {
+    generation: u64,
+    roots: Vec<PathBuf>,
+}
+
+struct IndexCompletion {
+    generation: u64,
+    index: Vec<IndexedDirectory>,
 }
 
 #[derive(Debug)]
@@ -171,6 +202,20 @@ impl Explorer {
                 });
             }
         });
+        let index_pending = Arc::new(Mutex::new(None::<IndexRequest>));
+        let worker_pending = Arc::clone(&index_pending);
+        let (index_wake, wake_rx) = mpsc::sync_channel::<()>(1);
+        let (index_tx, index_rx) = mpsc::channel();
+        let index_worker = thread::spawn(move || {
+            run_index_worker(worker_pending, wake_rx, index_tx, index_directories);
+        });
+        let browse_pending = Arc::new(Mutex::new(None::<BrowseRequest>));
+        let worker_pending = Arc::clone(&browse_pending);
+        let (browse_wake, wake_rx) = mpsc::sync_channel::<()>(1);
+        let (browse_tx, browse_rx) = mpsc::channel();
+        let browse_worker = thread::spawn(move || {
+            run_browse_worker(worker_pending, wake_rx, browse_tx, load_directory_entries);
+        });
         let mut picker = Self {
             path_input: display_search_path(&directory),
             path_cursor: display_search_path(&directory).len(),
@@ -189,13 +234,22 @@ impl Explorer {
             preview_entries: Vec::new(),
             directory_index: Arc::new(Vec::new()),
             index_roots,
-            index_rx: None,
+            index_generation: 0,
+            index_loading: false,
+            index_pending,
+            index_wake: Some(index_wake),
+            index_rx,
+            index_worker: Some(index_worker),
             match_generation: 0,
             match_pending,
             match_wake: Some(match_wake),
             match_rx,
             match_worker: Some(match_worker),
-            browse_rx: None,
+            browse_generation: 0,
+            browse_pending,
+            browse_wake: Some(browse_wake),
+            browse_rx,
+            browse_worker: Some(browse_worker),
             content_generation: 0,
             last_row_click: None,
             left_pane_width: None,
@@ -398,7 +452,7 @@ impl Explorer {
     pub(super) fn reload(&mut self) {
         self.cancel_match_search();
         self.directory_index = Arc::new(Vec::new());
-        self.index_rx = None;
+        self.cancel_index();
         self.searching = false;
         self.reload_directory();
     }
@@ -411,12 +465,17 @@ impl Explorer {
         self.state.select(None);
         self.surroundings.clear();
         self.surroundings_state.select(None);
-        let directory = self.directory.clone();
-        let (sender, receiver) = mpsc::channel();
-        self.browse_rx = Some(receiver);
-        thread::spawn(move || {
-            let _ = sender.send(load_directory_entries(&directory));
-        });
+        self.browse_generation = self.browse_generation.wrapping_add(1);
+        let request = BrowseRequest {
+            generation: self.browse_generation,
+            directory: self.directory.clone(),
+        };
+        if let Ok(mut pending) = self.browse_pending.lock() {
+            *pending = Some(request);
+            if let Some(wake) = &self.browse_wake {
+                let _ = wake.try_send(());
+            }
+        }
     }
 
     pub(super) fn move_selection(&mut self, delta: isize) {
@@ -448,18 +507,8 @@ impl Explorer {
 
     pub(super) fn poll_index(&mut self) -> bool {
         let mut changed = false;
-        if let Some(index) = self
-            .index_rx
-            .as_ref()
-            .and_then(|receiver| receiver.try_recv().ok())
-        {
-            self.directory_index = Arc::new(index);
-            self.index_rx = None;
-            self.searching = false;
-            if self.editing_path {
-                self.refresh_matches();
-            }
-            changed = true;
+        while let Ok(completion) = self.index_rx.try_recv() {
+            changed |= self.apply_index_completion(completion);
         }
         while let Ok(result) = self.match_rx.try_recv() {
             if result.generation != self.match_generation {
@@ -468,27 +517,11 @@ impl Explorer {
             self.matches = result.matches;
             self.select_match(result.selected_path.as_deref());
             self.refresh_preview();
-            self.searching = self.index_rx.is_some();
+            self.searching = self.index_loading;
             changed = true;
         }
-        if let Some(result) = self
-            .browse_rx
-            .as_ref()
-            .and_then(|receiver| receiver.try_recv().ok())
-        {
-            self.invalidate_targets();
-            self.browse_rx = None;
-            self.loading = false;
-            match result {
-                Ok(result) => {
-                    self.entries = result.entries;
-                    self.surroundings = result.surroundings;
-                    self.surroundings_state.select(result.selected_surrounding);
-                    self.state.select((!self.entries.is_empty()).then_some(0));
-                }
-                Err(error) => self.error = Some(error),
-            }
-            changed = true;
+        while let Ok(completion) = self.browse_rx.try_recv() {
+            changed |= self.apply_browse_completion(completion);
         }
         changed
     }
@@ -498,7 +531,7 @@ impl Explorer {
         let index_roots = search_roots(&path);
         if self.index_roots != index_roots {
             self.directory_index = Arc::new(Vec::new());
-            self.index_rx = None;
+            self.cancel_index();
             self.index_roots = index_roots;
             self.searching = false;
         }
@@ -665,6 +698,37 @@ impl Explorer {
         self.content_generation = self.content_generation.wrapping_add(1);
     }
 
+    fn apply_index_completion(&mut self, completion: IndexCompletion) -> bool {
+        if completion.generation != self.index_generation {
+            return false;
+        }
+        self.directory_index = Arc::new(completion.index);
+        self.index_loading = false;
+        self.searching = false;
+        if self.editing_path {
+            self.refresh_matches();
+        }
+        true
+    }
+
+    fn apply_browse_completion(&mut self, completion: BrowseCompletion) -> bool {
+        if completion.generation != self.browse_generation {
+            return false;
+        }
+        self.invalidate_targets();
+        self.loading = false;
+        match completion.result {
+            Ok(result) => {
+                self.entries = result.entries;
+                self.surroundings = result.surroundings;
+                self.surroundings_state.select(result.selected_surrounding);
+                self.state.select((!self.entries.is_empty()).then_some(0));
+            }
+            Err(error) => self.error = Some(error),
+        }
+        true
+    }
+
     fn favorite_directory(&self) -> PathBuf {
         if self.directory.is_absolute() {
             self.directory.clone()
@@ -782,20 +846,23 @@ impl Explorer {
             self.start_match_search(query, selected_path);
             return;
         }
-        if !query.contains(['/', '\\'])
-            && self.directory_index.is_empty()
-            && self.index_rx.is_none()
-        {
+        if !query.contains(['/', '\\']) && self.directory_index.is_empty() && !self.index_loading {
             self.searching = true;
-            let (sender, receiver) = mpsc::channel();
-            self.index_rx = Some(receiver);
-            let roots = self.index_roots.clone();
-            thread::spawn(move || {
-                let _ = sender.send(index_directories(&roots));
-            });
+            self.index_loading = true;
+            self.index_generation = self.index_generation.wrapping_add(1);
+            let request = IndexRequest {
+                generation: self.index_generation,
+                roots: self.index_roots.clone(),
+            };
+            if let Ok(mut pending) = self.index_pending.lock() {
+                *pending = Some(request);
+                if let Some(wake) = &self.index_wake {
+                    let _ = wake.try_send(());
+                }
+            }
         }
         if self.directory_index.is_empty() {
-            self.searching = self.index_rx.is_some();
+            self.searching = self.index_loading;
             self.matches.clear();
             self.preview_entries.clear();
             self.match_state.select(None);
@@ -828,6 +895,14 @@ impl Explorer {
             *pending = None;
         }
         self.searching = false;
+    }
+
+    fn cancel_index(&mut self) {
+        self.index_generation = self.index_generation.wrapping_add(1);
+        self.index_loading = false;
+        if let Ok(mut pending) = self.index_pending.lock() {
+            *pending = None;
+        }
     }
 
     fn accept_completion(&mut self) {
@@ -896,12 +971,68 @@ impl Explorer {
         if let Some(worker) = self.match_worker.take() {
             let _ = worker.join();
         }
+        self.cancel_index();
+        self.index_wake.take();
+        self.index_worker.take();
+        self.browse_generation = self.browse_generation.wrapping_add(1);
+        self.loading = false;
+        if let Ok(mut pending) = self.browse_pending.lock() {
+            *pending = None;
+        }
+        self.browse_wake.take();
+        self.browse_worker.take();
     }
 }
 
 impl Drop for Explorer {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+fn run_browse_worker(
+    pending: Arc<Mutex<Option<BrowseRequest>>>,
+    wake_rx: Receiver<()>,
+    result_tx: Sender<BrowseCompletion>,
+    load: impl Fn(&Path) -> Result<BrowseResult, String>,
+) {
+    while wake_rx.recv().is_ok() {
+        let Some(request) = pending.lock().ok().and_then(|mut slot| slot.take()) else {
+            continue;
+        };
+        let result = load(&request.directory);
+        if result_tx
+            .send(BrowseCompletion {
+                generation: request.generation,
+                result,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn run_index_worker(
+    pending: Arc<Mutex<Option<IndexRequest>>>,
+    wake_rx: Receiver<()>,
+    result_tx: Sender<IndexCompletion>,
+    load: impl Fn(&[PathBuf]) -> Vec<IndexedDirectory>,
+) {
+    while wake_rx.recv().is_ok() {
+        let Some(request) = pending.lock().ok().and_then(|mut slot| slot.take()) else {
+            continue;
+        };
+        let index = load(&request.roots);
+        if result_tx
+            .send(IndexCompletion {
+                generation: request.generation,
+                index,
+            })
+            .is_err()
+        {
+            break;
+        }
     }
 }
 

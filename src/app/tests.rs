@@ -932,6 +932,27 @@ fn workspace_fetches_expire_after_five_minutes() {
 }
 
 #[test]
+fn recording_workspace_fetch_removes_expired_entries() {
+    let now = Instant::now();
+    let expired = PathBuf::from("expired");
+    let fresh = PathBuf::from("fresh");
+    let inserted = PathBuf::from("inserted");
+    let mut recent_fetches = HashMap::from([
+        (expired.clone(), now - WORKSPACE_FETCH_FRESHNESS),
+        (
+            fresh.clone(),
+            now - WORKSPACE_FETCH_FRESHNESS + Duration::from_secs(1),
+        ),
+    ]);
+
+    insert_recent_fetch(&mut recent_fetches, inserted.clone(), now);
+
+    assert!(!recent_fetches.contains_key(&expired));
+    assert!(recent_fetches.contains_key(&fresh));
+    assert_eq!(recent_fetches.get(&inserted), Some(&now));
+}
+
+#[test]
 fn control_j_commits_in_terminals_that_encode_control_enter_as_line_feed() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

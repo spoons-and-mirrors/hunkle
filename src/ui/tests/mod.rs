@@ -573,6 +573,14 @@ fn renders_every_primary_surface() {
             .iter()
             .all(|change| change.staged)
     );
+    let staged_row = app
+        .changes
+        .worktree_rows(app.repository().unwrap())
+        .iter()
+        .position(|row| row.label == "STAGED")
+        .unwrap();
+    app.changes.worktree_scroll = staged_row;
+    app.changes.worktree_scroll_to_selection = false;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let staged_screen: String = terminal
         .backend()
@@ -589,12 +597,6 @@ fn renders_every_primary_surface() {
             assert_eq!(cell.bg, trailing.bg);
         }
     }
-    let staged_row = app
-        .changes
-        .worktree_rows(app.repository().unwrap())
-        .iter()
-        .position(|row| row.label == "STAGED")
-        .unwrap();
     let staged_target = app.changes.worktree_row_target(staged_row);
     let staged_title = app
         .regions

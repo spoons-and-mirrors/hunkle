@@ -127,6 +127,7 @@ struct InventoryCompletion {
     repositories: Vec<LinkedWorktreeRepository>,
     discovered: Vec<PathBuf>,
     pruned: Vec<PathBuf>,
+    relevant: Vec<PathBuf>,
 }
 
 struct RepositoryStatsCompletion {
@@ -143,6 +144,7 @@ pub(crate) struct LinkedWorktreeCatalogPoll {
 pub(crate) struct LinkedWorktreeCatalog {
     snapshot: LinkedWorktreeCatalogSnapshot,
     candidates: Vec<LinkedWorktreeCandidate>,
+    relevant_common_dirs: Vec<PathBuf>,
     store: KnownRepositoryStore,
     generation: u64,
     sender: Sender<InventoryCompletion>,
@@ -158,6 +160,7 @@ impl LinkedWorktreeCatalog {
         Self {
             snapshot: LinkedWorktreeCatalogSnapshot::default(),
             candidates: Vec::new(),
+            relevant_common_dirs: Vec::new(),
             store: KnownRepositoryStore::new(store_path),
             generation: 0,
             sender,
@@ -226,8 +229,11 @@ impl LinkedWorktreeCatalog {
         common_dir: Option<&Path>,
         root: &Path,
     ) -> Result<(), String> {
-        self.store
-            .remember_and_save(common_dir.map(Path::to_owned), root.to_owned())
+        self.store.remember_and_save(
+            common_dir.map(Path::to_owned),
+            root.to_owned(),
+            &self.relevant_common_dirs,
+        )
     }
 
     pub(crate) fn observe_herdr(&mut self, observation: LinkedWorktreeObservation) -> bool {
@@ -249,12 +255,16 @@ impl LinkedWorktreeCatalog {
             let mut common_dirs = known;
             let mut seen = common_dirs.iter().cloned().collect::<HashSet<_>>();
             let mut candidate_ranks = HashMap::new();
+            let mut relevant = Vec::new();
             let mut discovered = Vec::new();
             for (rank, candidate) in candidates.into_iter().enumerate() {
                 let Ok(common_dir) = git::common_git_dir(&candidate.path) else {
                     continue;
                 };
-                candidate_ranks.entry(common_dir.clone()).or_insert(rank);
+                if !candidate_ranks.contains_key(&common_dir) {
+                    candidate_ranks.insert(common_dir.clone(), rank);
+                    relevant.push(common_dir.clone());
+                }
                 if seen.insert(common_dir.clone()) {
                     discovered.push(common_dir.clone());
                     common_dirs.push(common_dir);
@@ -297,6 +307,7 @@ impl LinkedWorktreeCatalog {
                 repositories,
                 discovered,
                 pruned,
+                relevant,
             });
         });
         if !recent.is_empty() {
@@ -315,14 +326,12 @@ impl LinkedWorktreeCatalog {
             }
             self.snapshot.loading = false;
             self.snapshot.repositories = completion.repositories;
-            if !completion.discovered.is_empty()
-                && let Err(error) = self.store.extend_and_save(completion.discovered)
-            {
-                result.notice = Some(error);
-            }
-            if !completion.pruned.is_empty()
-                && let Err(error) = self.store.prune_and_save(&completion.pruned)
-            {
+            self.relevant_common_dirs = completion.relevant;
+            if let Err(error) = self.store.reconcile_and_save(
+                completion.discovered,
+                &completion.pruned,
+                &self.relevant_common_dirs,
+            ) {
                 result.notice = Some(error);
             }
             result.changed = true;

@@ -8,6 +8,10 @@ fn shutdown_joins_the_match_worker_once() {
     explorer.shutdown();
     assert!(explorer.match_worker.is_none());
     assert!(explorer.match_wake.is_none());
+    assert!(explorer.index_worker.is_none());
+    assert!(explorer.index_wake.is_none());
+    assert!(explorer.browse_worker.is_none());
+    assert!(explorer.browse_wake.is_none());
 }
 
 fn wait_for_matches(picker: &mut Explorer) {
@@ -30,6 +34,162 @@ fn wait_for_browse(picker: &mut Explorer) {
         thread::sleep(std::time::Duration::from_millis(5));
     }
     panic!("Explorer browse did not finish");
+}
+
+#[test]
+fn browse_worker_keeps_only_the_latest_pending_request() {
+    let pending = Arc::new(Mutex::new(None::<BrowseRequest>));
+    let worker_pending = Arc::clone(&pending);
+    let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (continue_tx, continue_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        run_browse_worker(worker_pending, wake_rx, result_tx, |directory| {
+            started_tx.send(directory.to_path_buf()).unwrap();
+            continue_rx.recv().unwrap();
+            Ok(BrowseResult {
+                entries: Vec::new(),
+                surroundings: Vec::new(),
+                selected_surrounding: None,
+            })
+        });
+    });
+
+    *pending.lock().unwrap() = Some(BrowseRequest {
+        generation: 1,
+        directory: PathBuf::from("first"),
+    });
+    wake_tx.try_send(()).unwrap();
+    assert_eq!(started_rx.recv().unwrap(), Path::new("first"));
+
+    *pending.lock().unwrap() = Some(BrowseRequest {
+        generation: 2,
+        directory: PathBuf::from("second"),
+    });
+    wake_tx.try_send(()).unwrap();
+    *pending.lock().unwrap() = Some(BrowseRequest {
+        generation: 3,
+        directory: PathBuf::from("latest"),
+    });
+    assert!(wake_tx.try_send(()).is_err());
+
+    continue_tx.send(()).unwrap();
+    assert_eq!(result_rx.recv().unwrap().generation, 1);
+    assert_eq!(started_rx.recv().unwrap(), Path::new("latest"));
+    continue_tx.send(()).unwrap();
+    assert_eq!(result_rx.recv().unwrap().generation, 3);
+
+    drop(wake_tx);
+    worker.join().unwrap();
+}
+
+#[test]
+fn index_worker_keeps_only_the_latest_pending_request() {
+    let pending = Arc::new(Mutex::new(None::<IndexRequest>));
+    let worker_pending = Arc::clone(&pending);
+    let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (continue_tx, continue_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        run_index_worker(worker_pending, wake_rx, result_tx, |roots| {
+            let path = roots[0].clone();
+            started_tx.send(path.clone()).unwrap();
+            continue_rx.recv().unwrap();
+            vec![IndexedDirectory {
+                name_lower: path.to_string_lossy().into_owned(),
+                depth: 1,
+                is_repo: false,
+                path,
+            }]
+        });
+    });
+
+    *pending.lock().unwrap() = Some(IndexRequest {
+        generation: 1,
+        roots: vec![PathBuf::from("first")],
+    });
+    wake_tx.try_send(()).unwrap();
+    assert_eq!(started_rx.recv().unwrap(), Path::new("first"));
+
+    *pending.lock().unwrap() = Some(IndexRequest {
+        generation: 2,
+        roots: vec![PathBuf::from("second")],
+    });
+    wake_tx.try_send(()).unwrap();
+    *pending.lock().unwrap() = Some(IndexRequest {
+        generation: 3,
+        roots: vec![PathBuf::from("latest")],
+    });
+    assert!(wake_tx.try_send(()).is_err());
+
+    continue_tx.send(()).unwrap();
+    assert_eq!(result_rx.recv().unwrap().generation, 1);
+    assert_eq!(started_rx.recv().unwrap(), Path::new("latest"));
+    continue_tx.send(()).unwrap();
+    assert_eq!(result_rx.recv().unwrap().generation, 3);
+
+    drop(wake_tx);
+    worker.join().unwrap();
+}
+
+#[test]
+fn stale_browse_and_index_completions_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut explorer = Explorer::new(directory.path().to_path_buf());
+
+    explorer.loading = true;
+    let browse_generation = explorer.browse_generation;
+    assert!(!explorer.apply_browse_completion(BrowseCompletion {
+        generation: browse_generation.wrapping_sub(1),
+        result: Err("stale browse".to_owned()),
+    }));
+    assert!(explorer.loading);
+    assert!(explorer.error.is_none());
+
+    let expected_entry = PickerEntry {
+        label: "current".to_owned(),
+        path: directory.path().join("current"),
+        action: PickerAction::Navigate,
+        is_repo: false,
+    };
+    assert!(explorer.apply_browse_completion(BrowseCompletion {
+        generation: browse_generation,
+        result: Ok(BrowseResult {
+            entries: vec![expected_entry.clone()],
+            surroundings: Vec::new(),
+            selected_surrounding: None,
+        }),
+    }));
+    assert!(!explorer.loading);
+    assert_eq!(explorer.entries[0].path, expected_entry.path);
+
+    explorer.index_loading = true;
+    let index_generation = explorer.index_generation;
+    assert!(!explorer.apply_index_completion(IndexCompletion {
+        generation: index_generation.wrapping_sub(1),
+        index: vec![IndexedDirectory {
+            path: PathBuf::from("stale"),
+            name_lower: "stale".to_owned(),
+            depth: 1,
+            is_repo: false,
+        }],
+    }));
+    assert!(explorer.index_loading);
+    assert!(explorer.directory_index.is_empty());
+
+    assert!(explorer.apply_index_completion(IndexCompletion {
+        generation: index_generation,
+        index: vec![IndexedDirectory {
+            path: PathBuf::from("current"),
+            name_lower: "current".to_owned(),
+            depth: 1,
+            is_repo: false,
+        }],
+    }));
+    assert!(!explorer.index_loading);
+    assert_eq!(explorer.directory_index[0].path, Path::new("current"));
 }
 
 #[test]
@@ -215,13 +375,14 @@ fn invalidates_fuzzy_index_when_roaming_to_another_root() {
         depth: 1,
         is_repo: false,
     }]);
-    let (_, receiver) = mpsc::channel();
-    picker.index_rx = Some(receiver);
+    picker.index_loading = true;
+    let generation = picker.index_generation;
 
     picker.navigate(second);
 
     assert!(picker.directory_index.is_empty());
-    assert!(picker.index_rx.is_none());
+    assert!(!picker.index_loading);
+    assert_ne!(picker.index_generation, generation);
 }
 
 #[test]
@@ -234,13 +395,14 @@ fn explicit_reload_invalidates_the_fuzzy_index_for_the_same_root() {
         depth: 1,
         is_repo: false,
     }]);
-    let (_, receiver) = mpsc::channel();
-    picker.index_rx = Some(receiver);
+    picker.index_loading = true;
+    let generation = picker.index_generation;
 
     picker.reload();
 
     assert!(picker.directory_index.is_empty());
-    assert!(picker.index_rx.is_none());
+    assert!(!picker.index_loading);
+    assert_ne!(picker.index_generation, generation);
 }
 
 #[test]

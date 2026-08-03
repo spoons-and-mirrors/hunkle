@@ -36,6 +36,7 @@ const AGENT_MESSAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
 const LAYOUT_INDEX_VERSION: u8 = 1;
+const MAX_AGENT_LAYOUTS: usize = 64;
 pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub(super) fn send_command_below(command: String) -> Result<String, String> {
@@ -169,6 +170,13 @@ struct AgentLayoutIndex {
 struct AgentLayoutRecord {
     key: AgentTimingKey,
     layout: client::AgentLayout,
+    #[serde(default)]
+    last_used_ms: u64,
+}
+
+struct SavedAgentLayout {
+    layout: client::AgentLayout,
+    last_used_ms: u64,
 }
 
 impl AgentTiming {
@@ -372,7 +380,7 @@ pub(crate) struct HerdrSession {
     agent_timing_persistence: Option<timings::Persistence>,
     agent_timing_clear_generation: u64,
     agent_timing_persistence_notice: Option<String>,
-    agent_layouts: HashMap<AgentTimingKey, client::AgentLayout>,
+    agent_layouts: HashMap<AgentTimingKey, SavedAgentLayout>,
     agent_layouts_path: Option<PathBuf>,
     displayed_agent_key: Option<AgentTimingKey>,
     stash: stash::AgentStashStore,
@@ -553,7 +561,7 @@ impl HerdrSession {
                                 pane_locations,
                             } = *result;
                             for saved in self.agent_layouts.values_mut() {
-                                saved.remap_known(&pane_locations);
+                                saved.layout.remap_known(&pane_locations);
                             }
                             for agent in &mut self.agents {
                                 let Some(location) = pane_locations.get(&agent.pane_id) else {
@@ -567,11 +575,25 @@ impl HerdrSession {
                                     agent.workspace_id = selected_workspace_id.clone();
                                 }
                             }
+                            let last_used_ms = unix_time_ms();
                             if let (Some(key), Some(layout)) = (outgoing_key, parked) {
-                                self.agent_layouts.insert(key, layout);
+                                self.agent_layouts.insert(
+                                    key,
+                                    SavedAgentLayout {
+                                        layout,
+                                        last_used_ms,
+                                    },
+                                );
                             }
-                            self.agent_layouts.insert(selected_key.clone(), displayed);
+                            self.agent_layouts.insert(
+                                selected_key.clone(),
+                                SavedAgentLayout {
+                                    layout: displayed,
+                                    last_used_ms,
+                                },
+                            );
                             self.displayed_agent_key = Some(selected_key);
+                            self.prune_agent_layout_history();
                             if let Some(path) = self.agent_layouts_path.as_deref()
                                 && let Err(error) = save_agent_layouts(path, &self.agent_layouts)
                             {
@@ -644,7 +666,10 @@ impl HerdrSession {
                 }
                 Completion::LatestUserMessage { identity, result } => {
                     self.latest_user_message_requests.remove(&identity);
-                    if let Ok(message) = result {
+                    // Snapshot pruning removes this marker to invalidate departed agents' requests.
+                    if self.latest_user_message_refreshes.contains_key(&identity)
+                        && let Ok(message) = result
+                    {
                         self.latest_user_messages.insert(identity, message);
                     }
                 }
@@ -685,6 +710,19 @@ impl HerdrSession {
                 .filter(|agent| self.host_workspace_id.as_deref() == Some(&agent.workspace_id))
                 .collect()
         };
+        let active_identities = agents
+            .iter()
+            .filter_map(|agent| match agent.runtime.session_timing_key.as_ref() {
+                Some(AgentTimingKey::Session(identity)) => Some(identity.clone()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        self.latest_user_messages
+            .retain(|identity, _| active_identities.contains(identity));
+        self.latest_user_message_refreshes
+            .retain(|identity, _| active_identities.contains(identity));
+        self.latest_user_message_statuses
+            .retain(|identity, _| active_identities.contains(identity));
         timings::update_snapshot(&mut self.agent_timings, &agents, now_ms);
         if let Some(persistence) = self.agent_timing_persistence.as_ref()
             && let Err(error) = persistence.sync(
@@ -740,6 +778,7 @@ impl HerdrSession {
                 })
                 .map(|agent| agent.runtime.timing_key.clone());
         }
+        self.prune_agent_layout_history();
         self.agent_scroll = self.agent_scroll.min(self.agents.len().saturating_sub(1));
     }
 
@@ -1126,7 +1165,10 @@ impl HerdrSession {
             host_workspace_id: host_workspace_id.clone(),
             host_tab_id: host_tab_id.clone(),
             allow_cross_workspace: self.cross_workspace_agents,
-            saved_layout: self.agent_layouts.get(&agent.runtime.timing_key).cloned(),
+            saved_layout: self
+                .agent_layouts
+                .get(&agent.runtime.timing_key)
+                .map(|saved| saved.layout.clone()),
         };
         let selected_key = agent.runtime.timing_key.clone();
         let outgoing_key = self.displayed_agent_key.clone().or_else(|| {
@@ -1155,6 +1197,16 @@ impl HerdrSession {
             });
         });
         Ok(())
+    }
+
+    fn prune_agent_layout_history(&mut self) {
+        let relevant = self
+            .agents
+            .iter()
+            .map(|agent| agent.runtime.timing_key.clone())
+            .chain(self.displayed_agent_key.iter().cloned())
+            .collect::<HashSet<_>>();
+        prune_agent_layouts(&mut self.agent_layouts, relevant.iter());
     }
 
     fn agent_is_in_host_tab_by_agent(&self, agent: &AgentPane) -> bool {
@@ -1451,33 +1503,41 @@ fn agent_layouts_path(config_dir: &Path, host_pane_id: &str) -> PathBuf {
     config_dir.join("agent-layouts").join(format!("{key}.json"))
 }
 
-fn load_agent_layouts(
-    path: &Path,
-) -> std::io::Result<HashMap<AgentTimingKey, client::AgentLayout>> {
+fn load_agent_layouts(path: &Path) -> std::io::Result<HashMap<AgentTimingKey, SavedAgentLayout>> {
     let index: AgentLayoutIndex =
         serde_json::from_slice(&fs::read(path)?).map_err(std::io::Error::other)?;
     if index.version != LAYOUT_INDEX_VERSION {
         return Ok(HashMap::new());
     }
-    Ok(index
+    let layouts = index
         .layouts
         .into_iter()
-        .map(|record| (record.key, record.layout))
-        .collect())
+        .map(|record| {
+            (
+                record.key,
+                SavedAgentLayout {
+                    layout: record.layout,
+                    last_used_ms: record.last_used_ms,
+                },
+            )
+        })
+        .collect();
+    Ok(layouts)
 }
 
 fn save_agent_layouts(
     path: &Path,
-    layouts: &HashMap<AgentTimingKey, client::AgentLayout>,
+    layouts: &HashMap<AgentTimingKey, SavedAgentLayout>,
 ) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let mut records = layouts
         .iter()
-        .map(|(key, layout)| AgentLayoutRecord {
+        .map(|(key, saved)| AgentLayoutRecord {
             key: key.clone(),
-            layout: layout.clone(),
+            layout: saved.layout.clone(),
+            last_used_ms: saved.last_used_ms,
         })
         .collect::<Vec<_>>();
     records.sort_by_key(|record| record.key.stable_id());
@@ -1487,6 +1547,27 @@ fn save_agent_layouts(
     })
     .map_err(std::io::Error::other)?;
     atomic_write(path, &bytes)
+}
+
+fn prune_agent_layouts<'a>(
+    layouts: &mut HashMap<AgentTimingKey, SavedAgentLayout>,
+    relevant: impl IntoIterator<Item = &'a AgentTimingKey>,
+) {
+    if layouts.len() <= MAX_AGENT_LAYOUTS {
+        return;
+    }
+    let relevant = relevant.into_iter().collect::<HashSet<_>>();
+    let relevant_count = layouts.keys().filter(|key| relevant.contains(key)).count();
+    let target = MAX_AGENT_LAYOUTS.max(relevant_count);
+    let mut candidates = layouts
+        .iter()
+        .filter(|(key, _)| !relevant.contains(key))
+        .map(|(key, saved)| (saved.last_used_ms, key.stable_id(), key.clone()))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    for (_, _, key) in candidates.into_iter().take(layouts.len() - target) {
+        layouts.remove(&key);
+    }
 }
 
 fn populate_workspace_branches(workspaces: &mut [HerdrWorkspace]) {
@@ -1527,6 +1608,130 @@ fn branch_from_head(path: &Path) -> Option<String> {
         .strip_prefix("ref: refs/heads/")
         .filter(|branch| !branch.is_empty())
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod latest_user_message_cache_tests {
+    use super::*;
+
+    fn identity(value: &str) -> AgentSessionIdentity {
+        AgentSessionIdentity {
+            source: "herdr:opencode".to_owned(),
+            agent: "opencode".to_owned(),
+            kind: "id".to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    fn agent(pane_id: &str, identity: AgentSessionIdentity) -> AgentPane {
+        AgentPane {
+            workspace_id: "w1".to_owned(),
+            tab_id: "w1:t1".to_owned(),
+            pane_id: pane_id.to_owned(),
+            cwd: None,
+            destination_cwd: None,
+            focused: false,
+            runtime: AgentRuntime {
+                name: "opencode".to_owned(),
+                session_name: None,
+                status: AgentStatus::Idle,
+                timing_key: AgentTimingKey::Pane(format!("opencode@{pane_id}")),
+                session_timing_key: Some(AgentTimingKey::Session(identity)),
+                state_change_seq: 1,
+            },
+        }
+    }
+
+    fn message(text: &str) -> Vec<AgentUserMessage> {
+        vec![AgentUserMessage {
+            text: text.to_owned(),
+            requests: Vec::new(),
+        }]
+    }
+
+    #[test]
+    fn authoritative_snapshot_prunes_departed_agent_message_state() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.cross_workspace_agents = true;
+        let retained = identity("ses_retained");
+        let departed = identity("ses_departed");
+        let retained_agent = agent("w1:p1", retained.clone());
+        let departed_agent = agent("w1:p2", departed.clone());
+        session
+            .apply_agent_snapshot_at(vec![retained_agent.clone(), departed_agent], unix_time_ms());
+        for identity in [&retained, &departed] {
+            session
+                .latest_user_messages
+                .insert(identity.clone(), message(&identity.value));
+            session.latest_user_message_refreshes.insert(
+                identity.clone(),
+                Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
+            );
+            session
+                .latest_user_message_statuses
+                .insert(identity.clone(), AgentStatus::Idle);
+        }
+
+        session.apply_agent_snapshot_at(vec![retained_agent], unix_time_ms());
+
+        assert_eq!(
+            session.latest_user_messages.keys().collect::<Vec<_>>(),
+            vec![&retained]
+        );
+        assert_eq!(
+            session
+                .latest_user_message_refreshes
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![&retained]
+        );
+        assert_eq!(
+            session
+                .latest_user_message_statuses
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![&retained]
+        );
+    }
+
+    #[test]
+    fn departed_agent_completion_does_not_restore_message_state() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.cross_workspace_agents = true;
+        session.next_refresh = Instant::now() + Duration::from_secs(60);
+        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
+        let departed = identity("ses_departed");
+        session.apply_agent_snapshot_at(vec![agent("w1:p1", departed.clone())], unix_time_ms());
+        session
+            .latest_user_message_requests
+            .insert(departed.clone());
+        session.latest_user_message_refreshes.insert(
+            departed.clone(),
+            Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
+        );
+        session
+            .latest_user_message_statuses
+            .insert(departed.clone(), AgentStatus::Idle);
+
+        session.apply_agent_snapshot_at(Vec::new(), unix_time_ms());
+        session
+            .sender
+            .send(Completion::LatestUserMessage {
+                identity: departed.clone(),
+                result: Ok(message("stale")),
+            })
+            .unwrap();
+        session.poll();
+
+        assert!(!session.latest_user_messages.contains_key(&departed));
+        assert!(!session.latest_user_message_requests.contains(&departed));
+        assert!(
+            !session
+                .latest_user_message_refreshes
+                .contains_key(&departed)
+        );
+        assert!(!session.latest_user_message_statuses.contains_key(&departed));
+    }
 }
 
 #[cfg(test)]
@@ -1600,6 +1805,24 @@ mod stash_flow_tests {
 mod layout_tests {
     use super::*;
 
+    fn layout(pane_id: &str) -> client::AgentLayout {
+        serde_json::from_value(serde_json::json!({
+            "root": { "Pane": pane_id }
+        }))
+        .unwrap()
+    }
+
+    fn layout_key(index: usize) -> AgentTimingKey {
+        AgentTimingKey::Terminal(format!("terminal-{index:03}"))
+    }
+
+    fn saved_layout(index: usize) -> SavedAgentLayout {
+        SavedAgentLayout {
+            layout: layout(&format!("w1:p{index}")),
+            last_used_ms: index as u64,
+        }
+    }
+
     #[test]
     fn saves_agent_layouts_per_hunkle_pane() {
         let directory = tempfile::tempdir().unwrap();
@@ -1616,11 +1839,19 @@ mod layout_tests {
             }
         }))
         .unwrap();
-        let layouts = HashMap::from([(key.clone(), layout.clone())]);
+        let layouts = HashMap::from([(
+            key.clone(),
+            SavedAgentLayout {
+                layout: layout.clone(),
+                last_used_ms: 42,
+            },
+        )]);
 
         save_agent_layouts(&path, &layouts).unwrap();
 
-        assert_eq!(load_agent_layouts(&path).unwrap().get(&key), Some(&layout));
+        let loaded = load_agent_layouts(&path).unwrap();
+        assert_eq!(loaded.get(&key).map(|saved| &saved.layout), Some(&layout));
+        assert_eq!(loaded.get(&key).map(|saved| saved.last_used_ms), Some(42));
         assert_eq!(
             path,
             directory
@@ -1628,6 +1859,101 @@ mod layout_tests {
                 .join("agent-layouts")
                 .join("77313a7037.json")
         );
+    }
+
+    #[test]
+    fn first_snapshot_prunes_legacy_layouts_without_discarding_an_active_agent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-layouts.json");
+        let layouts = (0..=MAX_AGENT_LAYOUTS)
+            .map(|index| {
+                serde_json::json!({
+                    "key": layout_key(index),
+                    "layout": saved_layout(index).layout,
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": LAYOUT_INDEX_VERSION,
+                "layouts": layouts,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_agent_layouts(&path).unwrap();
+        let active_key = layout_key(0);
+
+        assert_eq!(loaded.len(), MAX_AGENT_LAYOUTS + 1);
+        assert!(loaded.contains_key(&active_key));
+
+        let mut session = HerdrSession::new(true, None, None);
+        session.agent_layouts = loaded;
+        session.apply_agent_snapshot_at(
+            vec![AgentPane {
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+                pane_id: "w1:p2".to_owned(),
+                cwd: None,
+                destination_cwd: None,
+                focused: false,
+                runtime: AgentRuntime {
+                    name: "opencode".to_owned(),
+                    session_name: None,
+                    status: AgentStatus::Idle,
+                    timing_key: active_key.clone(),
+                    session_timing_key: None,
+                    state_change_seq: 1,
+                },
+            }],
+            unix_time_ms(),
+        );
+
+        assert_eq!(session.agent_layouts.len(), MAX_AGENT_LAYOUTS);
+        assert!(session.agent_layouts.contains_key(&active_key));
+        assert!(!session.agent_layouts.contains_key(&layout_key(1)));
+        assert!(
+            session
+                .agent_layouts
+                .contains_key(&layout_key(MAX_AGENT_LAYOUTS))
+        );
+    }
+
+    #[test]
+    fn pruning_preserves_active_and_displayed_agent_layouts() {
+        let mut session = HerdrSession::new(true, None, None);
+        let active_key = layout_key(0);
+        let displayed_key = layout_key(1);
+        session.agent_layouts = (0..MAX_AGENT_LAYOUTS + 2)
+            .map(|index| (layout_key(index), saved_layout(index)))
+            .collect();
+        session.agents.push(AgentPane {
+            workspace_id: "w1".to_owned(),
+            tab_id: "w1:t2".to_owned(),
+            pane_id: "w1:p2".to_owned(),
+            cwd: None,
+            destination_cwd: None,
+            focused: false,
+            runtime: AgentRuntime {
+                name: "opencode".to_owned(),
+                session_name: None,
+                status: AgentStatus::Idle,
+                timing_key: active_key.clone(),
+                session_timing_key: None,
+                state_change_seq: 1,
+            },
+        });
+        session.displayed_agent_key = Some(displayed_key.clone());
+
+        session.prune_agent_layout_history();
+
+        assert_eq!(session.agent_layouts.len(), MAX_AGENT_LAYOUTS);
+        assert!(session.agent_layouts.contains_key(&active_key));
+        assert!(session.agent_layouts.contains_key(&displayed_key));
+        assert!(!session.agent_layouts.contains_key(&layout_key(2)));
+        assert!(!session.agent_layouts.contains_key(&layout_key(3)));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -13,6 +13,9 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use serde_json::Value;
 
 use crate::filesystem::atomic_write;
+
+pub(super) const MAX_KNOWN_REPOSITORIES: usize = 256;
+pub(super) const MAX_RECENT_REPOSITORIES: usize = 64;
 
 pub(super) struct KnownRepositoryStore {
     path: Option<PathBuf>,
@@ -52,18 +55,21 @@ impl KnownRepositoryStore {
                 None,
             ),
         };
-        Self {
+        let mut store = Self {
             path,
             repositories: stored.repositories,
             recent: stored.recent,
             load_error,
-        }
+        };
+        store.enforce_limits(&[]);
+        store
     }
 
     pub(super) fn remember_and_save(
         &mut self,
         common_dir: Option<PathBuf>,
         root: PathBuf,
+        relevant: &[PathBuf],
     ) -> Result<(), String> {
         let previous_repositories = self.repositories.clone();
         let previous_recent = self.recent.clone();
@@ -87,6 +93,7 @@ impl KnownRepositoryStore {
                 stats,
             },
         );
+        self.enforce_limits(relevant);
         if self.repositories == previous_repositories && self.recent == previous_recent {
             return Ok(());
         }
@@ -103,8 +110,6 @@ impl KnownRepositoryStore {
             return false;
         }
         self.repositories.push(common_dir);
-        self.repositories
-            .sort_by_cached_key(|path| path.to_string_lossy().to_lowercase());
         true
     }
 
@@ -114,30 +119,24 @@ impl KnownRepositoryStore {
         }
     }
 
-    pub(super) fn extend_and_save(&mut self, repositories: Vec<PathBuf>) -> Result<(), String> {
-        let previous = self.repositories.clone();
-        self.extend(repositories);
-        if self.repositories == previous {
-            return Ok(());
-        }
-        if let Err(error) = self.save() {
-            self.repositories = previous;
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    pub(super) fn prune_and_save(&mut self, repositories: &[PathBuf]) -> Result<(), String> {
+    pub(super) fn reconcile_and_save(
+        &mut self,
+        discovered: Vec<PathBuf>,
+        pruned: &[PathBuf],
+        relevant: &[PathBuf],
+    ) -> Result<(), String> {
         let previous_repositories = self.repositories.clone();
         let previous_recent = self.recent.clone();
+        self.extend(discovered);
         self.repositories
-            .retain(|path| !repositories.iter().any(|pruned| pruned == path));
+            .retain(|path| !pruned.iter().any(|pruned| pruned == path));
         self.recent.retain(|recent| {
             recent
                 .common_dir
                 .as_ref()
-                .is_none_or(|common_dir| !repositories.iter().any(|pruned| pruned == common_dir))
+                .is_none_or(|common_dir| !pruned.iter().any(|pruned| pruned == common_dir))
         });
+        self.enforce_limits(relevant);
         if self.repositories == previous_repositories && self.recent == previous_recent {
             return Ok(());
         }
@@ -147,6 +146,51 @@ impl KnownRepositoryStore {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn enforce_limits(&mut self, relevant: &[PathBuf]) {
+        let mut seen_common_dirs = HashSet::new();
+        let mut seen_local_roots = HashSet::new();
+        self.recent
+            .retain(|recent| match recent.common_dir.as_ref() {
+                Some(common_dir) => seen_common_dirs.insert(common_dir.clone()),
+                None => seen_local_roots.insert(recent.root.clone()),
+            });
+        self.recent.truncate(MAX_RECENT_REPOSITORIES);
+
+        let mut seen = HashSet::new();
+        self.repositories
+            .retain(|repository| seen.insert(repository.clone()));
+        if self.repositories.len() <= MAX_KNOWN_REPOSITORIES {
+            return;
+        }
+
+        let protected = relevant
+            .iter()
+            .chain(
+                self.recent
+                    .iter()
+                    .filter_map(|recent| recent.common_dir.as_ref()),
+            )
+            .collect::<HashSet<_>>();
+        let protected_count = self
+            .repositories
+            .iter()
+            .filter(|repository| protected.contains(repository))
+            .count();
+        let remove_count = self
+            .repositories
+            .len()
+            .saturating_sub(MAX_KNOWN_REPOSITORIES.max(protected_count));
+        let removed = self
+            .repositories
+            .iter()
+            .filter(|repository| !protected.contains(repository))
+            .take(remove_count)
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.repositories
+            .retain(|repository| !removed.contains(repository));
     }
 
     pub(super) fn update_stats_and_save(

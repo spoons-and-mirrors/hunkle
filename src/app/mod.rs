@@ -954,7 +954,7 @@ impl App {
                 WorkerOutcome::Fetch(result) => match result {
                     Ok(output) if output.success => {
                         if let Some(root) = self.session.data().map(|repo| repo.root.clone()) {
-                            self.recent_fetches.insert(root, Instant::now());
+                            insert_recent_fetch(&mut self.recent_fetches, root, Instant::now());
                         }
                         self.notice = Some("Fetched remotes".to_owned());
                     }
@@ -2331,6 +2331,15 @@ fn fetch_is_fresh(fetched_at: Option<&Instant>, now: Instant) -> bool {
     fetched_at.is_some_and(|fetched_at| {
         now.saturating_duration_since(*fetched_at) < WORKSPACE_FETCH_FRESHNESS
     })
+}
+
+fn insert_recent_fetch(
+    recent_fetches: &mut HashMap<PathBuf, Instant>,
+    root: PathBuf,
+    now: Instant,
+) {
+    recent_fetches.retain(|_, fetched_at| fetch_is_fresh(Some(fetched_at), now));
+    recent_fetches.insert(root, now);
 }
 
 fn first_error(stderr: &str, fallback: &str) -> String {

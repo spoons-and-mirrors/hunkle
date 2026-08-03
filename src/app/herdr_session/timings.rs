@@ -1,9 +1,12 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File, OpenOptions},
     io,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    sync::{
+        Arc, Condvar, Mutex,
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -16,6 +19,7 @@ use super::{AgentPane, AgentTiming, AgentTimingKey};
 
 const INDEX_VERSION: u8 = 2;
 const MAX_AGENT_TIMINGS: usize = 512;
+const MAX_PENDING_REQUESTS: usize = 3;
 
 #[derive(Default, Deserialize, Serialize)]
 struct TimingIndex {
@@ -39,10 +43,22 @@ struct TimingRecord {
 }
 
 pub(super) struct Persistence {
-    sender: Option<Sender<Request>>,
+    requests: Arc<RequestMailbox>,
     receiver: Receiver<Completion>,
     worker: Option<thread::JoinHandle<()>>,
     disconnected: bool,
+}
+
+#[derive(Default)]
+struct RequestMailbox {
+    state: Mutex<PendingRequests>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct PendingRequests {
+    queue: VecDeque<Request>,
+    closed: bool,
 }
 
 struct Request {
@@ -79,16 +95,46 @@ struct PersistedTimings {
     cleared_at_ms: u64,
 }
 
+impl PendingRequests {
+    fn enqueue(&mut self, request: Request) -> Option<Request> {
+        if matches!(request.operation, Operation::Reset { .. }) {
+            // A clear makes all queued work from older generations irrelevant, but each clear
+            // remains an ordered barrier so its watermark cannot be skipped.
+            self.queue
+                .retain(|pending| matches!(pending.operation, Operation::Reset { .. }));
+        } else if let Some(position) = self.queue.iter().rposition(|pending| {
+            pending.clear_generation == request.clear_generation
+                && matches!(
+                    (&pending.operation, &request.operation),
+                    (Operation::Snapshot { .. }, Operation::Snapshot { .. })
+                        | (Operation::Status { .. }, Operation::Status { .. })
+                )
+        }) {
+            // Submitted state is complete, so the newer operation of the same kind includes the
+            // local effects of the one it replaces. Moving it to the back preserves its order
+            // relative to the other operation kind.
+            self.queue.remove(position);
+        }
+
+        if self.queue.len() >= MAX_PENDING_REQUESTS {
+            return Some(request);
+        }
+        self.queue.push_back(request);
+        None
+    }
+}
+
 impl Persistence {
     pub(super) fn new(path: PathBuf) -> Self {
-        let (sender, requests) = mpsc::channel();
+        let requests = Arc::new(RequestMailbox::default());
         let (completions, receiver) = mpsc::channel();
+        let worker_requests = Arc::clone(&requests);
         let worker = thread::Builder::new()
             .name("agent-timing-persistence".to_owned())
-            .spawn(move || persistence_loop(path, requests, completions))
+            .spawn(move || persistence_loop(path, &worker_requests, completions))
             .expect("agent timing persistence worker should start");
         Self {
-            sender: Some(sender),
+            requests,
             receiver,
             worker: Some(worker),
             disconnected: false,
@@ -178,7 +224,14 @@ impl Persistence {
     }
 
     pub(super) fn shutdown(&mut self) {
-        self.sender.take();
+        let mut state = self
+            .requests
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.closed = true;
+        drop(state);
+        self.requests.ready.notify_all();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -190,25 +243,39 @@ impl Persistence {
         clear_generation: u64,
         operation: Operation,
     ) -> io::Result<()> {
-        self.sender
-            .as_ref()
-            .ok_or_else(|| {
-                io::Error::new(
+        let mut request = Request {
+            submitted: local.clone(),
+            clear_generation,
+            operation,
+        };
+        let mut state = self
+            .requests
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if state.closed {
+                return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "agent timing persistence worker stopped",
-                )
-            })?
-            .send(Request {
-                submitted: local.clone(),
-                clear_generation,
-                operation,
-            })
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "agent timing persistence worker stopped",
-                )
-            })
+                ));
+            }
+            match state.enqueue(request) {
+                None => {
+                    drop(state);
+                    self.requests.ready.notify_one();
+                    return Ok(());
+                }
+                Some(returned) => {
+                    request = returned;
+                    state = self
+                        .requests
+                        .ready
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            }
+        }
     }
 }
 
@@ -218,28 +285,27 @@ impl Drop for Persistence {
     }
 }
 
-fn persistence_loop(path: PathBuf, requests: Receiver<Request>, completions: Sender<Completion>) {
-    let mut pending = None;
+fn persistence_loop(path: PathBuf, requests: &RequestMailbox, completions: Sender<Completion>) {
     loop {
-        let mut request = match pending.take().map(Ok).unwrap_or_else(|| requests.recv()) {
-            Ok(request) => request,
-            Err(_) => return,
-        };
-        if matches!(request.operation, Operation::Snapshot { .. }) {
+        let request = {
+            let mut state = requests
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             loop {
-                match requests.try_recv() {
-                    Ok(next) if matches!(next.operation, Operation::Snapshot { .. }) => {
-                        request = next;
-                    }
-                    Ok(next) => {
-                        pending = Some(next);
-                        break;
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
+                if let Some(request) = state.queue.pop_front() {
+                    requests.ready.notify_all();
+                    break request;
                 }
+                if state.closed {
+                    return;
+                }
+                state = requests
+                    .ready
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
-        }
+        };
 
         let submitted = request.submitted.clone();
         let clear_generation = request.clear_generation;
@@ -705,6 +771,154 @@ mod tests {
         persistence.shutdown();
 
         assert!(load(&path).unwrap().timings.contains_key(&key));
+    }
+
+    fn status_request(index: u64, generation: u64) -> Request {
+        let key = AgentTimingKey::Terminal("agent".to_owned());
+        Request {
+            submitted: HashMap::from([(
+                key.clone(),
+                AgentTiming::new(AgentStatus::Working, index, index),
+            )]),
+            clear_generation: generation,
+            operation: Operation::Status {
+                key,
+                status: AgentStatus::Working,
+                state_change_seq: index,
+                now_ms: index,
+            },
+        }
+    }
+
+    fn snapshot_request(index: u64, generation: u64) -> Request {
+        Request {
+            submitted: status_request(index, generation).submitted,
+            clear_generation: generation,
+            operation: Operation::Snapshot {
+                agents: Vec::new(),
+                now_ms: index,
+            },
+        }
+    }
+
+    fn reset_request(index: u64, generation: u64) -> Request {
+        Request {
+            submitted: HashMap::new(),
+            clear_generation: generation,
+            operation: Operation::Reset {
+                agents: Vec::new(),
+                now_ms: index,
+            },
+        }
+    }
+
+    #[test]
+    fn pending_timing_work_coalesces_status_and_snapshot_bursts() {
+        let mut pending = PendingRequests::default();
+
+        for index in 1..=100 {
+            assert!(pending.enqueue(status_request(index, 0)).is_none());
+            assert!(pending.enqueue(snapshot_request(index, 0)).is_none());
+            assert!(pending.queue.len() <= 2);
+        }
+
+        assert_eq!(pending.queue.len(), 2);
+        assert!(matches!(
+            &pending.queue[0].operation,
+            Operation::Status { now_ms: 100, .. }
+        ));
+        assert!(matches!(
+            &pending.queue[1].operation,
+            Operation::Snapshot { now_ms: 100, .. }
+        ));
+        assert_eq!(
+            pending.queue[1]
+                .submitted
+                .values()
+                .next()
+                .unwrap()
+                .state_change_seq,
+            100
+        );
+    }
+
+    #[test]
+    fn pending_timing_resets_remain_ordered_barriers() {
+        let mut pending = PendingRequests::default();
+        assert!(pending.enqueue(status_request(1, 0)).is_none());
+        assert!(pending.enqueue(snapshot_request(2, 0)).is_none());
+        assert!(pending.enqueue(reset_request(3, 1)).is_none());
+        assert!(pending.enqueue(status_request(4, 1)).is_none());
+        assert!(pending.enqueue(snapshot_request(5, 1)).is_none());
+
+        assert!(pending.enqueue(reset_request(6, 2)).is_none());
+        assert!(pending.enqueue(status_request(7, 2)).is_none());
+
+        assert_eq!(pending.queue.len(), 3);
+        assert!(matches!(
+            &pending.queue[0].operation,
+            Operation::Reset { now_ms: 3, .. }
+        ));
+        assert!(matches!(
+            &pending.queue[1].operation,
+            Operation::Reset { now_ms: 6, .. }
+        ));
+        assert!(matches!(
+            &pending.queue[2].operation,
+            Operation::Status { now_ms: 7, .. }
+        ));
+        assert_eq!(
+            pending
+                .queue
+                .iter()
+                .map(|request| request.clear_generation)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 2]
+        );
+        assert!(pending.enqueue(reset_request(8, 3)).is_none());
+        assert!(pending.enqueue(reset_request(9, 4)).is_some());
+        assert_eq!(pending.queue.len(), MAX_PENDING_REQUESTS);
+        assert_eq!(
+            pending
+                .queue
+                .iter()
+                .map(|request| request.clear_generation)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn shutdown_flushes_reset_barrier_and_final_timing_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-timings.json");
+        let old_key = AgentTimingKey::Terminal("old".to_owned());
+        save(
+            &path,
+            &HashMap::from([(
+                old_key.clone(),
+                AgentTiming::new(AgentStatus::Idle, 1, 1_000),
+            )]),
+            0,
+        )
+        .unwrap();
+        let mut persistence = Persistence::new(path.clone());
+        persistence.reset(&HashMap::new(), &[], 2_000, 1).unwrap();
+        let new_key = AgentTimingKey::Terminal("new".to_owned());
+        let local = HashMap::from([(
+            new_key.clone(),
+            AgentTiming::new(AgentStatus::Working, 2, 3_000),
+        )]);
+        persistence
+            .observe_status(&local, new_key.clone(), AgentStatus::Working, 2, 3_000, 1)
+            .unwrap();
+
+        persistence.shutdown();
+
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.cleared_at_ms, 2_000);
+        assert!(!loaded.timings.contains_key(&old_key));
+        assert!(loaded.timings.contains_key(&new_key));
     }
 
     #[test]

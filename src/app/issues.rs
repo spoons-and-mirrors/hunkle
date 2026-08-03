@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc, Condvar, Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -80,10 +83,66 @@ impl Issue {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct IssueRequest {
     generation: u64,
     root: PathBuf,
     scope: IssueScope,
+}
+
+#[derive(Default)]
+struct IssueRequestState {
+    latest: Option<IssueRequest>,
+    shutdown: bool,
+}
+
+#[derive(Default)]
+struct IssueRequestQueue {
+    state: Mutex<IssueRequestState>,
+    ready: Condvar,
+}
+
+impl IssueRequestQueue {
+    fn enqueue(&self, request: IssueRequest) -> Result<Option<IssueRequest>, ()> {
+        let mut state = self.state.lock().expect("GitHub issue queue poisoned");
+        if state.shutdown {
+            return Err(());
+        }
+        let displaced = state.latest.replace(request);
+        self.ready.notify_one();
+        Ok(displaced)
+    }
+
+    fn prioritize_pending(&self, request: &IssueRequest) -> Result<Option<IssueRequest>, ()> {
+        let mut state = self.state.lock().expect("GitHub issue queue poisoned");
+        if state.shutdown {
+            return Err(());
+        }
+        if state.latest.as_ref() == Some(request) {
+            return Ok(None);
+        }
+        Ok(state.latest.take())
+    }
+
+    fn next(&self) -> Option<IssueRequest> {
+        let mut state = self.state.lock().expect("GitHub issue queue poisoned");
+        loop {
+            if state.shutdown {
+                return None;
+            }
+            if let Some(request) = state.latest.take() {
+                return Some(request);
+            }
+            state = self.ready.wait(state).expect("GitHub issue queue poisoned");
+        }
+    }
+
+    fn shutdown(&self) {
+        let mut state = self.state.lock().expect("GitHub issue queue poisoned");
+        state.shutdown = true;
+        state.latest.take();
+        self.ready.notify_one();
+    }
 }
 
 struct IssueCompletion {
@@ -106,20 +165,35 @@ pub(crate) struct IssueCatalog {
     loaded_at: HashMap<IssueScope, Instant>,
     pending: HashSet<IssueScope>,
     errors: HashMap<IssueScope, String>,
-    request_sender: Option<Sender<IssueRequest>>,
+    request_queue: Option<Arc<IssueRequestQueue>>,
     receiver: Receiver<IssueCompletion>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl Default for IssueCatalog {
     fn default() -> Self {
-        let (request_sender, request_receiver) = mpsc::channel::<IssueRequest>();
+        Self::with_loader(load_issues)
+    }
+}
+
+impl IssueCatalog {
+    fn with_loader<F>(loader: F) -> Self
+    where
+        F: Fn(
+                &IssueRequest,
+                &Sender<IssueCompletion>,
+            ) -> Result<(), mpsc::SendError<IssueCompletion>>
+            + Send
+            + 'static,
+    {
+        let request_queue = Arc::new(IssueRequestQueue::default());
+        let worker_queue = Arc::clone(&request_queue);
         let (result_sender, receiver) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("hunkle-github-issues".to_owned())
             .spawn(move || {
-                while let Ok(request) = request_receiver.recv() {
-                    if load_issues(&request, &result_sender).is_err() {
+                while let Some(request) = worker_queue.next() {
+                    if loader(&request, &result_sender).is_err() {
                         break;
                     }
                 }
@@ -133,14 +207,12 @@ impl Default for IssueCatalog {
             loaded_at: HashMap::new(),
             pending: HashSet::new(),
             errors: HashMap::new(),
-            request_sender: Some(request_sender),
+            request_queue: Some(request_queue),
             receiver,
             worker: Some(worker),
         }
     }
-}
 
-impl IssueCatalog {
     pub(crate) fn scope(&self) -> IssueScope {
         self.scope
     }
@@ -156,25 +228,60 @@ impl IssueCatalog {
         let fresh = self.loaded_at.get(&scope).is_some_and(|loaded| {
             Instant::now().saturating_duration_since(*loaded) < CATALOG_FRESHNESS
         });
-        if fresh || !self.pending.insert(scope) {
-            return;
-        }
-        self.issues.remove(&scope);
-        self.loaded_at.remove(&scope);
-        self.errors.remove(&scope);
         let request = IssueRequest {
             generation: self.generation,
             root: root.to_owned(),
             scope,
         };
-        if self
-            .request_sender
+        if fresh {
+            self.prioritize_pending(&request);
+            return;
+        }
+        if !self.pending.insert(scope) {
+            self.prioritize_pending(&request);
+            return;
+        }
+        self.issues.remove(&scope);
+        self.loaded_at.remove(&scope);
+        self.errors.remove(&scope);
+        let queued = self
+            .request_queue
             .as_ref()
-            .is_none_or(|sender| sender.send(request).is_err())
+            .ok_or(())
+            .and_then(|queue| queue.enqueue(request));
+        match queued {
+            Ok(displaced) => self.forget_displaced(displaced),
+            Err(()) => {
+                self.pending.remove(&scope);
+                self.errors
+                    .insert(scope, "GitHub issue worker stopped".to_owned());
+            }
+        }
+    }
+
+    fn prioritize_pending(&mut self, request: &IssueRequest) {
+        let queued = self
+            .request_queue
+            .as_ref()
+            .ok_or(())
+            .and_then(|queue| queue.prioritize_pending(request));
+        match queued {
+            Ok(displaced) => self.forget_displaced(displaced),
+            Err(()) if self.pending.contains(&request.scope) => {
+                self.pending.remove(&request.scope);
+                self.errors
+                    .insert(request.scope, "GitHub issue worker stopped".to_owned());
+            }
+            Err(()) => {}
+        }
+    }
+
+    fn forget_displaced(&mut self, displaced: Option<IssueRequest>) {
+        if let Some(displaced) = displaced
+            && displaced.generation == self.generation
+            && self.root.as_deref() == Some(&displaced.root)
         {
-            self.pending.remove(&scope);
-            self.errors
-                .insert(scope, "GitHub issue worker stopped".to_owned());
+            self.pending.remove(&displaced.scope);
         }
     }
 
@@ -231,7 +338,9 @@ impl IssueCatalog {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.request_sender.take();
+        if let Some(queue) = self.request_queue.take() {
+            queue.shutdown();
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -515,6 +624,97 @@ fn run_gh(command: &mut Command, noun: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn blocking_catalog() -> (IssueCatalog, Receiver<(PathBuf, IssueScope)>, Sender<()>) {
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let catalog = IssueCatalog::with_loader(move |request, _| {
+            started_sender
+                .send((request.root.clone(), request.scope))
+                .unwrap();
+            release_receiver.recv().unwrap();
+            Ok(())
+        });
+        (catalog, started_receiver, release_sender)
+    }
+
+    fn started(receiver: &Receiver<(PathBuf, IssueScope)>) -> (PathBuf, IssueScope) {
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap()
+    }
+
+    #[test]
+    fn queued_catalog_requests_coalesce_to_the_latest_repository() {
+        let (mut catalog, started_receiver, release_sender) = blocking_catalog();
+        let first = Path::new("/first");
+        let second = Path::new("/second");
+        let latest = Path::new("/latest");
+
+        catalog.request(first);
+        assert_eq!(
+            started(&started_receiver),
+            (first.to_owned(), IssueScope::Open)
+        );
+        catalog.request(second);
+        catalog.request(latest);
+
+        release_sender.send(()).unwrap();
+        assert_eq!(
+            started(&started_receiver),
+            (latest.to_owned(), IssueScope::Open)
+        );
+        release_sender.send(()).unwrap();
+        catalog.shutdown();
+        assert_eq!(
+            started_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn returning_to_pending_scope_discards_queued_scope_request() {
+        let (mut catalog, started_receiver, release_sender) = blocking_catalog();
+        let root = Path::new("/repository");
+
+        catalog.request(root);
+        assert_eq!(
+            started(&started_receiver),
+            (root.to_owned(), IssueScope::Open)
+        );
+        catalog.toggle_scope();
+        catalog.request(root);
+        catalog.toggle_scope();
+        catalog.request(root);
+
+        assert!(catalog.pending.contains(&IssueScope::Open));
+        assert!(!catalog.pending.contains(&IssueScope::Closed));
+        release_sender.send(()).unwrap();
+        catalog.shutdown();
+        assert_eq!(
+            started_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn shutdown_discards_queued_catalog_request() {
+        let (mut catalog, started_receiver, release_sender) = blocking_catalog();
+        let active = Path::new("/active");
+
+        catalog.request(active);
+        assert_eq!(
+            started(&started_receiver),
+            (active.to_owned(), IssueScope::Open)
+        );
+        catalog.request(Path::new("/obsolete"));
+        catalog.request_queue.as_ref().unwrap().shutdown();
+
+        release_sender.send(()).unwrap();
+        catalog.shutdown();
+        assert_eq!(
+            started_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        );
+    }
 
     #[test]
     fn parses_nullable_authors_and_labels() {
