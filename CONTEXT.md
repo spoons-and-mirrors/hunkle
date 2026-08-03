@@ -44,6 +44,10 @@ The `o` interaction for finding and opening another workspace. Confirming a file
 
 The active Git Repository or Linked worktree where Hunkle launches an OpenCode agent. The Repository, Worktree, and Branch header cards define this filesystem destination; clicking Agent uses it directly. Herdr remains the adapter for choosing pane placement and starting the agent.
 
+## Agent pane
+
+A Herdr pane with attached agent runtime metadata. The pane owns location, working directories, and focus; Herdr's agent record contributes runtime status, session, and timing identity. Hunkle does not maintain a second flattened agent entity.
+
 ## Interaction
 
 A focused user flow that owns its transient state and interprets input. An interaction may emit an application effect, such as opening a selected workspace.

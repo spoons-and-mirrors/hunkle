@@ -718,6 +718,12 @@ fn renders_every_primary_surface() {
                     "pane_id": "w1:p1",
                     "tab_id": "w1:t1",
                     "workspace_id": "w1"
+                }],
+                "panes": [{
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "workspace_id": "w1",
+                    "focused": true
                 }]
             }
         }
@@ -920,6 +926,12 @@ fn renders_every_primary_surface() {
                     "pane_id": "w1:p1",
                     "tab_id": "w1:t1",
                     "workspace_id": "w1"
+                }],
+                "panes": [{
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "workspace_id": "w1",
+                    "focused": true
                 }]
             }
         }

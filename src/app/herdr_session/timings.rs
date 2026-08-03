@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::filesystem::atomic_write;
 
-use super::{AgentTiming, AgentTimingKey, HerdrAgent};
+use super::{AgentPane, AgentTiming, AgentTimingKey};
 
 const INDEX_VERSION: u8 = 2;
 const MAX_AGENT_TIMINGS: usize = 512;
@@ -38,7 +38,7 @@ struct TimingRecord {
 pub(super) fn sync(
     path: &Path,
     local: &mut HashMap<AgentTimingKey, AgentTiming>,
-    agents: &[HerdrAgent],
+    agents: &[AgentPane],
     now_ms: u64,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -56,7 +56,10 @@ pub(super) fn sync(
     merge_local_timings(&mut shared, local, loaded.cleared_at_ms);
     migrate_session_timings(&mut shared, agents);
     update(&mut shared, agents, now_ms);
-    prune(&mut shared, agents.iter().map(|agent| &agent.timing_key));
+    prune(
+        &mut shared,
+        agents.iter().map(|agent| &agent.runtime.timing_key),
+    );
 
     if needs_rewrite || &shared != local {
         save(path, &shared, loaded.cleared_at_ms)?;
@@ -67,39 +70,39 @@ pub(super) fn sync(
 
 fn migrate_session_timings(
     timings: &mut HashMap<AgentTimingKey, AgentTiming>,
-    agents: &[HerdrAgent],
+    agents: &[AgentPane],
 ) {
     for agent in agents {
-        if timings.contains_key(&agent.timing_key) {
+        if timings.contains_key(&agent.runtime.timing_key) {
             continue;
         }
-        let Some(session_key) = agent.session_timing_key.as_ref() else {
+        let Some(session_key) = agent.runtime.session_timing_key.as_ref() else {
             continue;
         };
         if let Some(timing) = timings.remove(session_key) {
-            timings.insert(agent.timing_key.clone(), timing);
+            timings.insert(agent.runtime.timing_key.clone(), timing);
         }
     }
 }
 
 pub(super) fn update(
     timings: &mut HashMap<AgentTimingKey, AgentTiming>,
-    agents: &[HerdrAgent],
+    agents: &[AgentPane],
     now_ms: u64,
 ) {
     for agent in agents {
-        let key = agent.timing_key.clone();
+        let key = agent.runtime.timing_key.clone();
         if let Some(timing) = timings.get_mut(&key) {
             if timing.state_change_seq == 0
-                || agent.state_change_seq == 0
-                || agent.state_change_seq >= timing.state_change_seq
+                || agent.runtime.state_change_seq == 0
+                || agent.runtime.state_change_seq >= timing.state_change_seq
             {
-                timing.observe(agent.status, agent.state_change_seq, now_ms);
+                timing.observe(agent.runtime.status, agent.runtime.state_change_seq, now_ms);
             }
-        } else if agent.status.should_track_timing() {
+        } else if agent.runtime.status.should_track_timing() {
             timings.insert(
                 key,
-                AgentTiming::new(agent.status, agent.state_change_seq, now_ms),
+                AgentTiming::new(agent.runtime.status, agent.runtime.state_change_seq, now_ms),
             );
         }
     }
@@ -136,7 +139,7 @@ pub(super) fn observe_status(
 pub(super) fn reset(
     path: &Path,
     local: &mut HashMap<AgentTimingKey, AgentTiming>,
-    agents: &[HerdrAgent],
+    agents: &[AgentPane],
     now_ms: u64,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -342,19 +345,21 @@ mod tests {
             value: "ses_old".to_owned(),
         });
         let agent_key = AgentTimingKey::Terminal("opencode@term-1".to_owned());
-        let agent = HerdrAgent {
-            name: "opencode".to_owned(),
-            session_name: None,
+        let agent = AgentPane {
             workspace_id: "workspace".to_owned(),
             tab_id: "tab".to_owned(),
             pane_id: "pane".to_owned(),
             cwd: None,
             destination_cwd: None,
             focused: false,
-            status: AgentStatus::Idle,
-            timing_key: agent_key.clone(),
-            session_timing_key: Some(session_key.clone()),
-            state_change_seq: 7,
+            runtime: super::super::AgentRuntime {
+                name: "opencode".to_owned(),
+                session_name: None,
+                status: AgentStatus::Idle,
+                timing_key: agent_key.clone(),
+                session_timing_key: Some(session_key.clone()),
+                state_change_seq: 7,
+            },
         };
         let timing = AgentTiming {
             elapsed_ms: 3_000,

@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::process::{self, Limits};
 
 use super::{
-    AgentPaneDirection, AgentSessionIdentity, AgentStatus, AgentTimingKey, HerdrAgent,
+    AgentPane, AgentPaneDirection, AgentRuntime, AgentSessionIdentity, AgentStatus, AgentTimingKey,
     HerdrWorkspace,
 };
 
@@ -270,7 +270,7 @@ pub(super) fn environment() -> Option<Environment> {
     )
 }
 
-pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String> {
+pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<AgentPane>), String> {
     run(&["api".to_owned(), "snapshot".to_owned()]).and_then(|value| parse_snapshot(&value))
 }
 
@@ -1576,7 +1576,7 @@ fn stderr_detail(stderr: &[u8]) -> Option<String> {
 
 pub(super) fn parse_snapshot(
     value: &Value,
-) -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String> {
+) -> Result<(Vec<HerdrWorkspace>, Vec<AgentPane>), String> {
     let snapshot = value
         .get("result")
         .and_then(|result| result.get("snapshot"))
@@ -1601,7 +1601,7 @@ pub(super) fn parse_snapshot(
             .iter()
             .enumerate()
             .map(|(index, agent)| {
-                parse_agent(agent, snapshot)
+                parse_agent_pane(agent, snapshot)
                     .ok_or_else(|| format!("Herdr snapshot agent {index} is malformed"))
             })
             .collect::<Result<_, _>>()?,
@@ -1719,7 +1719,7 @@ fn workspace_path(workspace: &Value, snapshot: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn parse_agent(value: &Value, snapshot: &Value) -> Option<HerdrAgent> {
+fn parse_agent_pane(value: &Value, snapshot: &Value) -> Option<AgentPane> {
     let pane_id = value.get("pane_id")?.as_str()?.to_owned();
     let name = value.get("agent")?.as_str()?.to_owned();
     let session_timing_key = parse_agent_session_identity(value).map(AgentTimingKey::Session);
@@ -1728,38 +1728,36 @@ fn parse_agent(value: &Value, snapshot: &Value) -> Option<HerdrAgent> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id.as_str()));
-    Some(HerdrAgent {
-        name: name.clone(),
-        session_name: parse_agent_session_name(value),
-        workspace_id: value.get("workspace_id")?.as_str()?.to_owned(),
-        tab_id: value.get("tab_id")?.as_str()?.to_owned(),
+        .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id.as_str()))?;
+    Some(AgentPane {
+        workspace_id: pane.get("workspace_id")?.as_str()?.to_owned(),
+        tab_id: pane.get("tab_id")?.as_str()?.to_owned(),
         pane_id: pane_id.clone(),
         cwd: pane
-            .and_then(|pane| {
-                pane.get("foreground_cwd")
-                    .and_then(Value::as_str)
-                    .or_else(|| pane.get("cwd").and_then(Value::as_str))
-            })
+            .get("foreground_cwd")
+            .and_then(Value::as_str)
+            .or_else(|| pane.get("cwd").and_then(Value::as_str))
             .map(PathBuf::from),
-        destination_cwd: pane
-            .and_then(|pane| pane.get("cwd").and_then(Value::as_str))
-            .map(PathBuf::from),
-        focused: value
+        destination_cwd: pane.get("cwd").and_then(Value::as_str).map(PathBuf::from),
+        focused: pane
             .get("focused")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        status: parse_agent_status(value.get("agent_status").and_then(Value::as_str)),
-        timing_key: value
-            .get("terminal_id")
-            .and_then(Value::as_str)
-            .map(|terminal| AgentTimingKey::Terminal(format!("{name}@{terminal}")))
-            .unwrap_or_else(|| AgentTimingKey::Pane(format!("{name}@{pane_id}"))),
-        session_timing_key,
-        state_change_seq: value
-            .get("state_change_seq")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
+        runtime: AgentRuntime {
+            name: name.clone(),
+            session_name: parse_agent_session_name(value),
+            status: parse_agent_status(value.get("agent_status").and_then(Value::as_str)),
+            timing_key: value
+                .get("terminal_id")
+                .and_then(Value::as_str)
+                .map(|terminal| AgentTimingKey::Terminal(format!("{name}@{terminal}")))
+                .unwrap_or_else(|| AgentTimingKey::Pane(format!("{name}@{pane_id}"))),
+            session_timing_key,
+            state_change_seq: value
+                .get("state_change_seq")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        },
     })
 }
 
@@ -3221,8 +3219,8 @@ mod tests {
                     "terminal_id": "term-3",
                     "focused": false,
                     "pane_id": "pane-3",
-                    "tab_id": "tab-3",
-                    "workspace_id": "pane-path"
+                    "tab_id": "stale-tab",
+                    "workspace_id": "stale-workspace"
                 }],
                 "panes": [{
                     "pane_id": "pane-3",
@@ -3241,19 +3239,21 @@ mod tests {
             workspaces[2].path.as_deref(),
             Some(Path::new("/foreground"))
         );
-        assert_eq!(agents[0].status, AgentStatus::Blocked);
+        assert_eq!(agents[0].runtime.status, AgentStatus::Blocked);
+        assert_eq!(agents[0].workspace_id, "pane-path");
+        assert_eq!(agents[0].tab_id, "tab-3");
         assert!(agents[0].focused);
-        assert_eq!(agents[0].state_change_seq, 17);
+        assert_eq!(agents[0].runtime.state_change_seq, 17);
         assert!(matches!(
-            &agents[0].timing_key,
+            &agents[0].runtime.timing_key,
             AgentTimingKey::Terminal(identity) if identity == "opencode@term-3"
         ));
         assert!(matches!(
-            &agents[0].session_timing_key,
+            &agents[0].runtime.session_timing_key,
             Some(AgentTimingKey::Session(session)) if session.value == "ses_timer"
         ));
         assert_eq!(
-            agents[0].session_name.as_deref(),
+            agents[0].runtime.session_name.as_deref(),
             Some("Refine workspace timers")
         );
     }

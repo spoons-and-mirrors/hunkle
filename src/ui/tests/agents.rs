@@ -19,6 +19,12 @@ fn agent_snapshot() -> serde_json::Value {
                 "tab_id": "w1:t1",
                 "terminal_title_stripped": "OC | Refine agent timers across every workspace",
                 "workspace_id": "w1"
+            }],
+            "panes": [{
+                "pane_id": "w1:p1",
+                "tab_id": "w1:t1",
+                "workspace_id": "w1",
+                "focused": true
             }]
         } }
     })
@@ -598,10 +604,14 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     snapshot["result"]["snapshot"]["panes"] = serde_json::json!([
         {
             "pane_id": "w1:p1",
+            "tab_id": "w1:t1",
+            "workspace_id": "w1",
             "cwd": "/repos/first-repo"
         },
         {
             "pane_id": "w1:p2",
+            "tab_id": "w1:t1",
+            "workspace_id": "w1",
             "cwd": "/repos/second-repo"
         }
     ]);
@@ -799,6 +809,14 @@ fn agent_preview_follows_the_agent_across_reordering_and_session_changes() {
             "workspace_id": "w1",
             "state_change_seq": 1
         }));
+    snapshot["result"]["snapshot"]["panes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "pane_id": "w1:p2",
+            "tab_id": "w1:t1",
+            "workspace_id": "w1"
+        }));
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&snapshot);
     app.herdr
@@ -850,6 +868,14 @@ fn hovering_agent_cards_does_not_open_history() {
             "agent": "opencode",
             "agent_status": "idle",
             "focused": false,
+            "pane_id": "w1:p2",
+            "tab_id": "w1:t1",
+            "workspace_id": "w1"
+        }));
+    snapshot["result"]["snapshot"]["panes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
             "pane_id": "w1:p2",
             "tab_id": "w1:t1",
             "workspace_id": "w1"
@@ -973,6 +999,11 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
                     "agent": "opencode",
                     "agent_status": "idle",
                     "focused": false,
+                    "pane_id": format!("w1:p{index}"),
+                    "tab_id": "w1:t1",
+                    "workspace_id": "w1"
+                })).collect::<Vec<_>>(),
+                "panes": (0..count).map(|index| serde_json::json!({
                     "pane_id": format!("w1:p{index}"),
                     "tab_id": "w1:t1",
                     "workspace_id": "w1"

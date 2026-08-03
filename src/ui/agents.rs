@@ -227,7 +227,7 @@ pub(super) fn draw(
             session,
             change_stats,
             elapsed.as_deref(),
-            agent.status,
+            agent.runtime.status,
             herdr.spinner_frame(),
             state,
             in_host_tab,
@@ -384,7 +384,7 @@ pub(super) fn draw_history(
     let status = herdr
         .agents
         .get(index)
-        .map_or(AgentStatus::Unknown, |agent| agent.status);
+        .map_or(AgentStatus::Unknown, |agent| agent.runtime.status);
     let phase = match status {
         AgentStatus::Working => Some(("LIVE", palette().orange)),
         AgentStatus::Blocked => Some(("PAUSED", palette().red)),

@@ -125,15 +125,20 @@ impl AgentTimingKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HerdrAgent {
-    pub(crate) name: String,
-    pub(crate) session_name: Option<String>,
+pub(crate) struct AgentPane {
     pub(crate) workspace_id: String,
     pub(crate) tab_id: String,
     pub(crate) pane_id: String,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) destination_cwd: Option<PathBuf>,
     pub(crate) focused: bool,
+    pub(crate) runtime: AgentRuntime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentRuntime {
+    pub(crate) name: String,
+    pub(crate) session_name: Option<String>,
     pub(crate) status: AgentStatus,
     timing_key: AgentTimingKey,
     session_timing_key: Option<AgentTimingKey>,
@@ -261,9 +266,10 @@ pub(crate) struct HerdrSessionPoll {
     pub(crate) reopen_path: Option<PathBuf>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Completion {
     Snapshot {
-        result: Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String>,
+        result: Result<(Vec<HerdrWorkspace>, Vec<AgentPane>), String>,
         observed_at_ms: u64,
     },
     Event {
@@ -299,7 +305,7 @@ enum Completion {
 }
 
 struct PendingAgentStash {
-    agent: HerdrAgent,
+    agent: AgentPane,
     index: usize,
     repository: PathBuf,
     repository_label: String,
@@ -330,7 +336,7 @@ pub(crate) struct AgentUserMessage {
 pub(crate) struct HerdrSession {
     enabled: bool,
     pub(crate) workspaces: Vec<HerdrWorkspace>,
-    pub(crate) agents: Vec<HerdrAgent>,
+    pub(crate) agents: Vec<AgentPane>,
     pub(crate) agent_scroll: usize,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
@@ -616,7 +622,7 @@ impl HerdrSession {
         poll
     }
 
-    fn apply_agent_snapshot_at(&mut self, agents: Vec<HerdrAgent>, now_ms: u64) {
+    fn apply_agent_snapshot_at(&mut self, agents: Vec<AgentPane>, now_ms: u64) {
         let observed_panes = agents
             .iter()
             .map(|agent| agent.pane_id.as_str())
@@ -652,7 +658,7 @@ impl HerdrSession {
         let mut ranked = agents.into_iter().enumerate().collect::<Vec<_>>();
         ranked.sort_by_key(|(incoming_index, agent)| {
             (
-                Reverse(agent.state_change_seq),
+                Reverse(agent.runtime.state_change_seq),
                 previous
                     .iter()
                     .position(|existing| existing.pane_id == agent.pane_id)
@@ -665,7 +671,7 @@ impl HerdrSession {
             let live_sessions = self
                 .agents
                 .iter()
-                .filter_map(|agent| match agent.session_timing_key.as_ref() {
+                .filter_map(|agent| match agent.runtime.session_timing_key.as_ref() {
                     Some(AgentTimingKey::Session(identity)) => Some(identity.value.clone()),
                     _ => None,
                 })
@@ -676,7 +682,7 @@ impl HerdrSession {
         }
         let displayed_is_present = self.displayed_agent_key.as_ref().is_some_and(|key| {
             self.agents.iter().any(|agent| {
-                &agent.timing_key == key
+                &agent.runtime.timing_key == key
                     && self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
                     && self.host_tab_id.as_deref() == Some(&agent.tab_id)
             })
@@ -689,7 +695,7 @@ impl HerdrSession {
                     self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
                         && self.host_tab_id.as_deref() == Some(&agent.tab_id)
                 })
-                .map(|agent| agent.timing_key.clone());
+                .map(|agent| agent.runtime.timing_key.clone());
         }
         self.agent_scroll = self.agent_scroll.min(self.agents.len().saturating_sub(1));
     }
@@ -701,24 +707,24 @@ impl HerdrSession {
     ) -> Option<Duration> {
         let agent = self.agents.get(index)?;
         self.agent_timings
-            .get(&agent.timing_key)
+            .get(&agent.runtime.timing_key)
             .map(|timing| timing.elapsed_at(display, unix_time_ms()))
     }
 
     pub(crate) fn agent_display_name(&self, index: usize) -> Option<&str> {
-        self.agents.get(index)?.session_name.as_deref()
+        self.agents.get(index)?.runtime.session_name.as_deref()
     }
 
     pub(crate) fn agent_key(&self, index: usize) -> Option<AgentKey> {
         self.agents
             .get(index)
-            .map(|agent| AgentKey(agent.timing_key.clone()))
+            .map(|agent| AgentKey(agent.runtime.timing_key.clone()))
     }
 
     pub(crate) fn agent_index(&self, key: &AgentKey) -> Option<usize> {
         self.agents
             .iter()
-            .position(|agent| agent.timing_key == key.0)
+            .position(|agent| agent.runtime.timing_key == key.0)
     }
 
     pub(crate) fn stashed_agents(&self) -> &[StashedAgent] {
@@ -777,10 +783,10 @@ impl HerdrSession {
             .clone()
             .or_else(|| agent.cwd.clone())
             .ok_or_else(|| "Agent has not reported its working directory".to_owned())?;
-        let identity = match agent.session_timing_key.as_ref() {
+        let identity = match agent.runtime.session_timing_key.as_ref() {
             Some(AgentTimingKey::Session(identity)) => Some(identity.clone()),
-            _ if agent.name == "opencode" => {
-                agent.session_name.as_deref().ok_or_else(|| {
+            _ if agent.runtime.name == "opencode" => {
+                agent.runtime.session_name.as_deref().ok_or_else(|| {
                     "OpenCode session could not be identified without its title".to_owned()
                 })?;
                 None
@@ -791,9 +797,12 @@ impl HerdrSession {
             .as_ref()
             .is_some_and(|identity| identity.agent != "opencode")
         {
-            return Err(format!("{} sessions cannot be restored yet", agent.name));
+            return Err(format!(
+                "{} sessions cannot be restored yet",
+                agent.runtime.name
+            ));
         }
-        let title = agent.session_name.clone();
+        let title = agent.runtime.session_name.clone();
         self.pending_agent_stash = Some(PendingAgentStash {
             agent,
             index,
@@ -836,11 +845,11 @@ impl HerdrSession {
             .ok_or_else(|| "Agent stash is no longer pending".to_owned())?;
         let record = StashedAgent {
             harness: identity.agent,
-            agent_name: pending.agent.name.clone(),
+            agent_name: pending.agent.runtime.name.clone(),
             session_source: identity.source,
             session_kind: identity.kind,
             session_id: identity.value,
-            session_name: pending.agent.session_name.clone(),
+            session_name: pending.agent.runtime.session_name.clone(),
             repository: pending.repository.clone(),
             repository_label: pending.repository_label.clone(),
             worktree: pending.worktree.clone(),
@@ -851,7 +860,7 @@ impl HerdrSession {
             cwd: pending.agent.cwd.clone(),
             destination_cwd: pending.agent.destination_cwd.clone(),
             focused: pending.agent.focused,
-            status: pending.agent.status,
+            status: pending.agent.runtime.status,
             stashed_at_ms: unix_time_ms(),
         };
         self.stash.add(record.clone())?;
@@ -881,8 +890,12 @@ impl HerdrSession {
     }
 
     pub(crate) fn agent_user_messages(&self, index: usize) -> Option<&[AgentUserMessage]> {
-        let AgentTimingKey::Session(identity) =
-            self.agents.get(index)?.session_timing_key.as_ref()?
+        let AgentTimingKey::Session(identity) = self
+            .agents
+            .get(index)?
+            .runtime
+            .session_timing_key
+            .as_ref()?
         else {
             return None;
         };
@@ -893,9 +906,10 @@ impl HerdrSession {
         let Some((AgentTimingKey::Session(identity), status)) =
             self.agents.get(index).and_then(|agent| {
                 agent
+                    .runtime
                     .session_timing_key
                     .as_ref()
-                    .map(|key| (key, agent.status))
+                    .map(|key| (key, agent.runtime.status))
             })
         else {
             return;
@@ -995,7 +1009,7 @@ impl HerdrSession {
             selected: self.agents.get(index).is_some_and(|agent| {
                 self.displayed_agent_key
                     .as_ref()
-                    .map_or(agent.focused, |key| key == &agent.timing_key)
+                    .map_or(agent.focused, |key| key == &agent.runtime.timing_key)
             }),
         }
     }
@@ -1068,14 +1082,14 @@ impl HerdrSession {
             host_workspace_id: host_workspace_id.clone(),
             host_tab_id: host_tab_id.clone(),
             allow_cross_workspace: self.cross_workspace_agents,
-            saved_layout: self.agent_layouts.get(&agent.timing_key).cloned(),
+            saved_layout: self.agent_layouts.get(&agent.runtime.timing_key).cloned(),
         };
-        let selected_key = agent.timing_key.clone();
+        let selected_key = agent.runtime.timing_key.clone();
         let outgoing_key = self.displayed_agent_key.clone().or_else(|| {
             self.agents
                 .iter()
                 .find(|agent| self.agent_is_in_host_tab_by_agent(agent))
-                .map(|agent| agent.timing_key.clone())
+                .map(|agent| agent.runtime.timing_key.clone())
         });
         let reopen_path = agent.cwd.clone();
         let completion_host_workspace_id = host_workspace_id.clone();
@@ -1099,7 +1113,7 @@ impl HerdrSession {
         Ok(())
     }
 
-    fn agent_is_in_host_tab_by_agent(&self, agent: &HerdrAgent) -> bool {
+    fn agent_is_in_host_tab_by_agent(&self, agent: &AgentPane) -> bool {
         self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
             && self.host_tab_id.as_deref() == Some(&agent.tab_id)
     }
@@ -1153,7 +1167,7 @@ impl HerdrSession {
             && self
                 .agents
                 .iter()
-                .any(|agent| agent.status == AgentStatus::Working);
+                .any(|agent| agent.runtime.status == AgentStatus::Working);
         if !working {
             self.spinner_frame = 0;
             self.next_spinner = now;
@@ -1194,9 +1208,9 @@ impl HerdrSession {
         }) else {
             return;
         };
-        agent.status = event.status;
-        let key = agent.timing_key.clone();
-        let state_change_seq = agent.state_change_seq;
+        agent.runtime.status = event.status;
+        let key = agent.runtime.timing_key.clone();
+        let state_change_seq = agent.runtime.state_change_seq;
         let synced = self.agent_timings_path.as_deref().is_some_and(|path| {
             timings::observe_status(
                 path,
@@ -1280,12 +1294,12 @@ impl HerdrSession {
         let Some(AgentTimingKey::Session(identity)) = self
             .agents
             .get(index)
-            .and_then(|agent| agent.session_timing_key.as_ref())
+            .and_then(|agent| agent.runtime.session_timing_key.as_ref())
         else {
             panic!("test agent has no session identity");
         };
         let identity = identity.clone();
-        let status = self.agents[index].status;
+        let status = self.agents[index].runtime.status;
         self.latest_user_messages.insert(
             identity.clone(),
             messages
@@ -1318,6 +1332,7 @@ impl HerdrSession {
         reasoning_active: bool,
     ) {
         let AgentTimingKey::Session(identity) = self.agents[index]
+            .runtime
             .session_timing_key
             .as_ref()
             .expect("test agent has no session identity")
@@ -1424,20 +1439,22 @@ fn branch_from_head(path: &Path) -> Option<String> {
 mod stash_flow_tests {
     use super::*;
 
-    fn unresolved_agent() -> HerdrAgent {
-        HerdrAgent {
-            name: "opencode".to_owned(),
-            session_name: Some("Resume this later".to_owned()),
+    fn unresolved_agent() -> AgentPane {
+        AgentPane {
             workspace_id: "w1".to_owned(),
             tab_id: "w1:t1".to_owned(),
             pane_id: "w1:p2".to_owned(),
             cwd: Some(PathBuf::from("/code/hunkle")),
             destination_cwd: Some(PathBuf::from("/code/hunkle")),
             focused: false,
-            status: AgentStatus::Idle,
-            timing_key: AgentTimingKey::Pane("opencode@w1:p2".to_owned()),
-            session_timing_key: None,
-            state_change_seq: 1,
+            runtime: AgentRuntime {
+                name: "opencode".to_owned(),
+                session_name: Some("Resume this later".to_owned()),
+                status: AgentStatus::Idle,
+                timing_key: AgentTimingKey::Pane("opencode@w1:p2".to_owned()),
+                session_timing_key: None,
+                state_change_seq: 1,
+            },
         }
     }
 
@@ -1523,19 +1540,21 @@ mod layout_tests {
     fn showing_the_current_agent_keeps_it_visible() {
         let mut session = HerdrSession::new(true, None, None);
         session.set_host_for_test("w1", "w1:t1", "w1:p1");
-        session.agents.push(HerdrAgent {
-            name: "opencode".to_owned(),
-            session_name: None,
+        session.agents.push(AgentPane {
             workspace_id: "w1".to_owned(),
             tab_id: "w1:t1".to_owned(),
             pane_id: "w1:p2".to_owned(),
             cwd: Some(PathBuf::from("/code/hunkle")),
             destination_cwd: Some(PathBuf::from("/code/hunkle")),
             focused: false,
-            status: AgentStatus::Idle,
-            timing_key: AgentTimingKey::Pane("opencode@w1:p2".to_owned()),
-            session_timing_key: None,
-            state_change_seq: 1,
+            runtime: AgentRuntime {
+                name: "opencode".to_owned(),
+                session_name: None,
+                status: AgentStatus::Idle,
+                timing_key: AgentTimingKey::Pane("opencode@w1:p2".to_owned()),
+                session_timing_key: None,
+                state_change_seq: 1,
+            },
         });
 
         session.show_agent(0).unwrap();
