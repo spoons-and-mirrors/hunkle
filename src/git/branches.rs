@@ -14,6 +14,11 @@ pub(crate) fn create_branch(root: &Path, branch: &str, base: &str) -> Result<Com
     Ok(command_output(output))
 }
 
+pub(crate) fn delete_branch(root: &Path, branch: &str) -> Result<CommandOutput> {
+    let output = run(root, &["branch", "--delete", "--", branch])?;
+    Ok(command_output(output))
+}
+
 pub(crate) fn branch_name(root: &Path) -> Result<String> {
     let output = run(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if output.status.success() {

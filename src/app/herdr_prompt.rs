@@ -4,7 +4,7 @@ use std::{
     thread,
 };
 
-use super::{AgentPaneDirection, HerdrPaneLayout, TextInput, herdr_session};
+use super::{AgentPaneDirection, HerdrPaneLayout, HitTarget, TextInput, herdr_session};
 
 pub(crate) struct HerdrPromptPoll {
     pub(crate) changed: bool,
@@ -33,6 +33,7 @@ struct PendingAgent {
     path: PathBuf,
     host_pane_id: String,
     layout: Option<HerdrPaneLayout>,
+    pane_focus: Option<HitTarget>,
     session_id: Option<String>,
 }
 
@@ -77,10 +78,12 @@ impl HerdrPrompt {
         layout: HerdrPaneLayout,
     ) {
         self.next_agent_request_id = self.next_agent_request_id.wrapping_add(1);
+        let pane_focus = initial_pane_focus(&layout, &host_pane_id);
         self.pending_agent = Some(PendingAgent {
             request_id: self.next_agent_request_id,
             path,
             host_pane_id,
+            pane_focus,
             layout: Some(layout),
             session_id: None,
         });
@@ -152,6 +155,7 @@ impl HerdrPrompt {
             path,
             host_pane_id: host_pane_id.clone(),
             layout: None,
+            pane_focus: None,
             session_id,
         });
         let sender = self.layout_sender.clone();
@@ -167,6 +171,82 @@ impl HerdrPrompt {
 
     pub(crate) fn agent_pane_layout(&self) -> Option<&HerdrPaneLayout> {
         self.pending_agent.as_ref()?.layout.as_ref()
+    }
+
+    pub(crate) fn agent_pane_focus(&self) -> Option<HitTarget> {
+        self.pending_agent.as_ref()?.pane_focus.clone()
+    }
+
+    pub(crate) fn cycle_agent_pane_focus(&mut self, backwards: bool) {
+        let Some(pending) = self.pending_agent.as_mut() else {
+            return;
+        };
+        let Some(layout) = pending.layout.as_ref() else {
+            return;
+        };
+        let count = layout.panes.len();
+        if count == 0 {
+            pending.pane_focus = None;
+            return;
+        }
+        let focus_count = count * 5;
+        let current = pending
+            .pane_focus
+            .clone()
+            .and_then(pane_focus_ordinal)
+            .unwrap_or(0)
+            .min(focus_count - 1);
+        let next = if backwards {
+            current.checked_sub(1).unwrap_or(focus_count - 1)
+        } else {
+            (current + 1) % focus_count
+        };
+        pending.pane_focus = Some(pane_focus_from_ordinal(next));
+    }
+
+    pub(crate) fn move_agent_pane_focus(&mut self, direction: AgentPaneDirection) {
+        let Some(pending) = self.pending_agent.as_mut() else {
+            return;
+        };
+        let Some(layout) = pending.layout.as_ref() else {
+            return;
+        };
+        let Some(focus) = pending.pane_focus.clone() else {
+            pending.pane_focus = initial_pane_focus(layout, &pending.host_pane_id);
+            return;
+        };
+        let (current_index, edge) = match focus {
+            HitTarget::AgentPane(index) => (index, None),
+            HitTarget::AgentPaneSplit(index, edge) => (index, Some(edge)),
+            _ => {
+                pending.pane_focus = initial_pane_focus(layout, &pending.host_pane_id);
+                return;
+            }
+        };
+        if layout.panes.get(current_index).is_none() {
+            pending.pane_focus = initial_pane_focus(layout, &pending.host_pane_id);
+            return;
+        }
+        pending.pane_focus = match edge {
+            None => Some(HitTarget::AgentPaneSplit(current_index, direction)),
+            Some(edge) if edge == direction => neighboring_pane(layout, current_index, direction)
+                .map(HitTarget::AgentPane)
+                .or(Some(focus)),
+            Some(edge) if opposite_direction(edge) == direction => {
+                Some(HitTarget::AgentPane(current_index))
+            }
+            Some(_) => Some(HitTarget::AgentPaneSplit(current_index, direction)),
+        };
+    }
+
+    pub(crate) fn activate_agent_pane_focus(&mut self) -> Result<(), String> {
+        match self.agent_pane_focus() {
+            Some(HitTarget::AgentPane(index)) => self.select_agent_pane(index),
+            Some(HitTarget::AgentPaneSplit(index, direction)) => {
+                self.split_agent_pane(index, direction)
+            }
+            _ => Err("No Herdr pane position is selected".to_owned()),
+        }
     }
 
     pub(crate) fn update_agent_destination(&mut self, path: PathBuf) {
@@ -293,6 +373,7 @@ impl HerdrPrompt {
             match result {
                 Ok(layout) => {
                     if let Some(pending) = self.pending_agent.as_mut() {
+                        pending.pane_focus = initial_pane_focus(&layout, &pending.host_pane_id);
                         pending.layout = Some(layout);
                     }
                 }
@@ -317,4 +398,75 @@ impl HerdrPrompt {
             completion,
         }
     }
+}
+
+fn initial_pane_focus(layout: &HerdrPaneLayout, host_pane_id: &str) -> Option<HitTarget> {
+    layout
+        .panes
+        .iter()
+        .position(|pane| pane.pane_id != host_pane_id)
+        .or_else(|| (!layout.panes.is_empty()).then_some(0))
+        .map(HitTarget::AgentPane)
+}
+
+fn pane_focus_ordinal(focus: HitTarget) -> Option<usize> {
+    match focus {
+        HitTarget::AgentPane(index) => Some(index * 5),
+        HitTarget::AgentPaneSplit(index, AgentPaneDirection::Up) => Some(index * 5 + 1),
+        HitTarget::AgentPaneSplit(index, AgentPaneDirection::Right) => Some(index * 5 + 2),
+        HitTarget::AgentPaneSplit(index, AgentPaneDirection::Down) => Some(index * 5 + 3),
+        HitTarget::AgentPaneSplit(index, AgentPaneDirection::Left) => Some(index * 5 + 4),
+        _ => None,
+    }
+}
+
+fn pane_focus_from_ordinal(ordinal: usize) -> HitTarget {
+    let index = ordinal / 5;
+    match ordinal % 5 {
+        0 => HitTarget::AgentPane(index),
+        1 => HitTarget::AgentPaneSplit(index, AgentPaneDirection::Up),
+        2 => HitTarget::AgentPaneSplit(index, AgentPaneDirection::Right),
+        3 => HitTarget::AgentPaneSplit(index, AgentPaneDirection::Down),
+        4 => HitTarget::AgentPaneSplit(index, AgentPaneDirection::Left),
+        _ => unreachable!(),
+    }
+}
+
+fn opposite_direction(direction: AgentPaneDirection) -> AgentPaneDirection {
+    match direction {
+        AgentPaneDirection::Up => AgentPaneDirection::Down,
+        AgentPaneDirection::Down => AgentPaneDirection::Up,
+        AgentPaneDirection::Left => AgentPaneDirection::Right,
+        AgentPaneDirection::Right => AgentPaneDirection::Left,
+    }
+}
+
+fn neighboring_pane(
+    layout: &HerdrPaneLayout,
+    current_index: usize,
+    direction: AgentPaneDirection,
+) -> Option<usize> {
+    let current = layout.panes.get(current_index)?;
+    let current_x = i32::from(current.x) * 2 + i32::from(current.width);
+    let current_y = i32::from(current.y) * 2 + i32::from(current.height);
+    layout
+        .panes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, pane)| {
+            let x = i32::from(pane.x) * 2 + i32::from(pane.width);
+            let y = i32::from(pane.y) * 2 + i32::from(pane.height);
+            let (primary, secondary) = match direction {
+                AgentPaneDirection::Up if y < current_y => (current_y - y, (x - current_x).abs()),
+                AgentPaneDirection::Down if y > current_y => (y - current_y, (x - current_x).abs()),
+                AgentPaneDirection::Left if x < current_x => (current_x - x, (y - current_y).abs()),
+                AgentPaneDirection::Right if x > current_x => {
+                    (x - current_x, (y - current_y).abs())
+                }
+                _ => return None,
+            };
+            Some(((secondary, primary, index), index))
+        })
+        .min_by_key(|(score, _)| *score)
+        .map(|(_, index)| index)
 }

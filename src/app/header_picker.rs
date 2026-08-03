@@ -63,6 +63,7 @@ pub(crate) enum BranchPickerStep {
     Branches,
     Base,
     Name,
+    Delete,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +106,7 @@ pub(crate) struct HeaderPicker {
     pub(crate) branch_step: BranchPickerStep,
     pub(crate) branch_base: Option<Branch>,
     pub(crate) branch_name: TextInput,
+    pub(crate) branch_delete: Option<String>,
     pub(crate) repository_step: RepositoryPickerStep,
     pub(crate) clone_directory: TextInput,
     pub(crate) clone_url: TextInput,
@@ -154,6 +156,7 @@ impl HeaderPicker {
         self.branch_step = BranchPickerStep::Base;
         self.branch_base = None;
         self.branch_name.clear();
+        self.branch_delete = None;
     }
 
     pub(crate) fn open_branch_name(&mut self, base: Branch) {
@@ -208,6 +211,7 @@ impl HeaderPicker {
         self.branch_step = BranchPickerStep::Branches;
         self.branch_base = None;
         self.branch_name.clear();
+        self.branch_delete = None;
         self.repository_step = RepositoryPickerStep::Repositories;
         self.clone_field = CloneField::Directory;
         self.clone_directory.clear();
@@ -405,6 +409,17 @@ impl HeaderPicker {
         self.kind == Some(HeaderPickerKind::Branches) && self.branch_step == BranchPickerStep::Name
     }
 
+    pub(crate) fn deleting_branch(&self) -> bool {
+        self.kind == Some(HeaderPickerKind::Branches)
+            && self.branch_step == BranchPickerStep::Delete
+    }
+
+    pub(crate) fn begin_branch_deletion(&mut self, branch: String) {
+        self.branch_step = BranchPickerStep::Delete;
+        self.branch_delete = Some(branch);
+        self.message = None;
+    }
+
     pub(crate) fn cloning_repository(&self) -> bool {
         self.kind == Some(HeaderPickerKind::Repositories)
             && self.repository_step == RepositoryPickerStep::Clone
@@ -462,6 +477,7 @@ impl HeaderPicker {
         self.is_open()
             && self.searchable
             && !self.naming_branch()
+            && !self.deleting_branch()
             && !self.cloning_repository()
             && !self.creating_worktree()
             && !self.deleting_worktree()

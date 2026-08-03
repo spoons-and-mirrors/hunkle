@@ -326,6 +326,10 @@ impl App {
             self.handle_new_branch_name(key);
             return;
         }
+        if self.header_picker.deleting_branch() {
+            self.handle_branch_deletion(key);
+            return;
+        }
         if self.header_picker.cloning_repository() {
             self.handle_repository_clone(key);
             return;
@@ -461,6 +465,49 @@ impl App {
         }
         self.header_picker
             .begin_worktree_deletion(worktree.path.clone());
+    }
+
+    pub(crate) fn begin_header_branch_deletion(&mut self, index: usize) {
+        if !self.session.can_start_mutation() {
+            self.header_picker.message = Some("Wait for the current Git operation".to_owned());
+            return;
+        }
+        let Some(HeaderPickerItem::Branch(branch)) = self.header_picker.items.get(index) else {
+            return;
+        };
+        if branch.current {
+            self.header_picker.message = Some("The current branch cannot be deleted".to_owned());
+            return;
+        }
+        if branch.remote {
+            self.header_picker.message = Some("Remote branches cannot be deleted here".to_owned());
+            return;
+        }
+        self.header_picker
+            .begin_branch_deletion(branch.name.clone());
+    }
+
+    pub(crate) fn handle_branch_deletion(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') => self.open_header_branches(),
+            KeyCode::Enter | KeyCode::Char('y') => self.confirm_header_branch_deletion(),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn confirm_header_branch_deletion(&mut self) {
+        if !self.session.can_start_mutation() {
+            self.header_picker.message = Some("Wait for the current Git operation".to_owned());
+            return;
+        }
+        let Some(branch) = self.header_picker.branch_delete.clone() else {
+            self.open_header_branches();
+            return;
+        };
+        if self.session.start_branch_delete(branch.clone()) {
+            self.header_picker.close();
+            self.notice = Some(format!("Deleting branch {branch}…"));
+        }
     }
 
     pub(crate) fn handle_worktree_deletion(&mut self, key: KeyEvent) {
