@@ -20,7 +20,7 @@ mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandRecord, CommandStatus};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
-pub(crate) use changes::{ChangesHitTarget, SqliteFocus, SqlitePage};
+pub(crate) use changes::{ChangesHitTarget, PreviewOrigin, SqliteFocus, SqlitePage};
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use commit_message::{CommitMessageCompletion, CommitMessageGenerator};
 pub(crate) use commit_summary::CommitSummaryCache;
@@ -387,7 +387,7 @@ impl App {
             || self.graph_commit_open
             || (!self.graph_hidden
                 && self.view == View::Changes
-                && self.changes.preview_pane == LeftPane::Worktree
+                && self.changes.preview.pane() == LeftPane::Worktree
                 && self.changes.branch_comparison().is_none()
                 && self.repository().is_some_and(|repo| {
                     repo.details_ready && !repo.is_local() && repo.changes.is_empty()
@@ -1553,7 +1553,8 @@ impl App {
             ShortcutAction::OpenGitCommand => self.open_git_command(),
             ShortcutAction::OpenHelp => self.mode = Mode::Help,
             ShortcutAction::ToggleWrap
-                if self.visible_view() == View::Changes || self.graph_commit_open =>
+                if (self.visible_view() == View::Changes || self.graph_commit_open)
+                    && self.changes.preview.wrappable() =>
             {
                 let wrapped = self.changes.toggle_wrap();
                 let subject = if self.view == View::Changes && self.changes.pane == LeftPane::Files
@@ -1623,11 +1624,7 @@ impl App {
             .regions
             .sqlite_rows
             .map_or(0, |area| usize::from(area.height));
-        let focus = self
-            .changes
-            .sqlite_browser
-            .as_ref()
-            .map(|browser| browser.focus);
+        let focus = self.changes.preview.database().map(|browser| browser.focus);
         match key.code {
             KeyCode::Esc => self.changes.deactivate_sqlite(),
             KeyCode::BackTab => self.changes.toggle_sqlite_focus(),
@@ -1873,7 +1870,7 @@ impl App {
     }
 
     fn selected_file_to_edit(&self) -> Option<(PathBuf, PathBuf)> {
-        if self.changes.issue_preview.is_some() {
+        if self.changes.preview.issue().is_some() {
             return None;
         }
         let repo = self.repository()?;
@@ -2053,14 +2050,7 @@ impl App {
     }
 
     pub(crate) fn markdown_preview_available(&self) -> bool {
-        self.view == View::Changes
-            && (self.changes.issue_preview.is_some()
-                || (self.changes.pane == LeftPane::Files
-                    && self.changes.preview_image.is_none()
-                    && self.changes.sqlite_browser.is_none()
-                    && self
-                        .selected_explorer_file_path()
-                        .is_some_and(is_markdown_path)))
+        self.view == View::Changes && self.changes.preview.markdown_available()
     }
 
     pub(crate) fn markdown_preview_rendered(&self) -> bool {
@@ -2350,7 +2340,7 @@ fn first_error(stderr: &str, fallback: &str) -> String {
         .to_owned()
 }
 
-fn is_markdown_path(path: &RepoPath) -> bool {
+pub(crate) fn is_markdown_path(path: &RepoPath) -> bool {
     path.as_path()
         .extension()
         .and_then(|extension| extension.to_str())

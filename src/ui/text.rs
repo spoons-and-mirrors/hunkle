@@ -6,6 +6,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::preview::{DiffDocument, DiffLineKind};
 use crate::repo_path::RepoPath;
 
 mod markdown;
@@ -47,7 +48,7 @@ pub(super) fn styled_source_window(
 }
 
 pub(super) fn styled_diff(
-    diff: &str,
+    diff: &DiffDocument,
     path: &str,
     width: usize,
     show_initial_header: bool,
@@ -55,87 +56,13 @@ pub(super) fn styled_diff(
     styled_diff_window(diff, path, width, 0, usize::MAX, show_initial_header)
 }
 
-pub(super) fn diff_display_line_count(diff: &str, show_initial_header: bool) -> usize {
-    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
-    let mut in_hunk = false;
-    let mut seen_header = false;
-    let mut count = 0;
-    for line in diff.lines() {
-        let file_header = line.starts_with("diff --git");
-        if file_header {
-            in_hunk = false;
-            if show_initial_header {
-                count += usize::from(seen_header);
-                count += 1;
-                seen_header = true;
-                continue;
-            }
-        }
-        let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header {
-            continue;
-        }
-        if hunk_header {
-            count += usize::from(in_hunk);
-            in_hunk = true;
-        }
-        count += 1;
-    }
-    count
-}
-
-pub(super) fn wrapped_preview_line_starts(
-    content: &str,
-    is_diff: bool,
-    width: usize,
-    show_initial_diff_header: bool,
-) -> Vec<usize> {
+pub(super) fn wrapped_source_line_starts(content: &str, width: usize) -> Vec<usize> {
     let width = width.max(1);
     let numbered = width >= 72;
-    let has_hunks = is_diff && content.lines().any(|line| line.starts_with("@@"));
-    let mut in_hunk = false;
-    let mut seen_header = false;
     let mut starts = vec![0_usize];
     for line in content.lines() {
-        let file_header = is_diff && line.starts_with("diff --git");
-        if file_header {
-            in_hunk = false;
-            if show_initial_diff_header {
-                if seen_header {
-                    starts.push(starts.last().copied().unwrap_or(0).saturating_add(1));
-                }
-                seen_header = true;
-            } else if has_hunks {
-                continue;
-            }
-        }
-        let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header && !file_header {
-            continue;
-        }
-        if hunk_header {
-            if in_hunk {
-                starts.push(starts.last().copied().unwrap_or(0).saturating_add(1));
-            }
-            in_hunk = true;
-        }
-        let prefix = if !is_diff {
-            usize::from(numbered) * 7
-        } else if in_hunk
-            && !hunk_header
-            && !line.starts_with("+++")
-            && !line.starts_with("---")
-            && (line.starts_with('+') || line.starts_with('-') || line.starts_with(' '))
-        {
-            usize::from(numbered) * 6 + 1
-        } else {
-            0
-        };
-        let payload = if is_diff && prefix > 0 {
-            &line[1..]
-        } else {
-            line
-        };
+        let prefix = usize::from(numbered) * 7;
+        let payload = line;
         let content_width_available = width.saturating_sub(prefix).max(1);
         let line_height = word_wrapped_height(payload, content_width_available);
         starts.push(
@@ -425,7 +352,7 @@ fn push_syntax_spans(spans: &mut Vec<Span<'static>>, code: &str, language: Langu
 }
 
 pub(super) fn styled_diff_window(
-    diff: &str,
+    diff: &DiffDocument,
     path: &str,
     width: usize,
     start: usize,
@@ -433,79 +360,40 @@ pub(super) fn styled_diff_window(
     show_initial_header: bool,
 ) -> Vec<Line<'static>> {
     let numbered = width >= 72;
-    let mut old_line = None;
-    let mut new_line = None;
     let end = start.saturating_add(count);
-    let mut display_index = 0;
     let mut lines = Vec::new();
-    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
-    let mut in_hunk = false;
-    let mut seen_header = false;
-    let language = Language::from_path(path);
-
-    for line in diff.lines() {
-        let file_header = line.starts_with("diff --git");
-        if file_header {
-            in_hunk = false;
-            new_line = None;
-            if show_initial_header {
-                if seen_header {
-                    if display_index >= start && display_index < end {
-                        lines.push(finish_line(Vec::new(), width, palette().panel));
-                    }
-                    display_index += 1;
-                }
-                seen_header = true;
-            } else if has_hunks {
-                continue;
-            }
-        }
-        let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header && !file_header {
+    for row in start..end.min(diff.display_len(show_initial_header)) {
+        let Some(line) = diff.display_line(row, show_initial_header) else {
             continue;
-        }
-        if hunk_header {
-            if in_hunk {
-                if display_index >= start && display_index < end {
-                    lines.push(finish_line(Vec::new(), width, palette().panel));
-                }
-                display_index += 1;
-            }
-            in_hunk = true;
-        }
-        if display_index >= end {
-            break;
-        }
-        if display_index >= start {
-            lines.push(styled_diff_line(
-                line,
-                language,
-                width,
-                numbered,
-                &mut old_line,
-                &mut new_line,
-            ));
-        } else {
-            advance_diff_line(line, &mut old_line, &mut new_line);
-        }
-        display_index += 1;
+        };
+        let (old_line, new_line) = diff.line_numbers_at_display_row(row, show_initial_header);
+        let row_path = diff
+            .display_path(row, show_initial_header)
+            .map(RepoPath::display);
+        let language = Language::from_path(row_path.as_deref().unwrap_or(path));
+        lines.push(styled_diff_line(
+            line,
+            diff.display_kind(row, show_initial_header),
+            language,
+            width,
+            numbered,
+            old_line,
+            new_line,
+        ));
     }
     lines
 }
 
 fn styled_diff_line(
     line: &str,
+    kind: Option<DiffLineKind>,
     language: Language,
     width: usize,
     numbered: bool,
-    old_line: &mut Option<u32>,
-    new_line: &mut Option<u32>,
+    _old_line: Option<u32>,
+    new_line: Option<u32>,
 ) -> Line<'static> {
-    if line.starts_with("@@") {
-        if let Some((old, new)) = parse_hunk_lines(line) {
-            *old_line = Some(old);
-            *new_line = Some(new);
-        }
+    if kind == Some(DiffLineKind::Hunk) {
         return finish_line(
             vec![Span::styled(
                 line.to_owned(),
@@ -574,26 +462,11 @@ fn styled_diff_line(
         );
     }
 
-    let (marker, payload, background, new_number) = if new_line.is_some()
-        && let Some(payload) = line.strip_prefix('+')
-    {
-        let number = *new_line;
-        *new_line = new_line.map(|value| value + 1);
-        ("+", payload, palette().add_bg, number)
-    } else if old_line.is_some()
-        && let Some(payload) = line.strip_prefix('-')
-    {
-        *old_line = old_line.map(|value| value + 1);
-        ("-", payload, palette().remove_bg, None)
-    } else if let Some(payload) = line.strip_prefix(' ')
-        && old_line.is_some()
-    {
-        let new = *new_line;
-        *old_line = old_line.map(|value| value + 1);
-        *new_line = new_line.map(|value| value + 1);
-        (" ", payload, palette().panel, new)
-    } else {
-        return finish_line(owned_syntax_spans(line, language), width, palette().panel);
+    let (marker, payload, background, new_number) = match kind {
+        Some(DiffLineKind::Addition) => ("+", &line[1..], palette().add_bg, new_line),
+        Some(DiffLineKind::Deletion) => ("-", &line[1..], palette().remove_bg, None),
+        Some(DiffLineKind::Context) => (" ", &line[1..], palette().panel, new_line),
+        _ => return finish_line(owned_syntax_spans(line, language), width, palette().panel),
     };
 
     let mut spans = if numbered {
@@ -617,390 +490,6 @@ fn styled_diff_line(
     finish_line(spans, width, background)
 }
 
-fn advance_diff_line(line: &str, old_line: &mut Option<u32>, new_line: &mut Option<u32>) {
-    if line.starts_with("@@") {
-        if let Some((old, new)) = parse_hunk_lines(line) {
-            *old_line = Some(old);
-            *new_line = Some(new);
-        }
-    } else if line.starts_with("+++") || line.starts_with("---") {
-    } else if line.starts_with('+') {
-        *new_line = new_line.map(|value| value + 1);
-    } else if line.starts_with('-') {
-        *old_line = old_line.map(|value| value + 1);
-    } else if line.starts_with(' ') && old_line.is_some() {
-        *old_line = old_line.map(|value| value + 1);
-        *new_line = new_line.map(|value| value + 1);
-    }
-}
-
-fn parse_hunk_lines(line: &str) -> Option<(u32, u32)> {
-    let mut fields = line.split_whitespace();
-    fields.next()?;
-    let old = fields
-        .next()?
-        .trim_start_matches('-')
-        .split(',')
-        .next()?
-        .parse()
-        .ok()?;
-    let new = fields
-        .next()?
-        .trim_start_matches('+')
-        .split(',')
-        .next()?
-        .parse()
-        .ok()?;
-    Some((old, new))
-}
-
-pub(super) fn diff_new_line_and_payload_at_display_row(
-    diff: &str,
-    target: usize,
-    show_initial_header: bool,
-) -> Option<(usize, &str)> {
-    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
-    let mut in_hunk = false;
-    let mut seen_header = false;
-    let mut display_index = 0;
-    let mut old_line = None;
-    let mut new_line = None;
-
-    for line in diff.lines() {
-        let file_header = line.starts_with("diff --git");
-        if file_header {
-            in_hunk = false;
-            old_line = None;
-            new_line = None;
-            if show_initial_header {
-                if seen_header {
-                    if display_index == target {
-                        return None;
-                    }
-                    display_index += 1;
-                }
-                seen_header = true;
-            } else if has_hunks {
-                continue;
-            }
-        }
-        let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header && !file_header {
-            continue;
-        }
-        if hunk_header {
-            if in_hunk {
-                if display_index == target {
-                    return None;
-                }
-                display_index += 1;
-            }
-            in_hunk = true;
-            if let Some((_, new)) = parse_hunk_lines(line) {
-                new_line = Some(new);
-            }
-        }
-        if display_index == target {
-            return if in_hunk && (line.starts_with('+') || line.starts_with(' ')) {
-                new_line.map(|number| (number.max(1) as usize, &line[1..]))
-            } else {
-                None
-            };
-        }
-        advance_diff_line(line, &mut old_line, &mut new_line);
-        display_index += 1;
-    }
-    None
-}
-
-pub(super) fn diff_file_position_at_display_row(
-    diff: &str,
-    target: usize,
-    show_initial_header: bool,
-) -> Option<(RepoPath, usize, &str)> {
-    if !show_initial_header {
-        return None;
-    }
-    let lines = diff.lines().collect::<Vec<_>>();
-    let has_hunks = lines.iter().any(|line| line.starts_with("@@"));
-    let mut display_index = 0;
-    let mut in_hunk = false;
-    let mut seen_header = false;
-    let mut path = None;
-    let mut old_line = None;
-    let mut new_line = None;
-
-    for (index, line) in lines.iter().copied().enumerate() {
-        let file_header = line.starts_with("diff --git");
-        if file_header {
-            in_hunk = false;
-            old_line = None;
-            new_line = None;
-            path = diff_file_destination(&lines, index).map(|(path, _)| path);
-            if seen_header {
-                if display_index == target {
-                    return None;
-                }
-                display_index += 1;
-            }
-            seen_header = true;
-        }
-        let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header && !file_header {
-            continue;
-        }
-        if hunk_header {
-            if in_hunk {
-                if display_index == target {
-                    return None;
-                }
-                display_index += 1;
-            }
-            in_hunk = true;
-            if let Some((old, new)) = parse_hunk_lines(line) {
-                old_line = Some(old);
-                new_line = Some(new);
-            }
-        }
-        if display_index == target {
-            return if in_hunk && (line.starts_with('+') || line.starts_with(' ')) {
-                Some((path.clone()?, new_line?.max(1) as usize, &line[1..]))
-            } else {
-                None
-            };
-        }
-        advance_diff_line(line, &mut old_line, &mut new_line);
-        display_index += 1;
-    }
-    None
-}
-
-pub(super) fn diff_file_header_at_display_row(
-    diff: &str,
-    target: usize,
-    show_initial_header: bool,
-) -> Option<(RepoPath, usize)> {
-    if !show_initial_header {
-        return None;
-    }
-    let lines = diff.lines().collect::<Vec<_>>();
-    let has_hunks = lines.iter().any(|line| line.starts_with("@@"));
-    let mut display_index = 0;
-    let mut in_hunk = false;
-    let mut seen_header = false;
-
-    for (index, line) in lines.iter().copied().enumerate() {
-        let file_header = line.starts_with("diff --git");
-        if file_header {
-            in_hunk = false;
-            if seen_header {
-                if display_index == target {
-                    return None;
-                }
-                display_index += 1;
-            }
-            seen_header = true;
-        }
-        let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header && !file_header {
-            continue;
-        }
-        if hunk_header {
-            if in_hunk {
-                if display_index == target {
-                    return None;
-                }
-                display_index += 1;
-            }
-            in_hunk = true;
-        }
-        if display_index == target {
-            return file_header
-                .then(|| diff_file_destination(&lines, index))
-                .flatten();
-        }
-        display_index += 1;
-    }
-    None
-}
-
-pub(super) fn diff_new_line_markers(diff: &str, target: &RepoPath) -> Vec<(usize, char)> {
-    let lines = diff.lines().collect::<Vec<_>>();
-    let has_hunks = lines.iter().any(|line| line.starts_with("@@"));
-    if !has_hunks {
-        return Vec::new();
-    }
-    let has_file_headers = lines.iter().any(|line| line.starts_with("diff --git"));
-    let mut path = (!has_file_headers).then(|| target.clone());
-    let mut in_hunk = false;
-    let mut new_line = None;
-    let mut deletion_pending = false;
-    let mut markers = Vec::new();
-
-    for (index, line) in lines.iter().copied().enumerate() {
-        let file_header = line.starts_with("diff --git");
-        if file_header {
-            path = diff_file_destination(&lines, index).map(|(path, _)| path);
-            in_hunk = false;
-            new_line = None;
-            deletion_pending = false;
-        }
-        let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header && !file_header {
-            continue;
-        }
-        if hunk_header {
-            in_hunk = true;
-            if let Some((_, new)) = parse_hunk_lines(line) {
-                new_line = Some(new);
-            }
-            deletion_pending = false;
-            continue;
-        }
-        if !in_hunk || path.as_ref() != Some(target) {
-            continue;
-        }
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            if let Some(line_number) = new_line {
-                markers.push((
-                    line_number.saturating_sub(1) as usize,
-                    if deletion_pending { '~' } else { '+' },
-                ));
-            }
-            new_line = new_line.map(|line| line.saturating_add(1));
-            deletion_pending = false;
-        } else if line.starts_with('-') {
-            deletion_pending = true;
-        } else if line.starts_with(' ') {
-            if deletion_pending && let Some(line_number) = new_line {
-                markers.push((line_number.saturating_sub(1) as usize, '-'));
-            }
-            new_line = new_line.map(|line| line.saturating_add(1));
-            deletion_pending = false;
-        }
-    }
-    if deletion_pending
-        && path.as_ref() == Some(target)
-        && let Some(line_number) = new_line
-    {
-        markers.push((line_number.saturating_sub(1) as usize, '-'));
-    }
-    markers
-}
-
-fn diff_file_destination(lines: &[&str], header_index: usize) -> Option<(RepoPath, usize)> {
-    let mut destination = None;
-    let mut deleted = false;
-    let mut first_line = 1;
-    for line in lines.iter().copied().skip(header_index + 1) {
-        if line.starts_with("diff --git") {
-            break;
-        }
-        if destination.is_none()
-            && let Some(path) = line.strip_prefix("+++ ")
-        {
-            if path == "/dev/null" {
-                deleted = true;
-            } else {
-                destination = parse_git_diff_path(path);
-            }
-        }
-        if line.starts_with("@@") {
-            first_line = parse_hunk_lines(line).map_or(1, |(_, line)| line.max(1) as usize);
-            break;
-        }
-    }
-    if deleted {
-        return None;
-    }
-    let destination = destination.or_else(|| {
-        let header = lines[header_index].strip_prefix("diff --git ")?;
-        if let Some((_, path)) = parse_git_diff_tokens(header) {
-            return path
-                .strip_prefix(b"b/")
-                .and_then(|path| RepoPath::from_git_bytes(path).ok());
-        }
-        if let Some((_, path)) = header.rsplit_once(" b/") {
-            return RepoPath::from_git_bytes(path.as_bytes()).ok();
-        }
-        None
-    })?;
-    Some((destination, first_line))
-}
-
-fn parse_git_diff_path(value: &str) -> Option<RepoPath> {
-    let bytes = if value.starts_with('"') {
-        parse_git_diff_token(value.as_bytes())?.0
-    } else {
-        value.as_bytes().to_vec()
-    };
-    let path = bytes.strip_prefix(b"b/").unwrap_or(bytes.as_slice());
-    RepoPath::from_git_bytes(path).ok()
-}
-
-fn parse_git_diff_tokens(value: &str) -> Option<(Vec<u8>, Vec<u8>)> {
-    let bytes = value.as_bytes();
-    let (first, consumed) = parse_git_diff_token(bytes)?;
-    let remaining = bytes.get(consumed..)?;
-    let whitespace = remaining
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())?;
-    let (second, _) = parse_git_diff_token(&remaining[whitespace..])?;
-    Some((first, second))
-}
-
-fn parse_git_diff_token(value: &[u8]) -> Option<(Vec<u8>, usize)> {
-    if value.first() != Some(&b'"') {
-        let end = value
-            .iter()
-            .position(u8::is_ascii_whitespace)
-            .unwrap_or(value.len());
-        return Some((value[..end].to_vec(), end));
-    }
-    let mut output = Vec::new();
-    let mut index = 1;
-    while index < value.len() {
-        match value[index] {
-            b'"' => return Some((output, index + 1)),
-            b'\\' => {
-                index += 1;
-                let escaped = *value.get(index)?;
-                if escaped.is_ascii_digit() && escaped < b'8' {
-                    let mut byte = 0_u8;
-                    let mut digits = 0;
-                    while digits < 3
-                        && value
-                            .get(index)
-                            .is_some_and(|byte| (b'0'..=b'7').contains(byte))
-                    {
-                        byte = byte.saturating_mul(8).saturating_add(value[index] - b'0');
-                        index += 1;
-                        digits += 1;
-                    }
-                    output.push(byte);
-                    continue;
-                }
-                output.push(match escaped {
-                    b'a' => 0x07,
-                    b'b' => 0x08,
-                    b't' => b'\t',
-                    b'n' => b'\n',
-                    b'v' => 0x0b,
-                    b'f' => 0x0c,
-                    b'r' => b'\r',
-                    other => other,
-                });
-            }
-            byte => output.push(byte),
-        }
-        index += 1;
-    }
-    None
-}
-
 fn line_number(new: Option<u32>) -> Vec<Span<'static>> {
     vec![Span::styled(
         format!(
@@ -1018,14 +507,19 @@ fn finish_line(spans: Vec<Span<'static>>, _width: usize, background: Color) -> L
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo_path::RepoPath;
 
     #[test]
     fn maps_only_new_side_diff_rows() {
         let diff =
             "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -2,2 +2,3 @@\n context\n-old\n+new\n+more\n";
 
-        let mapped_line =
-            |row| diff_new_line_and_payload_at_display_row(diff, row, false).map(|(line, _)| line);
+        let document = DiffDocument::parse(diff.to_owned());
+        let mapped_line = |row| {
+            document
+                .display_new_position(row, false)
+                .map(|(line, _)| line)
+        };
         assert_eq!(mapped_line(0), None);
         assert_eq!(mapped_line(1), Some(2));
         assert_eq!(mapped_line(2), None);
@@ -1036,7 +530,8 @@ mod tests {
     #[test]
     fn diff_and_source_line_numbers_share_the_same_gutter() {
         let diff = "@@ -2 +2 @@\n-old\n+new\n";
-        let diff_line = styled_diff(diff, "notes.txt", 100, false)[2]
+        let document = DiffDocument::parse(diff.to_owned());
+        let diff_line = styled_diff(&document, "notes.txt", 100, false)[2]
             .spans
             .iter()
             .map(|span| span.content.as_ref())
@@ -1066,35 +561,37 @@ mod tests {
             "@@ -40 +42 @@\n",
             "+second\n",
         );
+        let document = DiffDocument::parse(diff.to_owned());
 
         assert_eq!(
-            diff_file_header_at_display_row(diff, 0, true),
+            document.display_file_header(0, true),
             Some((RepoPath::from("src/first.rs"), 12))
         );
-        assert_eq!(diff_file_header_at_display_row(diff, 3, true), None);
+        assert_eq!(document.display_file_header(3, true), None);
         assert_eq!(
-            diff_file_header_at_display_row(diff, 4, true),
+            document.display_file_header(4, true),
             Some((RepoPath::from("src/space name.rs"), 42))
         );
-        assert_eq!(diff_file_header_at_display_row(diff, 0, false), None);
+        assert_eq!(document.display_file_header(0, false), None);
         assert_eq!(
-            diff_file_position_at_display_row(diff, 2, true),
+            document.display_file_position(2, true),
             Some((RepoPath::from("src/first.rs"), 12, "first"))
         );
         assert_eq!(
-            diff_file_position_at_display_row(diff, 6, true),
+            document.display_file_position(6, true),
             Some((RepoPath::from("src/space name.rs"), 42, "second"))
         );
-        assert_eq!(diff_file_position_at_display_row(diff, 3, true), None);
+        assert_eq!(document.display_file_position(3, true), None);
     }
 
     #[test]
     fn maps_quoted_header_only_paths_containing_the_diff_separator() {
         let diff =
             "diff --git \"a/odd b/target\" \"b/odd b/target\"\nold mode 100644\nnew mode 100755\n";
+        let document = DiffDocument::parse(diff.to_owned());
 
         assert_eq!(
-            diff_file_header_at_display_row(diff, 0, true),
+            document.display_file_header(0, true),
             Some((RepoPath::from("odd b/target"), 1))
         );
     }
@@ -1111,9 +608,10 @@ mod tests {
             "+new\n",
             "+more\n",
         );
+        let document = DiffDocument::parse(diff.to_owned());
 
         assert_eq!(
-            diff_new_line_markers(diff, &RepoPath::from("src/main.rs")),
+            document.new_line_markers(&RepoPath::from("src/main.rs")),
             vec![(1, '~'), (2, '+')]
         );
     }
@@ -1189,7 +687,7 @@ mod tests {
 
     #[test]
     fn styles_source_diff_with_numbers_and_tinted_changes() {
-        let lines = styled_diff(
+        let document = DiffDocument::parse(
             concat!(
                 "diff --git a/src/main.rs b/src/main.rs\n",
                 "index 1234567..abcdef0 100644\n",
@@ -1198,11 +696,10 @@ mod tests {
                 "@@ -1 +1 @@\n",
                 "-let old_value = 1;\n",
                 "+let new_value = 2;",
-            ),
-            "src/main.rs",
-            100,
-            false,
+            )
+            .to_owned(),
         );
+        let lines = styled_diff(&document, "src/main.rs", 100, false);
 
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].style.bg, Some(palette().surface_alt));
@@ -1229,25 +726,24 @@ mod tests {
             "-let old_value = 1;\n",
             "+let new_value = 2;",
         );
-        let lines = styled_diff(diff, "", 100, true);
+        let document = DiffDocument::parse(diff.to_owned());
+        let lines = styled_diff(&document, "", 100, true);
 
         assert_eq!(lines.len(), 4);
         assert!(lines[0].spans[0].content.starts_with("diff --git"));
-        assert_eq!(diff_display_line_count(diff, true), lines.len());
+        assert_eq!(document.display_len(true), lines.len());
         assert_eq!(
-            wrapped_preview_line_starts(diff, true, 100, true).len(),
+            document.wrapped_line_starts(100, true).len(),
             lines.len() + 1
         );
     }
 
     #[test]
     fn does_not_style_untracked_source_markers_as_diff_lines() {
-        let lines = styled_diff(
-            "Untracked file: SESSION.md\n\n- first item\n+ literal plus",
-            "SESSION.md",
-            100,
-            false,
+        let document = DiffDocument::parse(
+            "Untracked file: SESSION.md\n\n- first item\n+ literal plus".to_owned(),
         );
+        let lines = styled_diff(&document, "SESSION.md", 100, false);
 
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[2].style.bg, Some(palette().panel));
@@ -1273,7 +769,8 @@ mod tests {
             "@@ -2 +2 @@\n",
             "+change",
         );
-        let lines = styled_diff(diff, "", 100, true);
+        let document = DiffDocument::parse(diff.to_owned());
+        let lines = styled_diff(&document, "", 100, true);
         let text = |index: usize| {
             lines[index]
                 .spans
@@ -1295,9 +792,9 @@ mod tests {
                 .collect::<String>();
             !text.starts_with("index ") && !text.starts_with("--- ") && !text.starts_with("+++ ")
         }));
-        assert_eq!(diff_display_line_count(diff, true), lines.len());
+        assert_eq!(document.display_len(true), lines.len());
         assert_eq!(
-            wrapped_preview_line_starts(diff, true, 100, true).len(),
+            document.wrapped_line_starts(100, true).len(),
             lines.len() + 1
         );
     }
@@ -1317,8 +814,9 @@ mod tests {
             "+emoji 👩‍💻 line",
         );
         let width = 10;
-        let lines = styled_diff(diff, "src/main.rs", width, false);
-        let starts = wrapped_preview_line_starts(diff, true, width, false);
+        let document = DiffDocument::parse(diff.to_owned());
+        let lines = styled_diff(&document, "src/main.rs", width, false);
+        let starts = document.wrapped_line_starts(width, false);
 
         assert_eq!(starts.len(), lines.len() + 1);
         for (index, line) in lines.iter().enumerate() {

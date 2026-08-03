@@ -16,7 +16,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.regions.diff_scroll_max = 0;
     app.regions.diff_scrollbar = None;
     app.regions.diff_scroll_thumb = None;
-    let Some(browser) = app.changes.sqlite_browser.as_ref() else {
+    let Some(browser) = app.changes.preview.database() else {
         return;
     };
     let active = browser.active;
@@ -58,8 +58,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
     let (has_previous, has_next) = app
         .changes
-        .sqlite_browser
-        .as_ref()
+        .preview
+        .database()
         .and_then(|browser| browser.page.as_ref())
         .map_or((false, false), |page| (page.key.offset > 0, page.has_next));
     let show_paging =
@@ -108,7 +108,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn draw_objects(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let Some(browser) = app.changes.sqlite_browser.as_ref() else {
+    let Some(browser) = app.changes.preview.database() else {
         return;
     };
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
@@ -220,7 +220,7 @@ fn draw_objects(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn draw_rows(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let Some(browser) = app.changes.sqlite_browser.as_ref() else {
+    let Some(browser) = app.changes.preview.database() else {
         return;
     };
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);

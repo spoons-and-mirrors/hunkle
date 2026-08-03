@@ -20,7 +20,7 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
         app.selected_explorer_file_path().map(|path| path.display()),
         Some("a-preview.png".to_string())
     );
-    wait_for(&mut app, |app| app.changes.preview_image.is_some());
+    wait_for(&mut app, |app| app.changes.preview.image().is_some());
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     wait_for_halfblock_render(&mut terminal, &mut app);
     let preview_body = app.regions.diff.unwrap();
@@ -57,7 +57,8 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
     app.mode = Mode::Normal;
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     wait_for(&mut app, |app| {
-        app.changes.preview_image.is_none() && app.changes.diff == "plain text preview\n"
+        app.changes.preview.image().is_none()
+            && app.changes.preview.text() == Some("plain text preview\n")
     });
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen: String = terminal
@@ -86,13 +87,17 @@ fn corrupt_image_shows_an_error_as_text() {
     let mut app = App::new(directory.path().to_path_buf());
     wait_for(&mut app, |app| {
         app.changes
-            .diff
+            .preview
+            .text()
+            .unwrap()
             .starts_with("Could not read image dimensions:")
     });
-    assert!(app.changes.preview_image.is_none());
+    assert!(app.changes.preview.image().is_none());
     assert!(
         app.changes
-            .diff
+            .preview
+            .text()
+            .unwrap()
             .starts_with("Could not read image dimensions:")
     );
 }

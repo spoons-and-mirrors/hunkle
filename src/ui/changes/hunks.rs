@@ -13,10 +13,10 @@ pub(super) struct VisibleHunk {
 pub(super) fn visible_hunks(
     rows: &[(usize, usize)],
     rendered_height: usize,
-    body: Rect,
-    scroll: usize,
+    layout: &PreviewLayout,
 ) -> Vec<VisibleHunk> {
-    let top = scroll;
+    let body = layout.viewport;
+    let top = layout.outer_scroll;
     let bottom = top.saturating_add(usize::from(body.height));
     rows.iter()
         .enumerate()
@@ -24,10 +24,14 @@ pub(super) fn visible_hunks(
             let end = rows
                 .get(position + 1)
                 .map_or(rendered_height, |(_, next)| next.saturating_sub(1));
-            let visible_start = (*header).max(top);
-            let visible_end = end.min(bottom);
+            let positioned_header = header.saturating_add(layout.leading_height);
+            let positioned_end = end.saturating_add(layout.leading_height);
+            let visible_start = positioned_header.max(top);
+            let visible_end = positioned_end.min(bottom);
             let scroll_start = *header;
-            let scroll_end = end.saturating_sub(usize::from(body.height)).max(*header);
+            let scroll_end = positioned_end
+                .saturating_sub(usize::from(body.height))
+                .max(*header);
             (visible_start < visible_end).then(|| VisibleHunk {
                 index: *index,
                 area: Rect::new(
@@ -36,10 +40,10 @@ pub(super) fn visible_hunks(
                     body.width,
                     (visible_end - visible_start) as u16,
                 ),
-                header_y: (*header >= top && *header < bottom)
-                    .then(|| body.y.saturating_add((*header - top) as u16)),
-                continues_above: *header < top,
-                continues_below: end > bottom,
+                header_y: (positioned_header >= top && positioned_header < bottom)
+                    .then(|| body.y.saturating_add((positioned_header - top) as u16)),
+                continues_above: positioned_header < top,
+                continues_below: positioned_end > bottom,
                 scroll_start,
                 scroll_end,
             })
@@ -54,9 +58,10 @@ pub(super) fn scroll_to_row(row: usize, rendered_height: usize) -> usize {
 pub(super) fn draw_hunk_actions(
     frame: &mut Frame<'_>,
     app: &mut App,
-    body: Rect,
+    layout: &PreviewLayout,
     hunks: Vec<VisibleHunk>,
 ) {
+    let body = layout.viewport;
     if body.width < 3 {
         return;
     }

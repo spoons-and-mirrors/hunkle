@@ -10,8 +10,8 @@ pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::{
     app::{
-        App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, ShortcutAction,
-        TextInput, View,
+        App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, PreviewOrigin,
+        ShortcutAction, TextInput, View,
     },
     git::{Change, Commit, DiffSummary},
     repo_path::{RepoPath, display_os_str},
@@ -40,7 +40,7 @@ use metadata::*;
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
     let sidebar_pane = app.changes.pane;
-    let preview_pane = app.changes.preview_pane;
+    let preview_pane = app.changes.preview.pane();
     if app.single_panel_layout() {
         if app.agents_pane_visible() {
             app.reset_media_presentation();
@@ -323,27 +323,27 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
     }
     let repo = app.session.data().expect("checked above");
 
-    let selected_graph_commit = (app.visible_view() == View::Graph && app.graph_commit_open)
-        .then(|| app.selected_graph_commit())
-        .flatten();
-    let selected_commit = selected_graph_commit;
-    let branch_comparison = selected_commit
-        .is_none()
-        .then(|| app.changes.branch_comparison())
-        .flatten()
-        .cloned();
-    let selected_section = (selected_commit.is_none() && branch_comparison.is_none())
-        .then(|| app.changes.selected_diff_section())
-        .flatten();
-    let selected_change = if selected_commit.is_none() && branch_comparison.is_none() {
-        app.changes
-            .worktree_state
-            .selected()
-            .and_then(|index| app.changes.worktree_rows(repo).get(index))
-            .and_then(|row| row.change_index)
-            .and_then(|index| repo.changes.get(index))
-    } else {
-        None
+    let selected_commit = match app.changes.preview.origin() {
+        PreviewOrigin::Commit { oid } => app
+            .selected_graph_commit()
+            .filter(|commit| commit.oid == *oid),
+        _ => None,
+    };
+    let branch_comparison = app.changes.branch_comparison().cloned();
+    let selected_section = match app.changes.preview.origin() {
+        PreviewOrigin::WorktreeSection(section) => Some(*section),
+        _ => None,
+    };
+    let selected_directory = match app.changes.preview.origin() {
+        PreviewOrigin::WorktreeDirectory { section, path } => Some((*section, path)),
+        _ => None,
+    };
+    let selected_change = match app.changes.preview.origin() {
+        PreviewOrigin::WorktreeChange { path, staged, .. } => repo
+            .changes
+            .iter()
+            .find(|change| change.path == *path && change.staged == *staged),
+        _ => None,
     };
     let selected_label = branch_comparison.as_ref().map_or_else(
         || {
@@ -351,12 +351,21 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
                 || {
                     selected_change.map_or_else(
                         || {
-                            selected_section.map_or_else(
-                                || "No file selected".to_owned(),
-                                |section| match section {
-                                    WorktreeSection::Staged => "All staged changes".to_owned(),
-                                    WorktreeSection::Unstaged => "All unstaged changes".to_owned(),
+                            selected_directory.map_or_else(
+                                || {
+                                    selected_section.map_or_else(
+                                        || "No file selected".to_owned(),
+                                        |section| match section {
+                                            WorktreeSection::Staged => {
+                                                "All staged changes".to_owned()
+                                            }
+                                            WorktreeSection::Unstaged => {
+                                                "All unstaged changes".to_owned()
+                                            }
+                                        },
+                                    )
                                 },
+                                |(_, path)| path.display(),
                             )
                         },
                         |change| change.path.display(),
@@ -378,17 +387,19 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         || {
             selected_commit.map_or_else(
                 || {
-                    selected_section.map_or_else(
-                        || {
-                            selected_change.map_or("", |change| {
-                                if change.staged { "staged" } else { "unstaged" }
-                            })
-                        },
-                        |section| match section {
-                            WorktreeSection::Staged => "staged",
-                            WorktreeSection::Unstaged => "unstaged",
-                        },
-                    )
+                    selected_section
+                        .or_else(|| selected_directory.map(|(section, _)| section))
+                        .map_or_else(
+                            || {
+                                selected_change.map_or("", |change| {
+                                    if change.staged { "staged" } else { "unstaged" }
+                                })
+                            },
+                            |section| match section {
+                                WorktreeSection::Staged => "staged",
+                                WorktreeSection::Unstaged => "unstaged",
+                            },
+                        )
                 },
                 |_| "commit",
             )
@@ -396,9 +407,10 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         |_| "branch",
     );
     let inspecting_commit = selected_commit.is_some();
-    let show_file_headers =
-        inspecting_commit || selected_section.is_some() || branch_comparison.is_some();
-    let show_summary = inspecting_commit || selected_section.is_some() || selected_change.is_some();
+    let show_summary = inspecting_commit
+        || selected_section.is_some()
+        || selected_directory.is_some()
+        || selected_change.is_some();
     let metadata_width = diff_header.width.saturating_sub(2);
     let message_height = selected_commit.map_or(0, |commit| {
         commit_message_height(
@@ -423,10 +435,23 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
             deletions: changes.map(|change| change.deletions).sum(),
         }
     });
+    let directory_summary = selected_directory.map(|(section, directory)| {
+        let staged = section == WorktreeSection::Staged;
+        let changes = repo.changes.iter().filter(|change| {
+            change.staged == staged && change.path.as_path().starts_with(directory.as_path())
+        });
+        DiffSummary {
+            files: changes.clone().map(|change| change.path.clone()).collect(),
+            files_truncated: false,
+            additions: changes.clone().map(|change| change.additions).sum(),
+            deletions: changes.map(|change| change.deletions).sum(),
+        }
+    });
     let summary = selected_commit
         .and_then(|commit| app.commit_summaries.get(&commit.oid))
         .or(live_summary.as_ref())
-        .or(section_summary.as_ref());
+        .or(section_summary.as_ref())
+        .or(directory_summary.as_ref());
     let summary_unavailable =
         selected_commit.is_some_and(|commit| app.commit_summaries.failed(&commit.oid));
     let scrolled_commit = selected_commit.cloned();
@@ -451,16 +476,7 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         0
     };
     let metadata_bottom_margin = u16::from(metadata_height > 0);
-    let scrollable_metadata_height = if inspecting_commit {
-        metadata_height.saturating_add(metadata_bottom_margin)
-    } else {
-        0
-    };
-    let fixed_metadata_height = if inspecting_commit {
-        0
-    } else {
-        metadata_height.saturating_add(metadata_bottom_margin)
-    };
+    let scrollable_metadata_height = metadata_height.saturating_add(metadata_bottom_margin);
     let diff_body = if inspecting_commit {
         Rect::new(
             diff_header.x,
@@ -473,20 +489,16 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
     } else {
         Rect::new(
             diff_header.x,
-            diff_header
-                .y
-                .saturating_add(2)
-                .saturating_add(fixed_metadata_height),
+            diff_header.y.saturating_add(2),
             diff_header.width,
-            columns[1].bottom().saturating_sub(
-                diff_header
-                    .y
-                    .saturating_add(3)
-                    .saturating_add(fixed_metadata_height),
-            ),
+            columns[1]
+                .bottom()
+                .saturating_sub(diff_header.y.saturating_add(3)),
         )
     };
-    let wrap_label = if app.changes.diff_wrap {
+    let wrap_label = if !app.changes.preview.wrappable() {
+        String::new()
+    } else if app.changes.diff_wrap {
         format!(
             "  {}:on",
             app.settings.shortcuts.label(ShortcutAction::ToggleWrap)
@@ -542,48 +554,26 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
             diff_header,
         );
     }
-    if !inspecting_commit {
-        draw_metadata_card(
-            frame,
-            Rect::new(
-                diff_header.x,
-                diff_header.y.saturating_add(2),
-                diff_header.width,
-                metadata_height,
-            ),
-            summary,
-            summary_unavailable,
-            summary_height,
-        );
-    }
-    let show_hunk_actions =
-        !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
+    let show_hunk_actions = app.changes.preview.hunk_actions();
     let editable_diff = selected_change.map(|change| (change.path.clone(), change.code == '?'));
-    let editable_combined_diff = selected_section.is_some() || branch_comparison.is_some();
-    let mut preview = prepare_preview_lines(
+    let editable_combined_diff = app.changes.preview.editable() && editable_diff.is_none();
+    let mut layout = prepare_preview_layout(
         app,
+        columns[1],
         diff_body,
         &syntax_path,
-        true,
-        show_file_headers,
         false,
         scrollable_metadata_height,
     );
-    if let Some((path, untracked)) = editable_diff {
-        app.regions.preview_body = Some(diff_body);
-        app.regions.preview_path = Some(path);
-        app.regions.preview_untracked = untracked;
-        app.regions.preview_generation = app.changes.preview_content_generation;
-        app.regions.preview_scroll = app.changes.diff_scroll;
-    } else if editable_combined_diff {
-        app.regions.preview_body = Some(diff_body);
-        app.regions.preview_generation = app.changes.preview_content_generation;
-        app.regions.preview_scroll = app.changes.diff_scroll;
-    }
     let (hunk_rows, rendered_height) = if show_hunk_actions {
         app.changes
-            .preview_presentation
-            .hunk_rows(&app.changes.diff, preview.wrapped)
+            .preview
+            .document()
+            .map_or((Vec::new(), 0), |document| {
+                app.changes
+                    .preview_presentation
+                    .hunk_rows(document, layout.preview.wrapped)
+            })
     } else {
         (Vec::new(), 0)
     };
@@ -595,36 +585,34 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         let old_scroll = app.changes.diff_scroll;
         app.changes.diff_scroll = scroll_to_row(*row, rendered_height);
         if app.changes.diff_scroll != old_scroll {
-            preview = prepare_preview_lines(
+            layout = prepare_preview_layout(
                 app,
+                columns[1],
                 diff_body,
                 &syntax_path,
-                true,
-                show_file_headers,
                 false,
                 scrollable_metadata_height,
             );
         }
     }
-    let visible_hunks = visible_hunks(
-        &hunk_rows,
-        rendered_height,
-        diff_body,
-        app.changes.diff_scroll,
-    );
-    render_scrollable_content(
-        frame,
-        app,
-        columns[1],
-        diff_body,
-        preview,
-        scrollable_metadata_height,
-    );
+    let visible_hunks = visible_hunks(&hunk_rows, rendered_height, &layout);
+    if !layout.preview_body.is_empty() {
+        if let Some((path, untracked)) = editable_diff {
+            app.regions.preview_body = Some(layout.preview_body);
+            app.regions.preview_path = Some(path);
+            app.regions.preview_untracked = untracked;
+            app.regions.preview_generation = app.changes.preview.generation();
+            app.regions.preview_scroll = layout.content_scroll;
+        } else if editable_combined_diff {
+            app.regions.preview_body = Some(layout.preview_body);
+            app.regions.preview_generation = app.changes.preview.generation();
+            app.regions.preview_scroll = layout.content_scroll;
+        }
+    }
     if let Some(message) = scrolled_commit_message.as_deref() {
         draw_scrolled_metadata_card(
             frame,
-            diff_body,
-            app.changes.diff_scroll,
+            &layout,
             CommitMetadata {
                 height: metadata_height,
                 commit: scrolled_commit
@@ -637,8 +625,18 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
                 summary_height,
             },
         );
+    } else if metadata_height > 0 {
+        draw_scrolled_summary_card(
+            frame,
+            &layout,
+            metadata_height,
+            scrolled_summary.as_ref(),
+            summary_unavailable,
+            summary_height,
+        );
     }
-    draw_hunk_actions(frame, app, diff_body, visible_hunks);
+    render_scrollable_content(frame, app, &mut layout);
+    draw_hunk_actions(frame, app, &layout, visible_hunks);
     if !single_panel {
         draw_commit_editor(
             frame,

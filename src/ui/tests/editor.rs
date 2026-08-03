@@ -67,7 +67,7 @@ fn selects_visible_text_and_suppresses_clicks_after_dragging() {
     fs::write(root.join("selected.txt"), "select me\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
-    app.changes.set_diff("select me".to_owned());
+    app.changes.set_diff_for_test("select me".to_owned());
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -297,7 +297,9 @@ fn preview_click_preserves_wrapped_position_and_scroll_through_editing() {
         .join(" ");
     fs::write(root.join("notes.txt"), format!("{content}\n")).unwrap();
     let mut app = App::new(root.to_path_buf());
-    wait_for(&mut app, |app| app.changes.diff == format!("{content}\n"));
+    wait_for(&mut app, |app| {
+        app.changes.preview.text() == Some(format!("{content}\n").as_str())
+    });
     app.changes.diff_scroll = 2;
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -352,7 +354,12 @@ fn preview_click_preserves_wrapped_position_and_scroll_through_editing() {
     app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
     wait_for(&mut app, |app| {
-        app.mode == Mode::FileEdit && app.changes.diff.contains('X')
+        app.mode == Mode::FileEdit
+            && app
+                .changes
+                .preview
+                .text()
+                .is_some_and(|text| text.contains('X'))
     });
     assert_eq!(app.changes.diff_scroll, 2);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
@@ -425,7 +432,12 @@ fn untracked_preview_source_lines_open_in_the_inline_editor() {
     run_git(root, &["init", "-b", "main"]);
     fs::write(root.join("notes.txt"), "first\nsecond\n").unwrap();
     let mut app = App::new(root.to_path_buf());
-    wait_for(&mut app, |app| app.changes.diff.contains("Untracked file:"));
+    wait_for(&mut app, |app| {
+        app.changes
+            .preview
+            .text()
+            .is_some_and(|text| text.contains("Untracked file:"))
+    });
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let body = app.regions.preview_body.unwrap();
@@ -474,11 +486,14 @@ fn preview_click_uses_the_scroll_state_from_the_rendered_frame() {
         })
         .unwrap();
     click(&mut app, list.x + 2, list.y + row as u16);
-    wait_for(&mut app, |app| app.changes.diff == "first\nsecond\n");
+    wait_for(&mut app, |app| {
+        app.changes.preview.text() == Some("first\nsecond\n")
+    });
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let body = app.regions.preview_body.unwrap();
 
-    app.changes.set_diff("first\nsecond\n".to_owned());
+    app.changes
+        .set_source_for_test("first\nsecond\n".to_owned());
     click(&mut app, body.x, body.y);
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(
@@ -563,14 +578,16 @@ fn inline_editor_gutter_shows_live_changed_lines() {
     let mut app = App::new(root.to_path_buf());
     app.file_editor =
         Some(crate::app::FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap());
-    app.changes.diff = concat!(
-        "@@ -1,3 +1,4 @@\n",
-        " context\n",
-        "-old\n",
-        "+new\n",
-        "+more\n",
-    )
-    .to_owned();
+    app.changes.set_diff_for_test(
+        concat!(
+            "@@ -1,3 +1,4 @@\n",
+            " context\n",
+            "-old\n",
+            "+new\n",
+            "+more\n",
+        )
+        .to_owned(),
+    );
     app.mode = Mode::FileEdit;
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

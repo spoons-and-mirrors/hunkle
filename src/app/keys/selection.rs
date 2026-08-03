@@ -107,7 +107,17 @@ impl App {
                 Some("Hunk actions are unavailable for paths that are not valid UTF-8".to_owned());
             return;
         }
-        let patch = self.changes.diff.clone();
+        if !self.changes.preview.hunk_actions() {
+            return;
+        }
+        let Some(patch) = self
+            .changes
+            .preview
+            .document()
+            .and_then(|document| document.hunk_patch(index))
+        else {
+            return;
+        };
         let path = preserve_selection
             .then(|| {
                 let repo = self.repository()?;
@@ -117,7 +127,7 @@ impl App {
             .flatten();
         let started = self
             .session
-            .start_mutation(Mutation::StageHunk { patch, index });
+            .start_mutation(Mutation::StageHunk { patch, index: 0 });
         if started && let Some(path) = path {
             self.changes
                 .preserve_hunk_selection_after_stage(path, index);

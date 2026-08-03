@@ -1194,7 +1194,15 @@ fn keeps_hunk_mode_on_the_next_hunk_after_staging() {
     let mut app = App::new(root.to_path_buf());
     for _ in 0..100 {
         let _ = app.poll_worker();
-        if app.changes.diff.matches("@@").count() == 2 {
+        if app
+            .changes
+            .preview
+            .text()
+            .unwrap_or_default()
+            .matches("@@")
+            .count()
+            == 2
+        {
             break;
         }
         thread::sleep(Duration::from_millis(5));
@@ -1233,8 +1241,16 @@ fn keeps_hunk_mode_on_the_next_hunk_after_staging() {
                 .any(|change| change.path == "tracked.txt" && !change.staged);
         if split_change
             && app.changes.hunk_selection == Some(0)
-            && app.changes.diff.contains("changed second")
-            && !app.changes.diff.contains("changed first")
+            && app
+                .changes
+                .preview
+                .text()
+                .is_some_and(|text| text.contains("changed second"))
+            && !app
+                .changes
+                .preview
+                .text()
+                .is_some_and(|text| text.contains("changed first"))
         {
             break;
         }
@@ -1242,8 +1258,20 @@ fn keeps_hunk_mode_on_the_next_hunk_after_staging() {
     }
 
     assert_eq!(app.changes.hunk_selection, Some(0));
-    assert!(app.changes.diff.contains("changed second"));
-    assert!(!app.changes.diff.contains("changed first"));
+    assert!(
+        app.changes
+            .preview
+            .text()
+            .unwrap()
+            .contains("changed second")
+    );
+    assert!(
+        !app.changes
+            .preview
+            .text()
+            .unwrap()
+            .contains("changed first")
+    );
 }
 
 #[test]
@@ -1526,11 +1554,21 @@ fn refreshes_an_already_dirty_file_when_its_contents_change_again() {
     let tracked = root.join("tracked.txt");
     fs::write(&tracked, "first\n").unwrap();
     let mut app = App::new(root.to_path_buf());
-    wait_for_state(&mut app, |app| app.changes.diff.contains("first"));
+    wait_for_state(&mut app, |app| {
+        app.changes
+            .preview
+            .text()
+            .is_some_and(|text| text.contains("first"))
+    });
 
     fs::write(&tracked, "later content\n").unwrap();
     app.session.schedule_status_check_now();
-    wait_for_state(&mut app, |app| app.changes.diff.contains("later"));
+    wait_for_state(&mut app, |app| {
+        app.changes
+            .preview
+            .text()
+            .is_some_and(|text| text.contains("later"))
+    });
 }
 
 fn initialize_repository(root: &Path) {

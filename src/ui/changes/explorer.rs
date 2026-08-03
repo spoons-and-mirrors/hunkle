@@ -106,7 +106,7 @@ pub(super) fn draw_explorer_changes(
         fill(frame, columns[1], palette().panel);
     }
 
-    let issue_preview = app.changes.issue_preview.clone();
+    let issue_preview = app.changes.preview.issue().cloned();
     let selected_path = issue_preview.as_ref().map_or_else(
         || {
             app.selected_explorer_file_path()
@@ -128,9 +128,9 @@ pub(super) fn draw_explorer_changes(
             .bottom()
             .saturating_sub(preview_header.y.saturating_add(3)),
     );
-    let media_loaded = issue_preview.is_none() && app.changes.preview_image.is_some();
-    let database_loaded = issue_preview.is_none() && app.changes.sqlite_browser.is_some();
-    let wrap_label = if media_loaded || database_loaded {
+    let media_loaded = app.changes.preview.image().is_some();
+    let database_loaded = app.changes.preview.database().is_some();
+    let wrap_label = if !app.changes.preview.wrappable() {
         String::new()
     } else if app.changes.diff_wrap {
         format!(
@@ -145,12 +145,11 @@ pub(super) fn draw_explorer_changes(
     };
     let markdown_available = app.markdown_preview_available();
     let markdown_rendered = app.markdown_preview_rendered();
-    let access_label =
-        if issue_preview.is_some() || media_loaded || database_loaded || markdown_rendered {
-            "read-only"
-        } else {
-            "click to edit"
-        };
+    let access_label = if app.changes.preview.editable() && !markdown_rendered {
+        "click to edit"
+    } else {
+        "read-only"
+    };
     let markdown_button_width = if markdown_available { 11 } else { 0 };
     let header_content_width = preview_header
         .width
@@ -251,11 +250,11 @@ pub(super) fn draw_explorer_changes(
         app.regions.diff_scroll_thumb = None;
         let image = app
             .changes
-            .preview_image
-            .as_ref()
+            .preview
+            .image()
             .expect("media preview was checked")
             .clone();
-        let generation = app.changes.preview_content_generation;
+        let generation = app.changes.preview.generation();
         let protocol = app.settings.media_preview_protocol;
         let (area, effective_protocol, state) = app.changes.preview_presentation.media_state(
             generation,
@@ -303,15 +302,19 @@ pub(super) fn draw_explorer_changes(
                 preview_body,
             );
         }
+    } else if media_loaded {
+        app.changes.preview_presentation.hide_media();
     } else if database_loaded {
         app.changes.preview_presentation.hide_media();
         crate::ui::sqlite::draw(frame, app, preview_body);
     } else {
         app.changes.preview_presentation.hide_media();
-        let editable_path = issue_preview
-            .is_none()
-            .then(|| app.selected_explorer_file_path().cloned())
-            .flatten();
+        let editable_path = match app.changes.preview.origin() {
+            PreviewOrigin::ExplorerFile { path } if app.changes.preview.editable() => {
+                Some(path.clone())
+            }
+            _ => None,
+        };
         let path = issue_preview.as_ref().map_or_else(
             || {
                 editable_path
@@ -320,8 +323,8 @@ pub(super) fn draw_explorer_changes(
             },
             |issue| format!("issue-{}.md", issue.number),
         );
-        let mut preview =
-            prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered, 0);
+        let mut layout =
+            prepare_preview_layout(app, columns[1], preview_body, &path, markdown_rendered, 0);
         if let Some(editable_path) = editable_path.as_ref()
             && let Some(line) = app.changes.take_preview_line(editable_path)
             && let Some(row) = app
@@ -330,15 +333,15 @@ pub(super) fn draw_explorer_changes(
                 .rendered_row_for_source_line(line)
         {
             app.changes.diff_scroll = row;
-            preview = prepare_preview_lines(app, preview_body, &path, false, false, false, 0);
+            layout = prepare_preview_layout(app, columns[1], preview_body, &path, false, 0);
         }
-        if !markdown_rendered {
-            app.regions.preview_body = Some(preview_body);
+        if !markdown_rendered && editable_path.is_some() && !layout.preview_body.is_empty() {
+            app.regions.preview_body = Some(layout.preview_body);
             app.regions.preview_path = editable_path;
-            app.regions.preview_generation = app.changes.preview_content_generation;
-            app.regions.preview_scroll = app.changes.diff_scroll;
+            app.regions.preview_generation = app.changes.preview.generation();
+            app.regions.preview_scroll = layout.content_scroll;
         }
-        render_scrollable_content(frame, app, columns[1], preview_body, preview, 0);
+        render_scrollable_content(frame, app, &mut layout);
     }
 }
 

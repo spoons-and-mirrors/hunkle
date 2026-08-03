@@ -1,25 +1,5 @@
 use super::*;
 
-pub(super) fn draw_diff_summary(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    summary: Option<&DiffSummary>,
-    unavailable: bool,
-    wrapped: bool,
-) {
-    frame.render_widget(
-        Paragraph::new(diff_summary_text(
-            summary,
-            unavailable,
-            wrapped,
-            area.width,
-            area.height,
-            true,
-        )),
-        area,
-    );
-}
-
 pub(super) fn diff_summary_text(
     summary: Option<&DiffSummary>,
     unavailable: bool,

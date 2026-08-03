@@ -252,7 +252,7 @@ impl App {
                 self.file_editor_anchor = Some(anchor);
                 self.file_editor_return = Some(FileEditorReturn {
                     path: editor.path().clone(),
-                    pane: self.changes.pane,
+                    pane: self.changes.preview.pane(),
                     scroll: self.changes.diff_scroll,
                 });
                 self.file_editor = Some(editor);
@@ -317,7 +317,7 @@ impl App {
         else {
             return;
         };
-        let selected_path = self.repository().and_then(|repo| match self.changes.pane {
+        let selected_path = self.repository().and_then(|repo| match return_pane {
             LeftPane::Worktree => self
                 .changes
                 .selected_change_index(repo)
@@ -325,7 +325,7 @@ impl App {
                 .map(|change| &change.path),
             LeftPane::Files => self.changes.selected_explorer_file_path(repo),
         });
-        if return_pane == self.changes.pane && selected_path == Some(&return_path) {
+        if return_pane == self.changes.preview.pane() && selected_path == Some(&return_path) {
             self.changes.diff_scroll = return_scroll;
             self.file_editor_return = None;
         } else if clear_if_not_matching {
