@@ -982,7 +982,8 @@ fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
     assert!(screen.contains("basetree"));
     assert!(screen.contains("main"));
     assert!(screen.contains("HUNKLE"));
-    assert!(screen.contains("CLICK INSIDE TO REPLACE"));
+    assert!(screen.contains("SELECT"));
+    assert!(screen.contains("ENTER ACTIVATE"));
     assert!(!screen.contains("w0:p1"));
     assert!(!screen.contains("w0:p3"));
     assert!(!screen.contains("w0:t1"));
@@ -1016,6 +1017,45 @@ fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
     assert_eq!(
         terminal.backend().buffer()[(branch.x, branch.y)].fg,
         super::palette().accent
+    );
+
+    assert_eq!(
+        app.herdr_prompt.agent_pane_focus(),
+        Some(HitTarget::AgentPane(0))
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        app.herdr_prompt.agent_pane_focus(),
+        Some(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Down))
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let down = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Down))
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(down.x + down.width / 2, down.y + down.height / 2)].symbol(),
+        "+"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        app.herdr_prompt.agent_pane_focus(),
+        Some(HitTarget::AgentPane(2))
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+        app.herdr_prompt.agent_pane_focus(),
+        Some(HitTarget::AgentPaneSplit(2, AgentPaneDirection::Up))
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+        app.herdr_prompt.agent_pane_focus(),
+        Some(HitTarget::AgentPane(1))
+    );
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(
+        app.herdr_prompt.agent_pane_focus(),
+        Some(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Left))
     );
 
     click(&mut app, repository.x, repository.y);

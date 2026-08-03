@@ -192,6 +192,7 @@ pub(crate) fn draw_agent_pane_picker(
 
     let scaled = fit_pane_layout(canvas, layout.width, layout.height);
     let host_pane_id = prompt.agent_host_pane_id().unwrap_or_default();
+    let keyboard_focus = prompt.agent_pane_focus();
     for (index, pane) in layout.panes.iter().enumerate() {
         let left = scale_pane_edge(pane.x, layout.x, layout.width, scaled.width);
         let top = scale_pane_edge(pane.y, layout.y, layout.height, scaled.height);
@@ -221,10 +222,11 @@ pub(crate) fn draw_agent_pane_picker(
         );
         let is_host = pane.pane_id == host_pane_id;
         let is_hovered = hovered == Some(HitTarget::AgentPane(index));
-        let background = if is_host {
-            palette().surface_alt
-        } else if is_hovered {
+        let is_selected = keyboard_focus == Some(HitTarget::AgentPane(index));
+        let background = if is_hovered || is_selected {
             palette().selected
+        } else if is_host {
+            palette().surface_alt
         } else {
             palette().raised
         };
@@ -240,7 +242,7 @@ pub(crate) fn draw_agent_pane_picker(
         );
         let label = if is_host {
             "HUNKLE"
-        } else if is_hovered {
+        } else if is_hovered || is_selected {
             "SELECT"
         } else {
             ""
@@ -304,7 +306,7 @@ pub(crate) fn draw_agent_pane_picker(
             ];
             for (direction, edge) in edges {
                 let target = HitTarget::AgentPaneSplit(index, direction);
-                if hovered == Some(target) {
+                if hovered == Some(target) || keyboard_focus == Some(target) {
                     fill(frame, edge, palette().selected);
                     let plus = Rect::new(
                         edge.x.saturating_add(edge.width / 2),
@@ -323,7 +325,7 @@ pub(crate) fn draw_agent_pane_picker(
         }
     }
 
-    let footer = "CLICK INSIDE TO REPLACE · CLICK AN EDGE TO SPLIT · ESC CANCEL";
+    let footer = "ARROWS SELECT CENTER/EDGE · ENTER ACTIVATE · TAB CYCLE · ESC CANCEL";
     frame.render_widget(
         Paragraph::new(truncate_width(footer, usize::from(inner_width)))
             .alignment(Alignment::Center)

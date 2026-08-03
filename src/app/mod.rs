@@ -527,9 +527,32 @@ impl App {
         if self.herdr_prompt.agent_pane_picker_open() {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 self.should_quit = true;
-            } else if key.code == KeyCode::Esc {
-                self.herdr_prompt.cancel_pending_agent();
-                self.notice = Some("Agent pane selection cancelled".to_owned());
+            } else {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.herdr_prompt.cancel_pending_agent();
+                        self.notice = Some("Agent pane selection cancelled".to_owned());
+                    }
+                    KeyCode::Tab => self.herdr_prompt.cycle_agent_pane_focus(false),
+                    KeyCode::BackTab => self.herdr_prompt.cycle_agent_pane_focus(true),
+                    KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
+                        let direction = match key.code {
+                            KeyCode::Up => AgentPaneDirection::Up,
+                            KeyCode::Down => AgentPaneDirection::Down,
+                            KeyCode::Left => AgentPaneDirection::Left,
+                            KeyCode::Right => AgentPaneDirection::Right,
+                            _ => unreachable!(),
+                        };
+                        self.herdr_prompt.move_agent_pane_focus(direction);
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        match self.herdr_prompt.activate_agent_pane_focus() {
+                            Ok(()) => self.notice = Some("Starting agent in pane".to_owned()),
+                            Err(error) => self.notice = Some(error),
+                        }
+                    }
+                    _ => {}
+                }
             }
             return;
         }
