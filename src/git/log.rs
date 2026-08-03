@@ -32,7 +32,7 @@ fn read_log(root: &Path, revisions: &[&str]) -> Result<Vec<Commit>> {
     let mut args = vec![
         "log",
         format,
-        "--date=format:%Y-%m-%d %H:%M",
+        "--date=format-local:%Y-%m-%d %H:%M",
         "--decorate=short",
     ];
     args.extend_from_slice(revisions);
