@@ -518,6 +518,9 @@ impl HerdrSession {
                                 layout,
                                 pane_locations,
                             } = *result;
+                            for saved in self.agent_layouts.values_mut() {
+                                saved.remap_known(&pane_locations);
+                            }
                             for agent in &mut self.agents {
                                 let Some(location) = pane_locations.get(&agent.pane_id) else {
                                     continue;
@@ -571,6 +574,9 @@ impl HerdrSession {
                                 parked,
                                 pane_locations,
                             } = *result;
+                            for saved in self.agent_layouts.values_mut() {
+                                saved.remap_known(&pane_locations);
+                            }
                             for agent in &mut self.agents {
                                 let Some(location) = pane_locations.get(&agent.pane_id) else {
                                     continue;

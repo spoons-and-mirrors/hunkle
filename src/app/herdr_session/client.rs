@@ -151,11 +151,31 @@ impl LiveLayoutNode {
             }),
         }
     }
+
+    fn remap_known(&mut self, panes: &HashMap<String, LivePaneLocation>) {
+        match self {
+            Self::Pane(pane_id) => {
+                if let Some(location) = panes.get(pane_id) {
+                    *pane_id = location.pane_id.clone();
+                }
+            }
+            Self::Split { first, second, .. } => {
+                first.remap_known(panes);
+                second.remap_known(panes);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub(super) struct AgentLayout {
     root: LiveLayoutNode,
+}
+
+impl AgentLayout {
+    pub(super) fn remap_known(&mut self, panes: &HashMap<String, LivePaneLocation>) {
+        self.root.remap_known(panes);
+    }
 }
 
 #[derive(Debug)]
@@ -918,8 +938,8 @@ where
     let result = value
         .get("result")
         .ok_or_else(|| format!("Herdr returned an invalid response while trying to {operation}"))?;
-    if result.get("type").and_then(Value::as_str) != Some("pane_focused")
-        || result.get("pane_id").and_then(Value::as_str) != Some(pane_id)
+    if result.get("type").and_then(Value::as_str) != Some("pane_info")
+        || result.pointer("/pane/pane_id").and_then(Value::as_str) != Some(pane_id)
     {
         return Err(format!(
             "Herdr focused an unexpected pane while trying to {operation}"
@@ -1872,7 +1892,7 @@ fn parse_agent_status(value: Option<&str>) -> AgentStatus {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{cell::RefCell, path::Path};
 
     use super::*;
 
@@ -1927,8 +1947,8 @@ mod tests {
     fn focused(pane_id: &str) -> Value {
         serde_json::json!({
             "result": {
-                "type": "pane_focused",
-                "pane_id": pane_id,
+                "type": "pane_info",
+                "pane": { "pane_id": pane_id },
             }
         })
     }
@@ -2225,6 +2245,148 @@ mod tests {
         assert_eq!(commands[2][5], "w1:p3");
         assert_eq!(result.displayed, agent_layout(target));
         assert_eq!(result.parked.unwrap(), agent_layout(host));
+    }
+
+    #[test]
+    fn rebuilds_an_arbitrary_six_pane_tree_from_a_deep_hunkle_leaf() {
+        fn insert(
+            node: &mut LiveLayoutNode,
+            target: &str,
+            moved: &str,
+            direction: LayoutDirection,
+            ratio: f32,
+        ) -> bool {
+            match node {
+                LiveLayoutNode::Pane(pane_id) if pane_id == target => {
+                    *node = LiveLayoutNode::Split {
+                        direction,
+                        ratio,
+                        first: Box::new(LiveLayoutNode::Pane(pane_id.clone())),
+                        second: Box::new(LiveLayoutNode::Pane(moved.to_owned())),
+                    };
+                    true
+                }
+                LiveLayoutNode::Pane(_) => false,
+                LiveLayoutNode::Split { first, second, .. } => {
+                    insert(first, target, moved, direction, ratio)
+                        || insert(second, target, moved, direction, ratio)
+                }
+            }
+        }
+
+        fn swap(node: &mut LiveLayoutNode, source: &str, target: &str) {
+            match node {
+                LiveLayoutNode::Pane(pane_id) if pane_id == source => {
+                    *pane_id = target.to_owned();
+                }
+                LiveLayoutNode::Pane(pane_id) if pane_id == target => {
+                    *pane_id = source.to_owned();
+                }
+                LiveLayoutNode::Pane(_) => {}
+                LiveLayoutNode::Split { first, second, .. } => {
+                    swap(first, source, target);
+                    swap(second, source, target);
+                }
+            }
+        }
+
+        let desired = agent_layout(split(
+            "right",
+            0.63,
+            split(
+                "down",
+                0.41,
+                pane("w1:p2"),
+                split("right", 0.28, pane("w1:p3"), pane("w1:p1")),
+            ),
+            split(
+                "down",
+                0.57,
+                pane("w1:p4"),
+                split("right", 0.46, pane("w1:p5"), pane("w1:p6")),
+            ),
+        ))
+        .root;
+        let actual = RefCell::new(LiveLayoutNode::Pane("w1:p1".to_owned()));
+        let mut pane_ids = Vec::new();
+        desired.collect_panes(&mut pane_ids);
+        let mut panes = pane_ids
+            .into_iter()
+            .map(|pane_id| {
+                (
+                    pane_id.to_owned(),
+                    LivePaneLocation {
+                        pane_id: pane_id.to_owned(),
+                        tab_id: if pane_id == "w1:p1" { "w1:t1" } else { "w1:t2" }.to_owned(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut move_count = 0;
+        let mut swap_count = 0;
+
+        rebuild_layout(
+            &mut |args| match args[1].as_str() {
+                "move" => {
+                    move_count += 1;
+                    let direction = match args[8].as_str() {
+                        "right" => LayoutDirection::Right,
+                        "down" => LayoutDirection::Down,
+                        other => panic!("unexpected direction {other}"),
+                    };
+                    assert!(insert(
+                        &mut actual.borrow_mut(),
+                        &args[6],
+                        &args[2],
+                        direction,
+                        args[10].parse().unwrap(),
+                    ));
+                    Ok(moved(&args[2], &args[4]))
+                }
+                "swap" => {
+                    swap_count += 1;
+                    swap(&mut actual.borrow_mut(), &args[3], &args[5]);
+                    Ok(swapped(&args[3], &args[5]))
+                }
+                other => panic!("unexpected command {other}"),
+            },
+            &desired,
+            "w1:t1",
+            &mut panes,
+        )
+        .unwrap();
+
+        assert_eq!(*actual.borrow(), desired);
+        assert_eq!(move_count, 5);
+        assert_eq!(swap_count, 2);
+        assert!(panes.values().all(|location| location.tab_id == "w1:t1"));
+    }
+
+    #[test]
+    fn remaps_known_panes_in_saved_multi_pane_layouts() {
+        let mut layout = agent_layout(split(
+            "down",
+            0.4,
+            pane("w1:p2"),
+            split("right", 0.7, pane("w1:p3"), pane("w1:p4")),
+        ));
+        layout.remap_known(&HashMap::from([(
+            "w1:p3".to_owned(),
+            LivePaneLocation {
+                pane_id: "w2:p8".to_owned(),
+                tab_id: "w2:t1".to_owned(),
+            },
+        )]));
+
+        assert_eq!(
+            layout,
+            agent_layout(split(
+                "down",
+                0.4,
+                pane("w1:p2"),
+                split("right", 0.7, pane("w2:p8"), pane("w1:p4")),
+            ))
+        );
     }
 
     #[test]
