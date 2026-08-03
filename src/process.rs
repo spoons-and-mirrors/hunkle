@@ -13,6 +13,12 @@ use process_wrap::std::JobObject;
 #[cfg(unix)]
 use process_wrap::std::ProcessGroup;
 
+const FAST_COMMAND_WINDOW: Duration = Duration::from_millis(25);
+const LONG_COMMAND_THRESHOLD: Duration = Duration::from_secs(5);
+const FAST_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const NORMAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const LONG_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Limits {
     pub(crate) stdout_bytes: usize,
@@ -140,7 +146,10 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
                 }
                 break true;
             }
-            thread::sleep(Duration::from_millis(10));
+            let elapsed = started.elapsed();
+            thread::sleep(
+                process_poll_interval(elapsed).min(limits.timeout.saturating_sub(elapsed)),
+            );
         };
 
         if timed_out {
@@ -193,6 +202,16 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
     result
 }
 
+fn process_poll_interval(elapsed: Duration) -> Duration {
+    if elapsed < FAST_COMMAND_WINDOW {
+        FAST_POLL_INTERVAL
+    } else if elapsed < LONG_COMMAND_THRESHOLD {
+        NORMAL_POLL_INTERVAL
+    } else {
+        LONG_POLL_INTERVAL
+    }
+}
+
 fn receive_result<T>(
     receiver: &mpsc::Receiver<T>,
     result: &mut Option<T>,
@@ -232,7 +251,23 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<(Vec<u8>, boo
 mod tests {
     use std::io::Cursor;
 
-    use super::read_bounded;
+    use super::{process_poll_interval, read_bounded};
+
+    #[test]
+    fn process_polling_backs_off_for_long_running_commands() {
+        assert_eq!(
+            process_poll_interval(std::time::Duration::ZERO),
+            std::time::Duration::from_millis(1)
+        );
+        assert_eq!(
+            process_poll_interval(std::time::Duration::from_millis(25)),
+            std::time::Duration::from_millis(10)
+        );
+        assert_eq!(
+            process_poll_interval(std::time::Duration::from_secs(5)),
+            std::time::Duration::from_millis(100)
+        );
+    }
 
     #[test]
     fn drains_input_while_retaining_only_the_limit() {

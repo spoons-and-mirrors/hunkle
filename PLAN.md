@@ -11,9 +11,10 @@ its design is still changing.
   immediately current in memory, serialize writes through one coalescing worker,
   retain cross-process merge and clear-watermark behavior, and report failures
   asynchronously.
-- [ ] Replace subprocess polling with timeout-aware blocking waits. Keep bounded
-  concurrent stdout/stderr draining, stdin support, process-tree termination,
-  and the post-termination deadline for inherited pipes.
+- [x] Adapt subprocess lifecycle polling to favor fast command completion and
+  back off for long-running commands. Keep bounded concurrent stdout/stderr
+  draining, stdin support, process-tree termination, and the post-termination
+  deadline for inherited pipes.
 - [ ] Add an allocation-free word-wrap height path with exactly the same line
   breaking and Unicode/tab-width behavior as cursor-aware wrapping.
 - [ ] Batch syntax-highlighted text by styled run rather than allocating one
