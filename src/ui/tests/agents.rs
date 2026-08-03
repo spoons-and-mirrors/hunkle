@@ -725,6 +725,75 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
 }
 
 #[test]
+fn agent_preview_follows_the_agent_across_reordering_and_session_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut snapshot = agent_snapshot();
+    let first = &mut snapshot["result"]["snapshot"]["agents"][0];
+    first["terminal_id"] = serde_json::json!("term-first");
+    first["state_change_seq"] = serde_json::json!(2);
+    snapshot["result"]["snapshot"]["agents"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "agent": "opencode",
+            "agent_session": {
+                "source": "env",
+                "agent": "opencode",
+                "kind": "session_id",
+                "value": "ses_second"
+            },
+            "agent_status": "idle",
+            "focused": false,
+            "pane_id": "w1:p2",
+            "tab_id": "w1:t1",
+            "terminal_id": "term-second",
+            "terminal_title_stripped": "OC | Second agent",
+            "workspace_id": "w1",
+            "state_change_seq": 1
+        }));
+    let mut app = App::new(root.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&snapshot);
+    app.herdr
+        .set_agent_user_messages_for_test(0, &[("First request", None, 1, 0)]);
+    app.herdr
+        .set_agent_user_messages_for_test(1, &[("Old second request", None, 1, 0)]);
+    let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
+    open_agents_pane(&mut app);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let next = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewNext(0))
+        .unwrap();
+    click(&mut app, next.x, next.y);
+    assert_eq!(app.agents_pane_index(), Some(1));
+
+    let agents = snapshot["result"]["snapshot"]["agents"]
+        .as_array_mut()
+        .unwrap();
+    agents[1]["agent_session"]["value"] = serde_json::json!("ses_second_new");
+    agents[1]["terminal_title_stripped"] = serde_json::json!("OC | Updated second agent");
+    agents[1]["state_change_seq"] = serde_json::json!(3);
+    app.herdr.apply_snapshot_for_test(&snapshot);
+
+    assert_eq!(app.agents_pane_index(), Some(0));
+    app.herdr
+        .set_agent_user_messages_for_test(0, &[("New second request", None, 1, 0)]);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(screen.contains("New second request"), "{screen}");
+    assert!(!screen.contains("First request"), "{screen}");
+    assert!(!screen.contains("Old second request"), "{screen}");
+}
+
+#[test]
 fn hovering_agent_cards_does_not_open_history() {
     let directory = tempfile::tempdir().unwrap();
     let mut snapshot = agent_snapshot();
