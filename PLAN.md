@@ -17,7 +17,7 @@ its design is still changing.
   deadline for inherited pipes.
 - [x] Add an allocation-free word-wrap height path with exactly the same line
   breaking and Unicode/tab-width behavior as cursor-aware wrapping.
-- [ ] Batch syntax-highlighted text by styled run rather than allocating one
+- [x] Batch syntax-highlighted text by styled run rather than allocating one
   `String` per grapheme, while preserving tab expansion and Unicode widths.
 - [ ] Reuse parsed worktree status from the adaptive status check in the
   resulting refresh, avoiding an immediate duplicate `git status` without

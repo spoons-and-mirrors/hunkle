@@ -404,15 +404,22 @@ fn owned_syntax_spans(code: &str, language: Language) -> Vec<Span<'static>> {
 fn push_syntax_spans(spans: &mut Vec<Span<'static>>, code: &str, language: Language) {
     let mut column = 0usize;
     for span in syntax_spans_for_language(code, language) {
-        for grapheme in span.content.graphemes(true) {
-            if grapheme == "\t" {
+        if span.content.contains('\t') {
+            let mut expanded = String::with_capacity(span.content.len());
+            for grapheme in span.content.graphemes(true) {
+                if grapheme != "\t" {
+                    expanded.push_str(grapheme);
+                    column = column.saturating_add(UnicodeWidthStr::width(grapheme));
+                    continue;
+                }
                 let width = crate::app::TAB_WIDTH - column % crate::app::TAB_WIDTH;
-                push_merged_span(spans, Span::styled(" ".repeat(width), span.style));
+                expanded.extend(std::iter::repeat_n(' ', width));
                 column = column.saturating_add(width);
-            } else {
-                push_merged_span(spans, Span::styled(grapheme.to_owned(), span.style));
-                column = column.saturating_add(UnicodeWidthStr::width(grapheme));
             }
+            push_merged_span(spans, Span::styled(expanded, span.style));
+        } else {
+            column = column.saturating_add(UnicodeWidthStr::width(span.content.as_ref()));
+            push_merged_span(spans, span);
         }
     }
 }
@@ -1143,6 +1150,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn batched_syntax_spans_match_grapheme_by_grapheme_rendering() {
+        let cases = [
+            ("fn\tmain() { let café = \"界\"; }", Language::Rust),
+            (
+                "def\tvalue(name): # e\u{301}\n  return name",
+                Language::Python,
+            ),
+            ("const\tvalue = `👩‍💻`;", Language::JavaScript),
+        ];
+        for (content, language) in cases {
+            let mut actual = Vec::new();
+            push_syntax_spans(&mut actual, content, language);
+            assert_eq!(actual, legacy_syntax_spans(content, language));
+        }
+    }
+
+    fn legacy_syntax_spans(code: &str, language: Language) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        let mut column = 0usize;
+        for span in syntax_spans_for_language(code, language) {
+            for grapheme in span.content.graphemes(true) {
+                if grapheme == "\t" {
+                    let width = crate::app::TAB_WIDTH - column % crate::app::TAB_WIDTH;
+                    push_merged_span(&mut spans, Span::styled(" ".repeat(width), span.style));
+                    column = column.saturating_add(width);
+                } else {
+                    push_merged_span(&mut spans, Span::styled(grapheme.to_owned(), span.style));
+                    column = column.saturating_add(UnicodeWidthStr::width(grapheme));
+                }
+            }
+        }
+        spans
     }
 
     #[test]
