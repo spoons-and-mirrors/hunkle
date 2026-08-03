@@ -1076,8 +1076,6 @@ fn double_clicking_worktree_files_opens_them_in_files() {
         );
         assert_eq!(app.changes.diff, content);
 
-        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
-        assert!(app.agents_pane_visible());
         app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         assert_eq!(app.changes.pane, LeftPane::Worktree);
     }

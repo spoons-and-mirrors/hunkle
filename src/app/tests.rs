@@ -4,6 +4,16 @@ use crate::media::MediaPreviewProtocol;
 
 use super::*;
 
+fn enable_herdr(app: &mut App) {
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [],
+            "agents": [],
+            "panes": []
+        } }
+    }));
+}
+
 #[test]
 fn clearing_hit_targets_removes_overlaps_but_keeps_adjacent_targets() {
     let mut regions = Regions::default();
@@ -244,12 +254,9 @@ fn local_workspaces_reload_files_and_reject_git_actions() {
     }
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(app.agents_visible);
-    assert!(app.herdr.showing_stash);
-    assert_eq!(app.notice.as_deref(), Some("Agent stash shown"));
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    assert!(!app.agents_visible);
     assert!(!app.herdr.showing_stash);
-    assert_eq!(app.notice.as_deref(), Some("Agents hidden"));
+    assert!(!app.agents_pane_visible());
+    assert_eq!(app.notice.as_deref(), Some("Not a Git repository"));
 
     fs::write(root.join("two.txt"), "two\n").unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
@@ -615,6 +622,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     initialize_repository(directory.path());
     fs::write(directory.path().join("tracked.txt"), "edited\n").unwrap();
     let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
     app.mode = Mode::Normal;
     app.settings = Settings::default();
     app.settings_store = SettingsStore::at(path.clone());
@@ -764,6 +772,11 @@ fn function_keys_select_changes_files_and_agents() {
     assert!(!app.agents_pane_visible());
 
     app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert!(!app.agents_pane_visible());
+
+    enable_herdr(&mut app);
+    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
     assert!(app.agents_pane_visible());
 
     app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
@@ -780,8 +793,7 @@ fn shortcut_settings_rebind_reset_and_persist_commands() {
     app.settings_store = SettingsStore::at(path);
     app.mode = Mode::Settings;
     app.settings_page = SettingsPage::Shortcuts;
-    app.shortcut_selection = Shortcuts::definitions()
-        .iter()
+    app.shortcut_selection = Shortcuts::definitions(app.herdr_available())
         .position(|definition| definition.action == ShortcutAction::OpenExplorer)
         .unwrap();
 

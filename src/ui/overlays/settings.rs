@@ -11,6 +11,7 @@ pub(crate) struct SettingsView<'a> {
     pub(crate) opencode_selection: usize,
     pub(crate) opencode_model_input: Option<&'a str>,
     pub(crate) opencode_error: Option<&'a str>,
+    pub(crate) herdr_available: bool,
 }
 
 pub(crate) fn draw_settings(
@@ -29,6 +30,7 @@ pub(crate) fn draw_settings(
         opencode_selection,
         opencode_model_input,
         opencode_error,
+        herdr_available,
     } = view;
     let area = centered_min(frame.area(), 58, 0, 48, 30);
     frame.render_widget(Clear, area);
@@ -119,9 +121,8 @@ pub(crate) fn draw_settings(
             area.width.saturating_sub(4),
             area.height.saturating_sub(6),
         );
-        let definitions = Shortcuts::definitions();
+        let definitions = Shortcuts::definitions(herdr_available);
         for (row, (index, definition)) in definitions
-            .iter()
             .enumerate()
             .skip(shortcut_scroll)
             .take(usize::from(body.height))
@@ -331,8 +332,16 @@ pub(crate) fn draw_settings(
     let agent_y = if compact { 10 } else { 17 };
     let agent_time_y = if compact { 11 } else { 19 };
     let clear_timings_y = if compact { 12 } else { 21 };
-    let media_y = if compact { 13 } else { 23 };
-    let editor_y = if compact { 14 } else { 25 };
+    let media_y = if herdr_available {
+        if compact { 13 } else { 23 }
+    } else {
+        cross_workspace_y
+    };
+    let editor_y = if herdr_available {
+        if compact { 14 } else { 25 }
+    } else {
+        agent_y
+    };
     let auto_row = Rect::new(inner.x, area.y.saturating_add(auto_y), inner.width, 1);
     let interval_row = Rect::new(inner.x, area.y.saturating_add(interval_y), inner.width, 1);
     let format_on_save_row = Rect::new(
@@ -515,89 +524,91 @@ pub(crate) fn draw_settings(
             1,
         ),
     );
-    let (cross_workspace_switch, cross_workspace_switch_color) =
-        settings_toggle(settings.cross_workspace_agents);
-    let cross_workspace_padding = usize::from(cross_workspace_agents_row.width)
-        .saturating_sub(22 + UnicodeWidthStr::width(cross_workspace_switch));
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Cross-workspace agents", Style::default().fg(palette().ink)),
-            Span::raw(" ".repeat(cross_workspace_padding)),
-            Span::styled(
-                cross_workspace_switch,
-                Style::default()
-                    .fg(palette().canvas)
-                    .bg(cross_workspace_switch_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]))
-        .style(Style::default().bg(if selection == 3 {
-            palette().selected
-        } else {
-            palette().surface_alt
-        })),
-        cross_workspace_agents_row,
-    );
+    if herdr_available {
+        let (cross_workspace_switch, cross_workspace_switch_color) =
+            settings_toggle(settings.cross_workspace_agents);
+        let cross_workspace_padding = usize::from(cross_workspace_agents_row.width)
+            .saturating_sub(22 + UnicodeWidthStr::width(cross_workspace_switch));
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Cross-workspace agents", Style::default().fg(palette().ink)),
+                Span::raw(" ".repeat(cross_workspace_padding)),
+                Span::styled(
+                    cross_workspace_switch,
+                    Style::default()
+                        .fg(palette().canvas)
+                        .bg(cross_workspace_switch_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+            ]))
+            .style(Style::default().bg(if selection == 3 {
+                palette().selected
+            } else {
+                palette().surface_alt
+            })),
+            cross_workspace_agents_row,
+        );
 
-    let (agent_harness_switch, agent_harness_switch_color) =
-        settings_toggle(settings.show_agent_harness);
-    let agent_harness_padding = usize::from(agent_harness_row.width)
-        .saturating_sub(14 + UnicodeWidthStr::width(agent_harness_switch));
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Agent harness", Style::default().fg(palette().ink)),
-            Span::raw(" ".repeat(agent_harness_padding)),
-            Span::styled(
-                agent_harness_switch,
-                Style::default()
-                    .fg(palette().canvas)
-                    .bg(agent_harness_switch_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]))
-        .style(Style::default().bg(if selection == 4 {
-            palette().selected
-        } else {
-            palette().surface_alt
-        })),
-        agent_harness_row,
-    );
+        let (agent_harness_switch, agent_harness_switch_color) =
+            settings_toggle(settings.show_agent_harness);
+        let agent_harness_padding = usize::from(agent_harness_row.width)
+            .saturating_sub(14 + UnicodeWidthStr::width(agent_harness_switch));
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Agent harness", Style::default().fg(palette().ink)),
+                Span::raw(" ".repeat(agent_harness_padding)),
+                Span::styled(
+                    agent_harness_switch,
+                    Style::default()
+                        .fg(palette().canvas)
+                        .bg(agent_harness_switch_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+            ]))
+            .style(Style::default().bg(if selection == 4 {
+                palette().selected
+            } else {
+                palette().surface_alt
+            })),
+            agent_harness_row,
+        );
 
-    let agent_time_label = settings.agent_time_display.label();
-    let agent_time_padding = usize::from(agent_time_row.width)
-        .saturating_sub("Agent time".len() + agent_time_label.len());
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Agent time", Style::default().fg(palette().ink)),
-            Span::raw(" ".repeat(agent_time_padding)),
-            Span::styled(agent_time_label, Style::default().fg(palette().accent)),
-        ]))
-        .style(Style::default().bg(if selection == 5 {
-            palette().selected
-        } else {
-            palette().surface_alt
-        })),
-        agent_time_row,
-    );
+        let agent_time_label = settings.agent_time_display.label();
+        let agent_time_padding = usize::from(agent_time_row.width)
+            .saturating_sub("Agent time".len() + agent_time_label.len());
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Agent time", Style::default().fg(palette().ink)),
+                Span::raw(" ".repeat(agent_time_padding)),
+                Span::styled(agent_time_label, Style::default().fg(palette().accent)),
+            ]))
+            .style(Style::default().bg(if selection == 5 {
+                palette().selected
+            } else {
+                palette().surface_alt
+            })),
+            agent_time_row,
+        );
 
-    let clear_label = "Clear";
-    let clear_padding = usize::from(clear_agent_timings_row.width)
-        .saturating_sub("Agent timing history".len() + clear_label.len());
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Agent timing history", Style::default().fg(palette().ink)),
-            Span::raw(" ".repeat(clear_padding)),
-            Span::styled(clear_label, Style::default().fg(palette().orange)),
-        ]))
-        .style(Style::default().bg(if selection == 6 {
-            palette().selected
-        } else {
-            palette().surface_alt
-        })),
-        clear_agent_timings_row,
-    );
+        let clear_label = "Clear";
+        let clear_padding = usize::from(clear_agent_timings_row.width)
+            .saturating_sub("Agent timing history".len() + clear_label.len());
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Agent timing history", Style::default().fg(palette().ink)),
+                Span::raw(" ".repeat(clear_padding)),
+                Span::styled(clear_label, Style::default().fg(palette().orange)),
+            ]))
+            .style(Style::default().bg(if selection == 6 {
+                palette().selected
+            } else {
+                palette().surface_alt
+            })),
+            clear_agent_timings_row,
+        );
+    }
 
     let editor = settings
         .editor_command
@@ -646,27 +657,31 @@ pub(crate) fn draw_settings(
             format_on_save_row,
         ),
         (
-            HitTarget::Settings(SettingsHitTarget::CrossWorkspaceAgents),
-            cross_workspace_agents_row,
-        ),
-        (
-            HitTarget::Settings(SettingsHitTarget::AgentHarness),
-            agent_harness_row,
-        ),
-        (
-            HitTarget::Settings(SettingsHitTarget::AgentTime),
-            agent_time_row,
-        ),
-        (
-            HitTarget::Settings(SettingsHitTarget::ClearAgentTimings),
-            clear_agent_timings_row,
-        ),
-        (
             HitTarget::Settings(SettingsHitTarget::MediaPreview),
             media_preview_row,
         ),
         (HitTarget::Settings(SettingsHitTarget::Editor), editor_row),
     ]);
+    if herdr_available {
+        targets.extend([
+            (
+                HitTarget::Settings(SettingsHitTarget::CrossWorkspaceAgents),
+                cross_workspace_agents_row,
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::AgentHarness),
+                agent_harness_row,
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::AgentTime),
+                agent_time_row,
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::ClearAgentTimings),
+                clear_agent_timings_row,
+            ),
+        ]);
+    }
     targets
 }
 

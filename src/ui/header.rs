@@ -1,12 +1,13 @@
 use super::*;
 
 pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let herdr_available = app.herdr_available();
     let row = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().surface_alt)),
         row,
     );
-    let fullscreen_rect = (app.herdr.is_enabled() && !app.single_panel_layout()).then(|| {
+    let fullscreen_rect = (herdr_available && !app.single_panel_layout()).then(|| {
         let label = " ⛶ ";
         let width = UnicodeWidthStr::width(label) as u16;
         let rect = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
@@ -70,7 +71,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         0
     };
     let agent_badge = " AGENT ";
-    let agent_width = show_agent_actions
+    let agent_width = (show_agent_actions && herdr_available)
         .then(|| UnicodeWidthStr::width(agent_badge) as u16)
         .unwrap_or_default();
     let comparison = show_agent_actions
@@ -274,23 +275,25 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 app.regions
                     .register_hit_target(HitTarget::HeaderIssue, rect);
             }
-            let room = content_right.saturating_sub(x);
-            let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
-            let room = content_right.saturating_sub(x);
-            let agent_rect = render(
-                frame,
-                &mut x,
-                agent_badge.to_owned(),
-                header_badge_style(
-                    palette().green,
-                    app.hovered_hit_target == Some(HitTarget::HeaderAgent),
-                ),
-                room,
-            );
-            if let Some(rect) = agent_rect {
-                draw_header_badge_border(frame, rect, palette().green);
-                app.regions
-                    .register_hit_target(HitTarget::HeaderAgent, rect);
+            if herdr_available {
+                let room = content_right.saturating_sub(x);
+                let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+                let room = content_right.saturating_sub(x);
+                let agent_rect = render(
+                    frame,
+                    &mut x,
+                    agent_badge.to_owned(),
+                    header_badge_style(
+                        palette().green,
+                        app.hovered_hit_target == Some(HitTarget::HeaderAgent),
+                    ),
+                    room,
+                );
+                if let Some(rect) = agent_rect {
+                    draw_header_badge_border(frame, rect, palette().green);
+                    app.regions
+                        .register_hit_target(HitTarget::HeaderAgent, rect);
+                }
             }
             if let Some(comparison) = comparison {
                 let room = content_right.saturating_sub(x);

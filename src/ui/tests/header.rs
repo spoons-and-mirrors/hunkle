@@ -516,6 +516,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
     run_git(root, &["commit", "-m", "feature change"]);
 
     let mut app = App::new(root.to_path_buf());
+    enable_herdr(&mut app);
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -618,11 +619,11 @@ fn header_cards_open_pickers_and_checkout_branches() {
         super::palette().raised
     );
     app.header_picker.close();
-    assert_eq!(worktrees.width, " basetree ".width() as u16);
+    assert_eq!(worktrees.width, " basetr…".width() as u16);
     let worktree_text = (worktrees.x..worktrees.right())
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())
         .collect::<String>();
-    assert_eq!(worktree_text, "▌basetree ");
+    assert_eq!(worktree_text, "▌basetr…");
     let branch_text = (branch.x..branch.right())
         .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
         .collect::<String>();
@@ -690,7 +691,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(
-        rendered.contains("topic...feat"),
+        rendered.contains("topic..."),
         "rendered screen: {rendered:?}"
     );
     let diff = app.regions.diff.unwrap();

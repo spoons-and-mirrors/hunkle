@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
+pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts, herdr_available: bool) {
     let area = centered_min(frame.area(), 72, 0, 58, 24);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
@@ -43,21 +43,15 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
         Constraint::Percentage(50),
     ])
     .split(body);
-    let navigation = vec![
+    let mut navigation = vec![
         Line::styled(
             "NAVIGATION",
             Style::default()
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
         ),
-        shortcut_help(
-            shortcuts,
-            ShortcutAction::ToggleFullscreen,
-            "Toggle fullscreen",
-        ),
         shortcut_help(shortcuts, ShortcutAction::ShowChanges, "Show Changes"),
         shortcut_help(shortcuts, ShortcutAction::ShowFiles, "Show Files"),
-        shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Show Agents"),
         shortcut_help(
             shortcuts,
             ShortcutAction::ToggleGraph,
@@ -70,12 +64,6 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
         shortcut_help(shortcuts, ShortcutAction::OpenSettings, "Settings"),
         shortcut_help(shortcuts, ShortcutAction::OpenActions, "Git actions"),
         shortcut_help(shortcuts, ShortcutAction::OpenGitCommand, "Git command"),
-        shortcut_help(
-            shortcuts,
-            ShortcutAction::OpenHerdr,
-            "Send to Herdr pane below",
-        ),
-        shortcut_help(shortcuts, ShortcutAction::StartAgent, "Start agent"),
         shortcut_pair_help(
             shortcuts,
             ShortcutAction::EditFile,
@@ -98,7 +86,31 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
             "Toggle preview wrapping",
         ),
     ];
-    let worktree = vec![
+    if herdr_available {
+        navigation.insert(
+            1,
+            shortcut_help(
+                shortcuts,
+                ShortcutAction::ToggleFullscreen,
+                "Toggle fullscreen",
+            ),
+        );
+        navigation.insert(
+            4,
+            shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Show Agents"),
+        );
+        navigation.push(shortcut_help(
+            shortcuts,
+            ShortcutAction::OpenHerdr,
+            "Send to Herdr pane below",
+        ));
+        navigation.push(shortcut_help(
+            shortcuts,
+            ShortcutAction::StartAgent,
+            "Start agent",
+        ));
+    }
+    let mut worktree = vec![
         Line::styled(
             "CHANGES / FILES",
             Style::default()
@@ -117,11 +129,6 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
             shortcuts,
             ShortcutAction::DiscardChanges,
             "Discard unstaged file changes",
-        ),
-        shortcut_help(
-            shortcuts,
-            ShortcutAction::ToggleAgents,
-            "Cycle agents / stash / off",
         ),
         shortcut_help(shortcuts, ShortcutAction::UnstageAll, "Unstage all"),
         shortcut_help(
@@ -143,6 +150,16 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
         help_line("Esc", "Close / unfocus"),
         shortcut_help(shortcuts, ShortcutAction::Quit, "Quit"),
     ];
+    if herdr_available {
+        worktree.insert(
+            4,
+            shortcut_help(
+                shortcuts,
+                ShortcutAction::ToggleAgents,
+                "Cycle agents / stash / off",
+            ),
+        );
+    }
     frame.render_widget(Paragraph::new(navigation), columns[0]);
     frame.render_widget(Paragraph::new(worktree), columns[2]);
     frame.render_widget(

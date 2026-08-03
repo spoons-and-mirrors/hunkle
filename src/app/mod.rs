@@ -59,7 +59,8 @@ pub(super) use std::{
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
-const SETTINGS_ROW_COUNT: usize = 9;
+const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 7, 8];
+const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
 #[derive(Debug)]
@@ -396,7 +397,19 @@ impl App {
     }
 
     pub(crate) fn agents_pane_visible(&self) -> bool {
-        self.agents_pane_pinned
+        self.herdr_available() && self.agents_pane_pinned
+    }
+
+    pub(crate) fn herdr_available(&self) -> bool {
+        self.herdr.is_enabled()
+    }
+
+    pub(crate) fn general_settings(&self) -> &'static [usize] {
+        if self.herdr_available() {
+            ALL_SETTINGS
+        } else {
+            STANDALONE_SETTINGS
+        }
     }
 
     pub(crate) fn agents_pane_index(&self) -> Option<usize> {
@@ -598,6 +611,7 @@ impl App {
             return;
         }
         if matches!(self.mode, Mode::Normal | Mode::Commit)
+            && self.herdr_available()
             && self
                 .settings
                 .shortcuts
@@ -742,7 +756,7 @@ impl App {
         }
         changed |= self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
         changed |= self.file_search.poll(self.session.data());
-        if self.herdr.is_enabled() {
+        if self.herdr_available() {
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
                 self.herdr.poll()
@@ -1502,7 +1516,11 @@ impl App {
     }
 
     fn handle_normal_shortcut(&mut self, key: KeyEvent) -> bool {
-        let Some(action) = self.settings.shortcuts.main_action(key) else {
+        let Some(action) = self
+            .settings
+            .shortcuts
+            .main_action(key, self.herdr_available())
+        else {
             return false;
         };
         match action {
@@ -2058,7 +2076,11 @@ impl App {
     }
 
     fn handle_main_navigation(&mut self, key: KeyEvent) -> bool {
-        match self.settings.shortcuts.main_action(key) {
+        match self
+            .settings
+            .shortcuts
+            .main_action(key, self.herdr_available())
+        {
             Some(ShortcutAction::ShowChanges) => self.show_sidebar_pane(LeftPane::Worktree),
             Some(ShortcutAction::ShowFiles) => self.show_sidebar_pane(LeftPane::Files),
             Some(ShortcutAction::ShowAgents) => self.show_agents_pane(),
@@ -2255,6 +2277,9 @@ impl App {
     }
 
     pub(super) fn show_agents_pane(&mut self) {
+        if !self.herdr_available() {
+            return;
+        }
         let selection = self
             .agents_pane_index()
             .or_else(|| self.default_agent_preview_index())
@@ -2279,7 +2304,8 @@ impl App {
         }
         match self.changes.pane {
             LeftPane::Worktree => self.show_sidebar_pane(LeftPane::Files),
-            LeftPane::Files => self.show_agents_pane(),
+            LeftPane::Files if self.herdr_available() => self.show_agents_pane(),
+            LeftPane::Files => self.show_sidebar_pane(LeftPane::Worktree),
         }
     }
 

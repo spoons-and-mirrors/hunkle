@@ -192,6 +192,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     opencode_selection: app.opencode_selection,
                     opencode_model_input: app.opencode_model_input.as_deref(),
                     opencode_error: app.opencode_error.as_deref(),
+                    herdr_available: app.herdr_available(),
                 },
                 app.fetch_running(),
             );
@@ -272,7 +273,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Help => {
             dim(frame);
-            overlays::draw_help(frame, &app.settings.shortcuts);
+            overlays::draw_help(frame, &app.settings.shortcuts, app.herdr_available());
         }
         Mode::Normal | Mode::Commit => {}
     }
@@ -418,8 +419,10 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         (ShortcutAction::ShowChanges, "Changes")
     } else if app.changes.pane == LeftPane::Worktree {
         (ShortcutAction::ShowFiles, "Files")
-    } else {
+    } else if app.herdr_available() {
         (ShortcutAction::ShowAgents, "Agents")
+    } else {
+        (ShortcutAction::ShowChanges, "Changes")
     };
     let search_active = app.visible_view() == View::RepositorySearch;
     let key_label = |action| {

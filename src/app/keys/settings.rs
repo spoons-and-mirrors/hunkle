@@ -12,7 +12,13 @@ impl App {
                 self.shortcut_error = None;
                 return;
             }
-            let action = Shortcuts::definitions()[self.shortcut_selection].action;
+            let Some(action) = Shortcuts::definitions(self.herdr_available())
+                .nth(self.shortcut_selection)
+                .map(|definition| definition.action)
+            else {
+                self.shortcut_capture = false;
+                return;
+            };
             match self
                 .settings
                 .shortcuts
@@ -54,11 +60,20 @@ impl App {
                 self.close_settings();
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.settings_selection = (self.settings_selection + 1) % SETTINGS_ROW_COUNT;
+                let settings = self.general_settings();
+                let current = settings
+                    .iter()
+                    .position(|index| *index == self.settings_selection)
+                    .unwrap_or_default();
+                self.settings_selection = settings[(current + 1) % settings.len()];
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.settings_selection =
-                    (self.settings_selection + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
+                let settings = self.general_settings();
+                let current = settings
+                    .iter()
+                    .position(|index| *index == self.settings_selection)
+                    .unwrap_or_default();
+                self.settings_selection = settings[(current + settings.len() - 1) % settings.len()];
             }
             KeyCode::Left | KeyCode::Char('-') if self.settings_selection == 1 => {
                 self.change_fetch_interval(-1);
@@ -202,8 +217,7 @@ impl App {
             SettingsHitTarget::Overlay | SettingsHitTarget::FetchInterval => {}
             SettingsHitTarget::Page(page) => self.set_settings_page(page),
             SettingsHitTarget::Shortcut(action) => {
-                if let Some(index) = Shortcuts::definitions()
-                    .iter()
+                if let Some(index) = Shortcuts::definitions(self.herdr_available())
                     .position(|definition| definition.action == action)
                 {
                     self.shortcut_selection = index;
@@ -233,7 +247,7 @@ impl App {
     }
 
     pub(crate) fn handle_shortcut_settings(&mut self, key: KeyEvent) {
-        let count = Shortcuts::definitions().len();
+        let count = Shortcuts::definitions(self.herdr_available()).count();
         match key.code {
             KeyCode::Esc => self.close_settings(),
             KeyCode::Down | KeyCode::Char('j') => {
@@ -257,8 +271,10 @@ impl App {
                 self.shortcut_error = None;
             }
             KeyCode::Delete => {
-                let action = Shortcuts::definitions()[self.shortcut_selection].action;
-                if self.settings.shortcuts.reset(action) {
+                let action = Shortcuts::definitions(self.herdr_available())
+                    .nth(self.shortcut_selection)
+                    .map(|definition| definition.action);
+                if action.is_some_and(|action| self.settings.shortcuts.reset(action)) {
                     self.settings_changed();
                 }
                 self.shortcut_error = None;

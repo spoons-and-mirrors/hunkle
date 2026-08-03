@@ -38,6 +38,26 @@ fn assert_black_underlay(terminal: &Terminal<TestBackend>) {
     assert!(background.modifier.contains(Modifier::DIM));
 }
 
+fn enable_herdr(app: &mut App) {
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [],
+            "agents": [],
+            "panes": []
+        } }
+    }));
+}
+
+fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
 #[test]
 fn footer_abbreviates_paths_under_home() {
     let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
@@ -172,6 +192,72 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
 }
 
 #[test]
+fn standalone_hides_herdr_surfaces() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen = screen_text(&terminal);
+    assert!(app.regions.agents_splitter.is_none());
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderAgent)
+            .is_none()
+    );
+    assert!(!screen.contains("F3 Agents"));
+
+    app.mode = Mode::Help;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen = screen_text(&terminal);
+    for label in [
+        "Toggle fullscreen",
+        "Show Agents",
+        "Send to Herdr",
+        "Start agent",
+        "Cycle agents",
+    ] {
+        assert!(!screen.contains(label));
+    }
+
+    app.mode = Mode::Settings;
+    app.settings_page = SettingsPage::General;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen = screen_text(&terminal);
+    assert!(screen.contains("Media protocol"));
+    assert!(screen.contains("Editor command"));
+    for label in [
+        "Cross-workspace agents",
+        "Agent harness",
+        "Agent time",
+        "Agent timing history",
+    ] {
+        assert!(!screen.contains(label));
+    }
+    for target in [
+        SettingsHitTarget::CrossWorkspaceAgents,
+        SettingsHitTarget::AgentHarness,
+        SettingsHitTarget::AgentTime,
+        SettingsHitTarget::ClearAgentTimings,
+    ] {
+        assert!(
+            app.regions
+                .hit_target_rect(HitTarget::Settings(target))
+                .is_none()
+        );
+    }
+
+    app.settings_page = SettingsPage::Shortcuts;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen = screen_text(&terminal);
+    assert!(screen.contains("Show Changes"));
+    assert!(!screen.contains("Show Agents"));
+    assert!(!screen.contains("Send to Herdr pane"));
+}
+
+#[test]
 fn renders_every_primary_surface() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -218,6 +304,7 @@ fn renders_every_primary_surface() {
     fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
+    enable_herdr(&mut app);
     app.settings.graph_lane_width = 0;
     app.settings.graph_description_width = 0;
     app.settings.graph_changes_width = 11;

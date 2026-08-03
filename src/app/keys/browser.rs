@@ -305,6 +305,9 @@ impl App {
         if self.mode != Mode::Normal || self.session.open_running() {
             return;
         }
+        if !self.herdr_available() {
+            return;
+        }
         self.header_picker.close();
         let Some(path) = self.agent_destination_for_start() else {
             self.notice = Some("Open a workspace first".to_owned());

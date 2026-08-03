@@ -37,6 +37,19 @@ pub(crate) enum ShortcutAction {
     AuthorDisableAll,
 }
 
+impl ShortcutAction {
+    pub(crate) fn requires_herdr(self) -> bool {
+        matches!(
+            self,
+            Self::ToggleFullscreen
+                | Self::ShowAgents
+                | Self::OpenHerdr
+                | Self::StartAgent
+                | Self::ToggleAgents
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KeyChord {
     pub(crate) code: KeyCode,
@@ -455,8 +468,12 @@ pub struct Shortcuts {
 }
 
 impl Shortcuts {
-    pub(crate) fn definitions() -> &'static [ShortcutDefinition] {
+    pub(crate) fn definitions(
+        herdr_available: bool,
+    ) -> impl Iterator<Item = &'static ShortcutDefinition> {
         SHORTCUTS
+            .iter()
+            .filter(move |definition| herdr_available || !definition.action.requires_herdr())
     }
 
     pub(crate) fn binding(&self, action: ShortcutAction) -> KeyChord {
@@ -474,10 +491,16 @@ impl Shortcuts {
         self.binding(action) == KeyChord::from_event(event)
     }
 
-    pub(crate) fn main_action(&self, event: KeyEvent) -> Option<ShortcutAction> {
+    pub(crate) fn main_action(
+        &self,
+        event: KeyEvent,
+        herdr_available: bool,
+    ) -> Option<ShortcutAction> {
         let chord = KeyChord::from_event(event);
         SHORTCUTS.iter().find_map(|definition| {
-            (definition.scope & MAIN != 0 && self.binding(definition.action) == chord)
+            (definition.scope & MAIN != 0
+                && (herdr_available || !definition.action.requires_herdr())
+                && self.binding(definition.action) == chord)
                 .then_some(definition.action)
         })
     }
@@ -651,7 +674,10 @@ mod tests {
         let shortcuts = Shortcuts::default();
         let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
 
-        assert_eq!(shortcuts.main_action(key), Some(ShortcutAction::StartAgent));
+        assert_eq!(
+            shortcuts.main_action(key, true),
+            Some(ShortcutAction::StartAgent)
+        );
         assert_eq!(shortcuts.label(ShortcutAction::StartAgent), "Ctrl+Space");
     }
 
@@ -660,7 +686,7 @@ mod tests {
         let mut shortcuts = Shortcuts::default();
 
         assert_eq!(
-            shortcuts.main_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            shortcuts.main_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), true),
             Some(ShortcutAction::ToggleFullscreen)
         );
         shortcuts.load_override("toggle-pane", "Alt+f");
@@ -672,17 +698,35 @@ mod tests {
         let shortcuts = Shortcuts::default();
 
         assert_eq!(
-            shortcuts.main_action(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE), true),
             Some(ShortcutAction::ShowChanges)
         );
         assert_eq!(
-            shortcuts.main_action(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE), true),
             Some(ShortcutAction::ShowFiles)
         );
         assert_eq!(
-            shortcuts.main_action(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE), true),
             Some(ShortcutAction::ShowAgents)
         );
+    }
+
+    #[test]
+    fn herdr_shortcuts_are_unavailable_without_herdr() {
+        let shortcuts = Shortcuts::default();
+
+        assert!(
+            Shortcuts::definitions(false).all(|definition| !definition.action.requires_herdr())
+        );
+        for key in [
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::F(1), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        ] {
+            assert_eq!(shortcuts.main_action(key, false), None);
+        }
     }
 
     #[test]

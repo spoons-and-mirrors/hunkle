@@ -80,10 +80,10 @@ fn main() -> Result<()> {
     let mut app = App::opening(path.clone());
     app.set_workspace_state(startup.state);
     let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
-    if std::env::var_os("HERDR_ENV").is_some() {
+    if app.herdr_available() {
         picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
     }
-    app.configure_media_picker(picker, auto_kitty_supported());
+    app.configure_media_picker(picker, auto_kitty_supported(app.herdr_available()));
     #[cfg(unix)]
     let mut stdin_nonblocking = NonblockingStdin::enable()?;
     let mut dirty = true;
@@ -379,8 +379,8 @@ fn restore_terminal() {
 static KITTY_MEDIA_EMITTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn auto_kitty_supported() -> bool {
-    if std::env::var_os("HERDR_ENV").is_some() {
+fn auto_kitty_supported(herdr_available: bool) -> bool {
+    if herdr_available {
         return false;
     }
     ["TERM", "TERM_PROGRAM"]

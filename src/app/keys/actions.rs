@@ -130,7 +130,7 @@ impl App {
     }
 
     pub(crate) fn open_herdr_prompt(&mut self) {
-        if !self.herdr.is_enabled() {
+        if !self.herdr_available() {
             self.notice = Some("Herdr command prompt is only available inside Herdr".to_owned());
             return;
         }

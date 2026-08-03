@@ -687,7 +687,7 @@ fn clear_sidebar_regions(app: &mut App) {
 
 pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect) -> Rect {
     let agents_active = app.agents_pane_visible();
-    let tabs = [
+    let mut tabs = vec![
         (
             "CHANGES",
             ChangesHitTarget::WorktreeTab,
@@ -698,8 +698,10 @@ pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect
             ChangesHitTarget::FilesTab,
             !agents_active && app.changes.pane == LeftPane::Files,
         ),
-        ("AGENTS", ChangesHitTarget::AgentsTab, agents_active),
     ];
+    if app.herdr_available() {
+        tabs.push(("AGENTS", ChangesHitTarget::AgentsTab, agents_active));
+    }
     let mut spans = Vec::new();
     let mut x = area.x;
     for (index, (label, target, active)) in tabs.into_iter().enumerate() {
