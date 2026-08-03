@@ -135,7 +135,13 @@ pub(crate) fn draw_agent_pane_picker(
     prompt: &crate::app::HerdrPrompt,
     hovered: Option<HitTarget>,
 ) -> Vec<(HitTarget, Rect)> {
-    let area = frame.area();
+    let frame_area = frame.area();
+    let area = Rect::new(
+        frame_area.x,
+        frame_area.y.saturating_add(1),
+        frame_area.width,
+        frame_area.height.saturating_sub(1),
+    );
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -151,41 +157,14 @@ pub(crate) fn draw_agent_pane_picker(
 
     let inner_x = area.x.saturating_add(2);
     let inner_width = area.width.saturating_sub(4);
-    let destination = prompt
-        .agent_destination()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let branch = prompt.agent_destination_branch().unwrap_or_default();
-    let branch_width = if branch.is_empty() {
-        0
-    } else {
-        branch.width().saturating_add(2)
-    };
-    let destination_width = usize::from(inner_width)
-        .saturating_sub("START AGENT  ".len())
-        .saturating_sub(branch_width);
-    let mut header = vec![
-        Span::styled(
-            "START AGENT",
-            Style::default()
-                .fg(palette().ink)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {}", truncate_width(&destination, destination_width)),
-            Style::default().fg(palette().muted),
-        ),
-    ];
-    if !branch.is_empty() {
-        header.push(Span::styled(
-            format!("  {branch}"),
-            Style::default()
-                .fg(palette().accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
     frame.render_widget(
-        Paragraph::new(Line::from(header)),
+        Paragraph::new("START AGENT")
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
         Rect::new(inner_x, area.y.saturating_add(1), inner_width, 1),
     );
 

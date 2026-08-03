@@ -1,5 +1,4 @@
 use std::{
-    path::Path,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -33,7 +32,6 @@ pub(crate) struct HerdrPrompt {
 struct PendingAgent {
     request_id: u64,
     path: PathBuf,
-    branch: String,
     host_pane_id: String,
     layout: Option<HerdrPaneLayout>,
     session_id: Option<String>,
@@ -77,7 +75,6 @@ impl HerdrPrompt {
     pub(crate) fn show_agent_pane_picker(
         &mut self,
         path: PathBuf,
-        branch: String,
         host_pane_id: String,
         layout: HerdrPaneLayout,
     ) {
@@ -85,7 +82,6 @@ impl HerdrPrompt {
         self.pending_agent = Some(PendingAgent {
             request_id: self.next_agent_request_id,
             path,
-            branch,
             host_pane_id,
             layout: Some(layout),
             session_id: None,
@@ -126,23 +122,21 @@ impl HerdrPrompt {
         });
     }
 
-    pub(crate) fn prepare_agent(&mut self, path: PathBuf, branch: String) -> Result<(), String> {
-        self.prepare_agent_session(path, branch, None)
+    pub(crate) fn prepare_agent(&mut self, path: PathBuf) -> Result<(), String> {
+        self.prepare_agent_session(path, None)
     }
 
     pub(crate) fn prepare_stashed_agent(
         &mut self,
         path: PathBuf,
-        branch: String,
         session_id: String,
     ) -> Result<(), String> {
-        self.prepare_agent_session(path, branch, Some(session_id))
+        self.prepare_agent_session(path, Some(session_id))
     }
 
     fn prepare_agent_session(
         &mut self,
         path: PathBuf,
-        branch: String,
         session_id: Option<String>,
     ) -> Result<(), String> {
         if self.sending {
@@ -159,7 +153,6 @@ impl HerdrPrompt {
         self.pending_agent = Some(PendingAgent {
             request_id,
             path,
-            branch,
             host_pane_id: host_pane_id.clone(),
             layout: None,
             session_id,
@@ -179,16 +172,17 @@ impl HerdrPrompt {
         self.pending_agent.as_ref()?.layout.as_ref()
     }
 
-    pub(crate) fn agent_destination(&self) -> Option<&Path> {
+    pub(crate) fn update_agent_destination(&mut self, path: PathBuf) {
+        if let Some(pending) = self.pending_agent.as_mut() {
+            pending.path = path;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_destination(&self) -> Option<&std::path::Path> {
         self.pending_agent
             .as_ref()
             .map(|pending| pending.path.as_path())
-    }
-
-    pub(crate) fn agent_destination_branch(&self) -> Option<&str> {
-        self.pending_agent
-            .as_ref()
-            .map(|pending| pending.branch.as_str())
     }
 
     pub(crate) fn agent_host_pane_id(&self) -> Option<&str> {

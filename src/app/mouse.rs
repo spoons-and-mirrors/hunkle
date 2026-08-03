@@ -43,28 +43,6 @@ impl App {
                 }
             }
         }
-        if self.herdr_prompt.agent_pane_picker_open() {
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                match self.regions.hit_target_at(point) {
-                    Some(HitTarget::AgentPane(index)) => {
-                        match self.herdr_prompt.select_agent_pane(index) {
-                            Ok(()) => {
-                                self.notice = Some("Starting agent in selected pane".to_owned())
-                            }
-                            Err(error) => self.notice = Some(error),
-                        }
-                    }
-                    Some(HitTarget::AgentPaneSplit(index, direction)) => {
-                        match self.herdr_prompt.split_agent_pane(index, direction) {
-                            Ok(()) => self.notice = Some("Starting agent in new pane".to_owned()),
-                            Err(error) => self.notice = Some(error),
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            return;
-        }
         if self.dragging_splitter {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => self.resize_worktree(mouse.column),
@@ -225,6 +203,28 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+            return;
+        }
+        if self.herdr_prompt.agent_pane_picker_open() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                match self.regions.hit_target_at(point) {
+                    Some(HitTarget::AgentPane(index)) => {
+                        match self.herdr_prompt.select_agent_pane(index) {
+                            Ok(()) => {
+                                self.notice = Some("Starting agent in selected pane".to_owned())
+                            }
+                            Err(error) => self.notice = Some(error),
+                        }
+                    }
+                    Some(HitTarget::AgentPaneSplit(index, direction)) => {
+                        match self.herdr_prompt.split_agent_pane(index, direction) {
+                            Ok(()) => self.notice = Some("Starting agent in new pane".to_owned()),
+                            Err(error) => self.notice = Some(error),
+                        }
+                    }
+                    _ => {}
+                }
             }
             return;
         }

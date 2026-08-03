@@ -385,37 +385,18 @@ pub(super) fn draw_history(
         .agents
         .get(index)
         .map_or(AgentStatus::Unknown, |agent| agent.status);
-    let (phase, phase_color) = match status {
-        AgentStatus::Working => ("LIVE", palette().orange),
-        AgentStatus::Blocked => ("PAUSED", palette().red),
-        AgentStatus::Done => ("COMPLETE", palette().green),
-        AgentStatus::Idle => ("IDLE", palette().cyan),
-        AgentStatus::Unknown => ("UNKNOWN", palette().faint),
+    let phase = match status {
+        AgentStatus::Working => Some(("LIVE", palette().orange)),
+        AgentStatus::Blocked => Some(("PAUSED", palette().red)),
+        AgentStatus::Done => Some(("COMPLETE", palette().green)),
+        AgentStatus::Idle => None,
+        AgentStatus::Unknown => Some(("UNKNOWN", palette().faint)),
     };
     let agent_count = herdr.agents.len();
     let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
     let desired_navigation_width = badge_width(repository).saturating_add(6);
-    let navigation_width = desired_navigation_width
-        .min(area.width.saturating_sub(13))
-        .max(6)
-        .min(area.width);
-    frame.render_widget(
-        Paragraph::new("CONVERSATION LOG").style(
-            Style::default()
-                .fg(palette().cyan)
-                .bg(palette().panel)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Rect::new(
-            area.x,
-            area.y,
-            area.width
-                .saturating_sub(navigation_width)
-                .saturating_sub(1),
-            1,
-        ),
-    );
-    let navigation_x = area.right().saturating_sub(navigation_width);
+    let navigation_width = desired_navigation_width.max(6).min(area.width);
+    let navigation_x = area.x;
     let repository_width = navigation_width.saturating_sub(6);
     let repository_area = Rect::new(navigation_x, area.y, repository_width, 1);
     let previous_button = Rect::new(
@@ -427,7 +408,9 @@ pub(super) fn draw_history(
     let next_button = Rect::new(
         previous_button.right(),
         area.y,
-        area.right().saturating_sub(previous_button.right()),
+        navigation_x
+            .saturating_add(navigation_width)
+            .saturating_sub(previous_button.right()),
         1,
     );
     let button_style = |pressed| {
@@ -501,34 +484,25 @@ pub(super) fn draw_history(
         .unwrap_or_else(|| messages.len().saturating_sub(1))
         .min(messages.len().saturating_sub(1));
     let message = &messages[selected_message];
-    let turn = format!("TURN {} OF {}", selected_message + 1, messages.len());
-    let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
-    let phase_right = area.right();
-    let phase_x = phase_right.saturating_sub(phase_width);
-    frame.render_widget(
-        Paragraph::new(truncate_width(
-            &turn,
-            usize::from(phase_x.saturating_sub(area.x).saturating_sub(1)),
-        ))
-        .style(Style::default().fg(palette().faint).bg(palette().panel)),
-        Rect::new(
-            area.x,
-            area.y.saturating_add(1),
-            phase_x.saturating_sub(area.x).saturating_sub(1),
-            1,
-        ),
-    );
-    frame.render_widget(
-        Paragraph::new(phase)
-            .alignment(ratatui::layout::Alignment::Right)
-            .style(
-                Style::default()
-                    .fg(phase_color)
-                    .bg(palette().panel)
-                    .add_modifier(Modifier::BOLD),
+    if let Some((phase, phase_color)) = phase {
+        let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
+        frame.render_widget(
+            Paragraph::new(phase)
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(
+                    Style::default()
+                        .fg(phase_color)
+                        .bg(palette().panel)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            Rect::new(
+                area.right().saturating_sub(phase_width),
+                area.y.saturating_add(1),
+                phase_width,
+                1,
             ),
-        Rect::new(phase_x, area.y.saturating_add(1), phase_width, 1),
-    );
+        );
+    }
     let mut targets = vec![(
         HitTarget::AgentTooltip {
             agent: index,

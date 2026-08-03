@@ -199,6 +199,17 @@ fn local_workspaces_reload_files_and_reject_git_actions() {
 }
 
 #[test]
+fn local_workspaces_can_start_agents_from_their_root() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("notes.txt"), "notes\n").unwrap();
+    let app = App::new(directory.path().to_path_buf());
+
+    let path = app.agent_destination_for_start().unwrap();
+
+    assert_eq!(path, fs::canonicalize(directory.path()).unwrap());
+}
+
+#[test]
 fn creates_renames_drags_and_deletes_files_from_the_files_pane() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

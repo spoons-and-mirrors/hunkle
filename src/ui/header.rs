@@ -58,19 +58,27 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let dirty_marker = if dirty { "*" } else { "" };
     let branch_badge = format!(" {branch}{dirty_marker} ");
     let branch_width = UnicodeWidthStr::width(branch_badge.as_str()) as u16;
+    let show_agent_actions = !app.herdr_prompt.agent_pane_picker_open();
     let diff_badge = " DIFF ";
-    let diff_width = UnicodeWidthStr::width(diff_badge) as u16;
+    let diff_width = show_agent_actions
+        .then(|| UnicodeWidthStr::width(diff_badge) as u16)
+        .unwrap_or_default();
     let agent_badge = " AGENT ";
-    let agent_width = UnicodeWidthStr::width(agent_badge) as u16;
-    let comparison = app
-        .changes
-        .branch_comparison()
-        .map(|comparison| format!(" {}...{}", comparison.target, comparison.current));
+    let agent_width = show_agent_actions
+        .then(|| UnicodeWidthStr::width(agent_badge) as u16)
+        .unwrap_or_default();
+    let comparison = show_agent_actions
+        .then(|| {
+            app.changes
+                .branch_comparison()
+                .map(|comparison| format!(" {}...{}", comparison.target, comparison.current))
+        })
+        .flatten();
     let requested_comparison_width = comparison
         .as_deref()
         .map_or(0, |comparison| UnicodeWidthStr::width(comparison).min(40));
     let available = usize::from(header_right.saturating_sub(area.x));
-    let comparison_width = if is_local {
+    let comparison_width = if is_local || !show_agent_actions {
         0
     } else {
         requested_comparison_width.min(available.saturating_sub(
@@ -91,19 +99,15 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let worktree_width = UnicodeWidthStr::width(worktree.as_str())
         .saturating_add(2)
         .min(18);
+    let action_width = if show_agent_actions {
+        1 + usize::from(diff_width) + 1 + usize::from(agent_width) + comparison_width
+    } else {
+        0
+    };
     let badge_width = if is_local {
         1 + repository_width + 1 + "LOCAL".len()
     } else {
-        1 + repository_width
-            + 1
-            + worktree_width
-            + 1
-            + usize::from(branch_width)
-            + 1
-            + usize::from(diff_width)
-            + 1
-            + usize::from(agent_width)
-            + comparison_width
+        1 + repository_width + 1 + worktree_width + 1 + usize::from(branch_width) + action_width
     };
     let notice_budget = available
         .saturating_sub(badge_width.saturating_add(4))
@@ -216,52 +220,54 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.regions
                 .register_hit_target(HitTarget::HeaderBranch, rect);
         }
-        let room = content_right.saturating_sub(x);
-        let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
-        let room = content_right.saturating_sub(x);
-        let diff_rect = render(
-            frame,
-            &mut x,
-            diff_badge.to_owned(),
-            header_badge_style(
-                palette().purple,
-                app.hovered_hit_target == Some(HitTarget::HeaderDiff),
-            ),
-            room.saturating_sub(agent_width.saturating_add(1)),
-        );
-        if let Some(rect) = diff_rect {
-            draw_header_badge_border(frame, rect, palette().purple);
-            app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
-        }
-        let room = content_right.saturating_sub(x);
-        let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
-        let room = content_right.saturating_sub(x);
-        let agent_rect = render(
-            frame,
-            &mut x,
-            agent_badge.to_owned(),
-            header_badge_style(
-                palette().green,
-                app.hovered_hit_target == Some(HitTarget::HeaderAgent),
-            ),
-            room,
-        );
-        if let Some(rect) = agent_rect {
-            draw_header_badge_border(frame, rect, palette().green);
-            app.regions
-                .register_hit_target(HitTarget::HeaderAgent, rect);
-        }
-        if let Some(comparison) = comparison {
+        if show_agent_actions {
             let room = content_right.saturating_sub(x);
-            let _ = render(
+            let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+            let room = content_right.saturating_sub(x);
+            let diff_rect = render(
                 frame,
                 &mut x,
-                comparison,
-                Style::default()
-                    .fg(palette().purple)
-                    .add_modifier(Modifier::BOLD),
-                room.min(comparison_width as u16),
+                diff_badge.to_owned(),
+                header_badge_style(
+                    palette().purple,
+                    app.hovered_hit_target == Some(HitTarget::HeaderDiff),
+                ),
+                room.saturating_sub(agent_width.saturating_add(1)),
             );
+            if let Some(rect) = diff_rect {
+                draw_header_badge_border(frame, rect, palette().purple);
+                app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
+            }
+            let room = content_right.saturating_sub(x);
+            let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+            let room = content_right.saturating_sub(x);
+            let agent_rect = render(
+                frame,
+                &mut x,
+                agent_badge.to_owned(),
+                header_badge_style(
+                    palette().green,
+                    app.hovered_hit_target == Some(HitTarget::HeaderAgent),
+                ),
+                room,
+            );
+            if let Some(rect) = agent_rect {
+                draw_header_badge_border(frame, rect, palette().green);
+                app.regions
+                    .register_hit_target(HitTarget::HeaderAgent, rect);
+            }
+            if let Some(comparison) = comparison {
+                let room = content_right.saturating_sub(x);
+                let _ = render(
+                    frame,
+                    &mut x,
+                    comparison,
+                    Style::default()
+                        .fg(palette().purple)
+                        .add_modifier(Modifier::BOLD),
+                    room.min(comparison_width as u16),
+                );
+            }
         }
     }
 

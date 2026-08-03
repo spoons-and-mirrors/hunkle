@@ -484,6 +484,10 @@ impl App {
             self.handle_file_editor(key);
             return;
         }
+        if self.header_picker.is_open() {
+            self.handle_header_picker(key);
+            return;
+        }
         if self.herdr_prompt.agent_pane_picker_open() {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 self.should_quit = true;
@@ -501,10 +505,6 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
-            return;
-        }
-        if self.header_picker.is_open() {
-            self.handle_header_picker(key);
             return;
         }
         if self.mode == Mode::Normal && self.view == View::RepositorySearch {
@@ -1969,11 +1969,10 @@ impl App {
             return;
         };
         self.herdr.show_live_agents();
-        match self.herdr_prompt.prepare_stashed_agent(
-            agent.worktree,
-            agent.branch,
-            agent.session_id,
-        ) {
+        match self
+            .herdr_prompt
+            .prepare_stashed_agent(agent.worktree, agent.session_id)
+        {
             Ok(()) => self.notice = Some("Loading active Herdr tab layout".to_owned()),
             Err(error) => self.notice = Some(format!("Could not restore agent: {error}")),
         }

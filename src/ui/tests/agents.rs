@@ -228,8 +228,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(hovered_screen.contains("CONVERSATION LOG"));
-    assert!(hovered_screen.contains("TURN 5 OF 5"));
+    assert!(!hovered_screen.contains("CONVERSATION LOG"));
+    assert!(!hovered_screen.contains("TURN 5 OF 5"));
     assert!(!hovered_screen.contains("TEXT SNAPSHOT"));
     assert!(!hovered_screen.contains("LIVE · REFRESHING"));
     assert!(!hovered_screen.contains("FINAL SNAPSHOT"));
@@ -286,7 +286,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(scrolled_screen.contains("4 OF 5"));
+    assert!(!scrolled_screen.contains("TURN 4 OF 5"));
     assert!(scrolled_screen.contains("4 REQUESTS"));
     assert!(scrolled_screen.contains("8 TOOLS"));
     assert!(scrolled_screen.contains("Fourth request"));
@@ -390,7 +390,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(historical_screen.contains("2 OF 5"));
+    assert!(!historical_screen.contains("TURN 2 OF 5"));
     assert!(historical_screen.contains("Second request"));
     assert!(historical_screen.contains("Second response"));
     let newest_message = app
@@ -607,6 +607,14 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .regions
         .hit_target_rect(HitTarget::AgentPreviewPicker(0))
         .unwrap();
+    let history = app
+        .regions
+        .hit_target_rect(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 0,
+        })
+        .unwrap();
+    assert_eq!(picker.x, history.x);
     assert_eq!(
         terminal.backend().buffer()[(picker.x, picker.y)].symbol(),
         "▐"
@@ -655,6 +663,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .collect();
     assert!(second_header.contains("second-re"));
     assert!(!second_header.contains("first-repo"));
+    assert!(!second_header.contains("IDLE"));
 
     app.herdr.agents[1].tab_id = "w1:t2".to_owned();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

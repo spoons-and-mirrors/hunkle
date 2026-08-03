@@ -406,10 +406,6 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert_eq!(app.header_picker.kind, None);
     assert_eq!(app.herdr_prompt.agent_destination(), Some(root));
     assert_eq!(
-        app.herdr_prompt.agent_destination_branch(),
-        Some(long_branch)
-    );
-    assert_eq!(
         app.notice.as_deref(),
         Some("Loading active Herdr tab layout")
     );
@@ -417,10 +413,6 @@ fn header_cards_open_pickers_and_checkout_branches() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
     assert_eq!(app.herdr_prompt.agent_destination(), Some(root));
-    assert_eq!(
-        app.herdr_prompt.agent_destination_branch(),
-        Some(long_branch)
-    );
     assert!(app.herdr_prompt.cancel_pending_agent());
 
     click(&mut app, diff.x, diff.y);
@@ -766,10 +758,16 @@ fn header_cards_open_pickers_and_checkout_branches() {
 #[test]
 fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
     let directory = tempfile::tempdir().unwrap();
-    let mut app = App::opening(directory.path().to_path_buf());
+    let root = directory.path().join("repository");
+    fs::create_dir(&root).unwrap();
+    run_git(&root, &["init", "-b", "main"]);
+    let mut app = App::new(root.clone());
+    wait_for(&mut app, |app| {
+        app.repository()
+            .is_some_and(|repository| repository.details_ready)
+    });
     app.herdr_prompt.show_agent_pane_picker(
-        directory.path().to_path_buf(),
-        "feature/modal".to_owned(),
+        root,
         "w0:p2".to_owned(),
         HerdrPaneLayout {
             workspace_id: "w0".to_owned(),
@@ -809,7 +807,7 @@ fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
     assert_eq!(
         app.regions
             .hit_target_rect(HitTarget::AgentPanePickerOverlay),
-        Some(ratatui::layout::Rect::new(0, 0, 100, 30))
+        Some(ratatui::layout::Rect::new(0, 1, 100, 29))
     );
     let left = app
         .regions
@@ -868,10 +866,56 @@ fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(screen.contains("START AGENT"));
-    assert!(screen.contains("feature/modal"));
+    assert!(screen.contains("repository"));
+    assert!(screen.contains("basetree"));
+    assert!(screen.contains("main"));
     assert!(screen.contains("HUNKLE"));
     assert!(screen.contains("CLICK INSIDE TO REPLACE"));
     assert!(!screen.contains("w0:p1"));
     assert!(!screen.contains("w0:p3"));
     assert!(!screen.contains("w0:t1"));
+    let repository = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderRepository)
+        .unwrap();
+    let worktree = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderWorktrees)
+        .unwrap();
+    let branch = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderBranch)
+        .unwrap();
+    assert!(app.regions.hit_target_rect(HitTarget::HeaderDiff).is_none());
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderAgent)
+            .is_none()
+    );
+    assert_eq!((repository.y, worktree.y, branch.y), (0, 0, 0));
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x, repository.y)].fg,
+        super::palette().yellow
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(worktree.x, worktree.y)].fg,
+        super::palette().orange
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(branch.x, branch.y)].fg,
+        super::palette().accent
+    );
+
+    click(&mut app, repository.x, repository.y);
+    assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::Repositories));
+    assert!(app.herdr_prompt.agent_pane_picker_open());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderPickerOverlay)
+            .is_some()
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.header_picker.kind, None);
+    assert!(app.herdr_prompt.agent_pane_picker_open());
 }

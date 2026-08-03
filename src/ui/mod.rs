@@ -256,17 +256,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Normal | Mode::Commit => {}
     }
+    draw_agent_pane_picker_overlay(frame, app);
     if app.header_picker.is_open() {
         dim_except_header_controls(frame, app);
         draw_header_picker(frame, app);
     }
-    draw_agent_pane_picker_overlay(frame, app);
     finish_selection(frame, app);
 }
 
 fn draw_agent_pane_picker_overlay(frame: &mut Frame<'_>, app: &mut App) {
     if app.herdr_prompt.agent_pane_picker_open() {
-        dim(frame);
+        dim_except_header_controls(frame, app);
         for (target, rect) in
             overlays::draw_agent_pane_picker(frame, &app.herdr_prompt, app.hovered_hit_target)
         {

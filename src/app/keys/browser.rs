@@ -212,21 +212,19 @@ impl App {
             return;
         }
         self.header_picker.close();
-        let Some(repository) = self.git_repository() else {
-            self.notice = Some("Agents require a Git repository".to_owned());
+        let Some(path) = self.agent_destination_for_start() else {
+            self.notice = Some("Open a workspace first".to_owned());
             return;
         };
-        if !repository.details_ready {
-            self.notice = Some("Repository details are still loading".to_owned());
-            return;
-        }
-        let path = repository.root.clone();
-        let branch = repository.branch.clone();
-        if let Err(error) = self.herdr_prompt.prepare_agent(path, branch) {
+        if let Err(error) = self.herdr_prompt.prepare_agent(path) {
             self.notice = Some(error);
         } else {
             self.notice = Some("Loading active Herdr tab layout".to_owned());
         }
+    }
+
+    pub(crate) fn agent_destination_for_start(&self) -> Option<PathBuf> {
+        Some(self.repository()?.root.clone())
     }
 
     pub(crate) fn handle_header_picker(&mut self, key: KeyEvent) {
@@ -587,9 +585,9 @@ impl App {
             self.notice = Some("Another workspace operation is still running".to_owned());
             return;
         }
-        if !self.start_repository_open(path, true)
-            && let Some(error) = self.workspace_explorer.error.clone()
-        {
+        if self.start_repository_open(path.clone(), true) {
+            self.herdr_prompt.update_agent_destination(path);
+        } else if let Some(error) = self.workspace_explorer.error.clone() {
             self.notice = Some(error);
         }
     }
