@@ -15,24 +15,20 @@ use crate::app::{
     HitTarget, LinkedWorktreeCatalog, Settings,
 };
 
-use super::{fill, palette, text::word_wrapped_height, truncate_width};
+use super::{
+    fill, palette, preview::hard_wrap_preview_lines, text::word_wrapped_height, truncate_width,
+};
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 struct TranscriptBlock {
-    message: usize,
     user: bool,
     lines: Vec<Line<'static>>,
     start: usize,
     height: usize,
-}
-
-#[derive(Clone, Copy)]
-struct RequestAnchor {
-    message: usize,
-    request: usize,
-    start: usize,
-    tool_count: u64,
+    elapsed: Option<String>,
+    request: Option<usize>,
+    expandable: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -177,8 +173,8 @@ pub(super) fn draw(
             | HitTarget::AgentPreviewPickerItem(agent)
             | HitTarget::AgentPreviewPrevious(agent)
             | HitTarget::AgentPreviewNext(agent)
-            | HitTarget::AgentPreviewRequestPrevious { agent, .. }
-            | HitTarget::AgentPreviewRequestNext { agent, .. }
+            | HitTarget::AgentPreviewMessageTimeline(agent)
+            | HitTarget::AgentPreviewRequest { agent, .. }
             | HitTarget::AgentTooltip { agent, .. }
             | HitTarget::AgentMessage { agent, .. },
         ) => Some(agent),
@@ -393,8 +389,9 @@ pub(super) fn draw_history(
     frame: &mut Frame<'_>,
     herdr: &HerdrSession,
     index: usize,
-    selected_request: Option<(usize, usize)>,
+    selected_message: Option<usize>,
     transcript_scroll: Option<usize>,
+    expanded_requests: &[usize],
     pressed_navigation: Option<bool>,
     picker_open: bool,
     hovered: Option<HitTarget>,
@@ -545,89 +542,105 @@ pub(super) fn draw_history(
         );
         return (navigation_targets, 0, 0);
     }
+    let selected_message = selected_message
+        .unwrap_or_else(|| messages.len().saturating_sub(1))
+        .min(messages.len().saturating_sub(1));
+    let message = &messages[selected_message];
     let main = Rect::new(
         area.x,
         area.y.saturating_add(2),
         area.width,
         area.bottom().saturating_sub(area.y.saturating_add(2)),
     );
-    let selector_row = Rect::new(
+    let message_selector = Rect::new(
         main.x.saturating_add(2),
         main.y,
         main.width.saturating_sub(3),
         1.min(main.height),
     );
     let viewport = Rect::new(
-        main.x,
+        main.x.saturating_sub(1),
         main.y.saturating_add(2),
         main.width,
-        main.height.saturating_sub(2),
+        main.bottom().saturating_sub(main.y.saturating_add(2)),
     );
     let cards = Rect::new(
-        main.x.saturating_add(2),
+        main.x.saturating_add(1),
         viewport.y,
-        main.width.saturating_sub(3),
+        main.width.saturating_sub(1),
         viewport.height,
     );
+    let user_height =
+        message_wrapped_height(&message.text, usize::from(main.width.saturating_sub(4)))
+            .saturating_add(3)
+            .min(8)
+            .min(usize::from(viewport.height))
+            .max(3);
     let content_width = usize::from(cards.width.saturating_sub(3).max(1));
-    let live = status == AgentStatus::Working;
-    let (blocks, anchors, document_height) =
-        build_transcript(messages, content_width, live, herdr.spinner_frame());
+    let live = status == AgentStatus::Working && selected_message + 1 == messages.len();
+    let (mut blocks, request_height) = build_request_transcript(
+        message,
+        content_width,
+        live,
+        herdr.spinner_frame(),
+        expanded_requests,
+    );
+    for block in &mut blocks {
+        block.start = block.start.saturating_add(user_height);
+    }
+    let document_height = user_height.saturating_add(request_height);
     let scroll_max = document_height.saturating_sub(usize::from(viewport.height));
-    let selected_anchor = selected_request.and_then(|(message, request)| {
-        anchors
-            .iter()
-            .find(|anchor| anchor.message == message && anchor.request == request)
-    });
-    let scroll = selected_anchor
-        .map(|anchor| anchor.start.saturating_sub(1))
-        .or(transcript_scroll)
-        .unwrap_or(scroll_max)
-        .min(scroll_max);
-    let focus_row = scroll.saturating_add(usize::from(viewport.height) / 3);
-    let focused = selected_anchor.or_else(|| {
-        if scroll == scroll_max {
-            anchors.last()
-        } else if scroll == 0 {
-            anchors.first()
-        } else {
-            anchors
-                .iter()
-                .min_by_key(|anchor| anchor.start.abs_diff(focus_row))
-        }
-    });
-    let focused_message = focused.map_or(messages.len().saturating_sub(1), |anchor| anchor.message);
+    let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
     let mut targets = vec![(
         HitTarget::AgentTooltip {
             agent: agent_key.clone(),
-            message: focused_message,
+            message: selected_message,
         },
         area,
     )];
     targets.extend(navigation_targets);
-    if let Some(anchor) = focused {
-        let request_count = messages[anchor.message].requests.len();
-        draw_request_selector(
-            frame,
-            selector_row,
-            agent_key.clone(),
-            anchor.message,
-            anchor.request,
-            request_count,
-            anchor.tool_count,
-            &mut targets,
-        );
+    draw_message_timeline(
+        frame,
+        message_selector,
+        agent_key.clone(),
+        selected_message,
+        messages.len(),
+        &mut targets,
+    );
+    let user_block = TranscriptBlock {
+        user: true,
+        lines: message
+            .text
+            .split('\n')
+            .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().soft)))
+            .collect(),
+        start: 0,
+        height: user_height,
+        elapsed: None,
+        request: None,
+        expandable: false,
+    };
+    if let Some(rect) = draw_transcript_card(frame, &user_block, cards, viewport, scroll) {
+        targets.push((
+            HitTarget::AgentMessage {
+                agent: agent_key.clone(),
+                message: selected_message,
+            },
+            rect,
+        ));
     }
     for block in &blocks {
-        if let Some(visible) = draw_transcript_card(frame, block, cards, viewport, scroll)
-            && block.user
+        if let Some(rect) = draw_transcript_card(frame, block, cards, viewport, scroll)
+            && block.expandable
+            && let Some(request) = block.request
         {
             targets.push((
-                HitTarget::AgentMessage {
+                HitTarget::AgentPreviewRequest {
                     agent: agent_key.clone(),
-                    message: block.message,
+                    message: selected_message,
+                    request,
                 },
-                visible,
+                rect,
             ));
         }
     }
@@ -738,80 +751,73 @@ fn draw_agent_preview_picker(
     }
 }
 
-fn build_transcript(
-    messages: &[AgentUserMessage],
+fn build_request_transcript(
+    message: &AgentUserMessage,
     width: usize,
     live: bool,
     spinner_frame: usize,
-) -> (Vec<TranscriptBlock>, Vec<RequestAnchor>, usize) {
+    expanded_requests: &[usize],
+) -> (Vec<TranscriptBlock>, usize) {
     let mut blocks = Vec::new();
-    let mut anchors = Vec::new();
     let mut document_height = 0;
-    for (message_index, message) in messages.iter().enumerate() {
-        let user_height = message_wrapped_height(&message.text, width).max(1);
-        blocks.push(TranscriptBlock {
-            message: message_index,
-            user: true,
-            lines: message
-                .text
-                .split('\n')
-                .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().soft)))
-                .collect(),
-            start: document_height,
-            height: user_height.saturating_add(3),
-        });
-        document_height = document_height.saturating_add(user_height.saturating_add(3));
-
-        let agent_start = document_height;
-        let mut agent_lines = Vec::new();
-        let mut agent_height = 0;
-        if message.requests.is_empty() {
-            let (lines, height) = request_content(None, width, live, spinner_frame);
-            agent_lines = lines;
-            agent_height = height;
-        } else {
-            for (request_index, request) in message.requests.iter().enumerate() {
-                anchors.push(RequestAnchor {
-                    message: message_index,
-                    request: request_index,
-                    start: agent_start.saturating_add(2).saturating_add(agent_height),
-                    tool_count: request.tool_call_count,
-                });
-                if message.requests.len() > 1 {
-                    agent_lines.push(Line::styled(
-                        format!("request {} / {}", request_index + 1, message.requests.len()),
-                        Style::default().fg(palette().faint),
-                    ));
-                    agent_height = agent_height.saturating_add(1);
-                }
-                let (mut lines, height) = request_content(
-                    Some(request),
-                    width,
-                    live && message_index + 1 == messages.len()
-                        && request_index + 1 == message.requests.len(),
-                    spinner_frame,
-                );
-                agent_lines.append(&mut lines);
-                agent_height = agent_height.saturating_add(height);
-                if request_index + 1 < message.requests.len() {
-                    agent_lines.push(Line::default());
-                    agent_height = agent_height.saturating_add(1);
-                }
+    let request_count = message.requests.len();
+    for (request_index, request) in message.requests.iter().enumerate() {
+        let (lines, content_height) = request_content(
+            Some(request),
+            width,
+            live && request_index + 1 == request_count,
+            spinner_frame,
+        );
+        let full_height = content_height.max(1).saturating_add(2);
+        let (mut summary, reasoning, hidden) = request_summary(
+            request,
+            width,
+            live && request_index + 1 == request_count,
+            spinner_frame,
+        );
+        let expandable = hidden > 0;
+        let expanded = expanded_requests.contains(&request_index);
+        let collapsed = expandable && !expanded;
+        let (lines, height) = if collapsed {
+            if let Some(reasoning) = reasoning {
+                summary.insert(0, reasoning);
             }
-        }
-        agent_height = agent_height.max(1);
+            summary.push(Line::styled(
+                format!("⌄ {hidden} more"),
+                Style::default()
+                    .fg(palette().cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            let height = summary.len().saturating_add(2);
+            (summary, height)
+        } else {
+            (lines, full_height)
+        };
         blocks.push(TranscriptBlock {
-            message: message_index,
             user: false,
-            lines: agent_lines,
-            start: agent_start,
-            height: agent_height.saturating_add(3),
+            lines,
+            start: document_height,
+            height,
+            elapsed: request.duration_ms.map(format_preview_duration),
+            request: Some(request_index),
+            expandable,
         });
-        document_height = agent_start
-            .saturating_add(agent_height.saturating_add(3))
-            .saturating_add(1);
+        document_height = document_height.saturating_add(height);
     }
-    (blocks, anchors, document_height.saturating_sub(1))
+    if blocks.is_empty() {
+        let (lines, height) = request_content(None, width, live, spinner_frame);
+        blocks.push(TranscriptBlock {
+            user: false,
+            lines,
+            start: 0,
+            height: height.saturating_add(2),
+            elapsed: None,
+            request: None,
+            expandable: false,
+        });
+        document_height = height.saturating_add(2);
+    }
+    (blocks, document_height)
 }
 
 fn draw_transcript_card(
@@ -872,10 +878,34 @@ fn draw_transcript_card(
                 .style(Style::default().fg(background).bg(palette().panel)),
             Rect::new(cards.x, y, cards.width, 1),
         );
+        let elapsed_width = block.elapsed.as_deref().map_or(0, |elapsed| {
+            u16::try_from(UnicodeWidthStr::width(elapsed))
+                .unwrap_or(u16::MAX)
+                .saturating_add(2)
+        });
+        if let Some(elapsed) = block.elapsed.as_deref() {
+            let width = elapsed_width;
+            if cards.width > width.saturating_add(2) {
+                frame.render_widget(
+                    Paragraph::new(format!(" {elapsed} ")).style(
+                        Style::default()
+                            .fg(accent)
+                            .bg(palette().panel)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Rect::new(
+                        cards.right().saturating_sub(width).saturating_sub(1),
+                        y,
+                        width,
+                        1,
+                    ),
+                );
+            }
+        }
     }
-    if local_start <= 1 && local_end > 1 {
+    if block.user && local_start <= 1 && local_end > 1 {
         frame.render_widget(
-            Paragraph::new(if block.user { "YOU" } else { "AGENT" }).style(
+            Paragraph::new("YOU").style(
                 Style::default()
                     .fg(accent)
                     .bg(background)
@@ -889,7 +919,8 @@ fn draw_transcript_card(
             ),
         );
     }
-    let content_start = local_start.max(2);
+    let content_offset = 1 + usize::from(block.user);
+    let content_start = local_start.max(content_offset);
     let content_end = local_end.min(block.height.saturating_sub(1));
     if content_start < content_end {
         let content = Rect::new(
@@ -903,22 +934,20 @@ fn draw_transcript_card(
                 .style(Style::default().fg(palette().soft).bg(background))
                 .wrap(Wrap { trim: true })
                 .scroll((
-                    u16::try_from(content_start.saturating_sub(2)).unwrap_or(u16::MAX),
+                    u16::try_from(content_start.saturating_sub(content_offset)).unwrap_or(u16::MAX),
                     0,
                 )),
             content,
         );
     }
     if local_end == block.height {
+        let bottom_y = y.saturating_add(
+            u16::try_from(local_end.saturating_sub(local_start).saturating_sub(1)).unwrap_or(0),
+        );
         frame.render_widget(
             Paragraph::new("▀".repeat(usize::from(cards.width)))
                 .style(Style::default().fg(background).bg(palette().panel)),
-            Rect::new(
-                cards.x,
-                y.saturating_add(u16::try_from(local_end - local_start - 1).unwrap_or(0)),
-                cards.width,
-                1,
-            ),
+            Rect::new(cards.x, bottom_y, cards.width, 1),
         );
     }
     Some(visible)
@@ -941,8 +970,8 @@ fn request_content(
     };
     let mut lines = Vec::new();
     let mut height = 0;
-    let last_part = request.parts.len().saturating_sub(1);
-    for (index, part) in request.parts.iter().enumerate() {
+    let mut reasoning_seen = false;
+    for part in &request.parts {
         let AgentRequestPartPreview::Activity(activity) = part else {
             let AgentRequestPartPreview::Text(text) = part else {
                 unreachable!();
@@ -956,62 +985,17 @@ fn request_content(
             }
             continue;
         };
-        let (line, plain) = match activity {
-            AgentActivityPreview::Reasoning => {
-                let active = live && request.reasoning_active && index == last_part;
-                let prefix = if active {
-                    SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()]
-                } else {
-                    "›"
-                };
-                (
-                    Line::from(vec![
-                        Span::styled(prefix.to_owned(), Style::default().fg(palette().orange)),
-                        Span::styled(
-                            "  reasoning",
-                            Style::default()
-                                .fg(palette().orange)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    format!("{prefix}  reasoning"),
-                )
+        if matches!(activity, AgentActivityPreview::Reasoning) {
+            if reasoning_seen {
+                continue;
             }
-            AgentActivityPreview::Tool {
-                name,
-                title,
-                running,
-            } => {
-                let active = live && *running;
-                let prefix = if active {
-                    SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()]
-                } else {
-                    "›"
-                };
-                let mut spans = vec![
-                    Span::styled(prefix.to_owned(), Style::default().fg(palette().cyan)),
-                    Span::styled(
-                        "  tool  ",
-                        Style::default()
-                            .fg(palette().cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(name.clone(), Style::default().fg(palette().accent)),
-                ];
-                let mut plain = format!("{prefix}  tool  {name}");
-                if let Some(title) = title {
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(
-                        title.clone(),
-                        Style::default().fg(palette().soft),
-                    ));
-                    plain.push_str("  ");
-                    plain.push_str(title);
-                }
-                (Line::from(spans), plain)
-            }
+            reasoning_seen = true;
+        }
+        let line = match activity {
+            AgentActivityPreview::Reasoning => reasoning_line(request, live, spinner_frame),
+            AgentActivityPreview::Tool { .. } => tool_line(activity, width, live, spinner_frame),
         };
-        height += word_wrapped_height(&plain, width).max(1);
+        height += 1;
         lines.push(line);
     }
     if lines.is_empty() {
@@ -1024,103 +1008,205 @@ fn request_content(
     (lines, height)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_request_selector(
+fn request_summary(
+    request: &AgentRequestPreview,
+    width: usize,
+    live: bool,
+    spinner_frame: usize,
+) -> (Vec<Line<'static>>, Option<Line<'static>>, usize) {
+    const TEXT_ROWS: usize = 3;
+    const TOOL_ROWS: usize = 3;
+
+    let text = request
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            AgentRequestPartPreview::Text(text) => Some(text),
+            AgentRequestPartPreview::Activity(_) => None,
+        })
+        .flat_map(|text| text.split('\n'))
+        .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().soft)))
+        .collect();
+    let text = hard_wrap_preview_lines(text, width, 0, usize::MAX, false, false);
+    let tools = request
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            AgentRequestPartPreview::Activity(activity @ AgentActivityPreview::Tool { .. }) => {
+                Some(tool_line(activity, width, live, spinner_frame))
+            }
+            AgentRequestPartPreview::Text(_)
+            | AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning) => None,
+        })
+        .collect::<Vec<_>>();
+    let reasoning = request.parts.iter().find_map(|part| match part {
+        AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning) => {
+            Some(reasoning_line(request, live, spinner_frame))
+        }
+        AgentRequestPartPreview::Text(_)
+        | AgentRequestPartPreview::Activity(AgentActivityPreview::Tool { .. }) => None,
+    });
+    let hidden = text
+        .len()
+        .saturating_sub(TEXT_ROWS)
+        .saturating_add(tools.len().saturating_sub(TOOL_ROWS));
+    let lines = text
+        .into_iter()
+        .take(TEXT_ROWS)
+        .chain(tools.into_iter().take(TOOL_ROWS))
+        .collect();
+    (lines, reasoning, hidden)
+}
+
+fn reasoning_line(
+    request: &AgentRequestPreview,
+    live: bool,
+    spinner_frame: usize,
+) -> Line<'static> {
+    let active = live && request.reasoning_active;
+    let prefix = if active {
+        SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()]
+    } else {
+        "›"
+    };
+    let mut spans = vec![
+        Span::styled(prefix.to_owned(), Style::default().fg(palette().orange)),
+        Span::styled(
+            "  reasoning",
+            Style::default()
+                .fg(palette().orange)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(duration_ms) = request.reasoning_duration_ms {
+        spans.push(Span::styled(
+            format!("  {}", format_preview_duration(duration_ms)),
+            Style::default().fg(palette().faint),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn tool_line(
+    activity: &AgentActivityPreview,
+    width: usize,
+    live: bool,
+    spinner_frame: usize,
+) -> Line<'static> {
+    let AgentActivityPreview::Tool {
+        name,
+        title,
+        running,
+    } = activity
+    else {
+        unreachable!();
+    };
+    let active = live && *running;
+    let prefix = if active {
+        SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()]
+    } else {
+        "›"
+    };
+    let mut spans = Vec::new();
+    let mut remaining = width;
+    push_truncated_span(
+        &mut spans,
+        prefix,
+        Style::default().fg(palette().cyan),
+        &mut remaining,
+    );
+    push_truncated_span(
+        &mut spans,
+        " tool  ",
+        Style::default()
+            .fg(palette().cyan)
+            .add_modifier(Modifier::BOLD),
+        &mut remaining,
+    );
+    push_truncated_span(
+        &mut spans,
+        name,
+        Style::default().fg(palette().accent),
+        &mut remaining,
+    );
+    if let Some(title) = title {
+        push_truncated_span(&mut spans, "  ", Style::default(), &mut remaining);
+        push_truncated_span(
+            &mut spans,
+            title,
+            Style::default().fg(palette().soft),
+            &mut remaining,
+        );
+    }
+    Line::from(spans)
+}
+
+fn push_truncated_span(
+    spans: &mut Vec<Span<'static>>,
+    value: &str,
+    style: Style,
+    remaining: &mut usize,
+) {
+    if *remaining == 0 {
+        return;
+    }
+    let value = truncate_width(value, *remaining);
+    *remaining = remaining.saturating_sub(UnicodeWidthStr::width(value.as_str()));
+    spans.push(Span::styled(value, style));
+}
+
+fn draw_message_timeline(
     frame: &mut Frame<'_>,
     area: Rect,
     agent: AgentKey,
     message: usize,
-    request: usize,
-    request_count: usize,
-    tool_count: u64,
+    message_count: usize,
     targets: &mut Vec<(HitTarget, Rect)>,
 ) {
-    if area.height == 0 || area.width < 7 {
+    if area.height == 0 || area.width == 0 || message_count == 0 {
         return;
     }
-    let count = if request_count == 0 {
-        "0/0".to_owned()
-    } else {
-        format!("{}/{}", request + 1, request_count)
-    };
-    let selector_width = u16::try_from(UnicodeWidthStr::width(count.as_str()).saturating_add(4))
+    let capacity = usize::from(area.width).div_ceil(2).max(1);
+    let visible = message_count.min(capacity);
+    let start = message
+        .saturating_sub(visible / 2)
+        .min(message_count.saturating_sub(visible));
+    let timeline_width = u16::try_from(visible.saturating_mul(2).saturating_sub(1))
         .unwrap_or(u16::MAX)
         .min(area.width);
-    let selector = Rect::new(
+    let timeline = Rect::new(
         area.x
-            .saturating_add(area.width.saturating_sub(selector_width) / 2),
+            .saturating_add(area.width.saturating_sub(timeline_width) / 2),
         area.y,
-        selector_width,
+        timeline_width,
         1,
     );
-    let previous_enabled = request_count > 0 && request > 0;
-    let next_enabled = request_count > 0 && request + 1 < request_count;
+    let mut spans = Vec::with_capacity(visible.saturating_mul(2).saturating_sub(1));
+    for index in start..start.saturating_add(visible) {
+        if index > start {
+            spans.push(Span::raw(" "));
+        }
+        let selected = index == message;
+        spans.push(Span::styled(
+            if selected { "●" } else { "○" },
+            Style::default()
+                .fg(if selected {
+                    palette().cyan
+                } else {
+                    palette().faint
+                })
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "< ",
-                Style::default().fg(if previous_enabled {
-                    palette().cyan
-                } else {
-                    palette().faint
-                }),
-            ),
-            Span::styled(
-                count,
-                Style::default()
-                    .fg(palette().ink)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " >",
-                Style::default().fg(if next_enabled {
-                    palette().cyan
-                } else {
-                    palette().faint
-                }),
-            ),
-        ]))
-        .style(Style::default().bg(palette().panel)),
-        selector,
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().panel)),
+        timeline,
     );
-    let tools = format!(
-        "{tool_count} tool{}",
-        if tool_count == 1 { "" } else { "s" }
-    );
-    let tools_width = u16::try_from(UnicodeWidthStr::width(tools.as_str())).unwrap_or(u16::MAX);
-    if tools_width < area.width.saturating_sub(selector_width).saturating_sub(2) {
-        frame.render_widget(
-            Paragraph::new(tools)
-                .alignment(ratatui::layout::Alignment::Right)
-                .style(Style::default().fg(palette().faint).bg(palette().panel)),
-            Rect::new(
-                area.right().saturating_sub(tools_width),
-                area.y,
-                tools_width,
-                1,
-            ),
-        );
-    }
-    if previous_enabled {
-        targets.push((
-            HitTarget::AgentPreviewRequestPrevious {
-                agent: agent.clone(),
-                message,
-                request,
-            },
-            Rect::new(selector.x, selector.y, 2.min(selector.width), 1),
-        ));
-    }
-    if next_enabled {
-        targets.push((
-            HitTarget::AgentPreviewRequestNext {
-                agent,
-                message,
-                request,
-            },
-            Rect::new(selector.right().saturating_sub(2), selector.y, 2, 1),
-        ));
-    }
+    targets.push((HitTarget::AgentPreviewMessageTimeline(agent), timeline));
 }
 
 fn draw_transcript_progress(frame: &mut Frame<'_>, area: Rect, scroll: usize, scroll_max: usize) {
@@ -1430,6 +1516,21 @@ fn format_duration(duration: Duration) -> String {
         return format_tenths(seconds, 86_400, 'd');
     }
     format_tenths(seconds, 604_800, 'w')
+}
+
+fn format_preview_duration(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        return format!("{duration_ms}ms");
+    }
+    if duration_ms < 60_000 {
+        let tenths = duration_ms.saturating_add(50) / 100;
+        return if tenths.is_multiple_of(10) {
+            format!("{}s", tenths / 10)
+        } else {
+            format!("{}.{:01}s", tenths / 10, tenths % 10)
+        };
+    }
+    format_duration(Duration::from_millis(duration_ms))
 }
 
 fn format_tenths(seconds: u64, unit: u64, suffix: char) -> String {

@@ -69,7 +69,7 @@ pub(super) struct StyledChunk {
 
 type WrapToken = (bool, Vec<StyledChunk>);
 
-pub(super) fn hard_wrap_lines(
+pub(in crate::ui) fn hard_wrap_lines(
     lines: Vec<Line<'static>>,
     width: usize,
     skip: usize,

@@ -33,6 +33,7 @@ pub(super) use super::text::{
 mod diff;
 pub(crate) use diff::{DiffDocument, DiffLineKind};
 mod wrap;
+pub(super) use wrap::hard_wrap_lines as hard_wrap_preview_lines;
 use wrap::*;
 #[cfg(test)]
 mod tests;

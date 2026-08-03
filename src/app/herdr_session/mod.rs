@@ -342,6 +342,8 @@ pub(crate) struct AgentUserMessage {
 pub(crate) struct AgentRequestPreview {
     pub(crate) parts: Vec<AgentRequestPartPreview>,
     pub(crate) reasoning_active: bool,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) reasoning_duration_ms: Option<u64>,
     pub(crate) tool_call_count: u64,
 }
 
@@ -1416,6 +1418,8 @@ impl HerdrSession {
                             .map(|_| AgentRequestPreview {
                                 parts: Vec::new(),
                                 reasoning_active: false,
+                                duration_ms: None,
+                                reasoning_duration_ms: None,
                                 tool_call_count: 0,
                             })
                             .collect::<Vec<_>>();
@@ -1449,6 +1453,8 @@ impl HerdrSession {
         message: usize,
         activities: &[AgentActivityPreview],
         reasoning_active: bool,
+        duration_ms: Option<u64>,
+        reasoning_duration_ms: Option<u64>,
     ) {
         let AgentTimingKey::Session(identity) = self.agents[index]
             .runtime
@@ -1476,6 +1482,8 @@ impl HerdrSession {
                 .map(AgentRequestPartPreview::Activity),
         );
         request.reasoning_active = reasoning_active;
+        request.duration_ms = duration_ms;
+        request.reasoning_duration_ms = reasoning_duration_ms;
     }
 
     #[cfg(test)]

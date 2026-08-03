@@ -125,12 +125,8 @@ pub(crate) enum HitTarget {
     AgentPreviewPickerItem(AgentKey),
     AgentPreviewPrevious(AgentKey),
     AgentPreviewNext(AgentKey),
-    AgentPreviewRequestPrevious {
-        agent: AgentKey,
-        message: usize,
-        request: usize,
-    },
-    AgentPreviewRequestNext {
+    AgentPreviewMessageTimeline(AgentKey),
+    AgentPreviewRequest {
         agent: AgentKey,
         message: usize,
         request: usize,

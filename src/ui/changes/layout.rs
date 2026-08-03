@@ -71,6 +71,8 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
                 | HitTarget::AgentPreviewPickerItem(_)
                 | HitTarget::AgentPreviewPrevious(_)
                 | HitTarget::AgentPreviewNext(_)
+                | HitTarget::AgentPreviewMessageTimeline(_)
+                | HitTarget::AgentPreviewRequest { .. }
                 | HitTarget::AgentTooltip { .. }
                 | HitTarget::AgentMessage { .. }
         )

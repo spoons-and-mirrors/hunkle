@@ -66,14 +66,21 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 #[derive(Debug)]
 struct AgentPreviewTranscriptScroll {
     agent: AgentKey,
+    message: usize,
     offset: usize,
 }
 
 #[derive(Debug)]
-struct AgentPreviewRequestSelection {
+struct AgentPreviewMessageSelection {
     agent: AgentKey,
     message: usize,
-    request: usize,
+}
+
+#[derive(Debug)]
+struct AgentPreviewExpandedRequests {
+    agent: AgentKey,
+    message: usize,
+    requests: Vec<usize>,
 }
 
 pub(super) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -142,7 +149,8 @@ pub struct App {
     pub(crate) agents_pane_pinned: bool,
     agent_preview_selection: Option<AgentKey>,
     agent_preview_transcript_scroll: Option<AgentPreviewTranscriptScroll>,
-    agent_preview_request_selection: Option<AgentPreviewRequestSelection>,
+    agent_preview_message_selection: Option<AgentPreviewMessageSelection>,
+    agent_preview_expanded_requests: Option<AgentPreviewExpandedRequests>,
     agent_preview_picker_open: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     agent_preview_button_flash: Option<(bool, Instant)>,
@@ -302,7 +310,8 @@ impl App {
             agents_pane_pinned: false,
             agent_preview_selection: None,
             agent_preview_transcript_scroll: None,
-            agent_preview_request_selection: None,
+            agent_preview_message_selection: None,
+            agent_preview_expanded_requests: None,
             agent_preview_picker_open: false,
             hovered_hit_target: None,
             agent_preview_button_flash: None,
@@ -2126,7 +2135,8 @@ impl App {
             self.changes.deactivate_sqlite();
             self.single_panel_detail_open = false;
             self.agent_preview_transcript_scroll = None;
-            self.agent_preview_request_selection = None;
+            self.agent_preview_message_selection = None;
+            self.agent_preview_expanded_requests = None;
         }
     }
 
@@ -2168,7 +2178,8 @@ impl App {
         self.agents_pane_pinned = false;
         self.agent_preview_selection = None;
         self.agent_preview_transcript_scroll = None;
-        self.agent_preview_request_selection = None;
+        self.agent_preview_message_selection = None;
+        self.agent_preview_expanded_requests = None;
         self.agent_preview_picker_open = false;
         self.agent_preview_button_flash = None;
         if matches!(
@@ -2182,8 +2193,8 @@ impl App {
                     | HitTarget::AgentPreviewPickerItem(_)
                     | HitTarget::AgentPreviewPrevious(_)
                     | HitTarget::AgentPreviewNext(_)
-                    | HitTarget::AgentPreviewRequestPrevious { .. }
-                    | HitTarget::AgentPreviewRequestNext { .. }
+                    | HitTarget::AgentPreviewMessageTimeline(_)
+                    | HitTarget::AgentPreviewRequest { .. }
                     | HitTarget::AgentTooltip { .. }
                     | HitTarget::AgentMessage { .. }
             )
@@ -2251,7 +2262,13 @@ impl App {
 
     pub(crate) fn agent_preview_transcript_scroll(&self, index: usize) -> Option<usize> {
         let scroll = self.agent_preview_transcript_scroll.as_ref()?;
-        (self.herdr.agent_key(index).as_ref() == Some(&scroll.agent)).then_some(scroll.offset)
+        let message = self.agent_preview_message(index).or_else(|| {
+            self.herdr
+                .agent_user_messages(index)
+                .and_then(|messages| messages.len().checked_sub(1))
+        })?;
+        (self.herdr.agent_key(index).as_ref() == Some(&scroll.agent) && scroll.message == message)
+            .then_some(scroll.offset)
     }
 
     pub(crate) fn agent_preview_swipe(&self, index: usize) -> Option<(i32, usize)> {
@@ -2276,12 +2293,38 @@ impl App {
         Some((offset, neighbor))
     }
 
-    pub(crate) fn agent_preview_request(&self, index: usize) -> Option<(usize, usize)> {
+    pub(crate) fn agent_preview_message(&self, index: usize) -> Option<usize> {
         let selection = self
-            .agent_preview_request_selection
+            .agent_preview_message_selection
             .as_ref()
             .filter(|selection| self.herdr.agent_key(index).as_ref() == Some(&selection.agent))?;
-        Some((selection.message, selection.request))
+        let last = self
+            .herdr
+            .agent_user_messages(index)?
+            .len()
+            .checked_sub(1)?;
+        Some(selection.message.min(last))
+    }
+
+    pub(crate) fn agent_preview_expanded_requests(&self, index: usize) -> &[usize] {
+        let Some(agent) = self.herdr.agent_key(index) else {
+            return &[];
+        };
+        let Some(message) = self.agent_preview_message(index).or_else(|| {
+            self.herdr
+                .agent_user_messages(index)
+                .and_then(|messages| messages.len().checked_sub(1))
+        }) else {
+            return &[];
+        };
+        let Some(expanded) = self.agent_preview_expanded_requests.as_ref() else {
+            return &[];
+        };
+        if expanded.agent == agent && expanded.message == message {
+            &expanded.requests
+        } else {
+            &[]
+        }
     }
 
     pub(super) fn show_agents_pane(&mut self) {
