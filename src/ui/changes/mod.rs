@@ -451,16 +451,7 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         0
     };
     let metadata_bottom_margin = u16::from(metadata_height > 0);
-    let scrollable_metadata_height = if inspecting_commit {
-        metadata_height.saturating_add(metadata_bottom_margin)
-    } else {
-        0
-    };
-    let fixed_metadata_height = if inspecting_commit {
-        0
-    } else {
-        metadata_height.saturating_add(metadata_bottom_margin)
-    };
+    let scrollable_metadata_height = metadata_height.saturating_add(metadata_bottom_margin);
     let diff_body = if inspecting_commit {
         Rect::new(
             diff_header.x,
@@ -473,17 +464,11 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
     } else {
         Rect::new(
             diff_header.x,
-            diff_header
-                .y
-                .saturating_add(2)
-                .saturating_add(fixed_metadata_height),
+            diff_header.y.saturating_add(2),
             diff_header.width,
-            columns[1].bottom().saturating_sub(
-                diff_header
-                    .y
-                    .saturating_add(3)
-                    .saturating_add(fixed_metadata_height),
-            ),
+            columns[1]
+                .bottom()
+                .saturating_sub(diff_header.y.saturating_add(3)),
         )
     };
     let wrap_label = if app.changes.diff_wrap {
@@ -542,20 +527,6 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
             diff_header,
         );
     }
-    if !inspecting_commit {
-        draw_metadata_card(
-            frame,
-            Rect::new(
-                diff_header.x,
-                diff_header.y.saturating_add(2),
-                diff_header.width,
-                metadata_height,
-            ),
-            summary,
-            summary_unavailable,
-            summary_height,
-        );
-    }
     let show_hunk_actions =
         !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
     let editable_diff = selected_change.map(|change| (change.path.clone(), change.code == '?'));
@@ -606,11 +577,13 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
             );
         }
     }
+    let leading_height = usize::from(scrollable_metadata_height);
     let visible_hunks = visible_hunks(
         &hunk_rows,
         rendered_height,
         diff_body,
         app.changes.diff_scroll,
+        leading_height,
     );
     render_scrollable_content(
         frame,
@@ -636,6 +609,16 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
                 summary_unavailable,
                 summary_height,
             },
+        );
+    } else if metadata_height > 0 {
+        draw_scrolled_summary_card(
+            frame,
+            diff_body,
+            app.changes.diff_scroll,
+            metadata_height,
+            scrolled_summary.as_ref(),
+            summary_unavailable,
+            summary_height,
         );
     }
     draw_hunk_actions(frame, app, diff_body, visible_hunks);

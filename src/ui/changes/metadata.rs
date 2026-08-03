@@ -1,27 +1,41 @@
 use super::*;
 
-pub(super) fn draw_metadata_card(
+pub(super) fn draw_scrolled_summary_card(
     frame: &mut Frame<'_>,
-    card: Rect,
+    viewport: Rect,
+    scroll: usize,
+    height: u16,
     summary: Option<&DiffSummary>,
     summary_unavailable: bool,
     summary_height: u16,
 ) {
-    if card.is_empty() {
+    let scroll = scroll.min(usize::from(u16::MAX)) as u16;
+    if scroll >= height {
         return;
     }
+    let visible_height = height.saturating_sub(scroll).min(viewport.height);
+    let card = Rect::new(viewport.x, viewport.y, viewport.width, visible_height);
     fill(frame, card, palette().surface_alt);
-    draw_diff_summary(
+    let content_width = card.width.saturating_sub(2);
+    draw_scrolled_text(
         frame,
+        card,
         Rect::new(
             card.x.saturating_add(1),
-            card.y.saturating_add(1),
-            card.width.saturating_sub(2),
+            1,
+            content_width,
             summary_height.saturating_sub(1),
         ),
-        summary,
-        summary_unavailable,
-        true,
+        scroll,
+        diff_summary_text(
+            summary,
+            summary_unavailable,
+            true,
+            content_width,
+            summary_height.saturating_sub(1),
+            true,
+        ),
+        false,
     );
 }
 

@@ -164,6 +164,10 @@ pub(super) fn render_scrollable_content(
         .changes
         .diff_scroll
         .saturating_sub(usize::from(leading_height));
+    if app.regions.preview_body.is_some() {
+        app.regions.preview_body = Some(preview_body);
+        app.regions.preview_scroll = content_scroll;
+    }
     let file_headers = (0..preview.lines.len().min(usize::from(preview_body.height)))
         .filter_map(|row| {
             app.changes

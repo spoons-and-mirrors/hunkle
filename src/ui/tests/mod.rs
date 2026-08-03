@@ -969,6 +969,18 @@ fn renders_every_primary_surface() {
     );
     app.changes.diff_scroll = 0;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    app.changes.diff_scroll = 2;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let diff = app.regions.diff.unwrap();
+    let buffer = terminal.backend().buffer();
+    let scrolled_diff = (diff.y..diff.bottom())
+        .flat_map(|row| (diff.x..diff.right()).map(move |column| buffer[(column, row)].symbol()))
+        .collect::<String>();
+    assert!(scrolled_diff.contains("DIFF"));
+    assert!(!scrolled_diff.contains("CHANGES"));
+    assert!(scrolled_diff.contains("FILES"));
+    app.changes.diff_scroll = 0;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let scrollbar = app.regions.diff_scrollbar.unwrap();
     assert_eq!(scrollbar.width, 1);
     assert_eq!(scrollbar.right(), 120);
