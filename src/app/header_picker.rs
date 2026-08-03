@@ -14,6 +14,7 @@ pub(crate) enum HeaderPickerKind {
     Worktrees,
     Branches,
     DiffTargets,
+    Issues,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,12 @@ pub(crate) enum HeaderPickerItem {
         revision: String,
         detail: String,
         default: bool,
+    },
+    Issue {
+        number: u64,
+        title: String,
+        detail: String,
+        labels: Vec<String>,
     },
 }
 
@@ -686,6 +693,12 @@ impl HeaderPickerItem {
             ),
             Self::Branch(branch) | Self::BranchBase(branch) => branch.name.clone(),
             Self::DiffTarget { label, .. } => label.clone(),
+            Self::Issue {
+                number,
+                title,
+                detail,
+                labels,
+            } => format!("{number} {title} {detail} {}", labels.join(" ")),
         }
     }
 }

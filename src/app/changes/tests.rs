@@ -324,3 +324,30 @@ fn remembers_independent_markdown_source_and_preview_scrolls() {
     state.toggle_markdown_rendered();
     assert_eq!(state.diff_scroll, 5);
 }
+
+#[test]
+fn issue_preview_survives_refresh_and_clears_on_navigation() {
+    let repo = repository_data();
+    let mut state = ChangesState::new(Some(&repo));
+
+    state.show_issue(17, "ISSUE", "Render issue bodies", "# Body");
+    assert_eq!(state.diff, "# Body");
+    assert!(state.markdown_rendered);
+    assert_eq!(state.preview_pane, LeftPane::Files);
+    assert_eq!(
+        state.issue_preview.as_ref().map(|issue| issue.number),
+        Some(17)
+    );
+
+    state.refresh_diff(Some(&repo));
+    assert_eq!(state.diff, "# Body");
+
+    let row = state
+        .worktree_rows(&repo)
+        .iter()
+        .position(|row| row.change_index.is_some())
+        .unwrap();
+    assert!(state.select_worktree_row(&repo, row));
+    assert!(state.issue_preview.is_none());
+    assert_eq!(state.preview_pane, LeftPane::Worktree);
+}

@@ -26,6 +26,55 @@ fn errors_use_the_full_footer_instead_of_the_header() {
 }
 
 #[test]
+fn issue_picker_renders_searchable_rows_and_scope_control() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    app.header_picker.open(
+        HeaderPickerKind::Issues,
+        vec![HeaderPickerItem::Issue {
+            number: 42,
+            title: "Keep Markdown fast".to_owned(),
+            detail: "open issue · @octo".to_owned(),
+            labels: vec!["performance".to_owned()],
+        }],
+        0,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let row = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(0))
+        .unwrap();
+    let row_text = (row.x..row.right())
+        .map(|x| terminal.backend().buffer()[(x, row.y)].symbol())
+        .collect::<String>();
+    assert!(
+        row_text.contains("#42 Keep Markdown"),
+        "rendered row: {row_text:?}"
+    );
+    assert!(row_text.contains("performance"));
+    let scope = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerIssueScope)
+        .unwrap();
+    let scope_text = (scope.x..scope.right())
+        .map(|x| terminal.backend().buffer()[(x, scope.y)].symbol())
+        .collect::<String>();
+    assert!(scope_text.contains("OPEN"));
+
+    app.issues.toggle_scope();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let scope_text = (scope.x..scope.right())
+        .map(|x| terminal.backend().buffer()[(x, scope.y)].symbol())
+        .collect::<String>();
+    assert!(scope_text.contains("CLOSED"));
+}
+
+#[test]
 fn repository_picker_labels_linked_worktrees_by_repository() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("hunkle");
@@ -328,6 +377,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .hit_target_rect(HitTarget::HeaderBranch)
         .unwrap();
     let diff = app.regions.hit_target_rect(HitTarget::HeaderDiff).unwrap();
+    let issue = app.regions.hit_target_rect(HitTarget::HeaderIssue).unwrap();
     let agent = app.regions.hit_target_rect(HitTarget::HeaderAgent).unwrap();
     assert_eq!(repository.x, 1);
     assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), "▀");
@@ -342,7 +392,8 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert_eq!(repository.right().saturating_add(1), worktrees.x);
     assert!(worktrees.right() <= branch.x);
     assert_eq!(branch.right().saturating_add(1), diff.x);
-    assert_eq!(diff.right().saturating_add(1), agent.x);
+    assert_eq!(diff.right().saturating_add(1), issue.x);
+    assert_eq!(issue.right().saturating_add(1), agent.x);
     assert_eq!(
         terminal.backend().buffer()[(repository.x, repository.y)].symbol(),
         "▌"
@@ -372,10 +423,14 @@ fn header_cards_open_pickers_and_checkout_branches() {
         super::palette().purple
     );
     assert_eq!(
+        terminal.backend().buffer()[(issue.x, issue.y)].fg,
+        super::palette().cyan
+    );
+    assert_eq!(
         terminal.backend().buffer()[(agent.x, agent.y)].fg,
         super::palette().green
     );
-    for card in [repository, worktrees, branch, diff, agent] {
+    for card in [repository, worktrees, branch, diff, issue, agent] {
         assert_eq!(
             terminal.backend().buffer()[(card.x + 1, card.y)].bg,
             super::palette().surface_alt
@@ -463,7 +518,10 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("topic...feature/header"));
+    assert!(
+        rendered.contains("topic...feature"),
+        "rendered screen: {rendered:?}"
+    );
     let diff = app.regions.diff.unwrap();
     let diff_header = (diff.x..diff.right())
         .map(|x| terminal.backend().buffer()[(x, diff.y + 1)].symbol())

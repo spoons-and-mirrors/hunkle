@@ -100,9 +100,14 @@ pub(super) fn draw_explorer_changes(
         return;
     }
 
-    let selected_path = app
-        .selected_explorer_file_path()
-        .map_or_else(|| "No file selected".to_owned(), RepoPath::display);
+    let issue_preview = app.changes.issue_preview.clone();
+    let selected_path = issue_preview.as_ref().map_or_else(
+        || {
+            app.selected_explorer_file_path()
+                .map_or_else(|| "No file selected".to_owned(), RepoPath::display)
+        },
+        |issue| issue.title.clone(),
+    );
     let preview_header = Rect::new(
         columns[1].x.saturating_add(1),
         columns[1].y.saturating_add(1),
@@ -117,8 +122,8 @@ pub(super) fn draw_explorer_changes(
             .bottom()
             .saturating_sub(preview_header.y.saturating_add(3)),
     );
-    let media_loaded = app.changes.preview_image.is_some();
-    let database_loaded = app.changes.sqlite_browser.is_some();
+    let media_loaded = issue_preview.is_none() && app.changes.preview_image.is_some();
+    let database_loaded = issue_preview.is_none() && app.changes.sqlite_browser.is_some();
     let wrap_label = if media_loaded || database_loaded {
         String::new()
     } else if app.changes.diff_wrap {
@@ -134,21 +139,31 @@ pub(super) fn draw_explorer_changes(
     };
     let markdown_available = app.markdown_preview_available();
     let markdown_rendered = app.markdown_preview_rendered();
-    let access_label = if media_loaded || database_loaded || markdown_rendered {
-        "read-only"
-    } else {
-        "click to edit"
-    };
+    let access_label =
+        if issue_preview.is_some() || media_loaded || database_loaded || markdown_rendered {
+            "read-only"
+        } else {
+            "click to edit"
+        };
     let markdown_button_width = if markdown_available { 11 } else { 0 };
     let header_content_width = preview_header
         .width
         .saturating_sub(markdown_button_width)
         .saturating_sub(u16::from(markdown_available));
-    let preview_kind = if database_loaded { "DATABASE" } else { "FILE" };
+    let preview_kind = issue_preview.as_ref().map_or_else(
+        || {
+            if database_loaded {
+                "DATABASE".to_owned()
+            } else {
+                "FILE".to_owned()
+            }
+        },
+        |issue| format!("{} #{}", issue.kind, issue.number),
+    );
     let display_path = truncate_width(
         &selected_path,
         usize::from(header_content_width).saturating_sub(
-            preview_kind.len()
+            UnicodeWidthStr::width(preview_kind.as_str())
                 + 2
                 + access_label.len()
                 + UnicodeWidthStr::width(wrap_label.as_str()),
@@ -287,10 +302,18 @@ pub(super) fn draw_explorer_changes(
         crate::ui::sqlite::draw(frame, app, preview_body);
     } else {
         app.changes.preview_presentation.hide_media();
-        let editable_path = app.selected_explorer_file_path().cloned();
-        let path = editable_path
-            .as_ref()
-            .map_or_else(String::new, RepoPath::display);
+        let editable_path = issue_preview
+            .is_none()
+            .then(|| app.selected_explorer_file_path().cloned())
+            .flatten();
+        let path = issue_preview.as_ref().map_or_else(
+            || {
+                editable_path
+                    .as_ref()
+                    .map_or_else(String::new, RepoPath::display)
+            },
+            |issue| format!("issue-{}.md", issue.number),
+        );
         let mut preview =
             prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered, 0);
         if let Some(editable_path) = editable_path.as_ref()

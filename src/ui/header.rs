@@ -63,6 +63,12 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let diff_width = show_agent_actions
         .then(|| UnicodeWidthStr::width(diff_badge) as u16)
         .unwrap_or_default();
+    let issue_badge = " ISSUE ";
+    let issue_width = if show_agent_actions {
+        UnicodeWidthStr::width(issue_badge) as u16
+    } else {
+        0
+    };
     let agent_badge = " AGENT ";
     let agent_width = show_agent_actions
         .then(|| UnicodeWidthStr::width(agent_badge) as u16)
@@ -90,6 +96,8 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 + 1
                 + usize::from(diff_width)
                 + 1
+                + usize::from(issue_width)
+                + 1
                 + usize::from(agent_width),
         ))
     };
@@ -100,7 +108,12 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .saturating_add(2)
         .min(18);
     let action_width = if show_agent_actions {
-        1 + usize::from(diff_width) + 1 + usize::from(agent_width) + comparison_width
+        1 + usize::from(diff_width)
+            + 1
+            + usize::from(issue_width)
+            + 1
+            + usize::from(agent_width)
+            + comparison_width
     } else {
         0
     };
@@ -150,6 +163,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         } else {
             branch_width
                 .saturating_add(diff_width)
+                .saturating_add(issue_width)
                 .saturating_add(agent_width)
                 .saturating_add(comparison_width as u16)
                 .saturating_add(10)
@@ -186,6 +200,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             room.saturating_sub(
                 branch_width
                     .saturating_add(diff_width)
+                    .saturating_add(issue_width)
                     .saturating_add(agent_width)
                     .saturating_add(comparison_width as u16)
                     .saturating_add(4),
@@ -210,6 +225,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ),
             room.saturating_sub(
                 diff_width
+                    .saturating_add(issue_width)
                     .saturating_add(agent_width)
                     .saturating_add(comparison_width as u16)
                     .saturating_add(2),
@@ -232,11 +248,29 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     palette().purple,
                     app.hovered_hit_target == Some(HitTarget::HeaderDiff),
                 ),
-                room.saturating_sub(agent_width.saturating_add(1)),
+                room.saturating_sub(issue_width.saturating_add(agent_width).saturating_add(2)),
             );
             if let Some(rect) = diff_rect {
                 draw_header_badge_border(frame, rect, palette().purple);
                 app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
+            }
+            let room = content_right.saturating_sub(x);
+            let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+            let room = content_right.saturating_sub(x);
+            let issue_rect = render(
+                frame,
+                &mut x,
+                issue_badge.to_owned(),
+                header_badge_style(
+                    palette().cyan,
+                    app.hovered_hit_target == Some(HitTarget::HeaderIssue),
+                ),
+                room.saturating_sub(agent_width.saturating_add(1)),
+            );
+            if let Some(rect) = issue_rect {
+                draw_header_badge_border(frame, rect, palette().cyan);
+                app.regions
+                    .register_hit_target(HitTarget::HeaderIssue, rect);
             }
             let room = content_right.saturating_sub(x);
             let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
@@ -448,6 +482,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             ),
         },
         HeaderPickerKind::DiffTargets => " DIFF AGAINST".to_owned(),
+        HeaderPickerKind::Issues => " ISSUES & PULL REQUESTS".to_owned(),
     };
     let new_branch_action = kind == HeaderPickerKind::Branches
         && app.header_picker.branch_step == BranchPickerStep::Branches;
@@ -456,16 +491,19 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let new_worktree_action = kind == HeaderPickerKind::Worktrees
         && app.header_picker.worktree_step == WorktreePickerStep::Worktrees
         && filtering;
+    let issue_scope_action = kind == HeaderPickerKind::Issues && filtering;
     let action_width = if new_branch_action {
         11
     } else if clone_action {
         14
     } else if new_worktree_action {
         10
+    } else if issue_scope_action {
+        8
     } else {
         0
     };
-    let has_action = new_branch_action || clone_action || new_worktree_action;
+    let has_action = new_branch_action || clone_action || new_worktree_action || issue_scope_action;
     let action_space = action_width + u16::from(has_action);
     if filtering {
         draw_header_picker_search(frame, app, area, action_space, 1);
@@ -596,6 +634,34 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         );
         app.regions
             .register_hit_target(HitTarget::HeaderPickerNewWorktree, action_row);
+    } else if issue_scope_action {
+        let action_row = Rect::new(
+            area.right().saturating_sub(action_space),
+            area.y.saturating_add(1),
+            action_width,
+            1,
+        );
+        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerIssueScope);
+        let background = if hovered {
+            palette().selected
+        } else {
+            palette().cyan
+        };
+        frame.render_widget(
+            Paragraph::new(format!(" {:^6} ", app.issues.scope().label())).style(
+                Style::default()
+                    .fg(palette().canvas)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            action_row,
+        );
+        frame.render_widget(
+            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
+            Rect::new(action_row.right(), action_row.y, 1, 1),
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerIssueScope, action_row);
     }
     if filtering {
         draw_half_padding(
@@ -848,6 +914,24 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     None,
                     *default,
                     Some(4),
+                    None,
+                    false,
+                ),
+                HeaderPickerItem::Issue {
+                    number,
+                    title,
+                    detail,
+                    labels,
+                } => (
+                    format!("#{number} {title}"),
+                    if labels.is_empty() {
+                        detail.clone()
+                    } else {
+                        format!("{} · {}", detail, labels.join(", "))
+                    },
+                    None,
+                    false,
+                    Some(8),
                     None,
                     false,
                 ),
@@ -1151,6 +1235,7 @@ pub(super) fn draw_header_picker_search(
             }
             Some(HeaderPickerKind::Branches) => "Search branch...",
             Some(HeaderPickerKind::DiffTargets) => "Search target branch...",
+            Some(HeaderPickerKind::Issues) => "Search issues and pull requests...",
             None => "Search...",
         };
         format!(" {}{placeholder}", if cursor_visible { "▌" } else { " " })

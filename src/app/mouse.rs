@@ -125,6 +125,10 @@ impl App {
                     self.toggle_header_picker(HeaderPickerKind::DiffTargets);
                     return;
                 }
+                Some(HitTarget::HeaderIssue) => {
+                    self.toggle_header_picker(HeaderPickerKind::Issues);
+                    return;
+                }
                 Some(HitTarget::HeaderAgent) => {
                     self.start_header_agent();
                     return;
@@ -169,6 +173,7 @@ impl App {
                         Some(HitTarget::HeaderPickerItem(index)) => {
                             self.activate_header_picker(index)
                         }
+                        Some(HitTarget::HeaderPickerIssueScope) => self.toggle_header_issue_scope(),
                         Some(HitTarget::HeaderPickerNewBranch) => {
                             self.begin_header_branch_creation()
                         }

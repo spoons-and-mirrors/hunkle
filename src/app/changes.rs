@@ -102,6 +102,7 @@ pub struct ChangesState {
     pub(crate) preview_content_generation: u64,
     pub(crate) preview_image: Option<Arc<DynamicImage>>,
     pub(crate) sqlite_browser: Option<SqliteBrowser>,
+    pub(crate) issue_preview: Option<IssuePreview>,
     pub(crate) preview_presentation: PreviewPresentation,
     preview_loader: PreviewLoader,
     branch_comparison: Option<BranchComparison>,
@@ -113,6 +114,13 @@ pub(crate) struct BranchComparison {
     pub(crate) target: String,
     target_revision: String,
     current_revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssuePreview {
+    pub(crate) number: u64,
+    pub(crate) kind: String,
+    pub(crate) title: String,
 }
 
 struct PendingHunkSelection {
@@ -177,6 +185,7 @@ impl ChangesState {
             preview_content_generation: 0,
             preview_image: None,
             sqlite_browser: None,
+            issue_preview: None,
             preview_presentation: PreviewPresentation::default(),
             preview_loader: PreviewLoader::new(),
             branch_comparison: None,
@@ -201,6 +210,7 @@ impl ChangesState {
         repo: Option<&RepositoryData>,
         prepared_file_tree: Option<PreparedFileTree>,
     ) {
+        self.issue_preview = None;
         self.pane = Self::initial_pane(repo);
         self.preview_pane = self.pane;
         self.worktree_state = ListState::default();
@@ -414,6 +424,7 @@ impl ChangesState {
         path: &RepoPath,
         viewport: usize,
     ) -> bool {
+        self.clear_issue_preview();
         if self
             .pending_preview_line
             .as_ref()
@@ -474,6 +485,7 @@ impl ChangesState {
     }
 
     pub(super) fn set_pane(&mut self, pane: LeftPane, repo: Option<&RepositoryData>) -> bool {
+        self.clear_issue_preview();
         let changed = self.set_pane_preserving_preview(pane);
         if !changed && self.preview_pane == pane {
             return false;
@@ -501,6 +513,7 @@ impl ChangesState {
         if row.section.is_some() && row.section_stats.is_none() {
             return false;
         }
+        self.clear_issue_preview();
         self.worktree_state.select(Some(index));
         self.preview_pane = LeftPane::Worktree;
         self.refresh_diff(Some(repo));
@@ -837,6 +850,7 @@ impl ChangesState {
         if index >= self.explorer_rows().len() {
             return false;
         }
+        self.clear_issue_preview();
         self.pending_explorer_selection = None;
         self.pending_preview_line = None;
         self.explorer_state.select(Some(index));
@@ -877,6 +891,7 @@ impl ChangesState {
             );
         }
         if self.preview_selection() != previous {
+            self.clear_issue_preview();
             self.pending_preview_line = None;
             self.preview_pane = self.pane;
             self.refresh_diff(Some(repo));
@@ -911,6 +926,7 @@ impl ChangesState {
             );
         }
         if self.preview_selection() != previous {
+            self.clear_issue_preview();
             self.preview_pane = self.pane;
             self.refresh_diff(Some(repo));
         }
@@ -944,6 +960,7 @@ impl ChangesState {
             );
         }
         if self.preview_selection() != previous {
+            self.clear_issue_preview();
             self.preview_pane = self.pane;
             self.refresh_diff(Some(repo));
         }
@@ -1017,6 +1034,7 @@ impl ChangesState {
     }
 
     pub(super) fn preview_commit(&mut self, repo: &RepositoryData, commit: &Commit) {
+        self.clear_issue_preview();
         self.preview_pane = LeftPane::Worktree;
         self.branch_comparison = None;
         self.diff_scroll = 0;
@@ -1045,6 +1063,7 @@ impl ChangesState {
         current_revision: String,
         target_revision: String,
     ) {
+        self.clear_issue_preview();
         self.diff_scroll = 0;
         self.markdown_alternate_scroll = None;
         self.hunk_selection = None;
@@ -1126,6 +1145,7 @@ impl ChangesState {
     }
 
     pub(super) fn toggle_selected_explorer_directory(&mut self, repo: Option<&RepositoryData>) {
+        self.clear_issue_preview();
         self.preview_pane = LeftPane::Files;
         self.pending_explorer_selection = None;
         let Some(path) = self.selected_explorer_directory_path() else {
@@ -1143,6 +1163,7 @@ impl ChangesState {
     }
 
     pub(super) fn expand_or_descend_explorer(&mut self, repo: Option<&RepositoryData>) {
+        self.clear_issue_preview();
         self.preview_pane = LeftPane::Files;
         self.pending_explorer_selection = None;
         let Some(index) = self.explorer_state.selected() else {
@@ -1174,6 +1195,7 @@ impl ChangesState {
     }
 
     pub(super) fn collapse_or_ascend_explorer(&mut self, repo: Option<&RepositoryData>) {
+        self.clear_issue_preview();
         self.preview_pane = LeftPane::Files;
         self.pending_explorer_selection = None;
         let Some(index) = self.explorer_state.selected() else {
@@ -1203,6 +1225,7 @@ impl ChangesState {
     }
 
     pub(super) fn toggle_selected_directory(&mut self, repo: Option<&RepositoryData>) {
+        self.clear_issue_preview();
         self.preview_pane = LeftPane::Worktree;
         let Some(repo) = repo else {
             return;
@@ -1222,6 +1245,7 @@ impl ChangesState {
     }
 
     pub(super) fn expand_or_descend_worktree(&mut self, repo: Option<&RepositoryData>) {
+        self.clear_issue_preview();
         self.preview_pane = LeftPane::Worktree;
         let Some(repo) = repo else {
             return;
@@ -1254,6 +1278,7 @@ impl ChangesState {
     }
 
     pub(super) fn collapse_or_ascend_worktree(&mut self, repo: Option<&RepositoryData>) {
+        self.clear_issue_preview();
         self.preview_pane = LeftPane::Worktree;
         let Some(repo) = repo else {
             return;
@@ -1288,6 +1313,9 @@ impl ChangesState {
     }
 
     pub(super) fn refresh_diff(&mut self, repo: Option<&RepositoryData>) {
+        if self.issue_preview.is_some() {
+            return;
+        }
         self.branch_comparison = None;
         self.markdown_alternate_scroll = None;
         let preserve_hunk = self.pending_hunk_selection.as_ref().is_some_and(|pending| {
@@ -1608,6 +1636,33 @@ impl ChangesState {
         self.sqlite_browser = None;
         self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
         self.preview_presentation.clear();
+    }
+
+    pub(crate) fn show_issue(&mut self, number: u64, kind: &str, title: &str, body: &str) {
+        self.preview_loader.invalidate();
+        self.preview_pane = LeftPane::Files;
+        self.branch_comparison = None;
+        self.diff_scroll = 0;
+        self.markdown_rendered = true;
+        self.markdown_alternate_scroll = None;
+        self.hunk_selection = None;
+        self.hunk_pin_pending = false;
+        self.pending_hunk_selection = None;
+        self.pending_preview_line = None;
+        self.issue_preview = Some(IssuePreview {
+            number,
+            kind: kind.to_owned(),
+            title: title.to_owned(),
+        });
+        self.set_diff(if body.trim().is_empty() {
+            "_No description provided._".to_owned()
+        } else {
+            body.to_owned()
+        });
+    }
+
+    fn clear_issue_preview(&mut self) {
+        self.issue_preview = None;
     }
 
     pub(crate) fn pin_preview_line(&mut self, path: RepoPath, line: usize) {

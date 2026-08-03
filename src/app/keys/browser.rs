@@ -207,6 +207,67 @@ impl App {
             .open(HeaderPickerKind::DiffTargets, items, selected);
     }
 
+    pub(crate) fn open_header_issues(&mut self) {
+        let Some(root) = self
+            .git_repository()
+            .map(|repository| repository.root.clone())
+        else {
+            self.header_picker
+                .open_message(HeaderPickerKind::Issues, "Not a Git repository".to_owned());
+            return;
+        };
+        self.issues.request(&root);
+        self.header_picker
+            .open(HeaderPickerKind::Issues, Vec::new(), 0);
+        self.refresh_header_issue_items();
+    }
+
+    pub(crate) fn toggle_header_issue_scope(&mut self) {
+        self.issues.toggle_scope();
+        let Some(root) = self
+            .git_repository()
+            .map(|repository| repository.root.clone())
+        else {
+            return;
+        };
+        self.issues.request(&root);
+        self.refresh_header_issue_items();
+    }
+
+    pub(crate) fn refresh_header_issue_items(&mut self) {
+        let items = self
+            .issues
+            .issues()
+            .unwrap_or_default()
+            .iter()
+            .map(|issue| HeaderPickerItem::Issue {
+                number: issue.number,
+                title: issue.title.clone(),
+                detail: issue.detail(),
+                labels: issue.labels.clone(),
+            })
+            .collect::<Vec<_>>();
+        let message = self.issues.error().map(str::to_owned).or_else(|| {
+            if self.issues.loading() && items.is_empty() {
+                Some("Loading GitHub issues…".to_owned())
+            } else if items.is_empty() {
+                Some(match self.issues.scope() {
+                    IssueScope::Open => "No open issues or pull requests".to_owned(),
+                    IssueScope::Closed => "No closed issues or pull requests".to_owned(),
+                })
+            } else {
+                None
+            }
+        });
+        let query = self.header_picker.query.text().to_owned();
+        self.header_picker.open(HeaderPickerKind::Issues, items, 0);
+        if !query.is_empty() {
+            self.header_picker.query.insert(&query);
+            self.header_picker.apply_filter();
+        }
+        self.header_picker.message = message;
+    }
+
     pub(crate) fn start_header_agent(&mut self) {
         if self.mode != Mode::Normal || self.session.open_running() {
             return;
@@ -245,6 +306,9 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::Tab if self.header_picker.kind == Some(HeaderPickerKind::Issues) => {
+                self.toggle_header_issue_scope();
+            }
             KeyCode::Esc if self.header_picker.selecting_worktree_base() => {
                 self.header_picker.return_to_worktree_name();
             }

@@ -11,6 +11,7 @@ mod fuzzy;
 mod header_picker;
 mod herdr_prompt;
 mod herdr_session;
+mod issues;
 mod linked_worktrees;
 mod mouse;
 mod settings;
@@ -38,6 +39,7 @@ pub(crate) use herdr_session::{
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
+pub(crate) use issues::{IssueCatalog, IssueScope};
 pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
     LinkedWorktreeObservation, RepositoryPickerItem,
@@ -97,6 +99,7 @@ pub struct App {
     pub(crate) graph_scroll_to_selection: bool,
     pub(crate) author_filter: AuthorFilter,
     pub(crate) commit_summaries: CommitSummaryCache,
+    pub(crate) issues: IssueCatalog,
     pub(crate) commit_input: TextInput,
     pub(crate) commit_scroll: Option<usize>,
     pub(crate) commit_message_generator: CommitMessageGenerator,
@@ -247,6 +250,7 @@ impl App {
             graph_scroll_to_selection: true,
             author_filter,
             commit_summaries: CommitSummaryCache::default(),
+            issues: IssueCatalog::default(),
             commit_input: TextInput::default(),
             commit_scroll: None,
             commit_message_generator: CommitMessageGenerator::detect(),
@@ -476,6 +480,7 @@ impl App {
         self.file_search.shutdown();
         self.changes.shutdown();
         self.commit_summaries.shutdown();
+        self.issues.shutdown();
         self.workspace_explorer.shutdown();
     }
 
@@ -693,6 +698,12 @@ impl App {
         }
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
+        if self.issues.poll() {
+            if self.header_picker.kind == Some(HeaderPickerKind::Issues) {
+                self.refresh_header_issue_items();
+            }
+            changed = true;
+        }
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
         changed |= self
             .file_search
@@ -1690,6 +1701,9 @@ impl App {
     }
 
     fn selected_file_to_edit(&self) -> Option<(PathBuf, PathBuf)> {
+        if self.changes.issue_preview.is_some() {
+            return None;
+        }
         let repo = self.repository()?;
         let path = match self.changes.pane {
             LeftPane::Worktree => {
@@ -1726,6 +1740,7 @@ impl App {
             HeaderPickerKind::Worktrees => self.open_header_worktrees(),
             HeaderPickerKind::Branches => self.open_header_branches(),
             HeaderPickerKind::DiffTargets => self.open_header_diff_targets(),
+            HeaderPickerKind::Issues => self.open_header_issues(),
         }
     }
 
@@ -1807,6 +1822,20 @@ impl App {
                 self.changes
                     .preview_branch_diff(&root, current, label, current_revision, revision);
             }
+            HeaderPickerItem::Issue { number, .. } => {
+                let Some(issue) = self.issues.issue(number) else {
+                    return;
+                };
+                self.changes.show_issue(
+                    issue.number,
+                    issue.kind_label(),
+                    &issue.title,
+                    &issue.body,
+                );
+                self.initial_pane_pending = false;
+                self.dismiss_agent_preview();
+                self.show_main_pane();
+            }
         }
     }
 
@@ -1853,12 +1882,13 @@ impl App {
 
     pub(crate) fn markdown_preview_available(&self) -> bool {
         self.view == View::Changes
-            && self.changes.pane == LeftPane::Files
-            && self.changes.preview_image.is_none()
-            && self.changes.sqlite_browser.is_none()
-            && self
-                .selected_explorer_file_path()
-                .is_some_and(is_markdown_path)
+            && (self.changes.issue_preview.is_some()
+                || (self.changes.pane == LeftPane::Files
+                    && self.changes.preview_image.is_none()
+                    && self.changes.sqlite_browser.is_none()
+                    && self
+                        .selected_explorer_file_path()
+                        .is_some_and(is_markdown_path)))
     }
 
     pub(crate) fn markdown_preview_rendered(&self) -> bool {
