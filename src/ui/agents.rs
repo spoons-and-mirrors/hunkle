@@ -1006,7 +1006,7 @@ fn request_content(
                         Style::default().fg(palette().soft),
                     ));
                     plain.push_str("  ");
-                    plain.push_str(&title);
+                    plain.push_str(title);
                 }
                 (Line::from(spans), plain)
             }
@@ -1132,14 +1132,12 @@ fn draw_transcript_progress(frame: &mut Frame<'_>, area: Rect, scroll: usize, sc
             .style(Style::default().fg(palette().faint).bg(palette().panel)),
         Rect::new(area.x, area.y, 1, area.height),
     );
-    let offset = if scroll_max == 0 {
-        area.height.saturating_sub(1)
-    } else {
-        u16::try_from(
-            scroll.saturating_mul(usize::from(area.height.saturating_sub(1))) / scroll_max,
-        )
-        .unwrap_or(area.height.saturating_sub(1))
-    };
+    let extent = area.height.saturating_sub(1);
+    let offset = scroll
+        .saturating_mul(usize::from(extent))
+        .checked_div(scroll_max)
+        .and_then(|offset| u16::try_from(offset).ok())
+        .unwrap_or(extent);
     frame.render_widget(
         Paragraph::new("●").style(Style::default().fg(palette().yellow).bg(palette().panel)),
         Rect::new(area.x, area.y.saturating_add(offset), 1, 1),
