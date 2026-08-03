@@ -110,75 +110,27 @@ impl HeaderPicker {
     ) {
         self.change_details_rx = None;
         self.kind = Some(kind);
-        self.default_selected = selected.min(items.len().saturating_sub(1));
-        self.searchable = true;
-        self.selected = self.default_selected;
-        self.scroll = 0;
-        self.viewport_rows = 0;
-        self.scroll_follows_selection = true;
-        self.searchable_items = items
-            .iter()
-            .map(HeaderPickerItem::normalized_search_text)
-            .collect();
-        self.items.clone_from(&items);
-        self.all_items = items;
+        self.set_items(items, selected);
         self.message = None;
         self.query.clear();
         self.query.focus();
-        self.branch_step = BranchPickerStep::Branches;
-        self.branch_base = None;
-        self.branch_name.clear();
-        self.repository_step = RepositoryPickerStep::Repositories;
-        self.clone_field = CloneField::Directory;
-        self.clone_directory.clear();
-        self.clone_url.clear();
-        self.worktree_step = WorktreePickerStep::Worktrees;
-        self.worktree_name.clear();
-        self.worktree_delete = None;
+        self.reset_transient_state();
     }
 
     pub(crate) fn open_message(&mut self, kind: HeaderPickerKind, message: String) {
         self.change_details_rx = None;
         self.kind = Some(kind);
-        self.items.clear();
-        self.all_items.clear();
-        self.searchable_items.clear();
-        self.default_selected = 0;
-        self.searchable = false;
-        self.selected = 0;
-        self.scroll = 0;
-        self.viewport_rows = 0;
-        self.scroll_follows_selection = true;
+        self.clear_items();
         self.message = Some(message);
         self.query.clear();
         self.query.focus();
-        self.branch_step = BranchPickerStep::Branches;
-        self.branch_base = None;
-        self.branch_name.clear();
-        self.repository_step = RepositoryPickerStep::Repositories;
-        self.clone_field = CloneField::Directory;
-        self.clone_directory.clear();
-        self.clone_url.clear();
-        self.worktree_step = WorktreePickerStep::Worktrees;
-        self.worktree_name.clear();
-        self.worktree_delete = None;
+        self.reset_transient_state();
     }
 
     pub(crate) fn open_branch_bases(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
         self.change_details_rx = None;
         self.kind = Some(HeaderPickerKind::Branches);
-        self.default_selected = selected.min(items.len().saturating_sub(1));
-        self.searchable = true;
-        self.selected = self.default_selected;
-        self.scroll = 0;
-        self.viewport_rows = 0;
-        self.scroll_follows_selection = true;
-        self.searchable_items = items
-            .iter()
-            .map(HeaderPickerItem::normalized_search_text)
-            .collect();
-        self.items.clone_from(&items);
-        self.all_items = items;
+        self.set_items(items, selected);
         self.message = None;
         self.query.clear();
         self.query.focus();
@@ -190,15 +142,7 @@ impl HeaderPicker {
     pub(crate) fn open_branch_name(&mut self, base: Branch) {
         self.change_details_rx = None;
         self.kind = Some(HeaderPickerKind::Branches);
-        self.selected = 0;
-        self.scroll = 0;
-        self.viewport_rows = 0;
-        self.scroll_follows_selection = true;
-        self.items.clear();
-        self.all_items.clear();
-        self.searchable_items.clear();
-        self.default_selected = 0;
-        self.searchable = false;
+        self.clear_items();
         self.message = None;
         self.query.clear();
         self.branch_step = BranchPickerStep::Name;
@@ -210,6 +154,28 @@ impl HeaderPicker {
     pub(crate) fn close(&mut self) {
         self.change_details_rx = None;
         self.kind = None;
+        self.clear_items();
+        self.message = None;
+        self.query.clear();
+        self.reset_transient_state();
+    }
+
+    fn set_items(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
+        self.default_selected = selected.min(items.len().saturating_sub(1));
+        self.searchable = true;
+        self.selected = self.default_selected;
+        self.scroll = 0;
+        self.viewport_rows = 0;
+        self.scroll_follows_selection = true;
+        self.searchable_items = items
+            .iter()
+            .map(HeaderPickerItem::normalized_search_text)
+            .collect();
+        self.items.clone_from(&items);
+        self.all_items = items;
+    }
+
+    fn clear_items(&mut self) {
         self.items.clear();
         self.all_items.clear();
         self.searchable_items.clear();
@@ -219,8 +185,9 @@ impl HeaderPicker {
         self.scroll = 0;
         self.viewport_rows = 0;
         self.scroll_follows_selection = true;
-        self.message = None;
-        self.query.clear();
+    }
+
+    fn reset_transient_state(&mut self) {
         self.branch_step = BranchPickerStep::Branches;
         self.branch_base = None;
         self.branch_name.clear();
@@ -451,18 +418,7 @@ impl HeaderPicker {
 
     pub(crate) fn open_worktree_bases(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
         self.kind = Some(HeaderPickerKind::Worktrees);
-        self.default_selected = selected.min(items.len().saturating_sub(1));
-        self.searchable = true;
-        self.selected = self.default_selected;
-        self.scroll = 0;
-        self.viewport_rows = 0;
-        self.scroll_follows_selection = true;
-        self.searchable_items = items
-            .iter()
-            .map(HeaderPickerItem::normalized_search_text)
-            .collect();
-        self.items.clone_from(&items);
-        self.all_items = items;
+        self.set_items(items, selected);
         self.message = None;
         self.query.clear();
         self.query.focus();
