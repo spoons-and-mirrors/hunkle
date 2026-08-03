@@ -543,6 +543,11 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
     let agent = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
     assert!(app.regions.worktree_list.is_none());
     assert!(app.regions.diff.is_none());
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderFullscreen)
+            .is_none()
+    );
 
     click(&mut app, agent.x, agent.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
