@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, AgentKey, AgentPreviewRequestSelection, AgentPreviewTranscriptScroll, App,
-    CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag,
-    GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, MobileDragAxis, MobileScrollDrag, Mode,
-    SettingsHitTarget, SettingsPage, View, changes::ChangesEffect, file_editor::FileEditor,
-    scroll_table,
+    ACTION_ITEMS, AgentKey, AgentPreviewExpandedRequests, AgentPreviewMessageSelection,
+    AgentPreviewTranscriptScroll, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget,
+    FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane,
+    MobileDragAxis, MobileScrollDrag, Mode, SettingsHitTarget, SettingsPage, View,
+    changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
 const AGENT_PREVIEW_BUTTON_FLASH: Duration = Duration::from_millis(150);
@@ -43,8 +43,8 @@ impl App {
                     | HitTarget::AgentPreviewPickerItem(agent)
                     | HitTarget::AgentPreviewPrevious(agent)
                     | HitTarget::AgentPreviewNext(agent)
-                    | HitTarget::AgentPreviewRequestPrevious { agent, .. }
-                    | HitTarget::AgentPreviewRequestNext { agent, .. }
+                    | HitTarget::AgentPreviewMessageTimeline(agent)
+                    | HitTarget::AgentPreviewRequest { agent, .. }
                     | HitTarget::AgentTooltip { agent, .. }
                     | HitTarget::AgentMessage { agent, .. } => Some(agent),
                     _ => None,
@@ -272,16 +272,14 @@ impl App {
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-        ) && (self.scroll_agent_preview_transcript(
-            point,
-            if mouse.kind == MouseEventKind::ScrollUp {
-                -3
-            } else {
-                3
-            },
-        ) || self.cycle_agent_message(point, mouse.kind == MouseEventKind::ScrollUp))
-        {
-            return;
+        ) {
+            let forward = mouse.kind == MouseEventKind::ScrollDown;
+            let delta = if forward { 3 } else { -3 };
+            if self.scroll_agent_preview_message_timeline(point, forward)
+                || self.scroll_agent_preview_transcript(point, delta)
+            {
+                return;
+            }
         }
 
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -313,20 +311,12 @@ impl App {
                     self.restore_stashed_agent(index);
                     return;
                 }
-                Some(HitTarget::AgentPreviewRequestPrevious {
+                Some(HitTarget::AgentPreviewRequest {
                     agent,
                     message,
                     request,
                 }) => {
-                    self.select_agent_preview_request(agent, message, request, false);
-                    return;
-                }
-                Some(HitTarget::AgentPreviewRequestNext {
-                    agent,
-                    message,
-                    request,
-                }) => {
-                    self.select_agent_preview_request(agent, message, request, true);
+                    self.toggle_agent_preview_request(agent, message, request);
                     return;
                 }
                 _ => {}
@@ -565,9 +555,12 @@ impl App {
             return None;
         }
         match self.regions.hit_target_at(point) {
-            Some(HitTarget::AgentTooltip { agent, .. } | HitTarget::AgentMessage { agent, .. }) => {
-                Some(agent)
-            }
+            Some(
+                HitTarget::AgentTooltip { agent, .. }
+                | HitTarget::AgentMessage { agent, .. }
+                | HitTarget::AgentPreviewMessageTimeline(agent)
+                | HitTarget::AgentPreviewRequest { agent, .. },
+            ) => Some(agent),
             _ => None,
         }
     }
@@ -588,16 +581,9 @@ impl App {
             }
             return;
         }
-        if self.scroll_agent_preview_transcript(point, delta) {
-            return;
-        }
-        if matches!(
-            self.regions.hit_target_at(point),
-            Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. })
-        ) {
-            for _ in 0..delta.unsigned_abs() {
-                self.cycle_agent_message(point, delta < 0);
-            }
+        if self.scroll_agent_preview_message_timeline(point, delta > 0)
+            || self.scroll_agent_preview_transcript(point, delta)
+        {
             return;
         }
         let kind = if delta < 0 {
@@ -1273,7 +1259,8 @@ impl App {
         };
         self.agent_preview_selection = Some(key.clone());
         self.agent_preview_transcript_scroll = None;
-        self.agent_preview_request_selection = None;
+        self.agent_preview_message_selection = None;
+        self.agent_preview_expanded_requests = None;
         self.agent_preview_picker_open = false;
         self.hovered_hit_target = self
             .herdr
@@ -1546,86 +1533,87 @@ impl App {
         true
     }
 
-    fn cycle_agent_message(&mut self, point: Position, older: bool) -> bool {
-        let Some(target) = self.regions.hit_target_at(point) else {
-            return false;
-        };
-        let (agent_key, pointed_message) = match target {
-            HitTarget::Agent(agent) => (agent, None),
-            HitTarget::AgentTooltip { agent, message }
-            | HitTarget::AgentMessage { agent, message } => (agent, Some(message)),
-            _ => return false,
-        };
-        let Some(agent) = self.herdr.agent_index(&agent_key) else {
-            return false;
+    fn select_agent_preview_message(&mut self, key: AgentKey, message: usize, forward: bool) {
+        let Some(agent) = self.herdr.agent_index(&key) else {
+            return;
         };
         let Some(message_count) = self
             .herdr
             .agent_user_messages(agent)
-            .map(|messages| messages.len())
-            .filter(|count| *count > 0)
+            .filter(|messages| !messages.is_empty())
+            .map(<[_]>::len)
         else {
-            self.herdr.request_agent_latest_user_message(agent);
+            return;
+        };
+        let selected = if forward {
+            message.saturating_add(1).min(message_count - 1)
+        } else {
+            message.saturating_sub(1)
+        };
+        if selected == message {
+            return;
+        }
+        self.agent_preview_message_selection =
+            (selected + 1 < message_count).then(|| AgentPreviewMessageSelection {
+                agent: key.clone(),
+                message: selected,
+            });
+        self.agent_preview_expanded_requests = None;
+        self.agent_preview_transcript_scroll = Some(AgentPreviewTranscriptScroll {
+            agent: key.clone(),
+            message: selected,
+            offset: 0,
+        });
+        self.hovered_hit_target = Some(HitTarget::AgentTooltip {
+            agent: key,
+            message: selected,
+        });
+    }
+
+    fn scroll_agent_preview_message_timeline(&mut self, point: Position, forward: bool) -> bool {
+        let Some(HitTarget::AgentPreviewMessageTimeline(key)) = self.regions.hit_target_at(point)
+        else {
+            return false;
+        };
+        let Some(agent) = self.herdr.agent_index(&key) else {
             return true;
         };
-        let current = pointed_message
-            .or(match self.hovered_hit_target.as_ref() {
-                Some(HitTarget::AgentTooltip {
-                    agent: hovered_agent,
-                    message,
-                }) if hovered_agent == &agent_key => Some(*message),
-                Some(HitTarget::AgentMessage {
-                    agent: hovered_agent,
-                    message,
-                }) if hovered_agent == &agent_key => Some(*message),
-                _ => None,
-            })
-            .unwrap_or(message_count - 1)
-            .min(message_count - 1);
-        let message = if older {
-            current.checked_sub(1).unwrap_or(message_count - 1)
-        } else {
-            (current + 1) % message_count
+        let Some(message) = self.agent_preview_message(agent).or_else(|| {
+            self.herdr
+                .agent_user_messages(agent)
+                .and_then(|messages| messages.len().checked_sub(1))
+        }) else {
+            return true;
         };
-        self.hovered_hit_target = Some(HitTarget::AgentTooltip {
-            agent: agent_key.clone(),
-            message,
-        });
-        self.agent_preview_transcript_scroll = None;
-        self.agent_preview_request_selection = None;
+        self.select_agent_preview_message(key, message, forward);
         true
     }
 
-    fn select_agent_preview_request(
-        &mut self,
-        key: AgentKey,
-        message: usize,
-        request: usize,
-        forward: bool,
-    ) {
-        let Some(agent) = self.herdr.agent_index(&key) else {
+    fn toggle_agent_preview_request(&mut self, key: AgentKey, message: usize, request: usize) {
+        let same_scope = self
+            .agent_preview_expanded_requests
+            .as_ref()
+            .is_some_and(|expanded| expanded.agent == key && expanded.message == message);
+        if !same_scope {
+            self.agent_preview_expanded_requests = Some(AgentPreviewExpandedRequests {
+                agent: key,
+                message,
+                requests: vec![request],
+            });
+            return;
+        }
+        let Some(expanded) = self.agent_preview_expanded_requests.as_mut() else {
             return;
         };
-        let Some(request_count) = self
-            .herdr
-            .agent_user_messages(agent)
-            .and_then(|messages| messages.get(message))
-            .map(|message| message.requests.len())
-            .filter(|count| *count > 0)
-        else {
-            return;
-        };
-        let request = if forward {
-            request.saturating_add(1).min(request_count - 1)
+        if let Some(index) = expanded
+            .requests
+            .iter()
+            .position(|expanded| *expanded == request)
+        {
+            expanded.requests.remove(index);
         } else {
-            request.saturating_sub(1)
-        };
-        self.agent_preview_request_selection = Some(AgentPreviewRequestSelection {
-            agent: key,
-            message,
-            request,
-        });
-        self.agent_preview_transcript_scroll = None;
+            expanded.requests.push(request);
+        }
     }
 
     pub(super) fn scroll_agent_preview_by(&mut self, delta: isize) {
@@ -1643,8 +1631,7 @@ impl App {
             Some(
                 HitTarget::AgentTooltip { agent, .. }
                 | HitTarget::AgentMessage { agent, .. }
-                | HitTarget::AgentPreviewRequestPrevious { agent, .. }
-                | HitTarget::AgentPreviewRequestNext { agent, .. },
+                | HitTarget::AgentPreviewRequest { agent, .. },
             ) => agent,
             _ => return false,
         };
@@ -1653,25 +1640,31 @@ impl App {
     }
 
     fn set_agent_preview_scroll(&mut self, key: AgentKey, delta: isize) {
+        let Some(agent) = self.herdr.agent_index(&key) else {
+            return;
+        };
+        let Some(message) = self.agent_preview_message(agent).or_else(|| {
+            self.herdr
+                .agent_user_messages(agent)
+                .and_then(|messages| messages.len().checked_sub(1))
+        }) else {
+            return;
+        };
         let offset = self
             .agent_preview_transcript_scroll
             .as_ref()
-            .filter(|scroll| scroll.agent == key)
-            .map_or_else(
-                || {
-                    if self.agent_preview_request_selection.is_some() {
-                        self.regions.agent_preview_scroll
-                    } else {
-                        self.regions.agent_preview_scroll_max
-                    }
-                },
-                |scroll| scroll.offset,
-            )
+            .filter(|scroll| scroll.agent == key && scroll.message == message)
+            .map_or(self.regions.agent_preview_scroll_max, |scroll| {
+                scroll.offset
+            })
             .saturating_add_signed(delta)
             .min(self.regions.agent_preview_scroll_max);
-        self.agent_preview_request_selection = None;
         self.agent_preview_transcript_scroll = (offset < self.regions.agent_preview_scroll_max)
-            .then_some(AgentPreviewTranscriptScroll { agent: key, offset });
+            .then_some(AgentPreviewTranscriptScroll {
+                agent: key,
+                message,
+                offset,
+            });
     }
 
     fn scroll_at(&mut self, point: Position, delta: isize, wheel: bool) {

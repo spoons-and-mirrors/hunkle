@@ -4,7 +4,10 @@ use serde_json::Value;
 
 use crate::process::{self, Limits};
 
-use super::{AgentActivityPreview, AgentRequestPartPreview, AgentRequestPreview, AgentUserMessage};
+use super::{
+    AgentActivityPreview, AgentRequestPartPreview, AgentRequestPreview, AgentUserMessage,
+    unix_time_ms,
+};
 
 const QUERY_LIMITS: Limits = Limits::new(2 * 1024 * 1024, 64 * 1024, Duration::from_secs(5));
 
@@ -22,8 +25,10 @@ pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
                 AND json_extract(m.data, '$.role') = 'user'\
          ) \
          SELECT recent.id AS message_id, p.id AS user_part_id, \
-                json_extract(p.data, '$.text') AS text, response.id AS response_id, \
-                (SELECT json_group_array(json(part_json)) FROM ( \
+         json_extract(p.data, '$.text') AS text, response.id AS response_id, \
+                response.time_created AS response_started_at, \
+                json_extract(response.data, '$.time.completed') AS response_completed_at, \
+                 (SELECT json_group_array(json(part_json)) FROM ( \
                      SELECT json_object( \
                                 'type', json_extract(response_part.data, '$.type'), \
                                 'text', CASE \
@@ -31,8 +36,10 @@ pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
                                     THEN json_extract(response_part.data, '$.text') \
                                     ELSE NULL END, \
                                 'name', json_extract(response_part.data, '$.tool'), \
-                                'title', json_extract(response_part.data, '$.state.title'), \
-                                'status', json_extract(response_part.data, '$.state.status')) \
+                                 'title', json_extract(response_part.data, '$.state.title'), \
+                                 'status', json_extract(response_part.data, '$.state.status'), \
+                                 'started_at', json_extract(response_part.data, '$.time.start'), \
+                                 'completed_at', json_extract(response_part.data, '$.time.end')) \
                                 AS part_json \
                        FROM part response_part \
                       WHERE response_part.message_id = response.id \
@@ -119,6 +126,7 @@ fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
     let rows: Value = serde_json::from_slice(output)
         .map_err(|error| format!("OpenCode returned invalid query data: {error}"))?;
     let mut messages: Vec<(String, Vec<String>, Vec<String>, AgentUserMessage)> = Vec::new();
+    let now_ms = unix_time_ms();
     for row in rows.as_array().into_iter().flatten() {
         let Some(id) = row.get("message_id").and_then(Value::as_str) else {
             continue;
@@ -144,7 +152,7 @@ fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
             if let Some(response_id) = row.get("response_id").and_then(Value::as_str)
                 && !response_ids.iter().any(|id| id == response_id)
             {
-                message.requests.push(request(row));
+                message.requests.push(request(row, now_ms));
                 response_ids.push(response_id.to_owned());
             }
         } else {
@@ -152,7 +160,7 @@ fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
             let mut requests = Vec::new();
             if let Some(response_id) = row.get("response_id").and_then(Value::as_str) {
                 response_ids.push(response_id.to_owned());
-                requests.push(request(row));
+                requests.push(request(row, now_ms));
             }
             messages.push((
                 id.to_owned(),
@@ -174,12 +182,30 @@ fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
         .ok_or_else(|| "OpenCode session has no user message".to_owned())
 }
 
-fn request(row: &Value) -> AgentRequestPreview {
+fn request(row: &Value, now_ms: u64) -> AgentRequestPreview {
     let parts = row
         .get("response_parts")
         .and_then(Value::as_str)
         .and_then(|parts| serde_json::from_str::<Value>(parts).ok());
     let parts = parts.as_ref().and_then(Value::as_array);
+    let reasoning_duration_ms = parts.and_then(|parts| {
+        let mut found = false;
+        let duration = parts
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("reasoning"))
+            .filter_map(|part| {
+                let started_at = part.get("started_at")?.as_u64()?;
+                found = true;
+                let completed_at = part
+                    .get("completed_at")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(now_ms);
+                Some(completed_at.saturating_sub(started_at))
+            })
+            .fold(0_u64, u64::saturating_add);
+        found.then_some(duration)
+    });
+    let mut reasoning_seen = false;
     let request_parts = parts
         .into_iter()
         .flatten()
@@ -190,9 +216,12 @@ fn request(row: &Value) -> AgentRequestPreview {
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
                 .map(|text| AgentRequestPartPreview::Text(text.to_owned())),
-            Some("reasoning") => Some(AgentRequestPartPreview::Activity(
-                AgentActivityPreview::Reasoning,
-            )),
+            Some("reasoning") if !reasoning_seen => {
+                reasoning_seen = true;
+                Some(AgentRequestPartPreview::Activity(
+                    AgentActivityPreview::Reasoning,
+                ))
+            }
             Some("tool") => {
                 let name = part.get("name")?.as_str()?.trim();
                 if name.is_empty() {
@@ -232,10 +261,21 @@ fn request(row: &Value) -> AgentRequestPreview {
         .count()
         .try_into()
         .unwrap_or(u64::MAX);
+    let duration_ms = row
+        .get("response_started_at")
+        .and_then(Value::as_u64)
+        .map(|started_at| {
+            row.get("response_completed_at")
+                .and_then(Value::as_u64)
+                .unwrap_or(now_ms)
+                .saturating_sub(started_at)
+        });
     AgentRequestPreview {
         parts: request_parts,
         tool_call_count,
         reasoning_active,
+        duration_ms,
+        reasoning_duration_ms,
     }
 }
 
@@ -255,7 +295,8 @@ mod tests {
         let latest_parts = serde_json::json!([
             {"type":"text","text":"Latest response","name":null,"title":null,"status":null},
             {"type":"tool","text":null,"name":"apply_patch","title":"Updated files\nwith details","status":"running"},
-            {"type":"reasoning","text":null,"name":null,"title":null,"status":null}
+            {"type":"reasoning","text":null,"name":null,"title":null,"status":null,"started_at":1000,"completed_at":2500},
+            {"type":"reasoning","text":null,"name":null,"title":null,"status":null,"started_at":3000,"completed_at":3750}
         ])
         .to_string();
         let rows = serde_json::json!([
@@ -280,6 +321,8 @@ mod tests {
                 "user_part_id": "two-user-a",
                 "text": "Latest request",
                 "response_id": "two-response-b",
+                "response_started_at": 500,
+                "response_completed_at": 4500,
                 "response_parts": latest_parts
             },
             {
@@ -317,6 +360,8 @@ mod tests {
         assert_eq!(messages[1].text, "Latest request\n\nwith context");
         assert_eq!(messages[1].requests.len(), 2);
         assert_eq!(messages[1].requests[1].tool_call_count, 1);
+        assert_eq!(messages[1].requests[1].duration_ms, Some(4000));
+        assert_eq!(messages[1].requests[1].reasoning_duration_ms, Some(2250));
         assert_eq!(
             messages[1].requests[1].parts,
             vec![

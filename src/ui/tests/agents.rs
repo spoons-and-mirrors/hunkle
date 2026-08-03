@@ -178,6 +178,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
             AgentActivityPreview::Reasoning,
         ],
         true,
+        Some(12_300),
+        Some(4_200),
     );
     app.herdr.set_agent_request_for_test(
         0,
@@ -193,6 +195,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
                 }),
             ],
             reasoning_active: false,
+            duration_ms: Some(3_000),
+            reasoning_duration_ms: None,
             tool_call_count: 1,
         },
     );
@@ -275,13 +279,17 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(!hovered_screen.contains("TEXT SNAPSHOT"));
     assert!(!hovered_screen.contains("LIVE · REFRESHING"));
     assert!(!hovered_screen.contains("FINAL SNAPSHOT"));
-    assert!(hovered_screen.contains("< 5/5 >"));
-    assert!(hovered_screen.contains("10 tools"));
+    assert!(!hovered_screen.contains("< USER"));
+    assert!(!hovered_screen.contains("REQUEST"));
     assert!(hovered_screen.contains("Timer updates are"));
     assert!(hovered_screen.contains("progress"));
     assert!(hovered_screen.contains("reasoning"));
     assert!(hovered_screen.contains("tool"));
     assert!(hovered_screen.contains("apply_patch"));
+    assert!(hovered_screen.contains("› tool  apply_patch"));
+    assert!(!hovered_screen.contains("›  tool"));
+    assert!(hovered_screen.contains("12.3s"));
+    assert!(hovered_screen.contains("reasoning  4.2s"));
     let history = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
@@ -300,10 +308,21 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let text_row = row_containing("Timer updates").unwrap();
     let tool_row = row_containing("apply_patch").unwrap();
     let reasoning_row = row_containing("reasoning").unwrap();
-    let selector_row = row_containing("< 5/5 >").unwrap();
-    assert!(selector_row < text_row);
+    let message_timeline = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewMessageTimeline(key.clone()))
+        .unwrap();
+    let timeline_symbols = (message_timeline.x..message_timeline.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, message_timeline.y)]
+                .symbol()
+                .to_owned()
+        })
+        .collect::<String>();
+    assert_eq!(timeline_symbols, "○ ○ ○ ○ ●");
+    assert!(message_timeline.y < text_row);
     assert!(text_row < tool_row);
-    assert!(tool_row < reasoning_row);
+    assert_eq!(reasoning_row, tool_row + 1);
     let scroll_max = app.regions.agent_preview_scroll_max;
     assert!(scroll_max > 0);
     assert_eq!(
@@ -311,15 +330,11 @@ fn renders_and_targets_agents_in_the_normal_view() {
         app.regions.agent_preview_scroll_max
     );
 
-    let previous_request = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPreviewRequestPrevious {
-            agent: key.clone(),
-            message: 4,
-            request: 4,
-        })
-        .unwrap();
-    click(&mut app, previous_request.x, previous_request.y);
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollUp,
+        message_timeline.x,
+        message_timeline.y,
+    ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let previous_screen = terminal
         .backend()
@@ -328,29 +343,36 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(previous_screen.contains("< 4/5 >"));
-    assert!(previous_screen.contains("Earlier harness output"));
-    assert!(previous_screen.contains("1 tool"));
-    let next_request = app
+    assert!(!previous_screen.contains("< USER"));
+    assert!(previous_screen.contains("Fourth request"));
+    let message_timeline = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewRequestNext {
-            agent: key.clone(),
-            message: 4,
-            request: 3,
-        })
+        .hit_target_rect(HitTarget::AgentPreviewMessageTimeline(key.clone()))
         .unwrap();
-    click(&mut app, next_request.x + 1, next_request.y);
+    let timeline_symbols = (message_timeline.x..message_timeline.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, message_timeline.y)]
+                .symbol()
+                .to_owned()
+        })
+        .collect::<String>();
+    assert_eq!(timeline_symbols, "○ ○ ○ ● ○");
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        message_timeline.x,
+        message_timeline.y,
+    ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.agent_preview_scroll > 0);
+    assert_eq!(app.regions.agent_preview_scroll, 0);
 
     let scroll_before = app.regions.agent_preview_scroll;
     app.handle_mouse(mouse(
-        MouseEventKind::ScrollUp,
+        MouseEventKind::ScrollDown,
         history.x + 8,
         history.y + 6,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.agent_preview_scroll < scroll_before);
+    assert!(app.regions.agent_preview_scroll > scroll_before);
 
     let tooltip = app
         .regions
@@ -378,26 +400,41 @@ fn renders_and_targets_agents_in_the_normal_view() {
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let first_message = app
+    let user_message = app
         .regions
         .hit_target_rect(HitTarget::AgentMessage {
             agent: key.clone(),
-            message: 0,
+            message: 4,
         })
         .unwrap();
     assert_eq!(app.regions.agent_preview_scroll, 0);
-    assert!(first_message.right() < tooltip.right());
+    assert_eq!(user_message.x, tooltip.x + 1);
     assert_eq!(
-        terminal.backend().buffer()[(first_message.x, first_message.y)].symbol(),
+        terminal.backend().buffer()[(tooltip.x.saturating_sub(1), user_message.y)].symbol(),
+        "●"
+    );
+    assert_eq!(user_message.right(), tooltip.right());
+    assert_eq!(
+        terminal.backend().buffer()[(user_message.x, user_message.y)].symbol(),
         "▄"
     );
     assert_eq!(
-        terminal.backend().buffer()[(first_message.x, first_message.y + 1)].symbol(),
+        terminal.backend().buffer()[(user_message.x, user_message.y + 1)].symbol(),
         "┃"
     );
     assert_eq!(
-        terminal.backend().buffer()[(first_message.x, first_message.y + 1)].fg,
+        terminal.backend().buffer()[(user_message.x, user_message.y + 1)].fg,
         super::palette().yellow
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(user_message.x + 2, user_message.y + 1)].symbol(),
+        "Y"
+    );
+    assert!(
+        (user_message.bottom() + 1..tooltip.bottom().saturating_sub(1)).any(|y| {
+            terminal.backend().buffer()[(user_message.x, y)].symbol() == "▀"
+                && terminal.backend().buffer()[(user_message.x, y + 1)].symbol() == "▄"
+        })
     );
     let top_screen = terminal
         .backend()
@@ -406,8 +443,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(top_screen.contains("First request"));
-    assert!(top_screen.contains("First response"));
+    assert!(top_screen.contains("Please refine the agent timers"));
 
     for _ in 0..100 {
         app.handle_mouse(mouse(
@@ -503,7 +539,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
 }
 
 #[test]
-fn agent_preview_is_one_continuous_mobile_transcript() {
+fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -522,6 +558,36 @@ fn agent_preview_is_one_continuous_mobile_transcript() {
         0,
         &[(user_text.as_str(), Some(agent_text.as_str()), 1, 2)],
     );
+    app.herdr.set_agent_message_activity_for_test(
+        0,
+        0,
+        &[
+            AgentActivityPreview::Reasoning,
+            AgentActivityPreview::Tool {
+                name: "tool_0".to_owned(),
+                title: None,
+                running: false,
+            },
+            AgentActivityPreview::Tool {
+                name: "tool_1".to_owned(),
+                title: None,
+                running: false,
+            },
+            AgentActivityPreview::Tool {
+                name: "tool_2".to_owned(),
+                title: None,
+                running: false,
+            },
+            AgentActivityPreview::Tool {
+                name: "tool_3".to_owned(),
+                title: None,
+                running: false,
+            },
+        ],
+        false,
+        Some(9_000),
+        Some(2_000),
+    );
     let key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -530,20 +596,25 @@ fn agent_preview_is_one_continuous_mobile_transcript() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert!(app.regions.agent_preview_scroll_max > 40);
-    assert_eq!(
-        app.regions.agent_preview_scroll,
-        app.regions.agent_preview_scroll_max
-    );
-    let bottom_screen = terminal
+    assert_eq!(app.regions.agent_preview_scroll_max, 0);
+    let collapsed_screen = terminal
         .backend()
         .buffer()
         .content
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(bottom_screen.contains("agent line 39"));
-    assert!(!bottom_screen.contains("user line 00"));
+    assert!(collapsed_screen.contains("agent line 00"));
+    assert!(collapsed_screen.contains("agent line 02"));
+    assert!(!collapsed_screen.contains("agent line 03"));
+    assert!(!collapsed_screen.contains("agent line 39"));
+    assert!(collapsed_screen.contains("reasoning  2s"));
+    assert!(collapsed_screen.contains("tool_0"));
+    assert!(collapsed_screen.contains("tool_2"));
+    assert!(!collapsed_screen.contains("tool_3"));
+    assert!(collapsed_screen.contains("⌄ 38 more"));
+    assert!(!collapsed_screen.contains("click to expand"));
+    assert!(collapsed_screen.contains("user line 00"));
     let preview = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
@@ -551,6 +622,46 @@ fn agent_preview_is_one_continuous_mobile_transcript() {
             message: 0,
         })
         .unwrap();
+    let request = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewRequest {
+            agent: key.clone(),
+            message: 0,
+            request: 0,
+        })
+        .unwrap();
+    assert_eq!(request.height, 10);
+    let request_bottom =
+        usize::from(request.bottom().saturating_sub(1)) * 49 + usize::from(request.x);
+    assert_eq!(
+        terminal.backend().buffer().content[request_bottom].symbol(),
+        "▀"
+    );
+    click(&mut app, request.x + 2, request.y + 2);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.agent_preview_scroll_max > 0);
+    assert_eq!(
+        app.regions.agent_preview_scroll,
+        app.regions.agent_preview_scroll_max
+    );
+    let expanded_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(expanded_screen.contains("agent line 39"));
+    assert!(expanded_screen.contains("tool_3"));
+    assert!(!expanded_screen.contains("user line 00"));
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentMessage {
+                agent: key.clone(),
+                message: 0,
+            })
+            .is_none()
+    );
 
     for _ in 0..10 {
         app.handle_mouse(mouse(
@@ -585,7 +696,8 @@ fn agent_preview_is_one_continuous_mobile_transcript() {
             message: 0,
         })
         .unwrap();
-    assert!(user.right() < 49);
+    assert_eq!(user.right(), preview.right());
+    assert!(user.height <= 8);
     assert_eq!(terminal.backend().buffer()[(user.x, user.y)].symbol(), "▄");
     assert_eq!(app.regions.agent_preview_scroll, 0);
 }
@@ -1217,7 +1329,7 @@ fn hovering_agent_cards_does_not_open_history() {
 }
 
 #[test]
-fn conversation_transcript_scrolls_from_latest_to_earliest_message() {
+fn conversation_preview_scopes_requests_to_the_selected_user_message() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -1293,18 +1405,67 @@ fn conversation_transcript_scrolls_from_latest_to_earliest_message() {
         app.regions
             .hit_target_rect(HitTarget::AgentMessage {
                 agent: key.clone(),
-                message: 0,
+                message: 49,
+            })
+            .is_some()
+    );
+    let message_timeline = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewMessageTimeline(key.clone()))
+        .unwrap();
+    let timeline_symbols = (message_timeline.x..message_timeline.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, message_timeline.y)]
+                .symbol()
+                .to_owned()
+        })
+        .collect::<String>();
+    assert!(timeline_symbols.ends_with('●'));
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollUp,
+        message_timeline.x,
+        message_timeline.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentMessage {
+                agent: key.clone(),
+                message: 48,
             })
             .is_some()
     );
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentMessage {
-                agent: key,
+                agent: key.clone(),
                 message: 49,
             })
             .is_none()
     );
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(!screen.contains("< USER"));
+    let message_timeline = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewMessageTimeline(key))
+        .unwrap();
+    let timeline_symbols = (message_timeline.x..message_timeline.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, message_timeline.y)]
+                .symbol()
+                .to_owned()
+        })
+        .collect::<String>();
+    assert_eq!(timeline_symbols.matches('●').count(), 1);
+    assert!(timeline_symbols.ends_with("● ○"));
+    assert!(screen.contains("Request 49"));
+    assert!(screen.contains("Response 49"));
 }
 
 #[test]
