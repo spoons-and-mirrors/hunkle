@@ -202,7 +202,7 @@ impl WrappedCursorRow {
 }
 
 pub(super) fn word_wrapped_height(content: &str, width: usize) -> usize {
-    word_wrapped_rows(content, width).len()
+    wrap_content(content, width, WrappedHeight::default()).rows
 }
 
 pub(super) fn word_wrapped_column_at(
@@ -217,82 +217,171 @@ pub(super) fn word_wrapped_column_at(
 }
 
 pub(super) fn word_wrapped_rows(content: &str, width: usize) -> Vec<WrappedCursorRow> {
-    let width = width.max(1);
-    let mut source_column = 0usize;
-    let mut tokens: Vec<(bool, Vec<WrappedGrapheme>)> = Vec::new();
-    for grapheme in content.graphemes(true) {
-        let whitespace = grapheme.chars().all(char::is_whitespace);
-        if tokens.last().is_none_or(|token| token.0 != whitespace) {
-            tokens.push((whitespace, Vec::new()));
+    wrap_content(content, width, CursorRows::default()).finish()
+}
+
+#[derive(Clone, Copy)]
+struct WrapToken<'a> {
+    content: &'a str,
+    source_start: usize,
+    width: usize,
+    whitespace: bool,
+}
+
+trait WrapRows {
+    fn current_width(&self) -> usize;
+    fn break_row(&mut self, source_column: usize);
+    fn push(&mut self, grapheme: &WrappedGrapheme);
+}
+
+struct CursorRows {
+    completed: Vec<WrappedCursorRow>,
+    current: WrappedCursorRow,
+}
+
+impl Default for CursorRows {
+    fn default() -> Self {
+        Self {
+            completed: Vec::new(),
+            current: WrappedCursorRow::new(0),
         }
-        let grapheme_width = if grapheme == "\t" {
-            crate::app::TAB_WIDTH - source_column % crate::app::TAB_WIDTH
-        } else {
-            UnicodeWidthStr::width(grapheme)
-        };
-        tokens
-            .last_mut()
-            .expect("wrap token was inserted")
-            .1
-            .push(WrappedGrapheme {
-                source_start: source_column,
-                source_end: source_column.saturating_add(grapheme_width),
-                width: grapheme_width,
-            });
-        source_column = source_column.saturating_add(grapheme_width);
+    }
+}
+
+impl CursorRows {
+    fn finish(mut self) -> Vec<WrappedCursorRow> {
+        self.completed.push(self.current);
+        self.completed
+    }
+}
+
+impl WrapRows for CursorRows {
+    fn current_width(&self) -> usize {
+        self.current.width()
     }
 
-    let mut rows = Vec::new();
-    let mut current = WrappedCursorRow::new(0);
+    fn break_row(&mut self, source_column: usize) {
+        let next = WrappedCursorRow::new(source_column);
+        self.completed
+            .push(std::mem::replace(&mut self.current, next));
+    }
+
+    fn push(&mut self, grapheme: &WrappedGrapheme) {
+        self.current.push(grapheme);
+    }
+}
+
+struct WrappedHeight {
+    rows: usize,
+    current_width: usize,
+}
+
+impl Default for WrappedHeight {
+    fn default() -> Self {
+        Self {
+            rows: 1,
+            current_width: 0,
+        }
+    }
+}
+
+impl WrapRows for WrappedHeight {
+    fn current_width(&self) -> usize {
+        self.current_width
+    }
+
+    fn break_row(&mut self, _source_column: usize) {
+        self.rows = self.rows.saturating_add(1);
+        self.current_width = 0;
+    }
+
+    fn push(&mut self, grapheme: &WrappedGrapheme) {
+        self.current_width = self.current_width.saturating_add(grapheme.width);
+    }
+}
+
+fn wrap_content<R: WrapRows>(content: &str, width: usize, mut rows: R) -> R {
+    let width = width.max(1);
+    let mut graphemes = content.grapheme_indices(true).peekable();
+    let mut source_column = 0usize;
     let mut has_word = false;
-    let mut pending_whitespace: Option<Vec<WrappedGrapheme>> = None;
-    for (whitespace, token) in tokens {
-        if whitespace && has_word {
+    let mut pending_whitespace = None;
+    while let Some(token) = next_wrap_token(content, &mut graphemes, &mut source_column) {
+        if token.whitespace && has_word {
             pending_whitespace = Some(token);
             continue;
         }
-        let token_width = token.iter().map(|grapheme| grapheme.width).sum::<usize>();
-        let whitespace_width = pending_whitespace
-            .as_ref()
-            .map_or(0, |token| token.iter().map(|grapheme| grapheme.width).sum());
-        if !whitespace
+        let whitespace_width = pending_whitespace.map_or(0, |token: WrapToken<'_>| token.width);
+        if !token.whitespace
             && has_word
-            && token_width <= width
-            && current
-                .width()
+            && token.width <= width
+            && rows
+                .current_width()
                 .saturating_add(whitespace_width)
-                .saturating_add(token_width)
+                .saturating_add(token.width)
                 > width
         {
-            rows.push(current);
-            current = WrappedCursorRow::new(
-                token
-                    .first()
-                    .map_or(source_column, |grapheme| grapheme.source_start),
-            );
+            rows.break_row(token.source_start);
             pending_whitespace = None;
         } else if let Some(spaces) = pending_whitespace.take() {
-            append_wrapped_graphemes(spaces, width, &mut rows, &mut current);
+            append_wrap_token(spaces, width, &mut rows);
         }
-        append_wrapped_graphemes(token, width, &mut rows, &mut current);
-        has_word |= !whitespace;
+        append_wrap_token(token, width, &mut rows);
+        has_word |= !token.whitespace;
     }
-    rows.push(current);
     rows
 }
 
-fn append_wrapped_graphemes(
-    graphemes: Vec<WrappedGrapheme>,
-    width: usize,
-    rows: &mut Vec<WrappedCursorRow>,
-    current: &mut WrappedCursorRow,
-) {
-    for grapheme in graphemes {
-        if current.width() > 0 && current.width().saturating_add(grapheme.width) > width {
-            let next = WrappedCursorRow::new(grapheme.source_start);
-            rows.push(std::mem::replace(current, next));
+fn next_wrap_token<'a>(
+    content: &'a str,
+    graphemes: &mut std::iter::Peekable<unicode_segmentation::GraphemeIndices<'a>>,
+    source_column: &mut usize,
+) -> Option<WrapToken<'a>> {
+    let (start, first) = graphemes.next()?;
+    let whitespace = first.chars().all(char::is_whitespace);
+    let source_start = *source_column;
+    let first_width = wrap_grapheme_width(first, *source_column);
+    *source_column = (*source_column).saturating_add(first_width);
+    let mut end = start.saturating_add(first.len());
+    while let Some(&(index, grapheme)) = graphemes.peek() {
+        if grapheme.chars().all(char::is_whitespace) != whitespace {
+            break;
         }
-        current.push(&grapheme);
+        graphemes.next();
+        let grapheme_width = wrap_grapheme_width(grapheme, *source_column);
+        *source_column = (*source_column).saturating_add(grapheme_width);
+        end = index.saturating_add(grapheme.len());
+    }
+    Some(WrapToken {
+        content: &content[start..end],
+        source_start,
+        width: (*source_column).saturating_sub(source_start),
+        whitespace,
+    })
+}
+
+fn append_wrap_token(token: WrapToken<'_>, width: usize, rows: &mut impl WrapRows) {
+    let mut source_column = token.source_start;
+    for content in token.content.graphemes(true) {
+        let grapheme_width = wrap_grapheme_width(content, source_column);
+        let grapheme = WrappedGrapheme {
+            source_start: source_column,
+            source_end: source_column.saturating_add(grapheme_width),
+            width: grapheme_width,
+        };
+        if rows.current_width() > 0 && rows.current_width().saturating_add(grapheme.width) > width {
+            rows.break_row(grapheme.source_start);
+        }
+        rows.push(&grapheme);
+        source_column = grapheme.source_end;
+    }
+}
+
+fn wrap_grapheme_width(grapheme: &str, source_column: usize) -> usize {
+    if grapheme == "\t" {
+        crate::app::TAB_WIDTH - source_column % crate::app::TAB_WIDTH
+    } else {
+        UnicodeWidthStr::width(grapheme)
     }
 }
 
@@ -1035,6 +1124,25 @@ mod tests {
     fn maps_tabs_and_wide_graphemes_by_terminal_cells() {
         assert_eq!(word_wrapped_column_at("\tvalue", 4, 1, 2), Some(6));
         assert_eq!(word_wrapped_column_at("界x", 8, 0, 2), Some(2));
+    }
+
+    #[test]
+    fn height_only_wrapping_matches_cursor_rows_for_mixed_text() {
+        let atoms = ["", "a", " ", "\t", "界", "👩‍💻", "e\u{301}"];
+        for first in atoms {
+            for second in atoms {
+                for third in atoms {
+                    let content = format!("{first}{second}{third}");
+                    for width in 0..=12 {
+                        assert_eq!(
+                            word_wrapped_height(&content, width),
+                            word_wrapped_rows(&content, width).len(),
+                            "content={content:?}, width={width}",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

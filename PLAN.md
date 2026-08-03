@@ -15,7 +15,7 @@ its design is still changing.
   back off for long-running commands. Keep bounded concurrent stdout/stderr
   draining, stdin support, process-tree termination, and the post-termination
   deadline for inherited pipes.
-- [ ] Add an allocation-free word-wrap height path with exactly the same line
+- [x] Add an allocation-free word-wrap height path with exactly the same line
   breaking and Unicode/tab-width behavior as cursor-aware wrapping.
 - [ ] Batch syntax-highlighted text by styled run rather than allocating one
   `String` per grapheme, while preserving tab expansion and Unicode widths.
