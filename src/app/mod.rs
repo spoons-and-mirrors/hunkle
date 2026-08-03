@@ -550,6 +550,15 @@ impl App {
             self.open_file_search();
             return;
         }
+        if matches!(self.mode, Mode::Normal | Mode::Commit)
+            && self
+                .settings
+                .shortcuts
+                .matches(ShortcutAction::ToggleFullscreen, key)
+        {
+            self.toggle_fullscreen();
+            return;
+        }
         if matches!(self.mode, Mode::Normal | Mode::Commit) && self.handle_main_navigation(key) {
             if self.mode == Mode::Commit {
                 self.flush_commit_draft();
@@ -1372,7 +1381,7 @@ impl App {
             return false;
         };
         match action {
-            ShortcutAction::TogglePane
+            ShortcutAction::ToggleFullscreen
             | ShortcutAction::ShowChanges
             | ShortcutAction::ShowFiles
             | ShortcutAction::ShowAgents
@@ -1818,7 +1827,9 @@ impl App {
                     self.notice = Some("Another repository operation is running".to_owned());
                 }
             }
-            HeaderPickerItem::DiffTarget(branch) => {
+            HeaderPickerItem::DiffTarget {
+                label, revision, ..
+            } => {
                 let Some(repository) = self.git_repository() else {
                     return;
                 };
@@ -1831,15 +1842,9 @@ impl App {
                     .map(Branch::revision)
                     .or_else(|| repository.history.first().map(|commit| commit.oid.clone()))
                     .unwrap_or_else(|| "HEAD".to_owned());
-                let target_revision = branch.revision();
                 self.show_left_pane(LeftPane::Worktree);
-                self.changes.preview_branch_diff(
-                    &root,
-                    current,
-                    branch.name,
-                    current_revision,
-                    target_revision,
-                );
+                self.changes
+                    .preview_branch_diff(&root, current, label, current_revision, revision);
             }
         }
     }
@@ -1906,9 +1911,14 @@ impl App {
         self.changes.toggle_markdown_rendered();
     }
 
+    fn toggle_fullscreen(&mut self) {
+        if let Err(error) = self.herdr.toggle_fullscreen() {
+            self.notice = Some(format!("Could not toggle fullscreen: {error}"));
+        }
+    }
+
     fn handle_main_navigation(&mut self, key: KeyEvent) -> bool {
         match self.settings.shortcuts.main_action(key) {
-            Some(ShortcutAction::TogglePane) => self.toggle_left_pane(),
             Some(ShortcutAction::ShowChanges) => self.show_sidebar_pane(LeftPane::Worktree),
             Some(ShortcutAction::ShowFiles) => self.show_sidebar_pane(LeftPane::Files),
             Some(ShortcutAction::ShowAgents) => self.show_agents_pane(),

@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum ShortcutAction {
-    TogglePane,
+    ToggleFullscreen,
     ShowChanges,
     ShowFiles,
     ShowAgents,
@@ -198,9 +198,9 @@ macro_rules! shortcut {
 
 pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
     shortcut!(
-        TogglePane,
-        "toggle-pane",
-        "Cycle sidebar panes",
+        ToggleFullscreen,
+        "toggle-fullscreen",
+        "Toggle fullscreen",
         "Navigation",
         MAIN | COMMIT,
         KeyCode::Tab
@@ -566,7 +566,10 @@ impl Shortcuts {
     }
 
     pub(crate) fn load_override(&mut self, id: &str, value: &str) {
-        let Some(definition) = SHORTCUTS.iter().find(|definition| definition.id == id) else {
+        let Some(definition) = SHORTCUTS.iter().find(|definition| {
+            definition.id == id
+                || (id == "toggle-pane" && definition.action == ShortcutAction::ToggleFullscreen)
+        }) else {
             return;
         };
         let Some(chord) = KeyChord::parse(value) else {
@@ -650,6 +653,18 @@ mod tests {
 
         assert_eq!(shortcuts.main_action(key), Some(ShortcutAction::StartAgent));
         assert_eq!(shortcuts.label(ShortcutAction::StartAgent), "Ctrl+Space");
+    }
+
+    #[test]
+    fn tab_toggles_fullscreen_and_loads_the_previous_override_id() {
+        let mut shortcuts = Shortcuts::default();
+
+        assert_eq!(
+            shortcuts.main_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(ShortcutAction::ToggleFullscreen)
+        );
+        shortcuts.load_override("toggle-pane", "Alt+f");
+        assert_eq!(shortcuts.label(ShortcutAction::ToggleFullscreen), "Alt+f");
     }
 
     #[test]

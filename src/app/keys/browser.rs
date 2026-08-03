@@ -181,26 +181,30 @@ impl App {
             );
             return;
         }
-        let items = repository
-            .branches
-            .iter()
-            .filter(|branch| !branch.current)
-            .cloned()
-            .map(HeaderPickerItem::DiffTarget)
-            .collect::<Vec<_>>();
+        let mut items = vec![HeaderPickerItem::DiffTarget {
+            label: "HEAD~".to_owned(),
+            revision: "HEAD~".to_owned(),
+            detail: "parent".to_owned(),
+            default: true,
+        }];
+        items.extend(
+            repository
+                .branches
+                .iter()
+                .filter(|branch| !branch.current)
+                .map(|branch| HeaderPickerItem::DiffTarget {
+                    label: branch.name.clone(),
+                    revision: branch.revision(),
+                    detail: if branch.remote { "remote" } else { "local" }.to_owned(),
+                    default: branch.default,
+                }),
+        );
         let selected = items
             .iter()
-            .position(|item| matches!(item, HeaderPickerItem::DiffTarget(branch) if branch.default))
+            .position(|item| matches!(item, HeaderPickerItem::DiffTarget { default: true, .. }))
             .unwrap_or(0);
-        if items.is_empty() {
-            self.header_picker.open_message(
-                HeaderPickerKind::DiffTargets,
-                "No target branches".to_owned(),
-            );
-        } else {
-            self.header_picker
-                .open(HeaderPickerKind::DiffTargets, items, selected);
-        }
+        self.header_picker
+            .open(HeaderPickerKind::DiffTargets, items, selected);
     }
 
     pub(crate) fn start_header_agent(&mut self) {

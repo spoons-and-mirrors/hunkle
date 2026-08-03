@@ -30,7 +30,12 @@ pub(crate) enum HeaderPickerItem {
     },
     Branch(Branch),
     BranchBase(Branch),
-    DiffTarget(Branch),
+    DiffTarget {
+        label: String,
+        revision: String,
+        detail: String,
+        default: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -679,9 +684,8 @@ impl HeaderPickerItem {
                 worktree.path.display(),
                 worktree.branch.as_deref().unwrap_or_default()
             ),
-            Self::Branch(branch) | Self::BranchBase(branch) | Self::DiffTarget(branch) => {
-                branch.name.clone()
-            }
+            Self::Branch(branch) | Self::BranchBase(branch) => branch.name.clone(),
+            Self::DiffTarget { label, .. } => label.clone(),
         }
     }
 }

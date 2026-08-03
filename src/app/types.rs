@@ -83,6 +83,7 @@ pub(crate) enum HitTarget {
     AgentPaneSplit(usize, AgentPaneDirection),
     HeaderPickerOverlay,
     HeaderPickerNewBranch,
+    HeaderPickerOpenExplorer,
     HeaderPickerClone,
     HeaderPickerCloneDirectory,
     HeaderPickerCloneUrl,

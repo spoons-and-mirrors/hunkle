@@ -459,7 +459,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let action_width = if new_branch_action {
         11
     } else if clone_action {
-        7
+        14
     } else if new_worktree_action {
         10
     } else {
@@ -473,7 +473,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_widget(
             Paragraph::new(truncate_width(
                 &title,
-                usize::from(area.width.saturating_sub(action_width)),
+                usize::from(area.width.saturating_sub(action_space)),
             ))
             .style(Style::default().fg(if deleting_worktree {
                 palette().red
@@ -514,10 +514,37 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         app.regions
             .register_hit_target(HitTarget::HeaderPickerNewBranch, action_row);
     } else if clone_action {
-        let action_row = Rect::new(
+        let open_row = Rect::new(
             area.right().saturating_sub(action_space),
             area.y.saturating_add(1),
-            action_width,
+            6,
+            1,
+        );
+        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerOpenExplorer);
+        let background = if hovered {
+            palette().selected
+        } else {
+            palette().cyan
+        };
+        frame.render_widget(
+            Paragraph::new(" Open ").style(
+                Style::default()
+                    .fg(palette().canvas)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            open_row,
+        );
+        frame.render_widget(
+            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
+            Rect::new(open_row.right(), open_row.y, 1, 1),
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerOpenExplorer, open_row);
+        let action_row = Rect::new(
+            open_row.right().saturating_add(1),
+            area.y.saturating_add(1),
+            7,
             1,
         );
         let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerClone);
@@ -810,11 +837,16 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                     None,
                     false,
                 ),
-                HeaderPickerItem::DiffTarget(branch) => (
-                    branch.name.clone(),
-                    if branch.remote { "remote" } else { "local" }.to_owned(),
+                HeaderPickerItem::DiffTarget {
+                    label,
+                    detail,
+                    default,
+                    ..
+                } => (
+                    label.clone(),
+                    detail.clone(),
                     None,
-                    branch.default,
+                    *default,
                     Some(4),
                     None,
                     false,

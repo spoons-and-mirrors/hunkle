@@ -256,6 +256,37 @@ fn repository_picker_clones_and_opens_a_repository() {
 }
 
 #[test]
+fn repository_picker_opens_the_explorer() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let repository = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderRepository)
+        .unwrap();
+    click(&mut app, repository.x, repository.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let open = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOpenExplorer)
+        .unwrap();
+    let clone = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerClone)
+        .unwrap();
+    assert_eq!(open.right() + 1, clone.x);
+    click(&mut app, open.x, open.y);
+
+    assert_eq!(app.mode, Mode::Explorer);
+    assert!(!app.header_picker.is_open());
+}
+
+#[test]
 fn header_cards_open_pickers_and_checkout_branches() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("repository");
@@ -395,6 +426,12 @@ fn header_cards_open_pickers_and_checkout_branches() {
     click(&mut app, diff.x, diff.y);
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::DiffTargets));
+    assert_eq!(app.header_picker.selected, 0);
+    assert!(matches!(
+        app.header_picker.items.first(),
+        Some(HeaderPickerItem::DiffTarget { label, revision, .. })
+            if label == "HEAD~" && revision == "HEAD~"
+    ));
     for character in "topic".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
@@ -410,7 +447,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .items
         .iter()
         .position(
-            |item| matches!(item, HeaderPickerItem::DiffTarget(branch) if branch.name == "topic"),
+            |item| matches!(item, HeaderPickerItem::DiffTarget { label, .. } if label == "topic"),
         )
         .unwrap();
     let topic_target = app

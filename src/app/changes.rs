@@ -312,10 +312,11 @@ impl ChangesState {
         self.refresh_diff(Some(repo));
         if let Some(comparison) = branch_comparison
             && repo.branch == comparison.current
-            && repo
-                .branches
-                .iter()
-                .any(|branch| branch.revision() == comparison.target_revision)
+            && (comparison.target_revision == "HEAD~"
+                || repo
+                    .branches
+                    .iter()
+                    .any(|branch| branch.revision() == comparison.target_revision))
         {
             let current_revision = repo
                 .branches

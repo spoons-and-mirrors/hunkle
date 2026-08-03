@@ -152,9 +152,7 @@ impl App {
                     return;
                 }
                 Some(HitTarget::HeaderFullscreen) => {
-                    if let Err(error) = self.herdr.toggle_fullscreen() {
-                        self.notice = Some(format!("Could not toggle fullscreen: {error}"));
-                    }
+                    self.toggle_fullscreen();
                     return;
                 }
                 _ => {}
@@ -195,6 +193,10 @@ impl App {
                         }
                         Some(HitTarget::HeaderPickerNewBranch) => {
                             self.begin_header_branch_creation()
+                        }
+                        Some(HitTarget::HeaderPickerOpenExplorer) => {
+                            self.header_picker.close();
+                            self.open_explorer();
                         }
                         Some(HitTarget::HeaderPickerClone) => self.begin_repository_clone(),
                         Some(HitTarget::HeaderPickerCloneDirectory) => {

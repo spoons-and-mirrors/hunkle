@@ -25,12 +25,7 @@ fn agent_snapshot() -> serde_json::Value {
 }
 
 fn open_agents_pane(app: &mut App) {
-    for _ in 0..3 {
-        if app.agents_pane_visible() {
-            return;
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    }
+    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
     assert!(app.agents_pane_visible());
 }
 
@@ -479,9 +474,9 @@ fn renders_and_targets_agents_in_the_normal_view() {
         })
         .unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, preview.x + 4, preview.y + 4));
-    let pane_before_tab = app.changes.pane;
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_ne!(app.changes.pane, pane_before_tab);
+    let pane_before_switch = app.changes.pane;
+    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert_ne!(app.changes.pane, pane_before_switch);
     assert_eq!(app.hovered_hit_target, None);
     assert!(!app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

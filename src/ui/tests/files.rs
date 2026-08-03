@@ -106,7 +106,7 @@ fn decoupled_sidebar_passes_clear_inactive_content_and_targets() {
 
     let mut app = App::new(root.to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(100, 35)).unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.changes.pane, LeftPane::Files);
@@ -134,8 +134,7 @@ fn decoupled_sidebar_passes_clear_inactive_content_and_targets() {
         .position(|row| row.file_path.is_some())
         .unwrap();
     click(&mut app, explorer.x + 2, explorer.y + file_row as u16);
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.changes.pane, LeftPane::Worktree);
@@ -868,7 +867,7 @@ fn left_pane_files_take_over_the_preview_from_graph() {
     assert_eq!(app.view, View::Changes);
     assert!(!app.graph_commit_open);
 
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
     assert_eq!(app.changes.pane, LeftPane::Files);
     app.view = View::Graph;
     app.graph_commit_open = true;
@@ -941,9 +940,9 @@ fn double_clicking_worktree_files_opens_them_in_files() {
         );
         assert_eq!(app.changes.diff, content);
 
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
         assert!(app.agents_pane_visible());
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         assert_eq!(app.changes.pane, LeftPane::Worktree);
     }
 }
@@ -963,7 +962,7 @@ fn renders_markdown_files_and_toggles_back_to_source() {
 
     let mut app = App::new(root.to_path_buf());
     app.settings.worktree_width = 48;
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let explorer = app.regions.explorer_list.unwrap();
