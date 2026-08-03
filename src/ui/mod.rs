@@ -372,6 +372,29 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
         return;
     }
+    if app.single_panel_layout() {
+        app.regions.changes = None;
+        app.regions.graph = None;
+        app.regions.left_pane_toggle = None;
+        app.regions.explorer = None;
+        app.regions.settings = None;
+        app.regions.help = None;
+        if let Some(path) = app.repository().map(|repository| {
+            let path = display_path(&repository.root);
+            if repository.is_local() || repository.branch.is_empty() {
+                path
+            } else {
+                format!("{path}:{}", repository.branch)
+            }
+        }) {
+            frame.render_widget(
+                Paragraph::new(truncate_width(&format!(" {path}"), usize::from(area.width)))
+                    .style(Style::default().fg(palette().soft)),
+                area,
+            );
+        }
+        return;
+    }
 
     let compact = area.width < 100;
     let (left_pane_action, left_pane_label) = if app.agents_pane_visible() {

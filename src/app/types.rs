@@ -248,6 +248,14 @@ pub(crate) struct GraphColumnDrag {
     pub right_width: u16,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MobileScrollDrag {
+    pub(crate) start: Position,
+    pub(crate) previous: Position,
+    pub(crate) moved: bool,
+    pub(crate) modifiers: KeyModifiers,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HitRegion {
     target: HitTarget,

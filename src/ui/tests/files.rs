@@ -37,7 +37,7 @@ fn narrow_layout_drills_from_changes_into_a_full_width_detail_panel() {
     assert_eq!(app.regions.diff.unwrap().width, 49);
     assert!(app.regions.worktree_list.is_none());
     assert!(app.regions.commit.is_none());
-    assert!(app.regions.changes.is_some());
+    assert!(app.regions.changes.is_none());
     let screen = terminal
         .backend()
         .buffer()
@@ -64,6 +64,76 @@ fn narrow_layout_drills_from_changes_into_a_full_width_detail_panel() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.worktree_list.is_some());
     assert!(app.regions.diff.is_none());
+}
+
+#[test]
+fn narrow_files_drag_to_scroll_and_double_click_to_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    for index in 0..50 {
+        let content = (0..100)
+            .map(|line| format!("file {index} line {line}\n"))
+            .collect::<String>();
+        fs::write(root.join(format!("file-{index:02}.txt")), content).unwrap();
+    }
+
+    let mut app = App::new(root.to_path_buf());
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.explorer_list.unwrap();
+
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        list.x + 2,
+        list.y + 10,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        list.x + 2,
+        list.y + 3,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        list.x + 2,
+        list.y + 3,
+    ));
+    assert_eq!(app.changes.explorer_scroll, 7);
+    assert!(app.take_copy_request().is_none());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.diff.is_none());
+
+    let list = app.regions.explorer_list.unwrap();
+    click(&mut app, list.x + 2, list.y + 2);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.explorer_list.is_some());
+    assert!(app.regions.diff.is_none());
+
+    click(&mut app, list.x + 2, list.y + 2);
+    wait_for_preview(&mut app);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.explorer_list.is_none());
+    let detail = app.regions.diff.unwrap();
+    assert!(app.regions.diff_scroll_max > 0);
+
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        detail.x + 2,
+        detail.bottom() - 2,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        detail.x + 2,
+        detail.bottom() - 7,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        detail.x + 2,
+        detail.bottom() - 7,
+    ));
+    assert_eq!(app.changes.diff_scroll, 5);
+    assert!(app.take_copy_request().is_none());
 }
 
 #[test]

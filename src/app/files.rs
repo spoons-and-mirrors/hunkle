@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Position;
+use std::time::Instant;
 
 use crate::{
     filesystem::{FileOperation, clipboard_import_operation, validate_name},
@@ -7,7 +8,7 @@ use crate::{
     repo_path::{RepoPath, display_os_str},
 };
 
-use super::{App, EditOutcome, LeftPane, Mode, TextInput, View};
+use super::{App, DOUBLE_CLICK_INTERVAL, EditOutcome, LeftPane, Mode, TextInput, View};
 
 #[derive(Debug, Clone)]
 pub(crate) enum FileDialogKind {
@@ -441,12 +442,23 @@ impl App {
                 .regions
                 .explorer_list
                 .map_or(0, |rect| usize::from(rect.height));
-            if self
-                .changes
-                .select_explorer_path(repo, &drag.source.path, viewport)
+            let already_selected = self.single_panel_layout()
+                && self.changes.preview_pane == LeftPane::Files
+                && !drag.source.is_directory
+                && self.changes.selected_explorer_file_path(repo) == Some(&drag.source.path);
+            if already_selected
+                || self
+                    .changes
+                    .select_explorer_path(repo, &drag.source.path, viewport)
             {
                 if drag.source.is_directory {
+                    self.last_explorer_file_click = None;
                     self.changes.toggle_selected_explorer_directory(Some(repo));
+                } else if self.single_panel_layout()
+                    && self.register_explorer_file_click(&drag.source.path)
+                {
+                    self.changes.activate_sqlite();
+                    self.show_detail_panel();
                 } else {
                     self.show_main_pane();
                 }
@@ -468,6 +480,17 @@ impl App {
             from: drag.source.path,
             to: destination,
         });
+    }
+
+    fn register_explorer_file_click(&mut self, path: &RepoPath) -> bool {
+        let double_click = self
+            .last_explorer_file_click
+            .as_ref()
+            .is_some_and(|(previous, at)| {
+                previous == path && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+            });
+        self.last_explorer_file_click = (!double_click).then(|| (path.clone(), Instant::now()));
+        double_click
     }
 
     fn file_drop_target_at(&self, point: Position) -> Option<RepoPath> {

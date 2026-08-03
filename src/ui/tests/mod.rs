@@ -48,6 +48,29 @@ fn footer_abbreviates_paths_under_home() {
 }
 
 #[test]
+fn narrow_footer_only_shows_the_repository_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let footer: String = terminal.backend().buffer().content[47 * 49..]
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert_eq!(footer.trim(), format!("{}:main", root.display()));
+    assert!(app.regions.changes.is_none());
+    assert!(app.regions.graph.is_none());
+    assert!(app.regions.left_pane_toggle.is_none());
+    assert!(app.regions.explorer.is_none());
+    assert!(app.regions.settings.is_none());
+    assert!(app.regions.help.is_none());
+}
+
+#[test]
 fn background_startup_renders_one_stable_loading_surface() {
     let directory = tempfile::tempdir().unwrap();
     run_git(directory.path(), &["init", "-b", "main"]);

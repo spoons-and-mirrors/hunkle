@@ -25,6 +25,25 @@ fn inline_editor_renders_and_accepts_input_at_phone_width() {
     assert!(screen.contains("EDIT"));
     assert!(screen.contains("first"));
 
+    let body = app.regions.preview_body.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        body.x,
+        body.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        body.x + 3,
+        body.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        body.x + 3,
+        body.y,
+    ));
+    assert!(app.file_editor.as_ref().unwrap().has_selection());
+    app.file_editor.as_mut().unwrap().clear_selection();
+
     app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
     app.handle_paste(" pasted ");
     assert!(app.file_editor.as_ref().unwrap().text().contains('x'));

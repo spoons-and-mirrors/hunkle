@@ -57,6 +57,7 @@ pub(super) use std::{
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 const SETTINGS_ROW_COUNT: usize = 9;
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
 pub(super) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) use ratatui::{
@@ -110,6 +111,7 @@ pub struct App {
     pub dragging_diff_scrollbar: bool,
     pub(crate) dragging_graph_column: Option<GraphColumnDrag>,
     diff_scroll_drag_offset: u16,
+    mobile_scroll_drag: Option<MobileScrollDrag>,
     pub workspace_explorer: Explorer,
     pub(crate) file_search: FileSearch,
     pub(crate) actions: ActionsState,
@@ -150,6 +152,7 @@ pub struct App {
     pub(crate) file_dialog: Option<FileDialog>,
     file_drag: Option<FileDrag>,
     last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
+    last_explorer_file_click: Option<(RepoPath, Instant)>,
     last_file_editor_click: Option<(Position, Instant)>,
     last_file_search_click: Option<(SearchDestination, Instant)>,
     pub(crate) file_editor_dragging: bool,
@@ -261,6 +264,7 @@ impl App {
             dragging_diff_scrollbar: false,
             dragging_graph_column: None,
             diff_scroll_drag_offset: 0,
+            mobile_scroll_drag: None,
             workspace_explorer,
             file_search,
             actions: ActionsState::default(),
@@ -301,6 +305,7 @@ impl App {
             file_dialog: None,
             file_drag: None,
             last_worktree_file_click: None,
+            last_explorer_file_click: None,
             last_file_editor_click: None,
             last_file_search_click: None,
             file_editor_dragging: false,

@@ -113,7 +113,9 @@ fn narrow_sqlite_detail_returns_to_the_files_panel() {
     assert!(app.regions.explorer_list.is_some());
     assert!(app.regions.diff.is_none());
 
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let list = app.regions.explorer_list.unwrap();
+    click(&mut app, list.x + 2, list.y);
+    click(&mut app, list.x + 2, list.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.changes.sqlite_browser.as_ref().unwrap().active);
     assert_eq!(app.regions.diff.unwrap().width, 49);

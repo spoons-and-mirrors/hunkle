@@ -552,7 +552,7 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
     click(&mut app, agent.x, agent.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agents_list.is_none());
-    assert!(app.regions.changes.is_some());
+    assert!(app.regions.changes.is_none());
     let screen = terminal
         .backend()
         .buffer()
