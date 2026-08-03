@@ -126,9 +126,11 @@ directory, so it cannot be merged into another agent's saved layout.
 
 The Agents section acts as a live per-agent layout switcher. Clicking an agent
 restores its complete pane layout around the fixed Hunkle pane, keeps keyboard
-focus in Hunkle, and opens the selected agent's working directory. The currently
-visible layout is parked in the selected layout's former tab. Existing terminals
-move between tabs without restarting their processes or losing scrollback. Every
+focus in Hunkle, and opens the selected agent's working directory. When switching
+agents, the currently visible layout is parked in the selected layout's former
+tab. Clicking the current agent again leaves its layout unchanged. Existing
+terminals move between tabs without restarting their processes or losing
+scrollback. Every
 pane other than Hunkle belongs to the displayed agent, including panes beside or
 below Hunkle. Hunkle remembers each agent's geometry across restarts. By default,
 the section lists and operates on agents in Hunkle's Herdr workspace only; enable

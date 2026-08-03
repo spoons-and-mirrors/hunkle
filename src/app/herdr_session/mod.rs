@@ -272,7 +272,6 @@ enum Completion {
     },
     AgentLayoutMove {
         result: Result<Box<client::AgentLayoutMoveResult>, String>,
-        background: bool,
         key: AgentTimingKey,
         reopen_path: Option<PathBuf>,
         host_workspace_id: String,
@@ -503,7 +502,6 @@ impl HerdrSession {
                 }
                 Completion::AgentLayoutMove {
                     result,
-                    background,
                     key,
                     reopen_path,
                     host_workspace_id,
@@ -538,16 +536,9 @@ impl HerdrSession {
                                     "Agent layout changed, but it could not be saved: {error}"
                                 ));
                             }
-                            if background {
-                                if self.displayed_agent_key.as_ref() == Some(&key) {
-                                    self.displayed_agent_key = None;
-                                }
-                                "Agent moved to background tab".to_owned()
-                            } else {
-                                self.displayed_agent_key = Some(key);
-                                poll.reopen_path = reopen_path;
-                                "Agent returned to foreground".to_owned()
-                            }
+                            self.displayed_agent_key = Some(key);
+                            poll.reopen_path = reopen_path;
+                            "Agent returned to foreground".to_owned()
                         }
                         Err(error) => error,
                     });
@@ -1095,22 +1086,24 @@ impl HerdrSession {
         Ok(())
     }
 
-    pub(crate) fn toggle_agent_visibility(&mut self, index: usize) -> Result<(), String> {
+    pub(crate) fn show_agent(&mut self, index: usize) -> Result<(), String> {
         if self.agent_layout_running() {
             return Err("Another agent layout change is still in progress".to_owned());
         }
-        if !self.agent_is_in_host_tab(index)
-            && self
-                .agents
-                .iter()
-                .any(|agent| self.agent_is_in_host_tab_by_agent(agent))
+        if self.agent_is_in_host_tab(index) {
+            return Ok(());
+        }
+        if self
+            .agents
+            .iter()
+            .any(|agent| self.agent_is_in_host_tab_by_agent(agent))
         {
             return self.display_agent(index);
         }
-        self.start_agent_layout_move(index)
+        self.restore_agent_layout(index)
     }
 
-    fn start_agent_layout_move(&mut self, index: usize) -> Result<(), String> {
+    fn restore_agent_layout(&mut self, index: usize) -> Result<(), String> {
         let agent = self
             .agents
             .get(index)
@@ -1125,15 +1118,10 @@ impl HerdrSession {
         if agent.pane_id == host_pane_id {
             return Err("Hunkle cannot move its own pane".to_owned());
         }
-        let background = self.agent_is_in_host_tab(index);
         let pane_id = agent.pane_id.clone();
         let key = agent.timing_key.clone();
-        let label = self
-            .agent_repository_name(index)
-            .unwrap_or("agent")
-            .to_owned();
         let selected_workspace_id = agent.workspace_id.clone();
-        let reopen_path = (!background).then(|| agent.cwd.clone()).flatten();
+        let reopen_path = agent.cwd.clone();
         let request = client::DisplayAgentRequest {
             pane_id: pane_id.clone(),
             workspace_id: agent.workspace_id.clone(),
@@ -1147,14 +1135,9 @@ impl HerdrSession {
         self.agent_layout_move_running = true;
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = if background {
-                client::park_agent_layout(request, label).map(Box::new)
-            } else {
-                client::restore_agent_layout(request).map(Box::new)
-            };
+            let result = client::restore_agent_layout(request).map(Box::new);
             let _ = sender.send(Completion::AgentLayoutMove {
                 result,
-                background,
                 key,
                 reopen_path,
                 host_workspace_id,
@@ -1636,5 +1619,31 @@ mod layout_tests {
                 .join("agent-layouts")
                 .join("77313a7037.json")
         );
+    }
+
+    #[test]
+    fn showing_the_current_agent_keeps_it_visible() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.set_host_for_test("w1", "w1:t1", "w1:p1");
+        session.agents.push(HerdrAgent {
+            name: "opencode".to_owned(),
+            session_name: None,
+            workspace_id: "w1".to_owned(),
+            tab_id: "w1:t1".to_owned(),
+            pane_id: "w1:p2".to_owned(),
+            cwd: Some(PathBuf::from("/code/hunkle")),
+            destination_cwd: Some(PathBuf::from("/code/hunkle")),
+            focused: false,
+            status: AgentStatus::Idle,
+            timing_key: AgentTimingKey::Pane("opencode@w1:p2".to_owned()),
+            session_timing_key: None,
+            state_change_seq: 1,
+        });
+
+        session.show_agent(0).unwrap();
+
+        assert!(session.agent_is_in_host_tab(0));
+        assert!(!session.agent_layout_move_running);
+        assert!(!session.agent_display_running);
     }
 }

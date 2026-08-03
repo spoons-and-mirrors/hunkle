@@ -260,7 +260,7 @@ impl App {
                     if self.single_panel_layout() && self.agents_pane_visible() {
                         self.open_agent_detail(index);
                     } else {
-                        self.toggle_agent_visibility(index);
+                        self.show_agent(index);
                     }
                     return;
                 }
@@ -798,7 +798,7 @@ impl App {
                 if self.single_panel_layout() && self.agents_pane_visible() {
                     self.open_agent_detail(index);
                 } else {
-                    self.toggle_agent_visibility(index);
+                    self.show_agent(index);
                 }
                 return;
             }
@@ -1126,8 +1126,8 @@ impl App {
         true
     }
 
-    fn toggle_agent_visibility(&mut self, index: usize) {
-        if let Err(error) = self.herdr.toggle_agent_visibility(index) {
+    fn show_agent(&mut self, index: usize) {
+        if let Err(error) = self.herdr.show_agent(index) {
             self.notice = Some(error);
         }
     }

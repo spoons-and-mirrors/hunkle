@@ -258,91 +258,6 @@ pub(super) fn display_agent(request: DisplayAgentRequest) -> Result<DisplayAgent
     display_agent_with(request, run, api_request)
 }
 
-pub(super) fn park_agent_layout(
-    request: DisplayAgentRequest,
-    label: String,
-) -> Result<AgentLayoutMoveResult, String> {
-    park_agent_layout_with(request, label, run, api_request)
-}
-
-fn park_agent_layout_with<F, A>(
-    request: DisplayAgentRequest,
-    label: String,
-    mut runner: F,
-    mut api: A,
-) -> Result<AgentLayoutMoveResult, String>
-where
-    F: FnMut(&[String]) -> Result<Value, String>,
-    A: FnMut(&str, &Value) -> Result<Value, String>,
-{
-    let host = export_layout(&mut api, &request.host_tab_id)?;
-    if host.workspace_id != request.host_workspace_id
-        || host.tab_id != request.host_tab_id
-        || host.focused_pane_id != request.host_pane_id
-    {
-        return Err("Hunkle's Herdr tab changed before the layout could be parked".to_owned());
-    }
-    if host.zoomed {
-        return Err("Agent layouts cannot be parked while the Herdr tab is zoomed".to_owned());
-    }
-    let outgoing = layout_without_host(&host.root, &request.host_pane_id)?
-        .ok_or_else(|| "Hunkle has no agent layout to park".to_owned())?;
-    if !outgoing.contains(&request.pane_id) {
-        return Err("The selected agent is not in Hunkle's displayed layout".to_owned());
-    }
-    let mut panes = pane_locations(&[(&host.root, host.tab_id.as_str())])?;
-    let root = outgoing.first_pane().to_owned();
-    let moved = move_pane_to_new_tab(
-        &mut runner,
-        &mut panes,
-        &root,
-        &request.host_workspace_id,
-        &label,
-    )?;
-    let park = (|| {
-        rebuild_layout(&mut runner, &outgoing, &moved.tab_id, &mut panes)?;
-        let parked = export_layout(&mut api, &moved.tab_id)?;
-        verify_layout(&parked, &outgoing, &panes, "parked")?;
-        let remaining_host = export_layout(&mut api, &host.tab_id)?;
-        verify_layout(
-            &remaining_host,
-            &LiveLayoutNode::Pane(request.host_pane_id.clone()),
-            &panes,
-            "remaining Hunkle",
-        )?;
-        if remaining_host.focused_pane_id != request.host_pane_id {
-            return Err("Herdr did not preserve focus in Hunkle".to_owned());
-        }
-        Ok(AgentLayoutMoveResult {
-            layout: AgentLayout {
-                root: host.root.remap(&panes)?,
-            },
-            pane_locations: panes.clone(),
-        })
-    })();
-    match park {
-        Ok(result) => Ok(result),
-        Err(error) => {
-            let restore = scatter_layout(
-                &mut runner,
-                &outgoing,
-                &request.host_workspace_id,
-                "restore-agent-layout",
-                &mut panes,
-            )
-            .and_then(|_| rebuild_layout(&mut runner, &host.root, &host.tab_id, &mut panes))
-            .and_then(|()| export_layout(&mut api, &host.tab_id))
-            .and_then(|layout| verify_layout(&layout, &host.root, &panes, "previous displayed"));
-            Err(match restore {
-                Ok(()) => format!("{error}; restored the previous layout"),
-                Err(restore) => {
-                    format!("{error}; could not restore the previous layout: {restore}")
-                }
-            })
-        }
-    }
-}
-
 pub(super) fn restore_agent_layout(
     request: DisplayAgentRequest,
 ) -> Result<AgentLayoutMoveResult, String> {
@@ -2862,47 +2777,9 @@ mod tests {
     }
 
     #[test]
-    fn parks_and_restores_complete_agent_layouts_without_focus() {
+    fn restores_complete_agent_layouts_without_focus() {
         let agent = split("down", 0.37, pane("w1:p2"), pane("w1:p6"));
         let displayed = split("right", 0.58, pane("w1:p1"), agent.clone());
-        let request = DisplayAgentRequest {
-            pane_id: "w1:p2".to_owned(),
-            workspace_id: "w1".to_owned(),
-            tab_id: "w1:t1".to_owned(),
-            host_pane_id: "w1:p1".to_owned(),
-            host_workspace_id: "w1".to_owned(),
-            host_tab_id: "w1:t1".to_owned(),
-            allow_cross_workspace: false,
-            saved_layout: None,
-        };
-        let mut park_commands = Vec::new();
-        let mut exports = 0;
-        let parked = park_agent_layout_with(
-            request,
-            "hunkle".to_owned(),
-            |args| {
-                park_commands.push(args.to_vec());
-                Ok(if args.contains(&"--new-tab".to_owned()) {
-                    moved("w1:p2", "w1:t2")
-                } else {
-                    moved(&args[2], &args[4])
-                })
-            },
-            |method, _| {
-                assert_eq!(method, "layout.export");
-                exports += 1;
-                Ok(match exports {
-                    1 => layout("w1", "w1:t1", "w1:p1", displayed.clone()),
-                    2 => layout("w1", "w1:t2", "w1:p2", agent.clone()),
-                    3 => layout("w1", "w1:t1", "w1:p1", pane("w1:p1")),
-                    _ => panic!("unexpected layout export"),
-                })
-            },
-        )
-        .unwrap();
-        assert_eq!(parked.layout, agent_layout(displayed.clone()));
-        assert_eq!(parked.pane_locations["w1:p6"].tab_id, "w1:t2");
-
         let mut restore_commands = Vec::new();
         let mut exports = 0;
         let restored = restore_agent_layout_with(
@@ -2914,7 +2791,7 @@ mod tests {
                 host_workspace_id: "w1".to_owned(),
                 host_tab_id: "w1:t1".to_owned(),
                 allow_cross_workspace: false,
-                saved_layout: Some(parked.layout),
+                saved_layout: Some(agent_layout(displayed.clone())),
             },
             |args| {
                 restore_commands.push(args.to_vec());
@@ -2936,15 +2813,12 @@ mod tests {
         .unwrap();
         assert_eq!(restored.layout, agent_layout(displayed));
         assert_eq!(
-            park_commands
+            restore_commands
                 .iter()
-                .chain(&restore_commands)
                 .map(|args| args.last().map(String::as_str))
                 .collect::<Vec<_>>(),
-            vec![Some("--no-focus"); 4]
+            vec![Some("--no-focus"); 2]
         );
-        assert_eq!(park_commands[1][8], "down");
-        assert_eq!(park_commands[1][10], "0.37");
         assert_eq!(restore_commands[0][8], "right");
         assert_eq!(restore_commands[0][10], "0.58");
         assert_eq!(restore_commands[1][8], "down");
