@@ -491,7 +491,12 @@ impl App {
                     self.mobile_scroll_drag = (!released).then_some(drag);
                     if released {
                         if drag.axis == Some(MobileDragAxis::Horizontal) {
-                            if let Some(agent) = drag.agent_preview {
+                            let horizontal = drag.start.x.abs_diff(point.x);
+                            let vertical = drag.start.y.abs_diff(point.y);
+                            if horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD
+                                && horizontal > vertical
+                                && let Some(agent) = drag.agent_preview
+                            {
                                 self.cycle_agent_preview(agent, point.x < drag.start.x);
                             }
                         } else if !drag.moved {

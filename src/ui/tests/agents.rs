@@ -623,6 +623,51 @@ fn mobile_agent_preview_swipes_between_agents() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     let live_x = first_screen.find("LIVE").unwrap();
+    let drag_start = first.right().saturating_sub(3);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        drag_start,
+        first.y + 8,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        first.x.saturating_add(1),
+        first.y + 8,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let dragging_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert_eq!(
+        dragging_screen.find("LIVE").unwrap(),
+        live_x - usize::from(first.width / 2)
+    );
+    app.handle_mouse(mouse(MouseEventKind::Moved, drag_start, first.y + 8));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let returned_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert_eq!(returned_screen.find("LIVE").unwrap(), live_x);
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        drag_start,
+        first.y + 8,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(0))
+            .is_some()
+    );
+
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
         first.x + 20,
