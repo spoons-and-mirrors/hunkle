@@ -346,11 +346,7 @@ impl LinkedWorktreeCatalog {
 fn load_repository_stats(
     recent: Vec<known_repositories::RecentRepository>,
 ) -> Vec<(PathBuf, (u64, u64))> {
-    let roots = recent
-        .into_iter()
-        .filter(|recent| recent.common_dir.is_some())
-        .map(|recent| recent.root)
-        .collect::<Vec<_>>();
+    let roots = recent_git_roots(recent);
     let worker_count = roots.len().min(
         thread::available_parallelism()
             .map(usize::from)
@@ -383,6 +379,16 @@ fn load_repository_stats(
     stats
         .into_iter()
         .map(|(_, root, stats)| (root, stats))
+        .collect()
+}
+
+fn recent_git_roots(recent: Vec<known_repositories::RecentRepository>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    recent
+        .into_iter()
+        .filter(|recent| recent.common_dir.is_some())
+        .map(|recent| recent.root)
+        .filter(|root| seen.insert(root.clone()))
         .collect()
 }
 

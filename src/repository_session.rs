@@ -175,7 +175,7 @@ struct StatusResult {
     repository_generation: u64,
     baseline: Option<git::WorktreeSignature>,
     activity_generation: u64,
-    result: Result<git::WorktreeSignature, String>,
+    result: Result<git::WorktreeStatus, String>,
 }
 
 struct LoadResult {
@@ -338,6 +338,7 @@ impl RepositorySession {
             LoadKind::Open,
             RefreshScope::ALL,
             None,
+            None,
             fetch_interval,
         );
         if started {
@@ -350,6 +351,15 @@ impl RepositorySession {
     pub(crate) fn request_refresh(
         &mut self,
         scope: RefreshScope,
+        fetch_interval: Duration,
+    ) -> Option<RefreshRequest> {
+        self.request_refresh_with_status(scope, None, fetch_interval)
+    }
+
+    fn request_refresh_with_status(
+        &mut self,
+        scope: RefreshScope,
+        worktree_status: Option<git::WorktreeStatus>,
         fetch_interval: Duration,
     ) -> Option<RefreshRequest> {
         if self.open_running() {
@@ -377,7 +387,14 @@ impl RepositorySession {
         } else {
             RefreshScope::ALL
         };
-        if self.start_load(root, LoadKind::Reload, scope, Some(kind), fetch_interval) {
+        if self.start_load(
+            root,
+            LoadKind::Reload,
+            scope,
+            Some(kind),
+            worktree_status,
+            fetch_interval,
+        ) {
             self.active_refresh_scope = Some(scope);
             Some(RefreshRequest::Started)
         } else {
@@ -741,7 +758,7 @@ impl RepositorySession {
         let repository_generation = self.repository_generation;
         let sender = self.status_tx.clone();
         thread::spawn(move || {
-            let result = git::worktree_signature(&root).map_err(|error| error.to_string());
+            let result = git::worktree_status(&root).map_err(|error| error.to_string());
             let _ = sender.send(StatusResult {
                 root,
                 repository_generation,
@@ -922,12 +939,15 @@ impl RepositorySession {
             if !active || self.status_signature != done.baseline {
                 continue;
             }
-            if let Ok(signature) = done.result {
+            if let Ok(status) = done.result {
+                let signature = status.signature();
                 let previous = self.status_signature.replace(signature);
                 if let Some(previous) = previous.filter(|previous| *previous != signature) {
                     self.reset_status_interval();
                     let scope = signature.refresh_scope_since(previous);
-                    if let Some(request) = self.request_refresh(scope, fetch_interval) {
+                    if let Some(request) =
+                        self.request_refresh_with_status(scope, Some(status), fetch_interval)
+                    {
                         return Some(request);
                     }
                 }
@@ -969,6 +989,7 @@ impl RepositorySession {
         kind: LoadKind,
         scope: RefreshScope,
         repository_kind: Option<RepositoryKind>,
+        worktree_status: Option<git::WorktreeStatus>,
         fetch_interval: Duration,
     ) -> bool {
         if !self.operations.start(Operation::Load(kind)) {
@@ -994,9 +1015,13 @@ impl RepositorySession {
             let started = Instant::now();
             let result = match repository_kind {
                 None => git::bootstrap_or_local(&path).map(LoadPayload::Open),
-                Some(repository_kind) => {
-                    git::refresh_repository(&path, repository_kind, scope).map(LoadPayload::Refresh)
-                }
+                Some(repository_kind) => git::refresh_repository_with_status(
+                    &path,
+                    repository_kind,
+                    scope,
+                    worktree_status,
+                )
+                .map(LoadPayload::Refresh),
             }
             .map(|payload| {
                 let prepared_file_tree = match &payload {

@@ -1,6 +1,11 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) fn worktree_signature(root: &Path) -> Result<WorktreeSignature> {
+    worktree_status(root).map(|status| status.signature)
+}
+
+pub(crate) fn worktree_status(root: &Path) -> Result<WorktreeStatus> {
     let output = run(
         root,
         &[
@@ -16,7 +21,16 @@ pub(crate) fn worktree_signature(root: &Path) -> Result<WorktreeSignature> {
     }
 
     let changes = parse_status(&output.stdout)?;
-    Ok(status_signature(root, &output.stdout, &changes))
+    Ok(WorktreeStatus {
+        signature: status_signature(root, &output.stdout, &changes),
+        sync: parse_branch_sync(&output.stdout),
+        changes,
+    })
+}
+
+pub(super) fn status(root: &Path) -> Result<(Vec<Change>, WorktreeSignature, BranchSync)> {
+    let status = worktree_status(root)?;
+    Ok((status.changes, status.signature, status.sync))
 }
 
 fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> WorktreeSignature {
@@ -90,26 +104,6 @@ fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> WorktreeS
         inventory: inventory.finish(),
         branch: branch.finish(),
     }
-}
-
-pub(super) fn status(root: &Path) -> Result<(Vec<Change>, WorktreeSignature, BranchSync)> {
-    let output = run(
-        root,
-        &[
-            "status",
-            "--porcelain=v1",
-            "--branch",
-            "-z",
-            "--untracked-files=all",
-        ],
-    )?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    let changes = parse_status(&output.stdout)?;
-    let signature = status_signature(root, &output.stdout, &changes);
-    let sync = parse_branch_sync(&output.stdout);
-    Ok((changes, signature, sync))
 }
 
 pub(super) fn parse_branch_sync(bytes: &[u8]) -> BranchSync {

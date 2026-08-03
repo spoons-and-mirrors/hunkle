@@ -127,7 +127,7 @@ fn bootstrap_data(
 fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
     let (common_dir, worktree, inventory, history, graph, refs) = thread::scope(|scope| {
         let common_dir = scope.spawn(|| common_git_dir(&root));
-        let worktree = scope.spawn(|| load_worktree(&root));
+        let worktree = scope.spawn(|| load_worktree(&root, None));
         let inventory = scope.spawn(|| load_git_inventory(&root));
         let history = scope.spawn(|| load_history(&root));
         let graph = scope.spawn(|| load_graph(&root));
@@ -178,10 +178,20 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
     })
 }
 
+#[cfg(test)]
 pub fn refresh_repository(
     root: &Path,
     kind: RepositoryKind,
     scope: RefreshScope,
+) -> Result<RepositoryUpdate> {
+    refresh_repository_with_status(root, kind, scope, None)
+}
+
+pub(crate) fn refresh_repository_with_status(
+    root: &Path,
+    kind: RepositoryKind,
+    scope: RefreshScope,
+    worktree_status: Option<WorktreeStatus>,
 ) -> Result<RepositoryUpdate> {
     if kind == RepositoryKind::Local {
         return Ok(RepositoryUpdate {
@@ -201,7 +211,7 @@ pub fn refresh_repository(
     let (worktree, inventory, history, graph, refs) = thread::scope(|thread_scope| {
         let worktree = scope
             .includes(RefreshScope::WORKTREE)
-            .then(|| thread_scope.spawn(|| load_worktree(root)));
+            .then(|| thread_scope.spawn(|| load_worktree(root, worktree_status)));
         let inventory = scope
             .includes(RefreshScope::INVENTORY)
             .then(|| thread_scope.spawn(|| load_git_inventory(root)));
@@ -235,8 +245,12 @@ pub fn refresh_repository(
     })
 }
 
-fn load_worktree(root: &Path) -> Result<WorktreeData> {
-    let (mut changes, signature, sync) = status(root)?;
+fn load_worktree(root: &Path, status: Option<WorktreeStatus>) -> Result<WorktreeData> {
+    let WorktreeStatus {
+        mut changes,
+        signature,
+        sync,
+    } = status.map_or_else(|| worktree_status(root), Ok)?;
     populate_diff_stats(root, &mut changes)?;
     Ok(WorktreeData {
         fingerprint: fingerprint(&changes),
@@ -248,7 +262,7 @@ fn load_worktree(root: &Path) -> Result<WorktreeData> {
 }
 
 pub(crate) fn load_change_line_counts(root: &Path) -> Result<(u64, u64)> {
-    let worktree = load_worktree(root)?;
+    let worktree = load_worktree(root, None)?;
     Ok(change_line_counts(&worktree.changes))
 }
 

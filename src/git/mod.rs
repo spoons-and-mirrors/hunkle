@@ -28,6 +28,28 @@ struct WorktreeData {
     signature: WorktreeSignature,
 }
 
+#[derive(Debug)]
+pub(crate) struct WorktreeStatus {
+    changes: Vec<Change>,
+    sync: BranchSync,
+    signature: WorktreeSignature,
+}
+
+impl WorktreeStatus {
+    pub(crate) fn signature(&self) -> WorktreeSignature {
+        self.signature
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(signature: WorktreeSignature) -> Self {
+        Self {
+            changes: Vec::new(),
+            sync: BranchSync::default(),
+            signature,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct BranchSync {
     ahead: u64,

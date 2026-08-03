@@ -131,7 +131,7 @@ fn ignores_status_result_from_a_previous_repository() {
             repository_generation: 0,
             baseline: Some(signature(10, 1)),
             activity_generation: 0,
-            result: Ok(signature(20, 1)),
+            result: Ok(status(20, 1)),
         })
         .unwrap();
 
@@ -151,7 +151,7 @@ fn ignores_status_result_with_a_superseded_baseline() {
             repository_generation: 0,
             baseline: Some(signature(10, 1)),
             activity_generation: 0,
-            result: Ok(signature(30, 1)),
+            result: Ok(status(30, 1)),
         })
         .unwrap();
 
@@ -232,7 +232,7 @@ fn activity_keeps_status_checks_at_a_bounded_interval() {
             repository_generation: 0,
             baseline: Some(signature(10, 1)),
             activity_generation: 0,
-            result: Ok(signature(10, 1)),
+            result: Ok(status(10, 1)),
         })
         .unwrap();
     assert!(session.next_worktree_change(Duration::ZERO).is_none());
@@ -251,7 +251,7 @@ fn scopes_external_refreshes_by_branch_identity() {
             repository_generation: 0,
             baseline: Some(signature(10, 1)),
             activity_generation: 0,
-            result: Ok(signature(20, 1)),
+            result: Ok(status(20, 1)),
         })
         .unwrap();
     assert_eq!(
@@ -271,7 +271,7 @@ fn scopes_external_refreshes_by_branch_identity() {
             repository_generation: 0,
             baseline: Some(signature(20, 1)),
             activity_generation: 0,
-            result: Ok(signature(30, 2)),
+            result: Ok(status(30, 2)),
         })
         .unwrap();
     assert_eq!(
@@ -442,6 +442,10 @@ fn operation_state_preserves_repository_concurrency_rules() {
 
 fn signature(state: u64, branch: u64) -> git::WorktreeSignature {
     git::WorktreeSignature::for_test(state, branch)
+}
+
+fn status(state: u64, branch: u64) -> git::WorktreeStatus {
+    git::WorktreeStatus::for_test(signature(state, branch))
 }
 
 fn begin_fake_refresh(session: &mut RepositorySession, scope: RefreshScope) {

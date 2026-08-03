@@ -19,7 +19,7 @@ its design is still changing.
   breaking and Unicode/tab-width behavior as cursor-aware wrapping.
 - [x] Batch syntax-highlighted text by styled run rather than allocating one
   `String` per grapheme, while preserving tab expansion and Unicode widths.
-- [ ] Reuse parsed worktree status from the adaptive status check in the
+- [x] Reuse parsed worktree status from the adaptive status check in the
   resulting refresh, avoiding an immediate duplicate `git status` without
   weakening refresh scope selection or stale-result protection. Deduplicate
   repeated agent and linked-worktree line-count loads within each batch.

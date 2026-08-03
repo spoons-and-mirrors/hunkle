@@ -141,6 +141,32 @@ fn persists_repository_stats_for_an_instant_picker_open() {
 }
 
 #[test]
+fn repository_stats_deduplicate_repeated_roots_without_reordering() {
+    let recent = vec![
+        known_repositories::RecentRepository {
+            common_dir: Some(PathBuf::from("/first/.git")),
+            root: PathBuf::from("/shared"),
+            stats: None,
+        },
+        known_repositories::RecentRepository {
+            common_dir: Some(PathBuf::from("/second/.git")),
+            root: PathBuf::from("/shared"),
+            stats: None,
+        },
+        known_repositories::RecentRepository {
+            common_dir: Some(PathBuf::from("/third/.git")),
+            root: PathBuf::from("/other"),
+            stats: None,
+        },
+    ];
+
+    assert_eq!(
+        recent_git_roots(recent),
+        [PathBuf::from("/shared"), PathBuf::from("/other")]
+    );
+}
+
+#[test]
 fn malformed_inventory_is_not_overwritten() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("known-repositories.json");

@@ -831,6 +831,39 @@ fn scoped_refresh_updates_only_requested_facets() {
 }
 
 #[test]
+fn refresh_can_reuse_an_already_parsed_worktree_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.name", "Test Author"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    fs::write(root.join("tracked.txt"), "base\n").unwrap();
+    git(root, &["add", "tracked.txt"]);
+    git(root, &["commit", "-m", "base"]);
+
+    let status = worktree_status(root).unwrap();
+    fs::write(root.join("after-status.txt"), "new\n").unwrap();
+    let cached = refresh_repository_with_status(
+        root,
+        RepositoryKind::Git,
+        RefreshScope::WORKTREE,
+        Some(status),
+    )
+    .unwrap();
+    assert!(cached.worktree.unwrap().changes.is_empty());
+
+    let fresh = refresh_repository(root, RepositoryKind::Git, RefreshScope::WORKTREE).unwrap();
+    assert!(
+        fresh
+            .worktree
+            .unwrap()
+            .changes
+            .iter()
+            .any(|change| change.path == "after-status.txt")
+    );
+}
+
+#[test]
 fn external_content_changes_do_not_refresh_the_inventory() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
