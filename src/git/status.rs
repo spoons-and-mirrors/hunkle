@@ -92,7 +92,7 @@ fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> WorktreeS
     }
 }
 
-pub(super) fn status(root: &Path) -> Result<(Vec<Change>, WorktreeSignature)> {
+pub(super) fn status(root: &Path) -> Result<(Vec<Change>, WorktreeSignature, BranchSync)> {
     let output = run(
         root,
         &[
@@ -108,7 +108,30 @@ pub(super) fn status(root: &Path) -> Result<(Vec<Change>, WorktreeSignature)> {
     }
     let changes = parse_status(&output.stdout)?;
     let signature = status_signature(root, &output.stdout, &changes);
-    Ok((changes, signature))
+    let sync = parse_branch_sync(&output.stdout);
+    Ok((changes, signature, sync))
+}
+
+pub(super) fn parse_branch_sync(bytes: &[u8]) -> BranchSync {
+    let Some(header) = bytes
+        .split(|byte| *byte == 0)
+        .find(|field| field.starts_with(b"## "))
+    else {
+        return BranchSync::default();
+    };
+    let header = String::from_utf8_lossy(header);
+    let Some(summary) = header.rsplit_once(" [").map(|(_, summary)| summary) else {
+        return BranchSync::default();
+    };
+    let mut sync = BranchSync::default();
+    for state in summary.trim_end_matches(']').split(", ") {
+        if let Some(ahead) = state.strip_prefix("ahead ") {
+            sync.ahead = ahead.parse().unwrap_or_default();
+        } else if let Some(behind) = state.strip_prefix("behind ") {
+            sync.behind = behind.parse().unwrap_or_default();
+        }
+    }
+    sync
 }
 
 pub(super) fn parse_status(bytes: &[u8]) -> Result<Vec<Change>> {

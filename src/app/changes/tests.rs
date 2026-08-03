@@ -10,6 +10,8 @@ fn repository_data() -> RepositoryData {
         common_dir: None,
         kind: RepositoryKind::Git,
         branch: "main".to_owned(),
+        ahead: 0,
+        behind: 0,
         branches: Vec::new(),
         worktree_signature: None,
         changes: vec![Change {

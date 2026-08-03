@@ -24,7 +24,14 @@ struct WorktreeData {
     changes: Vec<Change>,
     fingerprint: u64,
     counts: (usize, usize),
+    sync: BranchSync,
     signature: WorktreeSignature,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct BranchSync {
+    ahead: u64,
+    behind: u64,
 }
 
 #[derive(Debug)]
@@ -90,6 +97,8 @@ pub struct RepositoryData {
     pub(crate) common_dir: Option<PathBuf>,
     pub kind: RepositoryKind,
     pub branch: String,
+    pub(crate) ahead: u64,
+    pub(crate) behind: u64,
     pub changes: Vec<Change>,
     pub files: Vec<RepoPath>,
     pub(crate) ignored_files: Vec<RepoPath>,
@@ -208,6 +217,8 @@ impl RepositoryData {
             self.changes = worktree.changes;
             self.changes_fingerprint = worktree.fingerprint;
             self.change_counts = worktree.counts;
+            self.ahead = worktree.sync.ahead;
+            self.behind = worktree.sync.behind;
             self.worktree_signature = Some(worktree.signature);
         }
         if let Some(inventory) = update.inventory {

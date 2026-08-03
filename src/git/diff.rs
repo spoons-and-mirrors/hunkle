@@ -223,7 +223,7 @@ pub fn branch_diff(root: &Path, target: &str, current: &str) -> Result<String> {
     let mut bytes = output.stdout;
     let mut truncated = output.stdout_truncated;
     if !truncated {
-        let (changes, _) = status(root)?;
+        let (changes, _, _) = status(root)?;
         let untracked = changes
             .into_iter()
             .filter(|change| !change.staged && change.code == '?')

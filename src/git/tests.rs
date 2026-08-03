@@ -240,6 +240,17 @@ fn preserves_both_paths_for_renames() {
 }
 
 #[test]
+fn parses_branch_tracking_divergence() {
+    let sync =
+        parse_branch_sync(b"## feature...origin/feature [ahead 12, behind 3]\0 M tracked.txt\0");
+
+    assert_eq!(sync.ahead, 12);
+    assert_eq!(sync.behind, 3);
+    assert_eq!(parse_branch_sync(b"## feature\0").ahead, 0);
+    assert_eq!(parse_branch_sync(b"## HEAD (no branch)\0").behind, 0);
+}
+
+#[test]
 fn untracked_line_counts_respect_the_read_budget() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("new.txt");
@@ -265,7 +276,7 @@ fn section_diffs_include_every_file_in_the_selected_section() {
     fs::write(root.join("unstaged.txt"), "after\n").unwrap();
     fs::write(root.join("untracked.txt"), "new\n").unwrap();
     git(root, &["add", "staged.txt"]);
-    let (changes, _) = status(root).unwrap();
+    let (changes, _, _) = status(root).unwrap();
 
     let staged = section_diff(root, &changes, true).unwrap();
     assert!(staged.contains("diff --git a/staged.txt b/staged.txt"));

@@ -55,9 +55,9 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         repo.branch.clone()
     };
     let dirty = !repo.changes.is_empty();
-    let dirty_marker = if dirty { "*" } else { "" };
-    let branch_badge = format!(" {branch}{dirty_marker} ");
-    let branch_width = UnicodeWidthStr::width(branch_badge.as_str()) as u16;
+    let (ahead, behind) = (repo.ahead, repo.behind);
+    let full_branch_badge = branch_badge(&branch, dirty, ahead, behind, usize::MAX);
+    let branch_width = UnicodeWidthStr::width(full_branch_badge.as_str()) as u16;
     let show_agent_actions = !app.herdr_prompt.agent_pane_picker_open();
     let diff_badge = " DIFF ";
     let diff_width = show_agent_actions
@@ -215,21 +215,22 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let room = content_right.saturating_sub(x);
         let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
         let room = content_right.saturating_sub(x);
+        let branch_limit = room.saturating_sub(
+            diff_width
+                .saturating_add(issue_width)
+                .saturating_add(agent_width)
+                .saturating_add(comparison_width as u16)
+                .saturating_add(2),
+        );
         let branch_rect = render(
             frame,
             &mut x,
-            branch_badge,
+            branch_badge(&branch, dirty, ahead, behind, usize::from(branch_limit)),
             header_badge_style(
                 palette().accent,
                 app.hovered_hit_target == Some(HitTarget::HeaderBranch),
             ),
-            room.saturating_sub(
-                diff_width
-                    .saturating_add(issue_width)
-                    .saturating_add(agent_width)
-                    .saturating_add(comparison_width as u16)
-                    .saturating_add(2),
-            ),
+            branch_limit,
         );
         if let Some(rect) = branch_rect {
             draw_header_badge_border(frame, rect, palette().accent);
@@ -319,6 +320,20 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ),
         );
     }
+}
+
+fn branch_badge(branch: &str, dirty: bool, ahead: u64, behind: u64, width: usize) -> String {
+    let dirty = if dirty { "*" } else { "" };
+    let ahead = (ahead > 0).then(|| format!(" ↑{ahead}"));
+    let behind = (behind > 0).then(|| format!(" ↓{behind}"));
+    let suffix = format!(
+        "{dirty}{}{} ",
+        ahead.as_deref().unwrap_or_default(),
+        behind.as_deref().unwrap_or_default()
+    );
+    let reserved = 1usize.saturating_add(UnicodeWidthStr::width(suffix.as_str()));
+    let branch = truncate_width(branch, width.saturating_sub(reserved));
+    format!(" {branch}{suffix}")
 }
 
 pub(super) fn draw_main_top_padding(frame: &mut Frame<'_>, app: &App, area: Rect) {

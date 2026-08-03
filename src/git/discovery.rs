@@ -104,6 +104,8 @@ fn bootstrap_data(
         common_dir,
         kind,
         branch,
+        ahead: 0,
+        behind: 0,
         changes_fingerprint: fingerprint(&changes),
         files_fingerprint: fingerprint(&(&files, &directories, &ignored_files)),
         changes,
@@ -156,6 +158,8 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         common_dir: Some(common_dir),
         kind: RepositoryKind::Git,
         branch: history.branch,
+        ahead: worktree.sync.ahead,
+        behind: worktree.sync.behind,
         changes: worktree.changes,
         files: inventory.files,
         ignored_files: inventory.ignored_files,
@@ -232,11 +236,12 @@ pub fn refresh_repository(
 }
 
 fn load_worktree(root: &Path) -> Result<WorktreeData> {
-    let (mut changes, signature) = status(root)?;
+    let (mut changes, signature, sync) = status(root)?;
     populate_diff_stats(root, &mut changes)?;
     Ok(WorktreeData {
         fingerprint: fingerprint(&changes),
         counts: change_counts(&changes),
+        sync,
         signature,
         changes,
     })
@@ -308,6 +313,8 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
         common_dir: None,
         kind: RepositoryKind::Local,
         branch: "local".to_owned(),
+        ahead: 0,
+        behind: 0,
         changes: Vec::new(),
         files: inventory.files,
         ignored_files: inventory.ignored_files,

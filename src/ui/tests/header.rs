@@ -390,6 +390,10 @@ fn header_cards_open_pickers_and_checkout_branches() {
     );
     let long_branch = "feature/header-branch-name-is-never-truncated";
     run_git(root, &["branch", "-m", long_branch]);
+    let remote = directory.path().join("remote.git");
+    run_git(root, &["init", "--bare", remote.to_str().unwrap()]);
+    run_git(root, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    run_git(root, &["push", "-u", "origin", "HEAD:sync-base"]);
     fs::write(root.join("feature.txt"), "feature branch\n").unwrap();
     run_git(root, &["add", "feature.txt"]);
     run_git(root, &["commit", "-m", "feature change"]);
@@ -505,7 +509,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let branch_text = (branch.x..branch.right())
         .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
         .collect::<String>();
-    assert_eq!(branch_text, format!("▌{long_branch} "));
+    assert_eq!(branch_text, format!("▌{long_branch} ↑1 "));
 
     click(&mut app, agent.x, agent.y);
     assert_eq!(app.header_picker.kind, None);
@@ -569,7 +573,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(
-        rendered.contains("topic...feature"),
+        rendered.contains("topic...feat"),
         "rendered screen: {rendered:?}"
     );
     let diff = app.regions.diff.unwrap();

@@ -473,6 +473,8 @@ fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
             common_dir: None,
             kind: git::RepositoryKind::Git,
             branch: "main".to_owned(),
+            ahead: 0,
+            behind: 0,
             branches: Vec::new(),
             changes: Vec::new(),
             files: Vec::new(),
