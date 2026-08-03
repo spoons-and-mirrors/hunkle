@@ -36,6 +36,7 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
     app.settings.agents_height = 9;
+    app.settings.worktree_width = 48;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
     let stash = StashedAgent {
         harness: "opencode".to_owned(),
@@ -124,6 +125,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
     app.settings.agents_height = 9;
+    app.settings.worktree_width = 48;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
     app.herdr.workspaces[0].branch = Some("feature/agents".to_owned());
     let stats_path = PathBuf::from("/agent/stats");

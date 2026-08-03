@@ -14,7 +14,10 @@ fn inline_editor_renders_and_accepts_input_at_phone_width() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.regions.diff.unwrap().width, 49);
-    assert_eq!(app.regions.preview_body.unwrap().width, 40);
+    assert_eq!(app.regions.preview_body.unwrap().width, 46);
+    let panel = app.regions.diff.unwrap();
+    let body = app.regions.preview_body.unwrap();
+    assert_eq!(terminal.backend().buffer()[(panel.x, body.y)].symbol(), "1");
     let screen = terminal
         .backend()
         .buffer()

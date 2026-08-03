@@ -162,6 +162,7 @@ pub struct App {
     initial_pane_pending: bool,
     recent_fetches: HashMap<PathBuf, Instant>,
     workspace_fetch_pending: bool,
+    footer_marquee: Option<FooterMarquee>,
 }
 
 impl App {
@@ -315,6 +316,7 @@ impl App {
             initial_pane_pending,
             recent_fetches: HashMap::new(),
             workspace_fetch_pending: false,
+            footer_marquee: None,
         };
         app.restore_commit_draft();
         app
@@ -322,6 +324,27 @@ impl App {
 
     pub(crate) fn repository(&self) -> Option<&RepositoryData> {
         self.session.data()
+    }
+
+    pub(crate) fn footer_marquee_elapsed(&mut self, value: &str, width: usize) -> Duration {
+        let now = Instant::now();
+        if self
+            .footer_marquee
+            .as_ref()
+            .is_none_or(|marquee| marquee.value != value || marquee.width != width)
+        {
+            self.footer_marquee = Some(FooterMarquee {
+                value: value.to_owned(),
+                width,
+                started: now,
+                next_frame: now + FOOTER_MARQUEE_STEP,
+            });
+        }
+        now.duration_since(self.footer_marquee.as_ref().unwrap().started)
+    }
+
+    pub(crate) fn clear_footer_marquee(&mut self) {
+        self.footer_marquee = None;
     }
 
     pub(crate) fn set_workspace_state(&mut self, state: Option<WorkspaceState>) {
@@ -662,6 +685,12 @@ impl App {
             .is_some_and(|(_, deadline)| now >= deadline)
         {
             self.agent_preview_button_flash = None;
+            changed = true;
+        }
+        if let Some(marquee) = &mut self.footer_marquee
+            && now >= marquee.next_frame
+        {
+            marquee.next_frame = now + FOOTER_MARQUEE_STEP;
             changed = true;
         }
         changed |= self.mode == Mode::Explorer && self.workspace_explorer.poll_index();

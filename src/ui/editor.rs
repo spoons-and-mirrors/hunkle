@@ -16,14 +16,23 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         panel.width.saturating_sub(2),
         1,
     );
+    let narrow = app.single_panel_layout();
     let body = Rect::new(
-        header.x,
+        if narrow { panel.x } else { header.x },
         header.y.saturating_add(2),
-        header.width,
+        if narrow { panel.width } else { header.width },
         panel.bottom().saturating_sub(header.y.saturating_add(3)),
     );
-    const LINE_NUMBER_WIDTH: u16 = 7;
-    let gutter_width = LINE_NUMBER_WIDTH.min(body.width);
+    let number_width = if narrow {
+        app.file_editor.as_ref().map_or(1, |editor| {
+            editor.visible_line_count().max(1).ilog10() as usize + 1
+        })
+    } else {
+        5
+    };
+    let gutter_width = u16::try_from(number_width.saturating_add(2))
+        .unwrap_or(u16::MAX)
+        .min(body.width);
     let gutter = Rect::new(body.x, body.y, gutter_width, body.height);
     let editor_body = Rect::new(
         body.x.saturating_add(gutter_width),
@@ -97,6 +106,8 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
             editor.wrap_scroll_row,
             viewport_height,
             &line_markers,
+            number_width,
+            narrow,
         );
         app.regions.editor_rows = rows;
         (
@@ -136,6 +147,8 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
                 editor_line_number(
                     (line < line_count).then_some(line),
                     line_markers.get(line).copied().flatten(),
+                    number_width,
+                    narrow,
                 )
             })
             .collect::<Vec<_>>();
@@ -313,12 +326,21 @@ fn editor_line_markers(
     markers
 }
 
-fn editor_line_number(line: Option<usize>, marker: Option<char>) -> Line<'static> {
+fn editor_line_number(
+    line: Option<usize>,
+    marker: Option<char>,
+    number_width: usize,
+    flush_left: bool,
+) -> Line<'static> {
     line.map_or_else(
         || Line::default().style(Style::default().bg(palette().panel)),
         |line| {
             let number = Span::styled(
-                format!("{:>5}", line.saturating_add(1)),
+                if flush_left {
+                    format!("{:<number_width$}", line.saturating_add(1))
+                } else {
+                    format!("{:>number_width$}", line.saturating_add(1))
+                },
                 Style::default().fg(palette().faint).bg(palette().panel),
             );
             let marker = marker.map_or_else(
@@ -377,6 +399,8 @@ fn wrapped_editor_view(
     scroll: usize,
     height: usize,
     line_markers: &[Option<char>],
+    number_width: usize,
+    flush_line_numbers_left: bool,
 ) -> (
     Vec<Line<'static>>,
     Vec<Line<'static>>,
@@ -408,6 +432,8 @@ fn wrapped_editor_view(
                 line_numbers.push(editor_line_number(
                     (index == 0).then_some(line_number),
                     line_markers.get(line_number).copied().flatten(),
+                    number_width,
+                    flush_line_numbers_left,
                 ));
                 rendered_rows.push(crate::app::EditorRenderedRow {
                     line: line_number,
@@ -422,7 +448,12 @@ fn wrapped_editor_view(
     }
     while lines.len() < height {
         lines.push(Line::default().style(Style::default().bg(palette().panel)));
-        line_numbers.push(editor_line_number(None, None));
+        line_numbers.push(editor_line_number(
+            None,
+            None,
+            number_width,
+            flush_line_numbers_left,
+        ));
     }
     (lines, line_numbers, rendered_rows)
 }

@@ -23,9 +23,10 @@ use std::{env, path::Path};
 
 pub(super) use crate::{
     app::{
-        APP_MIN_WIDTH, App, BranchPickerStep, CloneField, FileDialogKind, GraphHitTarget,
-        HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode, Regions,
-        RepositoryPickerStep, ShortcutAction, TAB_WIDTH, TextInput, View, WorktreePickerStep,
+        APP_MIN_WIDTH, App, BranchPickerStep, CloneField, FOOTER_MARQUEE_PAUSE,
+        FOOTER_MARQUEE_STEP, FileDialogKind, GraphHitTarget, HeaderPickerItem, HeaderPickerKind,
+        HitTarget, LeftPane, Mode, Regions, RepositoryPickerStep, ShortcutAction, TAB_WIDTH,
+        TextInput, View, WorktreePickerStep,
     },
     theme::{Palette, load_theme},
 };
@@ -357,12 +358,10 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .as_deref()
         .filter(|notice| notice_is_error(notice))
     {
+        let error = truncate_width(&format!(" ERROR  {error}"), usize::from(area.width));
+        app.clear_footer_marquee();
         frame.render_widget(
-            Paragraph::new(truncate_width(
-                &format!(" ERROR  {error}"),
-                usize::from(area.width),
-            ))
-            .style(
+            Paragraph::new(error).style(
                 Style::default()
                     .fg(palette().red)
                     .bg(palette().surface_alt)
@@ -387,14 +386,26 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 format!("{path}:{}", repository.branch)
             }
         }) {
+            let path = format!(" {path}");
+            let width = usize::from(area.width);
+            let path = if UnicodeWidthStr::width(path.as_str()) > width {
+                let frame = app.footer_marquee_elapsed(&path, width).as_millis()
+                    / FOOTER_MARQUEE_STEP.as_millis();
+                marquee_window(&path, width, frame as usize)
+            } else {
+                app.clear_footer_marquee();
+                path
+            };
             frame.render_widget(
-                Paragraph::new(truncate_width(&format!(" {path}"), usize::from(area.width)))
-                    .style(Style::default().fg(palette().soft)),
+                Paragraph::new(path).style(Style::default().fg(palette().soft)),
                 area,
             );
+        } else {
+            app.clear_footer_marquee();
         }
         return;
     }
+    app.clear_footer_marquee();
 
     let compact = area.width < 100;
     let (left_pane_action, left_pane_label) = if app.agents_pane_visible() {
@@ -571,6 +582,44 @@ fn truncate_width(value: &str, width: usize) -> String {
         used += grapheme_width;
     }
     result.push('…');
+    result
+}
+
+fn marquee_window(value: &str, width: usize, frame: usize) -> String {
+    let total_width = UnicodeWidthStr::width(value);
+    let travel = total_width.saturating_sub(width);
+    if travel == 0 || width == 0 {
+        return truncate_width(value, width);
+    }
+    let pause_frames =
+        (FOOTER_MARQUEE_PAUSE.as_millis() / FOOTER_MARQUEE_STEP.as_millis()) as usize;
+    let cycle = travel * 2 + pause_frames * 2 + 1;
+    let frame = frame % cycle;
+    let offset = if frame <= travel {
+        frame
+    } else if frame <= travel + pause_frames {
+        travel
+    } else if frame <= travel * 2 + pause_frames {
+        travel * 2 + pause_frames - frame
+    } else {
+        0
+    };
+
+    let mut skipped = 0;
+    let mut used = 0;
+    let mut result = String::new();
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if skipped < offset {
+            skipped += grapheme_width;
+            continue;
+        }
+        if used + grapheme_width > width {
+            break;
+        }
+        result.push_str(grapheme);
+        used += grapheme_width;
+    }
     result
 }
 
