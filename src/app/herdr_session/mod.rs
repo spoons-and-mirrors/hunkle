@@ -272,6 +272,7 @@ pub(crate) struct HerdrSessionPoll {
     pub(crate) changed: bool,
     pub(crate) notice: Option<String>,
     pub(crate) reopen_path: Option<PathBuf>,
+    pub(crate) fullscreen_result: Option<Result<bool, String>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -644,10 +645,10 @@ impl HerdrSession {
                 }
                 Completion::Fullscreen { result } => {
                     self.fullscreen_running = false;
-                    poll.notice = Some(match result {
+                    poll.notice = Some(match &result {
                         Ok(fullscreen) => {
-                            self.fullscreen = fullscreen;
-                            if fullscreen {
+                            self.fullscreen = *fullscreen;
+                            if *fullscreen {
                                 "Hunkle is fullscreen".to_owned()
                             } else {
                                 "Restored Herdr tab layout".to_owned()
@@ -655,6 +656,7 @@ impl HerdrSession {
                         }
                         Err(error) => format!("Could not toggle fullscreen: {error}"),
                     });
+                    poll.fullscreen_result = Some(result);
                 }
                 Completion::AgentChangeStats(stats) => {
                     self.agent_change_stats_loading = false;
@@ -1369,6 +1371,11 @@ impl HerdrSession {
         self.host_workspace_id = Some(workspace.to_owned());
         self.host_tab_id = Some(tab.to_owned());
         self.host_pane_id = Some(pane.to_owned());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fullscreen_for_test(&mut self, fullscreen: bool) {
+        self.fullscreen = fullscreen;
     }
 
     #[cfg(test)]

@@ -172,6 +172,8 @@ pub struct App {
     editor_request: Option<EditorRequest>,
     pub(crate) file_dialog: Option<FileDialog>,
     file_drag: Option<FileDrag>,
+    last_agent_click: Option<(AgentKey, Instant)>,
+    pending_fullscreen_agent: Option<AgentKey>,
     last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
     last_explorer_file_click: Option<(RepoPath, Instant)>,
     last_file_editor_click: Option<(Position, Instant)>,
@@ -330,6 +332,8 @@ impl App {
             editor_request: None,
             file_dialog: None,
             file_drag: None,
+            last_agent_click: None,
+            pending_fullscreen_agent: None,
             last_worktree_file_click: None,
             last_explorer_file_click: None,
             last_file_editor_click: None,
@@ -768,6 +772,15 @@ impl App {
             changed |= herdr_poll.changed;
             if let Some(error) = herdr_poll.notice {
                 self.notice = Some(error);
+            }
+            if let Some(result) = herdr_poll.fullscreen_result {
+                let pending = self.pending_fullscreen_agent.take();
+                if result == Ok(false)
+                    && let Some(index) =
+                        pending.as_ref().and_then(|key| self.herdr.agent_index(key))
+                {
+                    self.show_agent(index);
+                }
             }
             if let Some(path) = herdr_poll.reopen_path {
                 diagnostics::event(format!("opening repository path={}", path.display()));

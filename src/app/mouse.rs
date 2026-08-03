@@ -291,11 +291,7 @@ impl App {
                         return;
                     };
                     self.selection.clear();
-                    if self.single_panel_layout() && self.agents_pane_visible() {
-                        self.open_agent_detail(index);
-                    } else {
-                        self.show_agent(index);
-                    }
+                    self.activate_agent_card(key, index);
                     return;
                 }
                 Some(HitTarget::AgentStashToggle) => {
@@ -903,11 +899,7 @@ impl App {
                 let Some(index) = self.herdr.agent_index(&key) else {
                     return;
                 };
-                if self.single_panel_layout() && self.agents_pane_visible() {
-                    self.open_agent_detail(index);
-                } else {
-                    self.show_agent(index);
-                }
+                self.activate_agent_card(key, index);
                 return;
             }
             Some(HitTarget::AgentStashToggle) => {
@@ -1241,9 +1233,46 @@ impl App {
         true
     }
 
-    fn show_agent(&mut self, index: usize) {
+    pub(super) fn show_agent(&mut self, index: usize) {
         if let Err(error) = self.herdr.show_agent(index) {
             self.notice = Some(error);
+        }
+    }
+
+    pub(super) fn activate_agent_card(&mut self, key: AgentKey, index: usize) {
+        if self.herdr.fullscreen() {
+            let double_click = self
+                .last_agent_click
+                .as_ref()
+                .is_some_and(|(previous, at)| {
+                    previous == &key && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+                });
+            self.last_agent_click = (!double_click).then(|| (key.clone(), Instant::now()));
+            if double_click {
+                match self.herdr.toggle_fullscreen() {
+                    Ok(()) => self.pending_fullscreen_agent = Some(key),
+                    Err(error) => {
+                        self.pending_fullscreen_agent = None;
+                        self.notice = Some(format!("Could not toggle fullscreen: {error}"));
+                    }
+                }
+            } else if let Some(path) = self
+                .herdr
+                .agent_destination(index)
+                .map(|path| path.to_path_buf())
+            {
+                self.queue_workspace_restore(path);
+            } else {
+                self.notice = Some("Agent has not reported its working directory".to_owned());
+            }
+            return;
+        }
+
+        self.last_agent_click = None;
+        if self.single_panel_layout() && self.agents_pane_visible() {
+            self.open_agent_detail(index);
+        } else {
+            self.show_agent(index);
         }
     }
 

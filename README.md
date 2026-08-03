@@ -145,6 +145,10 @@ branch, harness, and session before closing its Herdr pane and process. The
 agents. Click a saved card to choose a pane and resume that exact OpenCode
 session; the saved entry is removed only after the agent starts successfully.
 
+While Hunkle is fullscreen, clicking an agent card opens that agent's working
+directory without changing the zoomed layout. Double-click a card to restore the
+tab layout and display that agent beside Hunkle.
+
 Hunkle remembers the last repository opened in each Herdr pane. Relaunching it
 from the same shell directory restores that repository; changing the shell
 directory or passing an explicit path starts from the requested location instead.

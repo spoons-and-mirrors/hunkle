@@ -153,6 +153,64 @@ fn successful_agent_creation_opens_its_destination() {
     assert_eq!(app.mode, Mode::Normal);
 }
 
+fn fullscreen_agent_app(source: &Path, destination: &Path) -> App {
+    let mut app = App::new(source.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE" }],
+            "agents": [{
+                "agent": "opencode",
+                "agent_status": "idle",
+                "pane_id": "w1:p2"
+            }],
+            "panes": [{
+                "pane_id": "w1:p2",
+                "tab_id": "w1:t2",
+                "workspace_id": "w1",
+                "cwd": destination
+            }]
+        } }
+    }));
+    app.herdr.set_host_for_test("w1", "w1:t1", "w1:p1");
+    app.herdr.set_fullscreen_for_test(true);
+    app
+}
+
+#[test]
+fn fullscreen_agent_click_opens_the_agents_destination() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    fs::write(first.path().join("first.txt"), "first\n").unwrap();
+    fs::write(second.path().join("second.txt"), "second\n").unwrap();
+    let destination = fs::canonicalize(second.path()).unwrap();
+    let mut app = fullscreen_agent_app(first.path(), second.path());
+    let key = app.herdr.agent_key(0).unwrap();
+
+    app.activate_agent_card(key, 0);
+    wait_for_state(&mut app, |app| {
+        !app.session.open_running()
+            && app
+                .repository()
+                .is_some_and(|repository| repository.root == destination)
+    });
+
+    assert!(app.herdr.fullscreen());
+}
+
+#[test]
+fn fullscreen_agent_double_click_queues_layout_restore_and_selection() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let mut app = fullscreen_agent_app(first.path(), second.path());
+    let key = app.herdr.agent_key(0).unwrap();
+
+    app.activate_agent_card(key.clone(), 0);
+    app.activate_agent_card(key.clone(), 0);
+
+    assert!(app.herdr.fullscreen_running());
+    assert_eq!(app.pending_fullscreen_agent, Some(key));
+}
+
 #[test]
 fn restored_stash_waits_for_an_authoritative_live_snapshot() {
     let directory = tempfile::tempdir().unwrap();
