@@ -885,10 +885,6 @@ impl HerdrSession {
         self.agents.insert(index, pending.agent);
     }
 
-    pub(crate) fn restored_stash(&mut self, session_id: &str) -> Result<(), String> {
-        self.stash.remove(session_id)
-    }
-
     pub(crate) fn agent_user_messages(&self, index: usize) -> Option<&[AgentUserMessage]> {
         let AgentTimingKey::Session(identity) = self
             .agents

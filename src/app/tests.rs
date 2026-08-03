@@ -144,6 +144,71 @@ fn successful_agent_creation_opens_its_destination() {
 }
 
 #[test]
+fn restored_stash_waits_for_an_authoritative_live_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mut app = App::new(root.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE" }],
+            "agents": [],
+            "panes": []
+        } }
+    }));
+    app.herdr.set_stashed_agents_for_test(vec![StashedAgent {
+        harness: "opencode".to_owned(),
+        agent_name: "opencode".to_owned(),
+        session_source: "env".to_owned(),
+        session_kind: "session_id".to_owned(),
+        session_id: "ses_restored".to_owned(),
+        session_name: Some("Resume this session".to_owned()),
+        repository: root.to_path_buf(),
+        repository_label: "hunkle".to_owned(),
+        worktree: root.to_path_buf(),
+        branch: "feature/restore".to_owned(),
+        workspace_id: "w1".to_owned(),
+        tab_id: "w1:t1".to_owned(),
+        pane_id: "w1:p2".to_owned(),
+        cwd: Some(root.to_path_buf()),
+        destination_cwd: Some(root.to_path_buf()),
+        focused: false,
+        status: AgentStatus::Idle,
+        stashed_at_ms: 42,
+    }]);
+    app.herdr_prompt
+        .complete_for_test("Started restored agent", None);
+
+    app.poll_worker();
+
+    assert_eq!(app.herdr.stashed_agents().len(), 1);
+    app.herdr.apply_snapshot_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE" }],
+            "agents": [{
+                "agent": "opencode",
+                "agent_session": {
+                    "source": "env",
+                    "agent": "opencode",
+                    "kind": "session_id",
+                    "value": "ses_restored"
+                },
+                "agent_status": "idle",
+                "pane_id": "w1:p3",
+                "tab_id": "w1:t1",
+                "workspace_id": "w1"
+            }],
+            "panes": [{
+                "pane_id": "w1:p3",
+                "tab_id": "w1:t1",
+                "workspace_id": "w1"
+            }]
+        } }
+    }));
+
+    assert!(app.herdr.stashed_agents().is_empty());
+}
+
+#[test]
 fn workspace_open_errors_remain_visible_after_explorer_closes() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

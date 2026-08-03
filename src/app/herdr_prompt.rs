@@ -14,7 +14,6 @@ pub(crate) struct HerdrPromptPoll {
 pub(crate) struct HerdrPromptCompletion {
     pub(crate) message: String,
     pub(crate) reopen_path: Option<PathBuf>,
-    pub(crate) restored_session_id: Option<String>,
 }
 
 pub(crate) struct HerdrPrompt {
@@ -66,7 +65,6 @@ impl HerdrPrompt {
             .send(Ok(HerdrPromptCompletion {
                 message: message.into(),
                 reopen_path,
-                restored_session_id: None,
             }))
             .unwrap();
     }
@@ -116,7 +114,6 @@ impl HerdrPrompt {
                 herdr_session::send_command_below(command).map(|pane_id| HerdrPromptCompletion {
                     message: format!("Sent to Herdr pane {pane_id}"),
                     reopen_path: None,
-                    restored_session_id: None,
                 });
             let _ = sender.send(result);
         });
@@ -227,17 +224,12 @@ impl HerdrPrompt {
                 path.display()
             ));
             let reopen_path = path.clone();
-            let result = herdr_session::replace_pane_with_agent(
-                path,
-                workspace_id,
-                pane_id,
-                session_id.clone(),
-            )
-            .map(|pane_id| HerdrPromptCompletion {
-                message: format!("Started agent in Herdr pane {pane_id}"),
-                reopen_path: Some(reopen_path),
-                restored_session_id: session_id,
-            });
+            let result =
+                herdr_session::replace_pane_with_agent(path, workspace_id, pane_id, session_id)
+                    .map(|pane_id| HerdrPromptCompletion {
+                        message: format!("Started agent in Herdr pane {pane_id}"),
+                        reopen_path: Some(reopen_path),
+                    });
             let _ = sender.send(result);
         });
         Ok(())
@@ -276,13 +268,11 @@ impl HerdrPrompt {
                 path.display()
             ));
             let reopen_path = path.clone();
-            let result =
-                herdr_session::split_pane_with_agent(path, pane_id, direction, session_id.clone())
-                    .map(|pane_id| HerdrPromptCompletion {
-                        message: format!("Started agent in new Herdr pane {pane_id}"),
-                        reopen_path: Some(reopen_path),
-                        restored_session_id: session_id,
-                    });
+            let result = herdr_session::split_pane_with_agent(path, pane_id, direction, session_id)
+                .map(|pane_id| HerdrPromptCompletion {
+                    message: format!("Started agent in new Herdr pane {pane_id}"),
+                    reopen_path: Some(reopen_path),
+                });
             let _ = sender.send(result);
         });
         Ok(())

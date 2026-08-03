@@ -846,15 +846,7 @@ impl App {
                         ));
                         self.queue_workspace_restore(path);
                     }
-                    self.notice = if let Some(session_id) = completion.restored_session_id
-                        && let Err(error) = self.herdr.restored_stash(&session_id)
-                    {
-                        Some(format!(
-                            "Agent resumed, but its stash could not be removed: {error}"
-                        ))
-                    } else {
-                        Some(completion.message)
-                    };
+                    self.notice = Some(completion.message);
                 }
                 Err(error) if self.mode == Mode::HerdrPrompt => {
                     self.herdr_prompt.error = Some(error);
