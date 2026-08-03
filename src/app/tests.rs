@@ -1297,7 +1297,7 @@ fn undersized_inline_editor_rejects_text_input() {
     let mut app = App::new(root.to_path_buf());
     app.file_editor = Some(FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap());
     app.mode = Mode::FileEdit;
-    app.regions.screen = Some(Rect::new(0, 0, 50, 12));
+    app.regions.screen = Some(Rect::new(0, 0, 39, 48));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
 

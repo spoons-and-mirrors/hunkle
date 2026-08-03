@@ -104,6 +104,16 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
     assert!(screen.contains("COMMIT"));
     assert!(screen.contains("MESSAGE"));
 
+    let mut narrow_terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+    narrow_terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.worktree.is_none());
+    assert_eq!(app.regions.diff.unwrap().width, 49);
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    assert!(!app.graph_commit_open);
+    narrow_terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.graph_table.is_some());
+    assert!(app.regions.diff.is_none());
+
     fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
     let mut dirty_app = App::new(root.to_path_buf());
     assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);

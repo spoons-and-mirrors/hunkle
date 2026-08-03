@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn narrow_layout_drills_from_changes_into_a_full_width_detail_panel() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Narrow Test"]);
+    run_git(root, &["config", "user.email", "narrow@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+    fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let list = app.regions.worktree_list.unwrap();
+    assert_eq!(app.regions.worktree.unwrap().width, 49);
+    assert!(app.regions.diff.is_none());
+    assert!(app.regions.splitter.is_none());
+    assert!(app.regions.agents_list.is_none());
+
+    let row = app
+        .changes
+        .worktree_rows(app.repository().unwrap())
+        .iter()
+        .position(|row| row.label == "tracked.txt")
+        .unwrap();
+    let y = list.y + (row - app.changes.worktree_scroll) as u16;
+    click(&mut app, list.x + 2, y);
+    wait_for_preview(&mut app);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert!(app.regions.worktree.is_none());
+    assert_eq!(app.regions.diff.unwrap().width, 49);
+    assert!(app.regions.worktree_list.is_none());
+    assert!(app.regions.commit.is_none());
+    assert!(app.regions.changes.is_some());
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(!screen.contains("STAGE ALL"));
+
+    let selected = app.changes.worktree_state.selected();
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert_eq!(app.changes.worktree_state.selected(), selected);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.worktree_list.is_some());
+    assert!(app.regions.diff.is_none());
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.worktree.is_none());
+    assert_eq!(app.regions.diff.unwrap().width, 49);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.worktree_list.is_some());
+    assert!(app.regions.diff.is_none());
+}
+
+#[test]
 fn right_clicking_worktree_rows_toggles_staging() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

@@ -526,6 +526,45 @@ fn renders_and_targets_agents_in_the_normal_view() {
 }
 
 #[test]
+fn narrow_agents_drill_from_the_list_into_conversation_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_agent_user_messages_for_test(
+        0,
+        &[("Make mobile useful", Some("Working on it"), 1, 2)],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+
+    open_agents_pane(&mut app);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let agent = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
+    assert!(app.regions.worktree_list.is_none());
+    assert!(app.regions.diff.is_none());
+
+    click(&mut app, agent.x, agent.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.agents_list.is_none());
+    assert!(app.regions.changes.is_some());
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(screen.contains("Make mobile useful"));
+    assert!(screen.contains("Working on it"));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.hit_target_rect(HitTarget::Agent(0)).is_some());
+    assert!(app.regions.changes.is_none());
+}
+
+#[test]
 fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

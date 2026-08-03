@@ -1,5 +1,8 @@
 use super::*;
 
+pub(crate) const APP_MIN_WIDTH: u16 = 40;
+pub(crate) const SPLIT_VIEW_MIN_WIDTH: u16 = 60;
+
 pub(crate) struct CommitDraftResult {
     pub(super) root: PathBuf,
     pub(super) result: Result<(PathBuf, Option<String>), String>,

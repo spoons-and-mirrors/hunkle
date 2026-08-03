@@ -95,3 +95,33 @@ fn explores_and_pages_sqlite_databases_with_keys_and_mouse() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!app.changes.sqlite_browser.as_ref().unwrap().active);
 }
+
+#[test]
+fn narrow_sqlite_detail_returns_to_the_files_panel() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("app.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+        .unwrap();
+    drop(connection);
+
+    let mut app = App::new(directory.path().to_path_buf());
+    wait_for(&mut app, |app| app.changes.sqlite_browser.is_some());
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.explorer_list.is_some());
+    assert!(app.regions.diff.is_none());
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.changes.sqlite_browser.as_ref().unwrap().active);
+    assert_eq!(app.regions.diff.unwrap().width, 49);
+    assert!(app.regions.explorer_list.is_none());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(!app.changes.sqlite_browser.as_ref().unwrap().active);
+    assert!(app.regions.explorer_list.is_some());
+    assert!(app.regions.diff.is_none());
+}

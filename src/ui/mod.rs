@@ -23,9 +23,9 @@ use std::{env, path::Path};
 
 pub(super) use crate::{
     app::{
-        App, BranchPickerStep, CloneField, FileDialogKind, GraphHitTarget, HeaderPickerItem,
-        HeaderPickerKind, HitTarget, LeftPane, Mode, Regions, RepositoryPickerStep, ShortcutAction,
-        TAB_WIDTH, TextInput, View, WorktreePickerStep,
+        APP_MIN_WIDTH, App, BranchPickerStep, CloneField, FileDialogKind, GraphHitTarget,
+        HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode, Regions,
+        RepositoryPickerStep, ShortcutAction, TAB_WIDTH, TextInput, View, WorktreePickerStep,
     },
     theme::{Palette, load_theme},
 };
@@ -50,16 +50,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         frame.area(),
     );
 
-    if frame.area().width < 60 || frame.area().height < 16 {
+    if frame.area().width < APP_MIN_WIDTH || frame.area().height < 16 {
         app.reset_media_presentation();
         let message = if app.mode == Mode::FileEdit {
             format!(
-                "hunkle editor needs at least 60 columns and 16 rows\n\n{}  save + close    esc  close",
+                "hunkle editor needs at least {APP_MIN_WIDTH} columns and 16 rows\n\n{}  save + close    esc  close",
                 app.settings.shortcuts.label(ShortcutAction::SaveOrFormat)
             )
         } else {
             format!(
-                "hunkle needs at least 60 columns and 16 rows\n\n{}  quit",
+                "hunkle needs at least {APP_MIN_WIDTH} columns and 16 rows\n\n{}  quit",
                 app.settings.shortcuts.label(ShortcutAction::Quit)
             )
         };
@@ -115,7 +115,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             visible_view != View::Graph || app.graph_commit_open,
         );
     }
-    if visible_view == View::Graph && !app.graph_commit_open {
+    if visible_view == View::Graph
+        && !app.graph_commit_open
+        && !(app.single_panel_layout() && app.agents_pane_visible())
+    {
+        app.reset_media_presentation();
         let graph_area = app.regions.diff.unwrap_or(main_content);
         frame.render_widget(Clear, graph_area);
         app.regions.diff = None;
@@ -124,6 +128,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.regions.diff_scroll_max = 0;
         app.regions.diff_hunks.clear();
         app.regions.clear_hit_targets_in(graph_area);
+        if app.single_panel_layout() {
+            app.regions.worktree = None;
+            app.regions.worktree_list = None;
+            app.regions.explorer_list = None;
+            app.regions.agents_list = None;
+            app.regions.agents_splitter = None;
+            app.regions.agents_bounds = None;
+            app.regions.commit = None;
+            app.regions.actions = None;
+            app.regions.files_add = None;
+            app.regions.files_root = None;
+        }
         let graph_regions = history::draw_graph(
             frame,
             graph_area,
@@ -373,10 +389,15 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.settings.shortcuts.label(action)
         }
     };
-    let mut labels = vec![
+    let show_back = app.single_panel_detail_visible() || app.graph_commit_open;
+    let mut labels = Vec::new();
+    if show_back {
+        labels.push(("esc".to_owned(), "Back"));
+    }
+    labels.extend([
         (key_label(ShortcutAction::ToggleGraph), "Git Graph"),
         (key_label(left_pane_action), left_pane_label),
-    ];
+    ]);
     labels.extend([
         (key_label(ShortcutAction::OpenExplorer), "Explorer"),
         (key_label(ShortcutAction::OpenSettings), "Settings"),
@@ -413,7 +434,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut x = start_x;
     let mut rects = Vec::new();
     for (index, (key, label)) in labels.iter().enumerate() {
-        let active = index == 0 && app.visible_view() == View::Graph;
+        let active = index == usize::from(show_back) && app.visible_view() == View::Graph;
         let background = active.then_some(palette().raised);
         spans.push(Span::styled(
             " ",
@@ -461,12 +482,13 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         x = x.saturating_add(width);
     }
 
-    app.regions.changes = None;
-    app.regions.graph = rects.first().copied();
-    app.regions.left_pane_toggle = rects.get(1).copied();
-    app.regions.explorer = rects.get(2).copied();
-    app.regions.settings = rects.get(3).copied();
-    app.regions.help = rects.get(4).copied();
+    let offset = usize::from(show_back);
+    app.regions.changes = show_back.then(|| rects[0]);
+    app.regions.graph = rects.get(offset).copied();
+    app.regions.left_pane_toggle = rects.get(offset + 1).copied();
+    app.regions.explorer = rects.get(offset + 2).copied();
+    app.regions.settings = rects.get(offset + 3).copied();
+    app.regions.help = rects.get(offset + 4).copied();
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)),

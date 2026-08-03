@@ -245,7 +245,11 @@ impl App {
             match self.regions.hit_target_at(point) {
                 Some(HitTarget::Agent(index)) => {
                     self.selection.clear();
-                    self.toggle_agent_visibility(index);
+                    if self.single_panel_layout() && self.agents_pane_visible() {
+                        self.open_agent_detail(index);
+                    } else {
+                        self.toggle_agent_visibility(index);
+                    }
                     return;
                 }
                 Some(HitTarget::AgentStashToggle) => {
@@ -512,6 +516,7 @@ impl App {
             .regions
             .agents_splitter
             .is_some_and(|rect| rect.contains(point))
+            && !self.single_panel_layout()
         {
             self.mode = Mode::Normal;
             self.dragging_agents = true;
@@ -647,7 +652,11 @@ impl App {
                 return;
             }
             Some(HitTarget::Agent(index)) => {
-                self.toggle_agent_visibility(index);
+                if self.single_panel_layout() && self.agents_pane_visible() {
+                    self.open_agent_detail(index);
+                } else {
+                    self.toggle_agent_visibility(index);
+                }
                 return;
             }
             Some(HitTarget::AgentStashToggle) => {
@@ -711,7 +720,7 @@ impl App {
             .changes
             .is_some_and(|rect| rect.contains(point))
         {
-            self.show_main_pane();
+            self.show_previous_panel();
         } else if self.regions.graph.is_some_and(|rect| rect.contains(point)) {
             self.toggle_graph();
         } else if self
@@ -733,7 +742,7 @@ impl App {
                 let repo = self.session.data();
                 self.changes.toggle_selected_explorer_directory(repo);
             } else {
-                self.show_main_pane();
+                self.show_detail_panel();
             }
         } else if self.select_agents_row(point) {
         } else if self.select_graph_row(point) {
@@ -899,12 +908,13 @@ impl App {
                 self.dismiss_agent_preview();
                 self.last_worktree_file_click = None;
                 self.mode = Mode::Normal;
+                self.single_panel_detail_open = false;
             }
             Some(ChangesEffect::PaneActivated) => {
                 self.dismiss_agent_preview();
                 self.last_worktree_file_click = None;
                 self.mode = Mode::Normal;
-                self.show_main_pane();
+                self.show_detail_panel();
             }
             Some(ChangesEffect::AgentsPaneActivated) => {
                 self.show_agents_pane();
@@ -936,7 +946,7 @@ impl App {
                 {
                     return;
                 }
-                self.show_main_pane();
+                self.show_detail_panel();
             }
             None => {}
         }
@@ -996,7 +1006,7 @@ impl App {
         self.select_agent_preview(index);
     }
 
-    fn select_agent_preview(&mut self, index: usize) {
+    pub(super) fn select_agent_preview(&mut self, index: usize) {
         if index >= self.herdr.agents.len() {
             return;
         }

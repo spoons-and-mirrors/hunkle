@@ -135,6 +135,7 @@ impl App {
                 self.changes.pin_preview_line(path, line);
             }
             self.file_search.close();
+            self.show_detail_panel();
         }
     }
 }
