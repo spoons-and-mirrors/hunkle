@@ -542,6 +542,7 @@ impl App {
     }
 
     pub(crate) fn shutdown(&mut self) {
+        self.herdr.shutdown();
         self.file_search.shutdown();
         self.changes.shutdown();
         self.commit_summaries.shutdown();

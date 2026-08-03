@@ -39,8 +39,9 @@ struct TimingRecord {
 }
 
 pub(super) struct Persistence {
-    sender: Sender<Request>,
+    sender: Option<Sender<Request>>,
     receiver: Receiver<Completion>,
+    worker: Option<thread::JoinHandle<()>>,
     disconnected: bool,
 }
 
@@ -82,13 +83,14 @@ impl Persistence {
     pub(super) fn new(path: PathBuf) -> Self {
         let (sender, requests) = mpsc::channel();
         let (completions, receiver) = mpsc::channel();
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("agent-timing-persistence".to_owned())
             .spawn(move || persistence_loop(path, requests, completions))
             .expect("agent timing persistence worker should start");
         Self {
-            sender,
+            sender: Some(sender),
             receiver,
+            worker: Some(worker),
             disconnected: false,
         }
     }
@@ -175,6 +177,13 @@ impl Persistence {
         }
     }
 
+    pub(super) fn shutdown(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+
     fn send(
         &self,
         local: &HashMap<AgentTimingKey, AgentTiming>,
@@ -182,6 +191,13 @@ impl Persistence {
         operation: Operation,
     ) -> io::Result<()> {
         self.sender
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "agent timing persistence worker stopped",
+                )
+            })?
             .send(Request {
                 submitted: local.clone(),
                 clear_generation,
@@ -193,6 +209,12 @@ impl Persistence {
                     "agent timing persistence worker stopped",
                 )
             })
+    }
+}
+
+impl Drop for Persistence {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -666,6 +688,23 @@ mod tests {
 
         assert!(local.contains_key(&shared_key));
         assert_eq!(local[&local_key].status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn shutdown_flushes_queued_timing_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-timings.json");
+        let key = AgentTimingKey::Terminal("queued".to_owned());
+        let local = HashMap::from([(
+            key.clone(),
+            AgentTiming::new(AgentStatus::Working, 1, 1_000),
+        )]);
+        let mut persistence = Persistence::new(path.clone());
+
+        persistence.sync(&local, &[], 1_000, 0).unwrap();
+        persistence.shutdown();
+
+        assert!(load(&path).unwrap().timings.contains_key(&key));
     }
 
     #[test]

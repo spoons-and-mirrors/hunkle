@@ -465,6 +465,12 @@ impl HerdrSession {
         self.enabled
     }
 
+    pub(crate) fn shutdown(&mut self) {
+        if let Some(persistence) = self.agent_timing_persistence.as_mut() {
+            persistence.shutdown();
+        }
+    }
+
     pub(crate) fn linked_worktree_observation(&self) -> LinkedWorktreeObservation {
         let candidates = self
             .workspaces
