@@ -10,13 +10,30 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentStatus, HerdrSession,
+    AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey,
+    AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentUserMessage, HerdrSession,
     HitTarget, LinkedWorktreeCatalog, Settings,
 };
 
-use super::{fill, palette, truncate_width};
+use super::{fill, palette, text::word_wrapped_height, truncate_width};
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+struct TranscriptBlock {
+    message: usize,
+    user: bool,
+    lines: Vec<Line<'static>>,
+    start: usize,
+    height: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RequestAnchor {
+    message: usize,
+    request: usize,
+    start: usize,
+    tool_count: u64,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw(
@@ -160,6 +177,8 @@ pub(super) fn draw(
             | HitTarget::AgentPreviewPickerItem(agent)
             | HitTarget::AgentPreviewPrevious(agent)
             | HitTarget::AgentPreviewNext(agent)
+            | HitTarget::AgentPreviewRequestPrevious { agent, .. }
+            | HitTarget::AgentPreviewRequestNext { agent, .. }
             | HitTarget::AgentTooltip { agent, .. }
             | HitTarget::AgentMessage { agent, .. },
         ) => Some(agent),
@@ -374,17 +393,19 @@ pub(super) fn draw_history(
     frame: &mut Frame<'_>,
     herdr: &HerdrSession,
     index: usize,
-    selected_message: Option<usize>,
+    selected_request: Option<(usize, usize)>,
+    transcript_scroll: Option<usize>,
     pressed_navigation: Option<bool>,
     picker_open: bool,
     hovered: Option<HitTarget>,
+    repository_anchor: Option<Rect>,
     area: Rect,
-) -> Vec<(HitTarget, Rect)> {
+) -> (Vec<(HitTarget, Rect)>, usize, usize) {
     if area.width < 24 || area.height < 10 {
-        return Vec::new();
+        return (Vec::new(), 0, 0);
     }
     let Some(agent_key) = herdr.agent_key(index) else {
-        return Vec::new();
+        return (Vec::new(), 0, 0);
     };
     fill(frame, area, palette().panel);
     let messages = herdr.agent_user_messages(index).unwrap_or_default();
@@ -401,23 +422,17 @@ pub(super) fn draw_history(
     };
     let agent_count = herdr.agents.len();
     let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
-    let desired_navigation_width = badge_width(repository).saturating_add(6);
-    let navigation_width = desired_navigation_width.max(6).min(area.width);
-    let navigation_x = area.x;
-    let repository_width = navigation_width.saturating_sub(6);
-    let repository_area = Rect::new(navigation_x, area.y, repository_width, 1);
-    let previous_button = Rect::new(
-        repository_area.right(),
-        area.y,
-        3.min(navigation_width.saturating_sub(repository_width)),
-        1,
+    let repository_width = badge_width(repository)
+        .min(repository_anchor.map_or_else(|| area.width.saturating_sub(6), |anchor| anchor.width));
+    let repository_area = repository_anchor.map_or_else(
+        || Rect::new(area.x, area.y, repository_width, 1),
+        |anchor| Rect::new(anchor.x, anchor.y, repository_width, 1),
     );
+    let previous_button = Rect::new(area.right().saturating_sub(6), area.y, 3.min(area.width), 1);
     let next_button = Rect::new(
         previous_button.right(),
         area.y,
-        navigation_x
-            .saturating_add(navigation_width)
-            .saturating_sub(previous_button.right()),
+        area.right().saturating_sub(previous_button.right()),
         1,
     );
     let button_style = |pressed| {
@@ -455,6 +470,43 @@ pub(super) fn draw_history(
             .style(button_style(pressed_navigation == Some(true))),
         next_button,
     );
+    if let Some((phase, phase_color)) = phase {
+        let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
+        let phase_x = area.x;
+        let phase_right = previous_button.x.saturating_sub(1);
+        let phase_area = Rect::new(
+            if repository_anchor.is_some() {
+                phase_x
+            } else {
+                repository_area.right().saturating_add(1)
+            },
+            area.y,
+            if repository_anchor.is_some() {
+                phase_right.saturating_sub(phase_x)
+            } else {
+                previous_button
+                    .x
+                    .saturating_sub(repository_area.right().saturating_add(2))
+            },
+            1,
+        );
+        if phase_area.width >= phase_width.saturating_add(2) {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("● ", Style::default().fg(phase_color)),
+                    Span::styled(
+                        phase,
+                        Style::default()
+                            .fg(phase_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]))
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(Style::default().bg(palette().panel)),
+                phase_area,
+            );
+        }
+    }
     let mut navigation_targets = Vec::new();
     if repository_area.width >= 3 {
         navigation_targets.push((
@@ -462,7 +514,7 @@ pub(super) fn draw_history(
             repository_area,
         ));
     }
-    if agent_count > 1 && navigation_width >= 2 {
+    if agent_count > 1 && area.width >= 6 {
         navigation_targets.push((
             HitTarget::AgentPreviewPrevious(agent_key.clone()),
             previous_button,
@@ -491,244 +543,95 @@ pub(super) fn draw_history(
             hovered,
             &mut navigation_targets,
         );
-        return navigation_targets;
+        return (navigation_targets, 0, 0);
     }
-    let selected_message = selected_message
-        .unwrap_or_else(|| messages.len().saturating_sub(1))
-        .min(messages.len().saturating_sub(1));
-    let message = &messages[selected_message];
-    if let Some((phase, phase_color)) = phase {
-        let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
-        frame.render_widget(
-            Paragraph::new(phase)
-                .alignment(ratatui::layout::Alignment::Right)
-                .style(
-                    Style::default()
-                        .fg(phase_color)
-                        .bg(palette().panel)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            Rect::new(
-                area.right().saturating_sub(phase_width),
-                area.y.saturating_add(1),
-                phase_width,
-                1,
-            ),
-        );
-    }
+    let main = Rect::new(
+        area.x,
+        area.y.saturating_add(2),
+        area.width,
+        area.bottom().saturating_sub(area.y.saturating_add(2)),
+    );
+    let selector_row = Rect::new(
+        main.x.saturating_add(2),
+        main.y,
+        main.width.saturating_sub(3),
+        1.min(main.height),
+    );
+    let viewport = Rect::new(
+        main.x,
+        main.y.saturating_add(2),
+        main.width,
+        main.height.saturating_sub(2),
+    );
+    let cards = Rect::new(
+        main.x.saturating_add(2),
+        viewport.y,
+        main.width.saturating_sub(3),
+        viewport.height,
+    );
+    let content_width = usize::from(cards.width.saturating_sub(3).max(1));
+    let live = status == AgentStatus::Working;
+    let (blocks, anchors, document_height) =
+        build_transcript(messages, content_width, live, herdr.spinner_frame());
+    let scroll_max = document_height.saturating_sub(usize::from(viewport.height));
+    let selected_anchor = selected_request.and_then(|(message, request)| {
+        anchors
+            .iter()
+            .find(|anchor| anchor.message == message && anchor.request == request)
+    });
+    let scroll = selected_anchor
+        .map(|anchor| anchor.start.saturating_sub(1))
+        .or(transcript_scroll)
+        .unwrap_or(scroll_max)
+        .min(scroll_max);
+    let focus_row = scroll.saturating_add(usize::from(viewport.height) / 3);
+    let focused = selected_anchor.or_else(|| {
+        if scroll == scroll_max {
+            anchors.last()
+        } else if scroll == 0 {
+            anchors.first()
+        } else {
+            anchors
+                .iter()
+                .min_by_key(|anchor| anchor.start.abs_diff(focus_row))
+        }
+    });
+    let focused_message = focused.map_or(messages.len().saturating_sub(1), |anchor| anchor.message);
     let mut targets = vec![(
         HitTarget::AgentTooltip {
             agent: agent_key.clone(),
-            message: selected_message,
+            message: focused_message,
         },
         area,
     )];
     targets.extend(navigation_targets);
-    let main = Rect::new(
-        area.x,
-        area.y.saturating_add(3),
-        area.width,
-        area.bottom().saturating_sub(area.y.saturating_add(3)),
-    );
-    let timeline = Rect::new(main.x, main.y, 2.min(main.width), main.height);
-    let marker_count = messages.len().min(usize::from(timeline.height));
-    let marker_start = selected_message
-        .saturating_sub(marker_count / 2)
-        .min(messages.len().saturating_sub(marker_count));
-    for visible_index in 0..marker_count {
-        let message_index = marker_start + visible_index;
-        let offset = u16::try_from(visible_index).unwrap_or(0);
-        let marker = Rect::new(
-            timeline.x,
-            timeline.y.saturating_add(offset),
-            timeline.width,
-            1,
-        );
-        let color = if message_index == selected_message {
-            palette().yellow
-        } else {
-            palette().muted
-        };
-        let symbol = if message_index == selected_message {
-            "◉"
-        } else {
-            "○"
-        };
-        frame.render_widget(
-            Paragraph::new(symbol).style(Style::default().fg(color).bg(palette().panel)),
-            Rect::new(marker.x, marker.y, 1, 1),
-        );
-        targets.push((
-            HitTarget::AgentMessage {
-                agent: agent_key.clone(),
-                message: message_index,
-            },
-            marker,
-        ));
-    }
-    let cards = Rect::new(
-        main.x.saturating_add(2),
-        main.y,
-        main.width.saturating_sub(2),
-        main.height,
-    );
-    let activity_count = message
-        .activities
-        .len()
-        .min(2)
-        .min(usize::from(cards.height.saturating_sub(15) / 3));
-    let activity_height = u16::try_from(activity_count).unwrap_or(0).saturating_mul(3);
-    let message_height = cards.height.min(14);
-    let user_height = message_height.div_ceil(2);
-    let agent_height = message_height.saturating_sub(user_height);
-    let user_card = Rect::new(cards.x, cards.y, cards.width, user_height);
-    let user_body = draw_half_cell_card(frame, user_card, palette().surface_alt, palette().panel);
-    frame.render_widget(
-        Paragraph::new("YOU").style(
-            Style::default()
-                .fg(palette().yellow)
-                .bg(palette().surface_alt)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Rect::new(user_body.x, user_body.y, user_body.width, 1),
-    );
-    frame.render_widget(
-        Paragraph::new(message.text.as_str())
-            .style(
-                Style::default()
-                    .fg(palette().soft)
-                    .bg(palette().surface_alt),
-            )
-            .wrap(Wrap { trim: true }),
-        Rect::new(
-            user_body.x,
-            user_body.y.saturating_add(1),
-            user_body.width,
-            user_body.height.saturating_sub(1),
-        ),
-    );
-    let agent_card = Rect::new(cards.x, user_card.bottom(), cards.width, agent_height);
-    let agent_body = draw_half_cell_card(frame, agent_card, palette().surface_alt, palette().panel);
-    let agent_text = message
-        .latest_agent_text
-        .as_deref()
-        .unwrap_or("Waiting for agent output...");
-    frame.render_widget(
-        Paragraph::new("AGENT").style(
-            Style::default()
-                .fg(palette().cyan)
-                .bg(palette().surface_alt)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Rect::new(agent_body.x, agent_body.y, agent_body.width, 1),
-    );
-    frame.render_widget(
-        Paragraph::new(agent_text)
-            .style(
-                Style::default()
-                    .fg(if message.latest_agent_text.is_some() {
-                        palette().accent
-                    } else {
-                        palette().faint
-                    })
-                    .bg(palette().surface_alt),
-            )
-            .wrap(Wrap { trim: true }),
-        Rect::new(
-            agent_body.x,
-            agent_body.y.saturating_add(1),
-            agent_body.width,
-            agent_body.height.saturating_sub(1),
-        ),
-    );
-    let activity_start = message.activities.len().saturating_sub(activity_count);
-    for (position, activity) in message.activities[activity_start..].iter().enumerate() {
-        let activity_card = Rect::new(
-            cards.x,
-            agent_card
-                .bottom()
-                .saturating_add(u16::try_from(position).unwrap_or(0).saturating_mul(3)),
-            cards.width,
-            3,
-        );
-        let activity_body =
-            draw_half_cell_card(frame, activity_card, palette().surface_alt, palette().panel);
-        let newest = position + 1 == activity_count;
-        let live =
-            status == AgentStatus::Working && selected_message == messages.len().saturating_sub(1);
-        let spinner = SPINNER_FRAMES[herdr.spinner_frame() % SPINNER_FRAMES.len()];
-        let spans = match activity {
-            AgentActivityPreview::Reasoning => {
-                let active = newest && live && message.reasoning_active;
-                let mut spans = Vec::new();
-                if active {
-                    spans.push(Span::styled(spinner, Style::default().fg(palette().orange)));
-                }
-                spans.push(Span::styled(
-                    if active { "  REASONING" } else { "REASONING" },
-                    Style::default()
-                        .fg(palette().orange)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans
-            }
-            AgentActivityPreview::Tool {
-                name,
-                title,
-                running,
-            } => {
-                let active = *running && newest && live;
-                let mut spans = Vec::new();
-                if active {
-                    spans.push(Span::styled(spinner, Style::default().fg(palette().cyan)));
-                }
-                spans.push(Span::styled(
-                    if active { "  TOOL  " } else { "TOOL  " },
-                    Style::default()
-                        .fg(palette().cyan)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    name.as_str(),
-                    Style::default().fg(palette().accent),
-                ));
-                if let Some(title) = title {
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(
-                        title.as_str(),
-                        Style::default().fg(palette().soft),
-                    ));
-                }
-                spans
-            }
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().surface_alt)),
-            activity_body,
+    if let Some(anchor) = focused {
+        let request_count = messages[anchor.message].requests.len();
+        draw_request_selector(
+            frame,
+            selector_row,
+            agent_key.clone(),
+            anchor.message,
+            anchor.request,
+            request_count,
+            anchor.tool_count,
+            &mut targets,
         );
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                message.request_count.to_string(),
-                Style::default().fg(palette().yellow),
-            ),
-            Span::styled(" REQUESTS", Style::default().fg(palette().muted)),
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                message.tool_call_count.to_string(),
-                Style::default().fg(palette().cyan),
-            ),
-            Span::styled(" TOOLS", Style::default().fg(palette().muted)),
-        ]))
-        .style(Style::default().bg(palette().panel)),
-        Rect::new(
-            cards.x,
-            agent_card.bottom().saturating_add(activity_height),
-            cards.width,
-            1,
-        ),
-    );
+    for block in &blocks {
+        if let Some(visible) = draw_transcript_card(frame, block, cards, viewport, scroll)
+            && block.user
+        {
+            targets.push((
+                HitTarget::AgentMessage {
+                    agent: agent_key.clone(),
+                    message: block.message,
+                },
+                visible,
+            ));
+        }
+    }
+    draw_transcript_progress(frame, viewport, scroll, scroll_max);
     draw_agent_preview_picker(
         frame,
         herdr,
@@ -739,7 +642,7 @@ pub(super) fn draw_history(
         hovered,
         &mut targets,
     );
-    targets
+    (targets, scroll_max, scroll)
 }
 
 fn draw_agent_preview_picker(
@@ -835,43 +738,418 @@ fn draw_agent_preview_picker(
     }
 }
 
-fn draw_half_cell_card(
+fn build_transcript(
+    messages: &[AgentUserMessage],
+    width: usize,
+    live: bool,
+    spinner_frame: usize,
+) -> (Vec<TranscriptBlock>, Vec<RequestAnchor>, usize) {
+    let mut blocks = Vec::new();
+    let mut anchors = Vec::new();
+    let mut document_height = 0;
+    for (message_index, message) in messages.iter().enumerate() {
+        let user_height = message_wrapped_height(&message.text, width).max(1);
+        blocks.push(TranscriptBlock {
+            message: message_index,
+            user: true,
+            lines: message
+                .text
+                .split('\n')
+                .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().soft)))
+                .collect(),
+            start: document_height,
+            height: user_height.saturating_add(3),
+        });
+        document_height = document_height.saturating_add(user_height.saturating_add(3));
+
+        let agent_start = document_height;
+        let mut agent_lines = Vec::new();
+        let mut agent_height = 0;
+        if message.requests.is_empty() {
+            let (lines, height) = request_content(None, width, live, spinner_frame);
+            agent_lines = lines;
+            agent_height = height;
+        } else {
+            for (request_index, request) in message.requests.iter().enumerate() {
+                anchors.push(RequestAnchor {
+                    message: message_index,
+                    request: request_index,
+                    start: agent_start.saturating_add(2).saturating_add(agent_height),
+                    tool_count: request.tool_call_count,
+                });
+                if message.requests.len() > 1 {
+                    agent_lines.push(Line::styled(
+                        format!("request {} / {}", request_index + 1, message.requests.len()),
+                        Style::default().fg(palette().faint),
+                    ));
+                    agent_height = agent_height.saturating_add(1);
+                }
+                let (mut lines, height) = request_content(
+                    Some(request),
+                    width,
+                    live && message_index + 1 == messages.len()
+                        && request_index + 1 == message.requests.len(),
+                    spinner_frame,
+                );
+                agent_lines.append(&mut lines);
+                agent_height = agent_height.saturating_add(height);
+                if request_index + 1 < message.requests.len() {
+                    agent_lines.push(Line::default());
+                    agent_height = agent_height.saturating_add(1);
+                }
+            }
+        }
+        agent_height = agent_height.max(1);
+        blocks.push(TranscriptBlock {
+            message: message_index,
+            user: false,
+            lines: agent_lines,
+            start: agent_start,
+            height: agent_height.saturating_add(3),
+        });
+        document_height = agent_start
+            .saturating_add(agent_height.saturating_add(3))
+            .saturating_add(1);
+    }
+    (blocks, anchors, document_height.saturating_sub(1))
+}
+
+fn draw_transcript_card(
+    frame: &mut Frame<'_>,
+    block: &TranscriptBlock,
+    cards: Rect,
+    viewport: Rect,
+    scroll: usize,
+) -> Option<Rect> {
+    let visible_start = block.start.max(scroll);
+    let visible_end = block
+        .start
+        .saturating_add(block.height)
+        .min(scroll.saturating_add(usize::from(viewport.height)));
+    if visible_start >= visible_end {
+        return None;
+    }
+    let local_start = visible_start.saturating_sub(block.start);
+    let local_end = visible_end.saturating_sub(block.start);
+    let y = viewport
+        .y
+        .saturating_add(u16::try_from(visible_start.saturating_sub(scroll)).unwrap_or(u16::MAX));
+    let visible = Rect::new(
+        cards.x,
+        y,
+        cards.width,
+        u16::try_from(visible_end - visible_start).unwrap_or(u16::MAX),
+    );
+    let background = palette().surface_alt;
+    let accent = if block.user {
+        palette().yellow
+    } else {
+        palette().cyan
+    };
+    let middle_start = local_start.max(1);
+    let middle_end = local_end.min(block.height.saturating_sub(1));
+    if middle_start < middle_end {
+        let middle = Rect::new(
+            cards.x,
+            y.saturating_add(u16::try_from(middle_start - local_start).unwrap_or(0)),
+            cards.width,
+            u16::try_from(middle_end - middle_start).unwrap_or(u16::MAX),
+        );
+        fill(frame, middle, background);
+        frame.render_widget(
+            Paragraph::new("┃\n".repeat(usize::from(middle.height))).style(
+                Style::default()
+                    .fg(accent)
+                    .bg(background)
+                    .remove_modifier(Modifier::DIM),
+            ),
+            Rect::new(middle.x, middle.y, 1, middle.height),
+        );
+    }
+    if local_start == 0 {
+        frame.render_widget(
+            Paragraph::new("▄".repeat(usize::from(cards.width)))
+                .style(Style::default().fg(background).bg(palette().panel)),
+            Rect::new(cards.x, y, cards.width, 1),
+        );
+    }
+    if local_start <= 1 && local_end > 1 {
+        frame.render_widget(
+            Paragraph::new(if block.user { "YOU" } else { "AGENT" }).style(
+                Style::default()
+                    .fg(accent)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(
+                cards.x.saturating_add(2),
+                y.saturating_add(u16::try_from(1_usize.saturating_sub(local_start)).unwrap_or(0)),
+                cards.width.saturating_sub(3),
+                1,
+            ),
+        );
+    }
+    let content_start = local_start.max(2);
+    let content_end = local_end.min(block.height.saturating_sub(1));
+    if content_start < content_end {
+        let content = Rect::new(
+            cards.x.saturating_add(2),
+            y.saturating_add(u16::try_from(content_start - local_start).unwrap_or(0)),
+            cards.width.saturating_sub(3),
+            u16::try_from(content_end - content_start).unwrap_or(u16::MAX),
+        );
+        frame.render_widget(
+            Paragraph::new(block.lines.clone())
+                .style(Style::default().fg(palette().soft).bg(background))
+                .wrap(Wrap { trim: true })
+                .scroll((
+                    u16::try_from(content_start.saturating_sub(2)).unwrap_or(u16::MAX),
+                    0,
+                )),
+            content,
+        );
+    }
+    if local_end == block.height {
+        frame.render_widget(
+            Paragraph::new("▀".repeat(usize::from(cards.width)))
+                .style(Style::default().fg(background).bg(palette().panel)),
+            Rect::new(
+                cards.x,
+                y.saturating_add(u16::try_from(local_end - local_start - 1).unwrap_or(0)),
+                cards.width,
+                1,
+            ),
+        );
+    }
+    Some(visible)
+}
+
+fn request_content(
+    request: Option<&AgentRequestPreview>,
+    width: usize,
+    live: bool,
+    spinner_frame: usize,
+) -> (Vec<Line<'static>>, usize) {
+    let Some(request) = request else {
+        return (
+            vec![Line::styled(
+                "Waiting for agent output...",
+                Style::default().fg(palette().faint),
+            )],
+            1,
+        );
+    };
+    let mut lines = Vec::new();
+    let mut height = 0;
+    let last_part = request.parts.len().saturating_sub(1);
+    for (index, part) in request.parts.iter().enumerate() {
+        let AgentRequestPartPreview::Activity(activity) = part else {
+            let AgentRequestPartPreview::Text(text) = part else {
+                unreachable!();
+            };
+            for line in text.split('\n') {
+                height += word_wrapped_height(line, width).max(1);
+                lines.push(Line::styled(
+                    line.to_owned(),
+                    Style::default().fg(palette().soft),
+                ));
+            }
+            continue;
+        };
+        let (line, plain) = match activity {
+            AgentActivityPreview::Reasoning => {
+                let active = live && request.reasoning_active && index == last_part;
+                let prefix = if active {
+                    SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()]
+                } else {
+                    "›"
+                };
+                (
+                    Line::from(vec![
+                        Span::styled(prefix.to_owned(), Style::default().fg(palette().orange)),
+                        Span::styled(
+                            "  reasoning",
+                            Style::default()
+                                .fg(palette().orange)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    format!("{prefix}  reasoning"),
+                )
+            }
+            AgentActivityPreview::Tool {
+                name,
+                title,
+                running,
+            } => {
+                let active = live && *running;
+                let prefix = if active {
+                    SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()]
+                } else {
+                    "›"
+                };
+                let mut spans = vec![
+                    Span::styled(prefix.to_owned(), Style::default().fg(palette().cyan)),
+                    Span::styled(
+                        "  tool  ",
+                        Style::default()
+                            .fg(palette().cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(name.clone(), Style::default().fg(palette().accent)),
+                ];
+                let mut plain = format!("{prefix}  tool  {name}");
+                if let Some(title) = title {
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(
+                        title.clone(),
+                        Style::default().fg(palette().soft),
+                    ));
+                    plain.push_str("  ");
+                    plain.push_str(&title);
+                }
+                (Line::from(spans), plain)
+            }
+        };
+        height += word_wrapped_height(&plain, width).max(1);
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            "Waiting for agent output...",
+            Style::default().fg(palette().faint),
+        ));
+        height = 1;
+    }
+    (lines, height)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_request_selector(
     frame: &mut Frame<'_>,
     area: Rect,
-    background: Color,
-    outer_background: Color,
-) -> Rect {
-    if area.width < 3 || area.height < 3 {
-        return area;
+    agent: AgentKey,
+    message: usize,
+    request: usize,
+    request_count: usize,
+    tool_count: u64,
+    targets: &mut Vec<(HitTarget, Rect)>,
+) {
+    if area.height == 0 || area.width < 7 {
+        return;
     }
-    let edge_style = Style::default()
-        .fg(background)
-        .bg(outer_background)
-        .remove_modifier(Modifier::DIM);
+    let count = if request_count == 0 {
+        "0/0".to_owned()
+    } else {
+        format!("{}/{}", request + 1, request_count)
+    };
+    let selector_width = u16::try_from(UnicodeWidthStr::width(count.as_str()).saturating_add(4))
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    let selector = Rect::new(
+        area.x
+            .saturating_add(area.width.saturating_sub(selector_width) / 2),
+        area.y,
+        selector_width,
+        1,
+    );
+    let previous_enabled = request_count > 0 && request > 0;
+    let next_enabled = request_count > 0 && request + 1 < request_count;
     frame.render_widget(
-        Paragraph::new("▄".repeat(usize::from(area.width))).style(edge_style),
-        Rect::new(area.x, area.y, area.width, 1),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "< ",
+                Style::default().fg(if previous_enabled {
+                    palette().cyan
+                } else {
+                    palette().faint
+                }),
+            ),
+            Span::styled(
+                count,
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " >",
+                Style::default().fg(if next_enabled {
+                    palette().cyan
+                } else {
+                    palette().faint
+                }),
+            ),
+        ]))
+        .style(Style::default().bg(palette().panel)),
+        selector,
     );
+    let tools = format!(
+        "{tool_count} tool{}",
+        if tool_count == 1 { "" } else { "s" }
+    );
+    let tools_width = u16::try_from(UnicodeWidthStr::width(tools.as_str())).unwrap_or(u16::MAX);
+    if tools_width < area.width.saturating_sub(selector_width).saturating_sub(2) {
+        frame.render_widget(
+            Paragraph::new(tools)
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(Style::default().fg(palette().faint).bg(palette().panel)),
+            Rect::new(
+                area.right().saturating_sub(tools_width),
+                area.y,
+                tools_width,
+                1,
+            ),
+        );
+    }
+    if previous_enabled {
+        targets.push((
+            HitTarget::AgentPreviewRequestPrevious {
+                agent: agent.clone(),
+                message,
+                request,
+            },
+            Rect::new(selector.x, selector.y, 2.min(selector.width), 1),
+        ));
+    }
+    if next_enabled {
+        targets.push((
+            HitTarget::AgentPreviewRequestNext {
+                agent,
+                message,
+                request,
+            },
+            Rect::new(selector.right().saturating_sub(2), selector.y, 2, 1),
+        ));
+    }
+}
+
+fn draw_transcript_progress(frame: &mut Frame<'_>, area: Rect, scroll: usize, scroll_max: usize) {
+    if area.height == 0 {
+        return;
+    }
     frame.render_widget(
-        Paragraph::new("▀".repeat(usize::from(area.width))).style(edge_style),
-        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        Paragraph::new("│\n".repeat(usize::from(area.height)))
+            .style(Style::default().fg(palette().faint).bg(palette().panel)),
+        Rect::new(area.x, area.y, 1, area.height),
     );
-    let inner = Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
+    let offset = if scroll_max == 0 {
+        area.height.saturating_sub(1)
+    } else {
+        u16::try_from(
+            scroll.saturating_mul(usize::from(area.height.saturating_sub(1))) / scroll_max,
+        )
+        .unwrap_or(area.height.saturating_sub(1))
+    };
     frame.render_widget(
-        Paragraph::new("▐\n".repeat(usize::from(inner.height))).style(edge_style),
-        Rect::new(area.x, inner.y, 1, inner.height),
+        Paragraph::new("●").style(Style::default().fg(palette().yellow).bg(palette().panel)),
+        Rect::new(area.x, area.y.saturating_add(offset), 1, 1),
     );
-    frame.render_widget(
-        Paragraph::new("▌\n".repeat(usize::from(inner.height))).style(edge_style),
-        Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height),
-    );
-    fill(frame, inner, background);
-    inner
+}
+
+fn message_wrapped_height(text: &str, width: usize) -> usize {
+    text.split('\n')
+        .map(|line| word_wrapped_height(line, width).max(1))
+        .sum()
 }
 
 fn row_background(state: &AgentEntryState, hovered: bool) -> Color {

@@ -75,10 +75,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
+    let hide_navigation = app.single_panel_detail_visible()
+        && app.agents_pane_visible()
+        && !app.notice.as_deref().is_some_and(notice_is_error);
     let layout = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(6),
-        Constraint::Length(1),
+        Constraint::Length(u16::from(!hide_navigation)),
     ])
     .split(frame.area());
 

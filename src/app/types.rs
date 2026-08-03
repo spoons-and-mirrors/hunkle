@@ -122,8 +122,24 @@ pub(crate) enum HitTarget {
     AgentPreviewPickerItem(AgentKey),
     AgentPreviewPrevious(AgentKey),
     AgentPreviewNext(AgentKey),
-    AgentTooltip { agent: AgentKey, message: usize },
-    AgentMessage { agent: AgentKey, message: usize },
+    AgentPreviewRequestPrevious {
+        agent: AgentKey,
+        message: usize,
+        request: usize,
+    },
+    AgentPreviewRequestNext {
+        agent: AgentKey,
+        message: usize,
+        request: usize,
+    },
+    AgentTooltip {
+        agent: AgentKey,
+        message: usize,
+    },
+    AgentMessage {
+        agent: AgentKey,
+        message: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,12 +275,20 @@ pub(crate) struct GraphColumnDrag {
     pub right_width: u16,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct MobileScrollDrag {
     pub(crate) start: Position,
     pub(crate) previous: Position,
     pub(crate) moved: bool,
+    pub(crate) axis: Option<MobileDragAxis>,
+    pub(crate) agent_preview: Option<AgentKey>,
     pub(crate) modifiers: KeyModifiers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MobileDragAxis {
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +346,8 @@ pub struct Regions {
     pub commit: Option<Rect>,
     pub commit_scroll: usize,
     pub commit_scroll_max: usize,
+    pub(crate) agent_preview_scroll: usize,
+    pub(crate) agent_preview_scroll_max: usize,
     pub graph_table: Option<Rect>,
     pub(crate) graph_columns: Vec<GraphColumnRegion>,
     pub action_menu: Option<Rect>,

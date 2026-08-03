@@ -326,11 +326,20 @@ pub(crate) enum AgentActivityPreview {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentUserMessage {
     pub(crate) text: String,
-    pub(crate) latest_agent_text: Option<String>,
-    pub(crate) activities: Vec<AgentActivityPreview>,
+    pub(crate) requests: Vec<AgentRequestPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentRequestPreview {
+    pub(crate) parts: Vec<AgentRequestPartPreview>,
     pub(crate) reasoning_active: bool,
-    pub(crate) request_count: u64,
     pub(crate) tool_call_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentRequestPartPreview {
+    Text(String),
+    Activity(AgentActivityPreview),
 }
 
 pub(crate) struct HerdrSession {
@@ -1301,13 +1310,29 @@ impl HerdrSession {
             messages
                 .iter()
                 .map(
-                    |(text, latest_agent_text, request_count, tool_call_count)| AgentUserMessage {
-                        text: (*text).to_owned(),
-                        latest_agent_text: latest_agent_text.map(str::to_owned),
-                        activities: Vec::new(),
-                        reasoning_active: false,
-                        request_count: *request_count,
-                        tool_call_count: *tool_call_count,
+                    |(text, latest_agent_text, request_count, tool_call_count)| {
+                        let request_count = usize::try_from(*request_count).unwrap_or(usize::MAX);
+                        let request_count =
+                            request_count.max(usize::from(latest_agent_text.is_some()));
+                        let mut requests = (0..request_count)
+                            .map(|_| AgentRequestPreview {
+                                parts: Vec::new(),
+                                reasoning_active: false,
+                                tool_call_count: 0,
+                            })
+                            .collect::<Vec<_>>();
+                        if let Some(request) = requests.last_mut() {
+                            if let Some(text) = latest_agent_text {
+                                request
+                                    .parts
+                                    .push(AgentRequestPartPreview::Text((*text).to_owned()));
+                            }
+                            request.tool_call_count = *tool_call_count;
+                        }
+                        AgentUserMessage {
+                            text: (*text).to_owned(),
+                            requests,
+                        }
                     },
                 )
                 .collect(),
@@ -1339,8 +1364,42 @@ impl HerdrSession {
             .latest_user_messages
             .get_mut(identity)
             .expect("test agent has no messages")[message];
-        message.activities = activities.to_vec();
-        message.reasoning_active = reasoning_active;
+        let request = message
+            .requests
+            .last_mut()
+            .expect("test message has no requests");
+        request
+            .parts
+            .retain(|part| matches!(part, AgentRequestPartPreview::Text(_)));
+        request.parts.extend(
+            activities
+                .iter()
+                .cloned()
+                .map(AgentRequestPartPreview::Activity),
+        );
+        request.reasoning_active = reasoning_active;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_agent_request_for_test(
+        &mut self,
+        index: usize,
+        message: usize,
+        request: usize,
+        preview: AgentRequestPreview,
+    ) {
+        let AgentTimingKey::Session(identity) = self.agents[index]
+            .runtime
+            .session_timing_key
+            .as_ref()
+            .expect("test agent has no session identity")
+        else {
+            panic!("test agent has no session identity");
+        };
+        self.latest_user_messages
+            .get_mut(identity)
+            .expect("test agent has no messages")[message]
+            .requests[request] = preview;
     }
 }
 

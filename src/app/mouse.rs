@@ -5,13 +5,15 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, AgentKey, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget,
-    FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane,
-    MobileScrollDrag, Mode, SettingsHitTarget, SettingsPage, View, changes::ChangesEffect,
-    file_editor::FileEditor, scroll_table,
+    ACTION_ITEMS, AgentKey, AgentPreviewRequestSelection, AgentPreviewTranscriptScroll, App,
+    CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag,
+    GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, MobileDragAxis, MobileScrollDrag, Mode,
+    SettingsHitTarget, SettingsPage, View, changes::ChangesEffect, file_editor::FileEditor,
+    scroll_table,
 };
 
 const AGENT_PREVIEW_BUTTON_FLASH: Duration = Duration::from_millis(150);
+const AGENT_PREVIEW_SWIPE_THRESHOLD: u16 = 4;
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -41,6 +43,8 @@ impl App {
                     | HitTarget::AgentPreviewPickerItem(agent)
                     | HitTarget::AgentPreviewPrevious(agent)
                     | HitTarget::AgentPreviewNext(agent)
+                    | HitTarget::AgentPreviewRequestPrevious { agent, .. }
+                    | HitTarget::AgentPreviewRequestNext { agent, .. }
                     | HitTarget::AgentTooltip { agent, .. }
                     | HitTarget::AgentMessage { agent, .. } => Some(agent),
                     _ => None,
@@ -248,7 +252,14 @@ impl App {
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-        ) && self.cycle_agent_message(point, mouse.kind == MouseEventKind::ScrollUp)
+        ) && (self.scroll_agent_preview_transcript(
+            point,
+            if mouse.kind == MouseEventKind::ScrollUp {
+                -3
+            } else {
+                3
+            },
+        ) || self.cycle_agent_message(point, mouse.kind == MouseEventKind::ScrollUp))
         {
             return;
         }
@@ -280,6 +291,22 @@ impl App {
                 }
                 Some(HitTarget::StashedAgent(index)) => {
                     self.restore_stashed_agent(index);
+                    return;
+                }
+                Some(HitTarget::AgentPreviewRequestPrevious {
+                    agent,
+                    message,
+                    request,
+                }) => {
+                    self.select_agent_preview_request(agent, message, request, false);
+                    return;
+                }
+                Some(HitTarget::AgentPreviewRequestNext {
+                    agent,
+                    message,
+                    request,
+                }) => {
+                    self.select_agent_preview_request(agent, message, request, true);
                     return;
                 }
                 _ => {}
@@ -426,32 +453,57 @@ impl App {
             return false;
         }
         let point = Position::new(mouse.column, mouse.row);
-        if let Some(mut drag) = self.mobile_scroll_drag {
+        if let Some(mut drag) = self.mobile_scroll_drag.clone() {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
                     if point != drag.previous {
                         drag.moved = true;
-                        let delta = drag.previous.y as isize - point.y as isize;
-                        if delta != 0 {
-                            self.scroll_mobile_at(drag.start, delta);
+                        let horizontal = drag.start.x.abs_diff(point.x);
+                        let vertical = drag.start.y.abs_diff(point.y);
+                        if drag.axis.is_none() {
+                            drag.axis = if drag.agent_preview.is_some()
+                                && horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD
+                                && horizontal > vertical
+                            {
+                                Some(MobileDragAxis::Horizontal)
+                            } else if vertical > 0
+                                && (drag.agent_preview.is_none() || vertical >= horizontal)
+                            {
+                                Some(MobileDragAxis::Vertical)
+                            } else {
+                                None
+                            };
+                        }
+                        if drag.axis == Some(MobileDragAxis::Vertical) {
+                            let delta = drag.previous.y as isize - point.y as isize;
+                            if delta != 0 {
+                                self.scroll_mobile_at(drag.start, delta);
+                            }
                         }
                         drag.previous = point;
                     }
                     let released = mouse.kind == MouseEventKind::Up(MouseButton::Left);
-                    self.mobile_scroll_drag = (!released).then_some(drag);
-                    if released && !drag.moved {
-                        self.handle_mouse_inner(MouseEvent {
-                            kind: MouseEventKind::Down(MouseButton::Left),
-                            column: drag.start.x,
-                            row: drag.start.y,
-                            modifiers: drag.modifiers,
-                        });
-                        self.handle_mouse_inner(MouseEvent {
-                            kind: MouseEventKind::Up(MouseButton::Left),
-                            column: drag.start.x,
-                            row: drag.start.y,
-                            modifiers: drag.modifiers,
-                        });
+                    if released {
+                        if drag.axis == Some(MobileDragAxis::Horizontal) {
+                            if let Some(agent) = drag.agent_preview.as_ref() {
+                                self.cycle_agent_preview(agent, point.x < drag.start.x);
+                            }
+                        } else if !drag.moved {
+                            self.handle_mouse_inner(MouseEvent {
+                                kind: MouseEventKind::Down(MouseButton::Left),
+                                column: drag.start.x,
+                                row: drag.start.y,
+                                modifiers: drag.modifiers,
+                            });
+                            self.handle_mouse_inner(MouseEvent {
+                                kind: MouseEventKind::Up(MouseButton::Left),
+                                column: drag.start.x,
+                                row: drag.start.y,
+                                modifiers: drag.modifiers,
+                            });
+                        }
+                    } else {
+                        self.mobile_scroll_drag = Some(drag);
                     }
                     return true;
                 }
@@ -468,13 +520,28 @@ impl App {
         if self.begin_mouse_control(point) {
             return true;
         }
+        let agent_preview = self.agent_preview_at(point);
         self.mobile_scroll_drag = Some(MobileScrollDrag {
             start: point,
             previous: point,
             moved: false,
+            axis: None,
+            agent_preview,
             modifiers: mouse.modifiers,
         });
         true
+    }
+
+    fn agent_preview_at(&self, point: Position) -> Option<AgentKey> {
+        if !self.agents_pane_visible() || !self.single_panel_detail_visible() {
+            return None;
+        }
+        match self.regions.hit_target_at(point) {
+            Some(HitTarget::AgentTooltip { agent, .. } | HitTarget::AgentMessage { agent, .. }) => {
+                Some(agent)
+            }
+            _ => None,
+        }
     }
 
     fn scroll_mobile_at(&mut self, point: Position, delta: isize) {
@@ -490,6 +557,9 @@ impl App {
                 self.hovered_hit_target = None;
                 self.header_picker.scroll_by(delta);
             }
+            return;
+        }
+        if self.scroll_agent_preview_transcript(point, delta) {
             return;
         }
         if matches!(
@@ -1173,6 +1243,8 @@ impl App {
             return;
         };
         self.agent_preview_selection = Some(key.clone());
+        self.agent_preview_transcript_scroll = None;
+        self.agent_preview_request_selection = None;
         self.agent_preview_picker_open = false;
         self.hovered_hit_target = self
             .herdr
@@ -1487,10 +1559,90 @@ impl App {
             (current + 1) % message_count
         };
         self.hovered_hit_target = Some(HitTarget::AgentTooltip {
-            agent: agent_key,
+            agent: agent_key.clone(),
             message,
         });
+        self.agent_preview_transcript_scroll = None;
+        self.agent_preview_request_selection = None;
         true
+    }
+
+    fn select_agent_preview_request(
+        &mut self,
+        key: AgentKey,
+        message: usize,
+        request: usize,
+        forward: bool,
+    ) {
+        let Some(agent) = self.herdr.agent_index(&key) else {
+            return;
+        };
+        let Some(request_count) = self
+            .herdr
+            .agent_user_messages(agent)
+            .and_then(|messages| messages.get(message))
+            .map(|message| message.requests.len())
+            .filter(|count| *count > 0)
+        else {
+            return;
+        };
+        let request = if forward {
+            request.saturating_add(1).min(request_count - 1)
+        } else {
+            request.saturating_sub(1)
+        };
+        self.agent_preview_request_selection = Some(AgentPreviewRequestSelection {
+            agent: key,
+            message,
+            request,
+        });
+        self.agent_preview_transcript_scroll = None;
+    }
+
+    pub(super) fn scroll_agent_preview_by(&mut self, delta: isize) {
+        let Some(agent) = self.agents_pane_index() else {
+            return;
+        };
+        let Some(key) = self.herdr.agent_key(agent) else {
+            return;
+        };
+        self.set_agent_preview_scroll(key, delta);
+    }
+
+    fn scroll_agent_preview_transcript(&mut self, point: Position, delta: isize) -> bool {
+        let agent = match self.regions.hit_target_at(point) {
+            Some(
+                HitTarget::AgentTooltip { agent, .. }
+                | HitTarget::AgentMessage { agent, .. }
+                | HitTarget::AgentPreviewRequestPrevious { agent, .. }
+                | HitTarget::AgentPreviewRequestNext { agent, .. },
+            ) => agent,
+            _ => return false,
+        };
+        self.set_agent_preview_scroll(agent, delta);
+        true
+    }
+
+    fn set_agent_preview_scroll(&mut self, key: AgentKey, delta: isize) {
+        let offset = self
+            .agent_preview_transcript_scroll
+            .as_ref()
+            .filter(|scroll| scroll.agent == key)
+            .map_or_else(
+                || {
+                    if self.agent_preview_request_selection.is_some() {
+                        self.regions.agent_preview_scroll
+                    } else {
+                        self.regions.agent_preview_scroll_max
+                    }
+                },
+                |scroll| scroll.offset,
+            )
+            .saturating_add_signed(delta)
+            .min(self.regions.agent_preview_scroll_max);
+        self.agent_preview_request_selection = None;
+        self.agent_preview_transcript_scroll = (offset < self.regions.agent_preview_scroll_max)
+            .then_some(AgentPreviewTranscriptScroll { agent: key, offset });
     }
 
     fn scroll_at(&mut self, point: Position, delta: isize, wheel: bool) {
