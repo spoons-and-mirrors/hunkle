@@ -685,7 +685,7 @@ fn clear_sidebar_regions(app: &mut App) {
     app.regions.files_root = None;
 }
 
-pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect) -> Rect {
     let agents_active = app.agents_pane_visible();
     let tabs = [
         (
@@ -729,6 +729,13 @@ pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect
         x = x.saturating_add(width);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let trailing_x = x.saturating_add(2).min(area.right());
+    Rect::new(
+        trailing_x,
+        area.y,
+        area.right().saturating_sub(trailing_x),
+        area.height,
+    )
 }
 
 pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, content: Rect) {
@@ -761,7 +768,7 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         pane.width,
         u16::from(pane.height > 1),
     );
-    draw_sidebar_tabs(frame, app, header);
+    let tabs_trailing = draw_sidebar_tabs(frame, app, header);
     let history = Rect::new(
         pane.x,
         header.bottom().saturating_add(1),
@@ -778,27 +785,29 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         );
         return;
     };
+    let repository_anchor = app
+        .single_panel_layout()
+        .then_some(tabs_trailing)
+        .filter(|anchor| anchor.width >= 3);
     app.herdr.request_agent_latest_user_message(index);
-    let selected_message = match app.hovered_hit_target {
-        Some(
-            HitTarget::AgentTooltip { agent, message } | HitTarget::AgentMessage { agent, message },
-        ) if agent == index => Some(message),
-        _ => None,
-    };
-    for (target, rect) in agents::draw_history(
+    let (targets, scroll_max, scroll) = agents::draw_history(
         frame,
         &app.herdr,
         index,
-        selected_message,
+        app.agent_preview_request(index),
+        app.agent_preview_transcript_scroll(index),
         app.agent_preview_button_flash(),
         app.agent_preview_picker_open(),
         app.hovered_hit_target,
+        repository_anchor,
         history,
-    ) {
+    );
+    app.regions.agent_preview_scroll = scroll;
+    app.regions.agent_preview_scroll_max = scroll_max;
+    for (target, rect) in targets {
         app.regions.register_hit_target(target, rect);
     }
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests;

@@ -122,8 +122,24 @@ pub(crate) enum HitTarget {
     AgentPreviewPickerItem(usize),
     AgentPreviewPrevious(usize),
     AgentPreviewNext(usize),
-    AgentTooltip { agent: usize, message: usize },
-    AgentMessage { agent: usize, message: usize },
+    AgentPreviewRequestPrevious {
+        agent: usize,
+        message: usize,
+        request: usize,
+    },
+    AgentPreviewRequestNext {
+        agent: usize,
+        message: usize,
+        request: usize,
+    },
+    AgentTooltip {
+        agent: usize,
+        message: usize,
+    },
+    AgentMessage {
+        agent: usize,
+        message: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,7 +280,14 @@ pub(crate) struct MobileScrollDrag {
     pub(crate) start: Position,
     pub(crate) previous: Position,
     pub(crate) moved: bool,
+    pub(crate) axis: Option<MobileDragAxis>,
     pub(crate) modifiers: KeyModifiers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MobileDragAxis {
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -322,6 +345,8 @@ pub struct Regions {
     pub commit: Option<Rect>,
     pub commit_scroll: usize,
     pub commit_scroll_max: usize,
+    pub(crate) agent_preview_scroll: usize,
+    pub(crate) agent_preview_scroll_max: usize,
     pub graph_table: Option<Rect>,
     pub(crate) graph_columns: Vec<GraphColumnRegion>,
     pub action_menu: Option<Rect>,

@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::process::{self, Limits};
 
-use super::{AgentActivityPreview, AgentUserMessage};
+use super::{AgentActivityPreview, AgentRequestPartPreview, AgentRequestPreview, AgentUserMessage};
 
 const QUERY_LIMITS: Limits = Limits::new(2 * 1024 * 1024, 64 * 1024, Duration::from_secs(5));
 
@@ -21,45 +21,25 @@ pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
              WHERE m.session_id = '{session_id}' \
                 AND json_extract(m.data, '$.role') = 'user'\
          ) \
-         SELECT recent.id AS message_id, json_extract(p.data, '$.text') AS text, \
-                 COUNT(DISTINCT response.id) AS request_count, \
-                 COUNT(DISTINCT tool.id) AS tool_call_count, \
-                  (SELECT json_extract(agent_text.data, '$.text') \
-                    FROM message agent_response \
-                    JOIN part agent_text ON agent_text.message_id = agent_response.id \
-                                        AND json_extract(agent_text.data, '$.type') = 'text' \
-                   WHERE agent_response.session_id = '{session_id}' \
-                     AND json_extract(agent_response.data, '$.role') = 'assistant' \
-                     AND json_extract(agent_response.data, '$.parentID') = recent.id \
-                     AND trim(COALESCE(json_extract(agent_text.data, '$.text'), '')) <> '' \
-                    ORDER BY agent_text.time_created DESC, agent_text.id DESC LIMIT 1) \
-                     AS latest_agent_text, \
-                 (SELECT json_group_array(json(activity_json)) FROM ( \
-                      SELECT json_object( \
-                                 'type', json_extract(activity.data, '$.type'), \
-                                 'name', json_extract(activity.data, '$.tool'), \
-                                 'title', json_extract(activity.data, '$.state.title'), \
-                                 'status', json_extract(activity.data, '$.state.status')) \
-                                 AS activity_json \
-                        FROM message activity_response \
-                        JOIN part activity ON activity.message_id = activity_response.id \
-                                          AND json_extract(activity.data, '$.type') \
-                                              IN ('reasoning', 'tool') \
-                       WHERE activity_response.session_id = '{session_id}' \
-                         AND json_extract(activity_response.data, '$.role') = 'assistant' \
-                         AND json_extract(activity_response.data, '$.parentID') = recent.id \
-                       ORDER BY activity.time_created DESC, activity.id DESC LIMIT 2 \
-                  )) AS latest_activities, \
-                 (SELECT json_extract(activity.data, '$.type') \
-                    FROM message activity_response \
-                    JOIN part activity ON activity.message_id = activity_response.id \
-                                      AND json_extract(activity.data, '$.type') \
-                                          IN ('reasoning', 'tool', 'text') \
-                   WHERE activity_response.session_id = '{session_id}' \
-                     AND json_extract(activity_response.data, '$.role') = 'assistant' \
-                     AND json_extract(activity_response.data, '$.parentID') = recent.id \
-                   ORDER BY activity.time_created DESC, activity.id DESC LIMIT 1) \
-                     AS latest_activity_type \
+         SELECT recent.id AS message_id, p.id AS user_part_id, \
+                json_extract(p.data, '$.text') AS text, response.id AS response_id, \
+                (SELECT json_group_array(json(part_json)) FROM ( \
+                     SELECT json_object( \
+                                'type', json_extract(response_part.data, '$.type'), \
+                                'text', CASE \
+                                    WHEN json_extract(response_part.data, '$.type') = 'text' \
+                                    THEN json_extract(response_part.data, '$.text') \
+                                    ELSE NULL END, \
+                                'name', json_extract(response_part.data, '$.tool'), \
+                                'title', json_extract(response_part.data, '$.state.title'), \
+                                'status', json_extract(response_part.data, '$.state.status')) \
+                                AS part_json \
+                       FROM part response_part \
+                      WHERE response_part.message_id = response.id \
+                        AND json_extract(response_part.data, '$.type') \
+                            IN ('reasoning', 'tool', 'text') \
+                      ORDER BY response_part.time_created, response_part.id \
+                 )) AS response_parts \
          FROM recent \
          JOIN part p ON p.message_id = recent.id \
                     AND json_extract(p.data, '$.type') = 'text' \
@@ -67,10 +47,8 @@ pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
                 ON response.session_id = '{session_id}' \
                AND json_extract(response.data, '$.role') = 'assistant' \
                AND json_extract(response.data, '$.parentID') = recent.id \
-         LEFT JOIN part tool ON tool.message_id = response.id \
-                            AND json_extract(tool.data, '$.type') = 'tool' \
-         GROUP BY recent.id, recent.time_created, p.id, p.time_created \
-         ORDER BY recent.time_created, recent.id, p.time_created, p.id"
+         ORDER BY recent.time_created, recent.id, p.time_created, p.id, \
+                  response.time_created, response.id"
     );
     let output = process::run(
         Command::new("opencode").args(["db", &query, "--format", "json", "--pure"]),
@@ -140,7 +118,7 @@ fn parse_session_id(output: &[u8]) -> Result<String, String> {
 fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
     let rows: Value = serde_json::from_slice(output)
         .map_err(|error| format!("OpenCode returned invalid query data: {error}"))?;
-    let mut messages: Vec<(String, AgentUserMessage)> = Vec::new();
+    let mut messages: Vec<(String, Vec<String>, Vec<String>, AgentUserMessage)> = Vec::new();
     for row in rows.as_array().into_iter().flatten() {
         let Some(id) = row.get("message_id").and_then(Value::as_str) else {
             continue;
@@ -151,179 +129,207 @@ fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
         if text.is_empty() {
             continue;
         }
-        if let Some((_, message)) = messages
+        let Some(user_part_id) = row.get("user_part_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some((_, user_parts, response_ids, message)) = messages
             .last_mut()
-            .filter(|(message_id, _)| message_id == id)
+            .filter(|(message_id, _, _, _)| message_id == id)
         {
-            message.text.push_str("\n\n");
-            message.text.push_str(text);
-            if message.latest_agent_text.is_none() {
-                message.latest_agent_text = latest_agent_text(row);
+            if !user_parts.iter().any(|part_id| part_id == user_part_id) {
+                message.text.push_str("\n\n");
+                message.text.push_str(text);
+                user_parts.push(user_part_id.to_owned());
             }
-            if message.activities.is_empty() {
-                message.activities = activities(row);
+            if let Some(response_id) = row.get("response_id").and_then(Value::as_str)
+                && !response_ids.iter().any(|id| id == response_id)
+            {
+                message.requests.push(request(row));
+                response_ids.push(response_id.to_owned());
             }
-            message.reasoning_active |= reasoning_active(row);
         } else {
+            let mut response_ids = Vec::new();
+            let mut requests = Vec::new();
+            if let Some(response_id) = row.get("response_id").and_then(Value::as_str) {
+                response_ids.push(response_id.to_owned());
+                requests.push(request(row));
+            }
             messages.push((
                 id.to_owned(),
+                vec![user_part_id.to_owned()],
+                response_ids,
                 AgentUserMessage {
                     text: text.to_owned(),
-                    latest_agent_text: latest_agent_text(row),
-                    activities: activities(row),
-                    reasoning_active: reasoning_active(row),
-                    request_count: row
-                        .get("request_count")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    tool_call_count: row
-                        .get("tool_call_count")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
+                    requests,
                 },
             ));
         }
     }
     let messages = messages
         .into_iter()
-        .map(|(_, message)| message)
+        .map(|(_, _, _, message)| message)
         .collect::<Vec<_>>();
     (!messages.is_empty())
         .then_some(messages)
         .ok_or_else(|| "OpenCode session has no user message".to_owned())
 }
 
-fn latest_agent_text(row: &Value) -> Option<String> {
-    row.get("latest_agent_text")
+fn request(row: &Value) -> AgentRequestPreview {
+    let parts = row
+        .get("response_parts")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-}
-
-fn activities(row: &Value) -> Vec<AgentActivityPreview> {
-    let Some(activities) = row
-        .get("latest_activities")
-        .and_then(Value::as_str)
-        .and_then(|activities| serde_json::from_str::<Value>(activities).ok())
-    else {
-        return Vec::new();
-    };
-    let mut activities = activities
-        .as_array()
+        .and_then(|parts| serde_json::from_str::<Value>(parts).ok());
+    let parts = parts.as_ref().and_then(Value::as_array);
+    let request_parts = parts
         .into_iter()
         .flatten()
-        .filter_map(
-            |activity| match activity.get("type").and_then(Value::as_str) {
-                Some("reasoning") => Some(AgentActivityPreview::Reasoning),
-                Some("tool") => {
-                    let name = activity.get("name")?.as_str()?.trim();
-                    if name.is_empty() {
-                        return None;
-                    }
-                    let title = activity
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
-                        .filter(|title| !title.is_empty());
-                    Some(AgentActivityPreview::Tool {
+        .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+            Some("text") => part
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(|text| AgentRequestPartPreview::Text(text.to_owned())),
+            Some("reasoning") => Some(AgentRequestPartPreview::Activity(
+                AgentActivityPreview::Reasoning,
+            )),
+            Some("tool") => {
+                let name = part.get("name")?.as_str()?.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let title = part
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|title| !title.is_empty());
+                Some(AgentRequestPartPreview::Activity(
+                    AgentActivityPreview::Tool {
                         name: name.to_owned(),
                         title,
-                        running: activity.get("status").and_then(Value::as_str) == Some("running"),
-                    })
-                }
-                _ => None,
-            },
-        )
+                        running: part.get("status").and_then(Value::as_str) == Some("running"),
+                    },
+                ))
+            }
+            _ => None,
+        })
         .collect::<Vec<_>>();
-    activities.reverse();
-    activities
-}
-
-fn reasoning_active(row: &Value) -> bool {
-    row.get("latest_activity_type").and_then(Value::as_str) == Some("reasoning")
+    let reasoning_active = parts
+        .into_iter()
+        .flatten()
+        .last()
+        .and_then(|part| part.get("type"))
+        .and_then(Value::as_str)
+        == Some("reasoning");
+    let tool_call_count = request_parts
+        .iter()
+        .filter(|part| {
+            matches!(
+                part,
+                AgentRequestPartPreview::Activity(AgentActivityPreview::Tool { .. })
+            )
+        })
+        .count()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    AgentRequestPreview {
+        parts: request_parts,
+        tool_call_count,
+        reasoning_active,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentActivityPreview, parse, parse_session_id, sql_string};
+    use super::{
+        AgentActivityPreview, AgentRequestPartPreview, parse, parse_session_id, sql_string,
+    };
 
     #[test]
     fn extracts_text_from_the_latest_user_message() {
+        let earlier_parts = serde_json::json!([
+            {"type":"text","text":"Earlier response","name":null,"title":null,"status":null},
+            {"type":"tool","text":null,"name":"read","title":"src/main.rs","status":"completed"}
+        ])
+        .to_string();
+        let latest_parts = serde_json::json!([
+            {"type":"text","text":"Latest response","name":null,"title":null,"status":null},
+            {"type":"tool","text":null,"name":"apply_patch","title":"Updated files\nwith details","status":"running"},
+            {"type":"reasoning","text":null,"name":null,"title":null,"status":null}
+        ])
+        .to_string();
         let rows = serde_json::json!([
             {
                 "message_id": "one",
+                "user_part_id": "one-user",
                 "text": "Earlier request",
-                "latest_agent_text": "Earlier response",
-                "latest_activities": serde_json::json!([
-                    {"type":"tool","name":"read","title":"src/main.rs","status":"completed"}
-                ]).to_string(),
-                "latest_activity_type": "text",
-                "request_count": 3,
-                "tool_call_count": 8
+                "response_id": "one-response-a",
+                "response_parts": earlier_parts
             },
             {
                 "message_id": "two",
+                "user_part_id": "two-user-a",
                 "text": "Latest request",
-                "latest_agent_text": "Latest response",
-                "latest_activities": serde_json::json!([
-                    {"type":"reasoning","name":null,"title":null,"status":null},
-                    {"type":"tool","name":"apply_patch","title":"Updated files\nwith details","status":"running"}
-                ]).to_string(),
-                "latest_activity_type": "reasoning",
-                "request_count": 2,
-                "tool_call_count": 5
+                "response_id": "two-response-a",
+                "response_parts": serde_json::json!([
+                    {"type":"tool","text":null,"name":"read","title":"context","status":"completed"}
+                ]).to_string()
             },
             {
                 "message_id": "two",
+                "user_part_id": "two-user-a",
+                "text": "Latest request",
+                "response_id": "two-response-b",
+                "response_parts": latest_parts
+            },
+            {
+                "message_id": "two",
+                "user_part_id": "two-user-b",
                 "text": "with context",
-                "latest_agent_text": "Latest response",
-                "latest_activities": serde_json::json!([
-                    {"type":"reasoning","name":null,"title":null,"status":null},
-                    {"type":"tool","name":"apply_patch","title":"Updated files\nwith details","status":"running"}
-                ]).to_string(),
-                "latest_activity_type": "reasoning",
-                "request_count": 2,
-                "tool_call_count": 5
+                "response_id": "two-response-a",
+                "response_parts": "[]"
+            },
+            {
+                "message_id": "two",
+                "user_part_id": "two-user-b",
+                "text": "with context",
+                "response_id": "two-response-b",
+                "response_parts": "[]"
             }
         ]);
 
         let messages = parse(&serde_json::to_vec(&rows).unwrap()).unwrap();
         assert_eq!(messages[0].text, "Earlier request");
+        assert_eq!(messages[0].requests.len(), 1);
+        assert_eq!(messages[0].requests[0].tool_call_count, 1);
         assert_eq!(
-            messages[0].latest_agent_text.as_deref(),
-            Some("Earlier response")
-        );
-        assert_eq!(messages[0].request_count, 3);
-        assert_eq!(messages[0].tool_call_count, 8);
-        assert_eq!(
-            messages[0].activities,
-            vec![AgentActivityPreview::Tool {
-                name: "read".to_owned(),
-                title: Some("src/main.rs".to_owned()),
-                running: false,
-            }]
-        );
-        assert!(!messages[0].reasoning_active);
-        assert_eq!(messages[1].text, "Latest request\n\nwith context");
-        assert_eq!(
-            messages[1].latest_agent_text.as_deref(),
-            Some("Latest response")
-        );
-        assert_eq!(messages[1].request_count, 2);
-        assert_eq!(messages[1].tool_call_count, 5);
-        assert_eq!(
-            messages[1].activities,
+            messages[0].requests[0].parts,
             vec![
-                AgentActivityPreview::Tool {
+                AgentRequestPartPreview::Text("Earlier response".to_owned()),
+                AgentRequestPartPreview::Activity(AgentActivityPreview::Tool {
+                    name: "read".to_owned(),
+                    title: Some("src/main.rs".to_owned()),
+                    running: false,
+                }),
+            ]
+        );
+        assert!(!messages[0].requests[0].reasoning_active);
+        assert_eq!(messages[1].text, "Latest request\n\nwith context");
+        assert_eq!(messages[1].requests.len(), 2);
+        assert_eq!(messages[1].requests[1].tool_call_count, 1);
+        assert_eq!(
+            messages[1].requests[1].parts,
+            vec![
+                AgentRequestPartPreview::Text("Latest response".to_owned()),
+                AgentRequestPartPreview::Activity(AgentActivityPreview::Tool {
                     name: "apply_patch".to_owned(),
                     title: Some("Updated files with details".to_owned()),
                     running: true,
-                },
-                AgentActivityPreview::Reasoning,
+                }),
+                AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning),
             ]
         );
-        assert!(messages[1].reasoning_active);
+        assert!(messages[1].requests[1].reasoning_active);
     }
 
     #[test]

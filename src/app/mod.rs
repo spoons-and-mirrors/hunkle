@@ -35,7 +35,8 @@ pub(crate) use header_picker::{
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
-    AgentActivityPreview, AgentEntryState, AgentKey, AgentStatus, HerdrPaneLayout, HerdrSession,
+    AgentActivityPreview, AgentEntryState, AgentKey, AgentRequestPartPreview, AgentRequestPreview,
+    AgentStatus, AgentUserMessage, HerdrPaneLayout, HerdrSession,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -60,6 +61,19 @@ pub(super) use std::{
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 const SETTINGS_ROW_COUNT: usize = 9;
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+
+#[derive(Debug)]
+struct AgentPreviewTranscriptScroll {
+    agent: AgentKey,
+    offset: usize,
+}
+
+#[derive(Debug)]
+struct AgentPreviewRequestSelection {
+    agent: AgentKey,
+    message: usize,
+    request: usize,
+}
 
 pub(super) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) use ratatui::{
@@ -125,6 +139,8 @@ pub struct App {
     pub(crate) agents_visible: bool,
     pub(crate) agents_pane_pinned: bool,
     agent_preview_selection: Option<AgentKey>,
+    agent_preview_transcript_scroll: Option<AgentPreviewTranscriptScroll>,
+    agent_preview_request_selection: Option<AgentPreviewRequestSelection>,
     agent_preview_picker_open: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     agent_preview_button_flash: Option<(bool, Instant)>,
@@ -280,6 +296,8 @@ impl App {
             agents_visible: true,
             agents_pane_pinned: false,
             agent_preview_selection: None,
+            agent_preview_transcript_scroll: None,
+            agent_preview_request_selection: None,
             agent_preview_picker_open: false,
             hovered_hit_target: None,
             agent_preview_button_flash: None,
@@ -1316,6 +1334,19 @@ impl App {
             self.show_previous_panel();
             return;
         }
+        if self.single_panel_detail_visible() && self.agents_pane_visible() {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.scroll_agent_preview_by(1);
+                    return;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.scroll_agent_preview_by(-1);
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.single_panel_layout()
             && self.agents_pane_visible()
             && !self.single_panel_detail_open
@@ -2040,6 +2071,8 @@ impl App {
         } else {
             self.changes.deactivate_sqlite();
             self.single_panel_detail_open = false;
+            self.agent_preview_transcript_scroll = None;
+            self.agent_preview_request_selection = None;
         }
     }
 
@@ -2080,6 +2113,8 @@ impl App {
     fn dismiss_agent_preview(&mut self) {
         self.agents_pane_pinned = false;
         self.agent_preview_selection = None;
+        self.agent_preview_transcript_scroll = None;
+        self.agent_preview_request_selection = None;
         self.agent_preview_picker_open = false;
         self.agent_preview_button_flash = None;
         if matches!(
@@ -2093,6 +2128,8 @@ impl App {
                     | HitTarget::AgentPreviewPickerItem(_)
                     | HitTarget::AgentPreviewPrevious(_)
                     | HitTarget::AgentPreviewNext(_)
+                    | HitTarget::AgentPreviewRequestPrevious { .. }
+                    | HitTarget::AgentPreviewRequestNext { .. }
                     | HitTarget::AgentTooltip { .. }
                     | HitTarget::AgentMessage { .. }
             )
@@ -2156,6 +2193,19 @@ impl App {
 
     pub(crate) fn agent_preview_picker_open(&self) -> bool {
         self.agent_preview_picker_open
+    }
+
+    pub(crate) fn agent_preview_transcript_scroll(&self, index: usize) -> Option<usize> {
+        let scroll = self.agent_preview_transcript_scroll.as_ref()?;
+        (self.herdr.agent_key(index).as_ref() == Some(&scroll.agent)).then_some(scroll.offset)
+    }
+
+    pub(crate) fn agent_preview_request(&self, index: usize) -> Option<(usize, usize)> {
+        let selection = self
+            .agent_preview_request_selection
+            .as_ref()
+            .filter(|selection| self.herdr.agent_key(index).as_ref() == Some(&selection.agent))?;
+        Some((selection.message, selection.request))
     }
 
     pub(super) fn show_agents_pane(&mut self) {
