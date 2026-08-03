@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::AgentKey;
 use std::path::PathBuf;
 
 fn agent_snapshot() -> serde_json::Value {
@@ -35,6 +36,10 @@ fn open_agents_pane(app: &mut App) {
     assert!(app.agents_pane_visible());
 }
 
+fn agent_key(app: &App, index: usize) -> AgentKey {
+    app.herdr.agent_key(index).unwrap()
+}
+
 #[test]
 fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     let directory = tempfile::tempdir().unwrap();
@@ -69,12 +74,16 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     second_stash.session_name = Some("Another saved agent".to_owned());
     app.herdr
         .set_stashed_agents_for_test(vec![stash, second_stash]);
+    let live_key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let live_height = app.settings.agents_height;
     assert_eq!(live_height, 5);
-    let live_card = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
+    let live_card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(live_key.clone()))
+        .unwrap();
     let header = app.regions.agents_splitter.unwrap();
     let toggle = app
         .regions
@@ -97,7 +106,11 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     assert!(app.herdr.showing_stash);
     assert_eq!(app.settings.agents_height, 8);
     assert!(app.settings.agents_height > live_height);
-    assert!(app.regions.hit_target_rect(HitTarget::Agent(0)).is_none());
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Agent(live_key))
+            .is_none()
+    );
     let stashed_card = app
         .regions
         .hit_target_rect(HitTarget::StashedAgent(0))
@@ -166,12 +179,16 @@ fn renders_and_targets_agents_in_the_normal_view() {
         ],
         true,
     );
+    let key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.mode, Mode::Normal);
-    let area = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
+    let area = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(key.clone()))
+        .unwrap();
     let row: String = (area.x..area.right())
         .map(|x| terminal.backend().buffer()[(x, area.y)].symbol())
         .collect();
@@ -194,7 +211,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(!idle_screen.contains("Please refine"));
 
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 2, area.y));
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     assert!(!app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
@@ -204,7 +221,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentTooltip {
-                agent: 0,
+                agent: key.clone(),
                 message: 4,
             })
             .is_none()
@@ -216,9 +233,9 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(app.agents_pane_visible());
     assert_eq!(app.changes.diff, viewer_before_sidebar_cycle);
     assert_eq!(app.view, view_before_sidebar_cycle);
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     assert_eq!(
         app.herdr
             .agent_user_messages(0)
@@ -252,7 +269,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let history = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 4,
         })
         .unwrap();
@@ -282,7 +299,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 3
         })
     );
@@ -302,7 +319,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 4
         })
     );
@@ -311,7 +328,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let tooltip = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 4,
         })
         .unwrap();
@@ -334,21 +351,21 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 4
         })
     );
     let second_message = app
         .regions
         .hit_target_rect(HitTarget::AgentMessage {
-            agent: 0,
+            agent: key.clone(),
             message: 1,
         })
         .unwrap();
     let first_message = app
         .regions
         .hit_target_rect(HitTarget::AgentMessage {
-            agent: 0,
+            agent: key.clone(),
             message: 0,
         })
         .unwrap();
@@ -361,7 +378,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let selected_message = app
         .regions
         .hit_target_rect(HitTarget::AgentMessage {
-            agent: 0,
+            agent: key.clone(),
             message: 4,
         })
         .unwrap();
@@ -404,7 +421,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let newest_message = app
         .regions
         .hit_target_rect(HitTarget::AgentMessage {
-            agent: 0,
+            agent: key.clone(),
             message: 4,
         })
         .unwrap();
@@ -425,7 +442,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 0
         })
     );
@@ -438,7 +455,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 4
         })
     );
@@ -448,20 +465,20 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 4,
         })
     );
     assert!(app.agents_pane_visible());
 
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     assert!(app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentTooltip {
-                agent: 0,
+                agent: key.clone(),
                 message: 4,
             })
             .is_some()
@@ -469,7 +486,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
 
     app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
     app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(0)));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     assert!(app.agents_pane_visible());
     open_agents_pane(&mut app);
     assert!(app.agents_pane_visible());
@@ -477,7 +494,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let preview = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 4,
         })
         .unwrap();
@@ -491,7 +508,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentTooltip {
-                agent: 0,
+                agent: key.clone(),
                 message: 4,
             })
             .is_none()
@@ -502,7 +519,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentTooltip {
-                agent: 0,
+                agent: key.clone(),
                 message: 4,
             })
             .is_some()
@@ -510,7 +527,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let preview = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key,
             message: 4,
         })
         .unwrap();
@@ -544,11 +561,15 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
         0,
         &[("Make mobile useful", Some("Working on it"), 1, 2)],
     );
+    let key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
 
     open_agents_pane(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let agent = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
+    let agent = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(key.clone()))
+        .unwrap();
     assert!(app.regions.worktree_list.is_none());
     assert!(app.regions.diff.is_none());
     assert!(
@@ -573,7 +594,7 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.hit_target_rect(HitTarget::Agent(0)).is_some());
+    assert!(app.regions.hit_target_rect(HitTarget::Agent(key)).is_some());
     assert!(app.regions.changes.is_none());
 }
 
@@ -622,9 +643,14 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .set_agent_user_messages_for_test(0, &[("First request", Some("First reply"), 1, 0)]);
     app.herdr
         .set_agent_user_messages_for_test(1, &[("Second request", Some("Second reply"), 2, 1)]);
+    let first_key = agent_key(&app, 0);
+    let second_key = agent_key(&app, 1);
     let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let card = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(first_key.clone()))
+        .unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, card.x + 2, card.y));
     assert!(!app.agents_pane_visible());
     open_agents_pane(&mut app);
@@ -653,20 +679,20 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     assert!(app.agents_pane_pinned);
     let next = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewNext(0))
+        .hit_target_rect(HitTarget::AgentPreviewNext(first_key.clone()))
         .unwrap();
     let previous = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewPrevious(0))
+        .hit_target_rect(HitTarget::AgentPreviewPrevious(first_key.clone()))
         .unwrap();
     let picker = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewPicker(0))
+        .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
         .unwrap();
     let history = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: first_key.clone(),
             message: 0,
         })
         .unwrap();
@@ -690,7 +716,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
-            agent: 1,
+            agent: second_key.clone(),
             message: 0,
         })
     );
@@ -748,7 +774,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
 
     let previous = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewPrevious(1))
+        .hit_target_rect(HitTarget::AgentPreviewPrevious(second_key.clone()))
         .unwrap();
     assert_eq!(
         terminal.backend().buffer()[(previous.x + 1, previous.y)].symbol(),
@@ -759,21 +785,21 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: first_key.clone(),
             message: 0,
         })
     );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let picker = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewPicker(0))
+        .hit_target_rect(HitTarget::AgentPreviewPicker(first_key))
         .unwrap();
     click(&mut app, picker.x + 1, picker.y);
     assert!(app.agent_preview_picker_open());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let second_agent = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewPickerItem(1))
+        .hit_target_rect(HitTarget::AgentPreviewPickerItem(second_key))
         .unwrap();
     click(&mut app, second_agent.x + 1, second_agent.y);
     assert!(!app.agent_preview_picker_open());
@@ -781,7 +807,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
 }
 
 #[test]
-fn agent_preview_follows_the_agent_across_reordering_and_session_changes() {
+fn cached_agent_target_follows_the_agent_across_reordering_and_session_changes() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -823,15 +849,14 @@ fn agent_preview_follows_the_agent_across_reordering_and_session_changes() {
         .set_agent_user_messages_for_test(0, &[("First request", None, 1, 0)]);
     app.herdr
         .set_agent_user_messages_for_test(1, &[("Old second request", None, 1, 0)]);
+    let first_key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
     open_agents_pane(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let next = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewNext(0))
+        .hit_target_rect(HitTarget::AgentPreviewNext(first_key))
         .unwrap();
-    click(&mut app, next.x, next.y);
-    assert_eq!(app.agents_pane_index(), Some(1));
 
     let agents = snapshot["result"]["snapshot"]["agents"]
         .as_array_mut()
@@ -841,6 +866,7 @@ fn agent_preview_follows_the_agent_across_reordering_and_session_changes() {
     agents[1]["state_change_seq"] = serde_json::json!(3);
     app.herdr.apply_snapshot_for_test(&snapshot);
 
+    click(&mut app, next.x, next.y);
     assert_eq!(app.agents_pane_index(), Some(0));
     app.herdr
         .set_agent_user_messages_for_test(0, &[("New second request", None, 1, 0)]);
@@ -884,23 +910,28 @@ fn hovering_agent_cards_does_not_open_history() {
     app.herdr = HerdrSession::ready_for_test(&snapshot);
     app.herdr
         .set_agent_user_messages_for_test(0, &[("First", Some("Reply"), 1, 0)]);
+    let first_key = agent_key(&app, 0);
+    let second_key = agent_key(&app, 1);
     app.regions.worktree = Some(ratatui::layout::Rect::new(0, 0, 40, 30));
     app.regions.register_hit_target(
-        HitTarget::Agent(1),
+        HitTarget::Agent(second_key.clone()),
         ratatui::layout::Rect::new(1, 25, 38, 3),
     );
     app.hovered_hit_target = Some(HitTarget::AgentTooltip {
-        agent: 0,
+        agent: first_key,
         message: 0,
     });
 
     app.handle_mouse(mouse(MouseEventKind::Moved, 3, 26));
 
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(1)));
+    assert_eq!(
+        app.hovered_hit_target,
+        Some(HitTarget::Agent(second_key.clone()))
+    );
     assert!(!app.agents_pane_visible());
     app.handle_mouse(mouse(MouseEventKind::Moved, 50, 5));
     app.handle_mouse(mouse(MouseEventKind::Moved, 3, 26));
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(1)));
+    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(second_key)));
     assert!(!app.agents_pane_visible());
 }
 
@@ -930,10 +961,14 @@ fn conversation_timeline_uses_its_full_height_and_tracks_selection() {
         .collect::<Vec<_>>();
     app.herdr
         .set_agent_user_messages_for_test(0, messages.as_slice());
+    let key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let agent = app.regions.hit_target_rect(HitTarget::Agent(0)).unwrap();
+    let agent = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(key.clone()))
+        .unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, agent.x + 2, agent.y));
     assert!(!app.agents_pane_visible());
     open_agents_pane(&mut app);
@@ -943,7 +978,7 @@ fn conversation_timeline_uses_its_full_height_and_tracks_selection() {
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentMessage {
-                agent: 0,
+                agent: key.clone(),
                 message: 49,
             })
             .is_some()
@@ -951,7 +986,7 @@ fn conversation_timeline_uses_its_full_height_and_tracks_selection() {
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentMessage {
-                agent: 0,
+                agent: key.clone(),
                 message: 0,
             })
             .is_none()
@@ -964,14 +999,14 @@ fn conversation_timeline_uses_its_full_height_and_tracks_selection() {
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
-            agent: 0,
+            agent: key.clone(),
             message: 0,
         })
     );
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentMessage {
-                agent: 0,
+                agent: key.clone(),
                 message: 0,
             })
             .is_some()
@@ -979,7 +1014,7 @@ fn conversation_timeline_uses_its_full_height_and_tracks_selection() {
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentMessage {
-                agent: 0,
+                agent: key,
                 message: 49,
             })
             .is_none()

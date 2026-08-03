@@ -158,7 +158,7 @@ fn main() -> Result<()> {
                         app.actions.selection,
                         app.graph_state.selected(),
                         app.author_filter.state.selected(),
-                        app.hovered_hit_target,
+                        app.hovered_hit_target.clone(),
                     );
                     app.handle_mouse(mouse);
                     let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
@@ -168,7 +168,7 @@ fn main() -> Result<()> {
                                 app.actions.selection,
                                 app.graph_state.selected(),
                                 app.author_filter.state.selected(),
-                                app.hovered_hit_target,
+                                app.hovered_hit_target.clone(),
                             );
                     (changed, false)
                 }

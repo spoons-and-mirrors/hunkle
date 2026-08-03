@@ -82,7 +82,7 @@ pub(crate) struct DiffFileHeaderRegion {
     pub(crate) line: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HitTarget {
     HeaderRepository,
     HeaderWorktrees,
@@ -114,16 +114,16 @@ pub(crate) enum HitTarget {
     Explorer(ExplorerHitTarget),
     FileSearch(FileSearchHitTarget),
     Settings(SettingsHitTarget),
-    Agent(usize),
+    Agent(AgentKey),
     AgentStashToggle,
-    AgentStash(usize),
+    AgentStash(AgentKey),
     StashedAgent(usize),
-    AgentPreviewPicker(usize),
-    AgentPreviewPickerItem(usize),
-    AgentPreviewPrevious(usize),
-    AgentPreviewNext(usize),
-    AgentTooltip { agent: usize, message: usize },
-    AgentMessage { agent: usize, message: usize },
+    AgentPreviewPicker(AgentKey),
+    AgentPreviewPickerItem(AgentKey),
+    AgentPreviewPrevious(AgentKey),
+    AgentPreviewNext(AgentKey),
+    AgentTooltip { agent: AgentKey, message: usize },
+    AgentMessage { agent: AgentKey, message: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,7 +267,7 @@ pub(crate) struct MobileScrollDrag {
     pub(crate) modifiers: KeyModifiers,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct HitRegion {
     target: HitTarget,
     rect: Rect,
@@ -351,7 +351,7 @@ impl Regions {
             .iter()
             .rev()
             .find(|region| region.rect.contains(point))
-            .map(|region| region.target)
+            .map(|region| region.target.clone())
     }
 
     pub(crate) fn settings_shortcut_rows(&self) -> usize {
@@ -359,7 +359,7 @@ impl Regions {
             .iter()
             .filter(|region| {
                 matches!(
-                    region.target,
+                    &region.target,
                     HitTarget::Settings(SettingsHitTarget::Shortcut(_))
                 )
             })

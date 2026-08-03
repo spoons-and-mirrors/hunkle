@@ -153,7 +153,7 @@ pub(super) fn draw(
     let scroll = herdr
         .agent_scroll
         .min(herdr.agents.len().saturating_sub(viewport));
-    let hovered_agent = match hovered {
+    let hovered_agent = match hovered.as_ref() {
         Some(HitTarget::Agent(index) | HitTarget::AgentStash(index)) => Some(index),
         Some(
             HitTarget::AgentPreviewPicker(agent)
@@ -164,7 +164,8 @@ pub(super) fn draw(
             | HitTarget::AgentMessage { agent, .. },
         ) => Some(agent),
         _ => None,
-    };
+    }
+    .and_then(|key| herdr.agent_index(key));
     let mut last_card = None;
     for (screen_row, index) in (scroll..herdr.agents.len()).enumerate() {
         if screen_row >= viewport {
@@ -180,6 +181,9 @@ pub(super) fn draw(
         let full_row_area = Rect::new(list.x, row_area.y, list.width, row_area.height);
         herdr.request_agent_latest_user_message(index);
         let agent = &herdr.agents[index];
+        let Some(agent_key) = herdr.agent_key(index) else {
+            continue;
+        };
         let state = herdr.agent_entry_state(index);
         let in_host_tab = herdr.agent_is_in_host_tab(index);
         let workspace = herdr
@@ -234,7 +238,7 @@ pub(super) fn draw(
             is_hovered,
         );
         last_card = Some((full_row_area, background));
-        targets.push((HitTarget::Agent(index), full_row_area));
+        targets.push((HitTarget::Agent(agent_key.clone()), full_row_area));
         if is_hovered && full_row_area.width >= 7 {
             let stash = Rect::new(full_row_area.right() - 7, full_row_area.y, 7, 1);
             frame.render_widget(
@@ -246,7 +250,7 @@ pub(super) fn draw(
                 ),
                 stash,
             );
-            targets.push((HitTarget::AgentStash(index), stash));
+            targets.push((HitTarget::AgentStash(agent_key), stash));
         }
     }
     if let Some((card, background)) = last_card {
@@ -379,6 +383,9 @@ pub(super) fn draw_history(
     if area.width < 24 || area.height < 10 {
         return Vec::new();
     }
+    let Some(agent_key) = herdr.agent_key(index) else {
+        return Vec::new();
+    };
     fill(frame, area, palette().panel);
     let messages = herdr.agent_user_messages(index).unwrap_or_default();
     let status = herdr
@@ -450,11 +457,17 @@ pub(super) fn draw_history(
     );
     let mut navigation_targets = Vec::new();
     if repository_area.width >= 3 {
-        navigation_targets.push((HitTarget::AgentPreviewPicker(index), repository_area));
+        navigation_targets.push((
+            HitTarget::AgentPreviewPicker(agent_key.clone()),
+            repository_area,
+        ));
     }
     if agent_count > 1 && navigation_width >= 2 {
-        navigation_targets.push((HitTarget::AgentPreviewPrevious(index), previous_button));
-        navigation_targets.push((HitTarget::AgentPreviewNext(index), next_button));
+        navigation_targets.push((
+            HitTarget::AgentPreviewPrevious(agent_key.clone()),
+            previous_button,
+        ));
+        navigation_targets.push((HitTarget::AgentPreviewNext(agent_key.clone()), next_button));
     }
     if messages.is_empty() {
         frame.render_widget(
@@ -505,7 +518,7 @@ pub(super) fn draw_history(
     }
     let mut targets = vec![(
         HitTarget::AgentTooltip {
-            agent: index,
+            agent: agent_key.clone(),
             message: selected_message,
         },
         area,
@@ -547,7 +560,7 @@ pub(super) fn draw_history(
         );
         targets.push((
             HitTarget::AgentMessage {
-                agent: index,
+                agent: agent_key.clone(),
                 message: message_index,
             },
             marker,
@@ -781,7 +794,11 @@ fn draw_agent_preview_picker(
             1,
         );
         let current = index == selected;
-        let hovered = hovered == Some(HitTarget::AgentPreviewPickerItem(index));
+        let Some(agent_key) = herdr.agent_key(index) else {
+            continue;
+        };
+        let hovered =
+            hovered.as_ref() == Some(&HitTarget::AgentPreviewPickerItem(agent_key.clone()));
         let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
         let agent = herdr.agent_display_name(index).unwrap_or("agent");
         let text = truncate_width(
@@ -814,7 +831,7 @@ fn draw_agent_preview_picker(
             ),
             rect,
         );
-        targets.push((HitTarget::AgentPreviewPickerItem(index), rect));
+        targets.push((HitTarget::AgentPreviewPickerItem(agent_key), rect));
     }
 }
 

@@ -60,7 +60,7 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
     let (Some(header), Some(list)) = (app.regions.agents_splitter, app.regions.agents_list) else {
         return;
     };
-    let hovered = app.hovered_hit_target.filter(|target| {
+    let hovered = app.hovered_hit_target.clone().filter(|target| {
         matches!(
             target,
             HitTarget::Agent(_)

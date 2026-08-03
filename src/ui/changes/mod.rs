@@ -779,10 +779,11 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         return;
     };
     app.herdr.request_agent_latest_user_message(index);
-    let selected_message = match app.hovered_hit_target {
+    let selected_key = app.herdr.agent_key(index);
+    let selected_message = match app.hovered_hit_target.as_ref() {
         Some(
             HitTarget::AgentTooltip { agent, message } | HitTarget::AgentMessage { agent, message },
-        ) if agent == index => Some(message),
+        ) if Some(agent) == selected_key.as_ref() => Some(*message),
         _ => None,
     };
     for (target, rect) in agents::draw_history(
@@ -792,7 +793,7 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         selected_message,
         app.agent_preview_button_flash(),
         app.agent_preview_picker_open(),
-        app.hovered_hit_target,
+        app.hovered_hit_target.clone(),
         history,
     ) {
         app.regions.register_hit_target(target, rect);

@@ -284,9 +284,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 fn draw_agent_pane_picker_overlay(frame: &mut Frame<'_>, app: &mut App) {
     if app.herdr_prompt.agent_pane_picker_open() {
         dim_except_header_controls(frame, app);
-        for (target, rect) in
-            overlays::draw_agent_pane_picker(frame, &app.herdr_prompt, app.hovered_hit_target)
-        {
+        for (target, rect) in overlays::draw_agent_pane_picker(
+            frame,
+            &app.herdr_prompt,
+            app.hovered_hit_target.clone(),
+        ) {
             app.regions.register_hit_target(target, rect);
         }
     }

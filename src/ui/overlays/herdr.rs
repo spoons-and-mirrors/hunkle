@@ -304,7 +304,7 @@ pub(crate) fn draw_agent_pane_picker(
             ];
             for (direction, edge) in edges {
                 let target = HitTarget::AgentPaneSplit(index, direction);
-                if hovered == Some(target) {
+                if hovered == Some(target.clone()) {
                     fill(frame, edge, palette().selected);
                     let plus = Rect::new(
                         edge.x.saturating_add(edge.width / 2),

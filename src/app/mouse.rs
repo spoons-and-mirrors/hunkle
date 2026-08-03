@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget, FileSearchHitTarget,
-    GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, MobileScrollDrag, Mode,
-    SettingsHitTarget, SettingsPage, View, changes::ChangesEffect, file_editor::FileEditor,
-    scroll_table,
+    ACTION_ITEMS, AgentKey, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget,
+    FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane,
+    MobileScrollDrag, Mode, SettingsHitTarget, SettingsPage, View, changes::ChangesEffect,
+    file_editor::FileEditor, scroll_table,
 };
 
 const AGENT_PREVIEW_BUTTON_FLASH: Duration = Duration::from_millis(150);
@@ -34,9 +34,9 @@ impl App {
         }
         if mouse.kind == MouseEventKind::Moved {
             self.hovered_hit_target = self.regions.hit_target_at(point);
-            if let Some(target) = self.hovered_hit_target {
+            if let Some(target) = self.hovered_hit_target.as_ref() {
                 let agent = match target {
-                    HitTarget::Agent(index) | HitTarget::AgentStash(index) => Some(index),
+                    HitTarget::Agent(key) | HitTarget::AgentStash(key) => Some(key),
                     HitTarget::AgentPreviewPicker(agent)
                     | HitTarget::AgentPreviewPickerItem(agent)
                     | HitTarget::AgentPreviewPrevious(agent)
@@ -45,7 +45,7 @@ impl App {
                     | HitTarget::AgentMessage { agent, .. } => Some(agent),
                     _ => None,
                 };
-                if let Some(index) = agent {
+                if let Some(index) = agent.and_then(|key| self.herdr.agent_index(key)) {
                     self.herdr.request_agent_latest_user_message(index);
                 }
             }
@@ -255,7 +255,10 @@ impl App {
 
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             match self.regions.hit_target_at(point) {
-                Some(HitTarget::Agent(index)) => {
+                Some(HitTarget::Agent(key)) => {
+                    let Some(index) = self.herdr.agent_index(&key) else {
+                        return;
+                    };
                     self.selection.clear();
                     if self.single_panel_layout() && self.agents_pane_visible() {
                         self.open_agent_detail(index);
@@ -268,7 +271,10 @@ impl App {
                     self.herdr.toggle_stash();
                     return;
                 }
-                Some(HitTarget::AgentStash(index)) => {
+                Some(HitTarget::AgentStash(key)) => {
+                    let Some(index) = self.herdr.agent_index(&key) else {
+                        return;
+                    };
                     self.stash_agent(index);
                     return;
                 }
@@ -794,7 +800,10 @@ impl App {
                 self.open_author_filter();
                 return;
             }
-            Some(HitTarget::Agent(index)) => {
+            Some(HitTarget::Agent(key)) => {
+                let Some(index) = self.herdr.agent_index(&key) else {
+                    return;
+                };
                 if self.single_panel_layout() && self.agents_pane_visible() {
                     self.open_agent_detail(index);
                 } else {
@@ -806,7 +815,10 @@ impl App {
                 self.herdr.toggle_stash();
                 return;
             }
-            Some(HitTarget::AgentStash(index)) => {
+            Some(HitTarget::AgentStash(key)) => {
+                let Some(index) = self.herdr.agent_index(&key) else {
+                    return;
+                };
                 self.stash_agent(index);
                 return;
             }
@@ -814,23 +826,26 @@ impl App {
                 self.restore_stashed_agent(index);
                 return;
             }
-            Some(HitTarget::AgentPreviewPicker(index)) => {
-                if let Some(key) = self.herdr.agent_key(index) {
-                    self.agent_preview_selection = Some(key);
+            Some(HitTarget::AgentPreviewPicker(key)) => {
+                if self.herdr.agent_index(&key).is_none() {
+                    return;
                 }
+                self.agent_preview_selection = Some(key);
                 self.agent_preview_picker_open = !self.agent_preview_picker_open;
                 return;
             }
-            Some(HitTarget::AgentPreviewPickerItem(index)) => {
-                self.select_agent_preview(index);
+            Some(HitTarget::AgentPreviewPickerItem(key)) => {
+                if let Some(index) = self.herdr.agent_index(&key) {
+                    self.select_agent_preview(index);
+                }
                 return;
             }
-            Some(HitTarget::AgentPreviewPrevious(index)) => {
-                self.cycle_agent_preview(index, false);
+            Some(HitTarget::AgentPreviewPrevious(key)) => {
+                self.cycle_agent_preview(&key, false);
                 return;
             }
-            Some(HitTarget::AgentPreviewNext(index)) => {
-                self.cycle_agent_preview(index, true);
+            Some(HitTarget::AgentPreviewNext(key)) => {
+                self.cycle_agent_preview(&key, true);
                 return;
             }
             Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => return,
@@ -1132,12 +1147,14 @@ impl App {
         }
     }
 
-    fn cycle_agent_preview(&mut self, current: usize, forward: bool) {
+    fn cycle_agent_preview(&mut self, current: &AgentKey, forward: bool) {
         let count = self.herdr.agents.len();
         if count == 0 {
             return;
         }
-        let current = current.min(count - 1);
+        let Some(current) = self.herdr.agent_index(current) else {
+            return;
+        };
         let index = if forward {
             (current + 1) % count
         } else if current == 0 {
@@ -1155,15 +1172,15 @@ impl App {
         let Some(key) = self.herdr.agent_key(index) else {
             return;
         };
-        self.agent_preview_selection = Some(key);
+        self.agent_preview_selection = Some(key.clone());
         self.agent_preview_picker_open = false;
         self.hovered_hit_target = self
             .herdr
             .agent_user_messages(index)
             .filter(|messages| !messages.is_empty())
-            .map_or(Some(HitTarget::Agent(index)), |messages| {
+            .map_or(Some(HitTarget::Agent(key.clone())), |messages| {
                 Some(HitTarget::AgentTooltip {
-                    agent: index,
+                    agent: key,
                     message: messages.len() - 1,
                 })
             });
@@ -1432,11 +1449,14 @@ impl App {
         let Some(target) = self.regions.hit_target_at(point) else {
             return false;
         };
-        let (agent, pointed_message) = match target {
+        let (agent_key, pointed_message) = match target {
             HitTarget::Agent(agent) => (agent, None),
             HitTarget::AgentTooltip { agent, message }
             | HitTarget::AgentMessage { agent, message } => (agent, Some(message)),
             _ => return false,
+        };
+        let Some(agent) = self.herdr.agent_index(&agent_key) else {
+            return false;
         };
         let Some(message_count) = self
             .herdr
@@ -1448,15 +1468,15 @@ impl App {
             return true;
         };
         let current = pointed_message
-            .or(match self.hovered_hit_target {
+            .or(match self.hovered_hit_target.as_ref() {
                 Some(HitTarget::AgentTooltip {
                     agent: hovered_agent,
                     message,
-                }) if hovered_agent == agent => Some(message),
+                }) if hovered_agent == &agent_key => Some(*message),
                 Some(HitTarget::AgentMessage {
                     agent: hovered_agent,
                     message,
-                }) if hovered_agent == agent => Some(message),
+                }) if hovered_agent == &agent_key => Some(*message),
                 _ => None,
             })
             .unwrap_or(message_count - 1)
@@ -1466,7 +1486,10 @@ impl App {
         } else {
             (current + 1) % message_count
         };
-        self.hovered_hit_target = Some(HitTarget::AgentTooltip { agent, message });
+        self.hovered_hit_target = Some(HitTarget::AgentTooltip {
+            agent: agent_key,
+            message,
+        });
         true
     }
 
