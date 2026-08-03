@@ -151,11 +151,31 @@ impl LiveLayoutNode {
             }),
         }
     }
+
+    fn remap_known(&mut self, panes: &HashMap<String, LivePaneLocation>) {
+        match self {
+            Self::Pane(pane_id) => {
+                if let Some(location) = panes.get(pane_id) {
+                    *pane_id = location.pane_id.clone();
+                }
+            }
+            Self::Split { first, second, .. } => {
+                first.remap_known(panes);
+                second.remap_known(panes);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub(super) struct AgentLayout {
     root: LiveLayoutNode,
+}
+
+impl AgentLayout {
+    pub(super) fn remap_known(&mut self, panes: &HashMap<String, LivePaneLocation>) {
+        self.root.remap_known(panes);
+    }
 }
 
 #[derive(Debug)]
@@ -258,12 +278,6 @@ pub(super) fn display_agent(request: DisplayAgentRequest) -> Result<DisplayAgent
     display_agent_with(request, run, api_request)
 }
 
-pub(super) fn restore_agent_layout(
-    request: DisplayAgentRequest,
-) -> Result<AgentLayoutMoveResult, String> {
-    restore_agent_layout_with(request, run, api_request)
-}
-
 fn restore_agent_layout_with<F, A>(
     request: DisplayAgentRequest,
     mut runner: F,
@@ -279,6 +293,20 @@ where
     let host = export_layout(&mut api, &request.host_tab_id)?;
     let selected = export_layout(&mut api, &request.tab_id)?;
     validate_layouts(&request, &host, &selected)?;
+    restore_exported_agent_layout(&request, host, selected, &mut runner, &mut api)
+}
+
+fn restore_exported_agent_layout<F, A>(
+    request: &DisplayAgentRequest,
+    host: LiveLayout,
+    selected: LiveLayout,
+    runner: &mut F,
+    api: &mut A,
+) -> Result<AgentLayoutMoveResult, String>
+where
+    F: FnMut(&[String]) -> Result<Value, String>,
+    A: FnMut(&str, &Value) -> Result<Value, String>,
+{
     if layout_without_host(&host.root, &request.host_pane_id)?.is_some() {
         return Err("Hunkle already has an agent layout to replace".to_owned());
     }
@@ -288,21 +316,21 @@ where
         .filter(|layout| saved_layout_matches(layout, &selected.root, &request.host_pane_id))
         .map(|layout| layout.root.clone())
         .unwrap_or_else(|| {
-            host_with_layout(request.host_pane_id.clone(), 0.6, selected.root.clone())
+            layout_around_host(&host.root, &request.host_pane_id, selected.root.clone())
         });
     let mut panes = pane_locations(&[
         (&host.root, host.tab_id.as_str()),
         (&selected.root, selected.tab_id.as_str()),
     ])?;
     let restore = (|| {
-        rebuild_layout(&mut runner, &target, &host.tab_id, &mut panes)?;
-        let final_host = export_layout(&mut api, &host.tab_id)?;
+        rebuild_layout(runner, &target, &host.tab_id, &mut panes)?;
+        let final_host = export_layout(api, &host.tab_id)?;
         verify_layout(&final_host, &target, &panes, "displayed")?;
         if final_host.focused_pane_id != request.host_pane_id {
             return Err("Herdr did not preserve focus in Hunkle".to_owned());
         }
         if selected.root.pane_count() > 1 {
-            refresh_rebuilt_agent(&mut api, &request.pane_id, &request.host_pane_id, &panes)?;
+            refresh_rebuilt_agent(api, &request.pane_id, &request.host_pane_id, &panes)?;
         }
         Ok(AgentLayoutMoveResult {
             layout: AgentLayout {
@@ -315,19 +343,19 @@ where
         Ok(result) => Ok(result),
         Err(error) => {
             let recovery = scatter_layout(
-                &mut runner,
+                runner,
                 &selected.root,
                 &request.workspace_id,
                 "restore-agent-layout",
                 &mut panes,
             )
             .and_then(|tab_id| {
-                rebuild_layout(&mut runner, &selected.root, &tab_id, &mut panes)?;
-                let parked = export_layout(&mut api, &tab_id)?;
+                rebuild_layout(runner, &selected.root, &tab_id, &mut panes)?;
+                let parked = export_layout(api, &tab_id)?;
                 verify_layout(&parked, &selected.root, &panes, "previous parked")
             })
             .and_then(|()| {
-                let restored_host = export_layout(&mut api, &host.tab_id)?;
+                let restored_host = export_layout(api, &host.tab_id)?;
                 verify_layout(&restored_host, &host.root, &panes, "previous Hunkle")
             });
             Err(match recovery {
@@ -380,21 +408,22 @@ where
     let host = export_layout(&mut api, &request.host_tab_id)?;
     let selected = export_layout(&mut api, &request.tab_id)?;
     validate_layouts(&request, &host, &selected)?;
-    let host_ratio = host_layout_ratio(&host.root, &request.host_pane_id);
-    let outgoing = layout_without_host(&host.root, &request.host_pane_id)?.ok_or_else(|| {
-        "Hunkle needs another pane before an agent layout can be exchanged".to_owned()
-    })?;
+    let Some(outgoing) = layout_without_host(&host.root, &request.host_pane_id)? else {
+        let result =
+            restore_exported_agent_layout(&request, host, selected, &mut runner, &mut api)?;
+        return Ok(DisplayAgentResult {
+            displayed: result.layout,
+            parked: None,
+            pane_locations: result.pane_locations,
+        });
+    };
     let selected_target = request
         .saved_layout
         .as_ref()
         .filter(|layout| saved_layout_matches(layout, &selected.root, &request.host_pane_id))
         .map(|layout| layout.root.clone())
         .unwrap_or_else(|| {
-            host_with_layout(
-                request.host_pane_id.clone(),
-                host_ratio,
-                selected.root.clone(),
-            )
+            layout_around_host(&host.root, &request.host_pane_id, selected.root.clone())
         });
 
     let mut panes = HashMap::new();
@@ -477,12 +506,41 @@ where
     }
 }
 
-fn host_with_layout(host_pane_id: String, ratio: f32, layout: LiveLayoutNode) -> LiveLayoutNode {
-    LiveLayoutNode::Split {
-        direction: LayoutDirection::Right,
-        ratio,
-        first: Box::new(LiveLayoutNode::Pane(host_pane_id)),
-        second: Box::new(layout),
+fn layout_around_host(
+    current: &LiveLayoutNode,
+    host_pane_id: &str,
+    layout: LiveLayoutNode,
+) -> LiveLayoutNode {
+    let host = LiveLayoutNode::Pane(host_pane_id.to_owned());
+    match current {
+        LiveLayoutNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } if first.contains(host_pane_id) => LiveLayoutNode::Split {
+            direction: *direction,
+            ratio: *ratio,
+            first: Box::new(host),
+            second: Box::new(layout),
+        },
+        LiveLayoutNode::Split {
+            direction,
+            ratio,
+            second,
+            ..
+        } if second.contains(host_pane_id) => LiveLayoutNode::Split {
+            direction: *direction,
+            ratio: *ratio,
+            first: Box::new(layout),
+            second: Box::new(host),
+        },
+        _ => LiveLayoutNode::Split {
+            direction: LayoutDirection::Right,
+            ratio: 0.6,
+            first: Box::new(host),
+            second: Box::new(layout),
+        },
     }
 }
 
@@ -750,26 +808,14 @@ fn layout_without_host(
     root: &LiveLayoutNode,
     host_pane_id: &str,
 ) -> Result<Option<LiveLayoutNode>, String> {
-    if root.first_pane() != host_pane_id || !root.contains(host_pane_id) {
-        return Err("Hunkle must be the first pane in the displayed agent layout".to_owned());
+    if !root.contains(host_pane_id) {
+        return Err("Hunkle is missing from the displayed agent layout".to_owned());
     }
     Ok(root.without_pane(host_pane_id))
 }
 
-fn host_layout_ratio(root: &LiveLayoutNode, host_pane_id: &str) -> f32 {
-    match root {
-        LiveLayoutNode::Split {
-            direction: LayoutDirection::Right,
-            ratio,
-            first,
-            ..
-        } if first.contains(host_pane_id) => *ratio,
-        _ => 0.6,
-    }
-}
-
 fn saved_layout_matches(layout: &AgentLayout, parked: &LiveLayoutNode, host_pane_id: &str) -> bool {
-    layout.root.first_pane() == host_pane_id
+    layout.root.contains(host_pane_id)
         && layout
             .root
             .without_pane(host_pane_id)
@@ -801,8 +847,8 @@ where
     let result = value
         .get("result")
         .ok_or_else(|| format!("Herdr returned an invalid response while trying to {operation}"))?;
-    if result.get("type").and_then(Value::as_str) != Some("pane_focused")
-        || result.get("pane_id").and_then(Value::as_str) != Some(pane_id)
+    if result.get("type").and_then(Value::as_str) != Some("pane_info")
+        || result.pointer("/pane/pane_id").and_then(Value::as_str) != Some(pane_id)
     {
         return Err(format!(
             "Herdr focused an unexpected pane while trying to {operation}"
@@ -829,11 +875,67 @@ where
     else {
         return Ok(());
     };
-    let target = first.first_pane().to_owned();
-    let moved = second.first_pane().to_owned();
-    move_layout_pane(runner, panes, &moved, tab_id, &target, *direction, *ratio)?;
+    let first_anchor = pane_in_tab(first, tab_id, panes);
+    let second_anchor = pane_in_tab(second, tab_id, panes);
+    match (first_anchor, second_anchor) {
+        (Some(_), Some(_)) => {}
+        (Some(target), None) => {
+            let moved = second.first_pane();
+            move_layout_pane(runner, panes, moved, tab_id, target, *direction, *ratio)?;
+        }
+        (None, Some(target)) => {
+            let moved = first.first_pane();
+            move_layout_pane(runner, panes, moved, tab_id, target, *direction, *ratio)?;
+            swap_layout_panes(runner, panes, target, moved)?;
+        }
+        (None, None) => {
+            return Err(format!("No saved layout pane is available in tab {tab_id}"));
+        }
+    }
     rebuild_layout(runner, first, tab_id, panes)?;
     rebuild_layout(runner, second, tab_id, panes)
+}
+
+fn pane_in_tab<'a>(
+    tree: &'a LiveLayoutNode,
+    tab_id: &str,
+    panes: &HashMap<String, LivePaneLocation>,
+) -> Option<&'a str> {
+    match tree {
+        LiveLayoutNode::Pane(pane_id) => panes
+            .get(pane_id)
+            .is_some_and(|location| location.tab_id == tab_id)
+            .then_some(pane_id),
+        LiveLayoutNode::Split { first, second, .. } => {
+            pane_in_tab(first, tab_id, panes).or_else(|| pane_in_tab(second, tab_id, panes))
+        }
+    }
+}
+
+fn swap_layout_panes<F>(
+    runner: &mut F,
+    panes: &HashMap<String, LivePaneLocation>,
+    source: &str,
+    target: &str,
+) -> Result<(), String>
+where
+    F: FnMut(&[String]) -> Result<Value, String>,
+{
+    let source = panes
+        .get(source)
+        .ok_or_else(|| format!("Saved layout pane {source} is unavailable"))?;
+    let target = panes
+        .get(target)
+        .ok_or_else(|| format!("Saved layout pane {target} is unavailable"))?;
+    let value = runner(&[
+        "pane".to_owned(),
+        "swap".to_owned(),
+        "--source-pane".to_owned(),
+        source.pane_id.clone(),
+        "--target-pane".to_owned(),
+        target.pane_id.clone(),
+    ])?;
+    require_changed(&value, "/result/swap", "pane swap").map(|_| ())
 }
 
 fn move_layout_pane<F>(
@@ -1699,7 +1801,7 @@ fn parse_agent_status(value: Option<&str>) -> AgentStatus {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{cell::RefCell, path::Path};
 
     use super::*;
 
@@ -1754,8 +1856,20 @@ mod tests {
     fn focused(pane_id: &str) -> Value {
         serde_json::json!({
             "result": {
-                "type": "pane_focused",
-                "pane_id": pane_id,
+                "type": "pane_info",
+                "pane": { "pane_id": pane_id },
+            }
+        })
+    }
+
+    fn swapped(source_pane_id: &str, target_pane_id: &str) -> Value {
+        serde_json::json!({
+            "result": {
+                "swap": {
+                    "changed": true,
+                    "source_pane_id": source_pane_id,
+                    "target_pane_id": target_pane_id,
+                }
             }
         })
     }
@@ -1991,6 +2105,200 @@ mod tests {
     }
 
     #[test]
+    fn exchanges_a_saved_layout_with_hunkle_on_the_right() {
+        let host = split("right", 0.35, pane("w1:p2"), pane("w1:p1"));
+        let target = split("right", 0.35, pane("w1:p3"), pane("w1:p1"));
+        let mut commands = Vec::new();
+        let mut exports = 0;
+
+        let result = display_agent_with(
+            DisplayAgentRequest {
+                pane_id: "w1:p3".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+                host_pane_id: "w1:p1".to_owned(),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+                allow_cross_workspace: false,
+                saved_layout: Some(agent_layout(target.clone())),
+            },
+            |args| {
+                commands.push(args.to_vec());
+                if args[1] == "swap" {
+                    Ok(swapped(&args[3], &args[5]))
+                } else {
+                    Ok(moved(&args[2], &args[4]))
+                }
+            },
+            |_, _| {
+                exports += 1;
+                Ok(match exports {
+                    1 => layout("w1", "w1:t1", "w1:p1", host.clone()),
+                    2 => layout("w1", "w1:t2", "w1:p3", pane("w1:p3")),
+                    3 => layout("w1", "w1:t1", "w1:p1", target.clone()),
+                    4 => layout("w1", "w1:t2", "w1:p2", pane("w1:p2")),
+                    _ => panic!("unexpected layout export"),
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0][1], "move");
+        assert_eq!(commands[0][2], "w1:p2");
+        assert_eq!(commands[1][1], "move");
+        assert_eq!(commands[1][2], "w1:p3");
+        assert_eq!(commands[1][6], "w1:p1");
+        assert_eq!(commands[2][1], "swap");
+        assert_eq!(commands[2][3], "w1:p1");
+        assert_eq!(commands[2][5], "w1:p3");
+        assert_eq!(result.displayed, agent_layout(target));
+        assert_eq!(result.parked.unwrap(), agent_layout(host));
+    }
+
+    #[test]
+    fn rebuilds_an_arbitrary_six_pane_tree_from_a_deep_hunkle_leaf() {
+        fn insert(
+            node: &mut LiveLayoutNode,
+            target: &str,
+            moved: &str,
+            direction: LayoutDirection,
+            ratio: f32,
+        ) -> bool {
+            match node {
+                LiveLayoutNode::Pane(pane_id) if pane_id == target => {
+                    *node = LiveLayoutNode::Split {
+                        direction,
+                        ratio,
+                        first: Box::new(LiveLayoutNode::Pane(pane_id.clone())),
+                        second: Box::new(LiveLayoutNode::Pane(moved.to_owned())),
+                    };
+                    true
+                }
+                LiveLayoutNode::Pane(_) => false,
+                LiveLayoutNode::Split { first, second, .. } => {
+                    insert(first, target, moved, direction, ratio)
+                        || insert(second, target, moved, direction, ratio)
+                }
+            }
+        }
+
+        fn swap(node: &mut LiveLayoutNode, source: &str, target: &str) {
+            match node {
+                LiveLayoutNode::Pane(pane_id) if pane_id == source => {
+                    *pane_id = target.to_owned();
+                }
+                LiveLayoutNode::Pane(pane_id) if pane_id == target => {
+                    *pane_id = source.to_owned();
+                }
+                LiveLayoutNode::Pane(_) => {}
+                LiveLayoutNode::Split { first, second, .. } => {
+                    swap(first, source, target);
+                    swap(second, source, target);
+                }
+            }
+        }
+
+        let desired = agent_layout(split(
+            "right",
+            0.63,
+            split(
+                "down",
+                0.41,
+                pane("w1:p2"),
+                split("right", 0.28, pane("w1:p3"), pane("w1:p1")),
+            ),
+            split(
+                "down",
+                0.57,
+                pane("w1:p4"),
+                split("right", 0.46, pane("w1:p5"), pane("w1:p6")),
+            ),
+        ))
+        .root;
+        let actual = RefCell::new(LiveLayoutNode::Pane("w1:p1".to_owned()));
+        let mut pane_ids = Vec::new();
+        desired.collect_panes(&mut pane_ids);
+        let mut panes = pane_ids
+            .into_iter()
+            .map(|pane_id| {
+                (
+                    pane_id.to_owned(),
+                    LivePaneLocation {
+                        pane_id: pane_id.to_owned(),
+                        tab_id: if pane_id == "w1:p1" { "w1:t1" } else { "w1:t2" }.to_owned(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut move_count = 0;
+        let mut swap_count = 0;
+
+        rebuild_layout(
+            &mut |args| match args[1].as_str() {
+                "move" => {
+                    move_count += 1;
+                    let direction = match args[8].as_str() {
+                        "right" => LayoutDirection::Right,
+                        "down" => LayoutDirection::Down,
+                        other => panic!("unexpected direction {other}"),
+                    };
+                    assert!(insert(
+                        &mut actual.borrow_mut(),
+                        &args[6],
+                        &args[2],
+                        direction,
+                        args[10].parse().unwrap(),
+                    ));
+                    Ok(moved(&args[2], &args[4]))
+                }
+                "swap" => {
+                    swap_count += 1;
+                    swap(&mut actual.borrow_mut(), &args[3], &args[5]);
+                    Ok(swapped(&args[3], &args[5]))
+                }
+                other => panic!("unexpected command {other}"),
+            },
+            &desired,
+            "w1:t1",
+            &mut panes,
+        )
+        .unwrap();
+
+        assert_eq!(*actual.borrow(), desired);
+        assert_eq!(move_count, 5);
+        assert_eq!(swap_count, 2);
+        assert!(panes.values().all(|location| location.tab_id == "w1:t1"));
+    }
+
+    #[test]
+    fn remaps_known_panes_in_saved_multi_pane_layouts() {
+        let mut layout = agent_layout(split(
+            "down",
+            0.4,
+            pane("w1:p2"),
+            split("right", 0.7, pane("w1:p3"), pane("w1:p4")),
+        ));
+        layout.remap_known(&HashMap::from([(
+            "w1:p3".to_owned(),
+            LivePaneLocation {
+                pane_id: "w2:p8".to_owned(),
+                tab_id: "w2:t1".to_owned(),
+            },
+        )]));
+
+        assert_eq!(
+            layout,
+            agent_layout(split(
+                "down",
+                0.4,
+                pane("w1:p2"),
+                split("right", 0.7, pane("w2:p8"), pane("w1:p4")),
+            ))
+        );
+    }
+
+    #[test]
     fn panes_below_hunkle_belong_to_the_displayed_agent_layout() {
         let outgoing = split(
             "right",
@@ -2221,7 +2529,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_layout_exchange_without_a_layout_to_park() {
+    fn displays_an_agent_when_hunkle_is_the_only_host_pane() {
+        let mut commands = Vec::new();
         let mut exports = 0;
         let result = display_agent_with(
             DisplayAgentRequest {
@@ -2234,21 +2543,32 @@ mod tests {
                 allow_cross_workspace: false,
                 saved_layout: None,
             },
-            |_| panic!("Preflight failure must not move panes"),
+            |args| {
+                commands.push(args.to_vec());
+                Ok(moved(&args[2], &args[4]))
+            },
             |_, _| {
                 exports += 1;
-                Ok(if exports == 1 {
-                    layout("w1", "w1:t1", "w1:p1", pane("w1:p1"))
-                } else {
-                    layout("w1", "w1:t2", "w1:p3", pane("w1:p3"))
+                Ok(match exports {
+                    1 => layout("w1", "w1:t1", "w1:p1", pane("w1:p1")),
+                    2 => layout("w1", "w1:t2", "w1:p3", pane("w1:p3")),
+                    3 => layout(
+                        "w1",
+                        "w1:t1",
+                        "w1:p1",
+                        split("right", 0.6, pane("w1:p1"), pane("w1:p3")),
+                    ),
+                    _ => panic!("unexpected layout export"),
                 })
             },
-        );
+        )
+        .unwrap();
 
-        assert_eq!(
-            result.unwrap_err(),
-            "Hunkle needs another pane before an agent layout can be exchanged"
-        );
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0][2], "w1:p3");
+        assert_eq!(commands[0][4], "w1:t1");
+        assert!(result.parked.is_none());
+        assert_eq!(exports, 3);
     }
 
     #[test]

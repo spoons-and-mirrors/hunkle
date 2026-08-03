@@ -270,14 +270,6 @@ enum Completion {
         event: client::Event,
         observed_at_ms: u64,
     },
-    AgentLayoutMove {
-        result: Result<Box<client::AgentLayoutMoveResult>, String>,
-        key: AgentTimingKey,
-        reopen_path: Option<PathBuf>,
-        host_workspace_id: String,
-        host_tab_id: String,
-        selected_workspace_id: String,
-    },
     AgentDisplay {
         result: Result<Box<client::DisplayAgentResult>, String>,
         selected_key: AgentTimingKey,
@@ -346,7 +338,6 @@ pub(crate) struct HerdrSession {
     host_tab_id: Option<String>,
     host_pane_id: Option<String>,
     cross_workspace_agents: bool,
-    agent_layout_move_running: bool,
     agent_display_running: bool,
     fullscreen_running: bool,
     fullscreen: bool,
@@ -420,7 +411,6 @@ impl HerdrSession {
             host_tab_id: None,
             host_pane_id: None,
             cross_workspace_agents: false,
-            agent_layout_move_running: false,
             agent_display_running: false,
             fullscreen_running: false,
             fullscreen: false,
@@ -500,49 +490,6 @@ impl HerdrSession {
                     self.apply_agent_status_event_at(event, observed_at_ms);
                     self.next_refresh = Instant::now();
                 }
-                Completion::AgentLayoutMove {
-                    result,
-                    key,
-                    reopen_path,
-                    host_workspace_id,
-                    host_tab_id,
-                    selected_workspace_id,
-                } => {
-                    self.agent_layout_move_running = false;
-                    self.next_refresh = Instant::now();
-                    poll.notice = Some(match result {
-                        Ok(result) => {
-                            let client::AgentLayoutMoveResult {
-                                layout,
-                                pane_locations,
-                            } = *result;
-                            for agent in &mut self.agents {
-                                let Some(location) = pane_locations.get(&agent.pane_id) else {
-                                    continue;
-                                };
-                                agent.pane_id = location.pane_id.clone();
-                                agent.tab_id = location.tab_id.clone();
-                                agent.workspace_id = if location.tab_id == host_tab_id {
-                                    host_workspace_id.clone()
-                                } else {
-                                    selected_workspace_id.clone()
-                                };
-                            }
-                            self.agent_layouts.insert(key.clone(), layout);
-                            if let Some(path) = self.agent_layouts_path.as_deref()
-                                && let Err(error) = save_agent_layouts(path, &self.agent_layouts)
-                            {
-                                poll.notice = Some(format!(
-                                    "Agent layout changed, but it could not be saved: {error}"
-                                ));
-                            }
-                            self.displayed_agent_key = Some(key);
-                            poll.reopen_path = reopen_path;
-                            "Agent returned to foreground".to_owned()
-                        }
-                        Err(error) => error,
-                    });
-                }
                 Completion::AgentDisplay {
                     result,
                     selected_key,
@@ -562,6 +509,9 @@ impl HerdrSession {
                                 parked,
                                 pane_locations,
                             } = *result;
+                            for saved in self.agent_layouts.values_mut() {
+                                saved.remap_known(&pane_locations);
+                            }
                             for agent in &mut self.agents {
                                 let Some(location) = pane_locations.get(&agent.pane_id) else {
                                     continue;
@@ -1058,7 +1008,7 @@ impl HerdrSession {
     }
 
     pub(crate) fn agent_layout_running(&self) -> bool {
-        self.agent_layout_move_running || self.agent_display_running || self.fullscreen_running
+        self.agent_display_running || self.fullscreen_running
     }
 
     pub(crate) fn fullscreen_running(&self) -> bool {
@@ -1093,59 +1043,7 @@ impl HerdrSession {
         if self.agent_is_in_host_tab(index) {
             return Ok(());
         }
-        if self
-            .agents
-            .iter()
-            .any(|agent| self.agent_is_in_host_tab_by_agent(agent))
-        {
-            return self.display_agent(index);
-        }
-        self.restore_agent_layout(index)
-    }
-
-    fn restore_agent_layout(&mut self, index: usize) -> Result<(), String> {
-        let agent = self
-            .agents
-            .get(index)
-            .ok_or_else(|| "Agent is no longer available".to_owned())?;
-        let (Some(host_workspace_id), Some(host_tab_id), Some(host_pane_id)) = (
-            self.host_workspace_id.clone(),
-            self.host_tab_id.clone(),
-            self.host_pane_id.clone(),
-        ) else {
-            return Err("Hunkle is not attached to a Herdr pane".to_owned());
-        };
-        if agent.pane_id == host_pane_id {
-            return Err("Hunkle cannot move its own pane".to_owned());
-        }
-        let pane_id = agent.pane_id.clone();
-        let key = agent.timing_key.clone();
-        let selected_workspace_id = agent.workspace_id.clone();
-        let reopen_path = agent.cwd.clone();
-        let request = client::DisplayAgentRequest {
-            pane_id: pane_id.clone(),
-            workspace_id: agent.workspace_id.clone(),
-            tab_id: agent.tab_id.clone(),
-            host_pane_id: host_pane_id.clone(),
-            host_workspace_id: host_workspace_id.clone(),
-            host_tab_id: host_tab_id.clone(),
-            allow_cross_workspace: self.cross_workspace_agents,
-            saved_layout: self.agent_layouts.get(&key).cloned(),
-        };
-        self.agent_layout_move_running = true;
-        let sender = self.sender.clone();
-        thread::spawn(move || {
-            let result = client::restore_agent_layout(request).map(Box::new);
-            let _ = sender.send(Completion::AgentLayoutMove {
-                result,
-                key,
-                reopen_path,
-                host_workspace_id,
-                host_tab_id,
-                selected_workspace_id,
-            });
-        });
-        Ok(())
+        self.display_agent(index)
     }
 
     fn display_agent(&mut self, index: usize) -> Result<(), String> {
@@ -1643,7 +1541,6 @@ mod layout_tests {
         session.show_agent(0).unwrap();
 
         assert!(session.agent_is_in_host_tab(0));
-        assert!(!session.agent_layout_move_running);
         assert!(!session.agent_display_running);
     }
 }
