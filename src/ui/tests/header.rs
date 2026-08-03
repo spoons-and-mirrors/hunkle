@@ -109,6 +109,81 @@ fn issue_picker_renders_searchable_rows_and_scope_control() {
 }
 
 #[test]
+fn issue_picker_uses_readable_stacked_rows_on_mobile() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    app.header_picker.open(
+        HeaderPickerKind::Issues,
+        vec![
+            HeaderPickerItem::Issue {
+                number: 42,
+                title: "Keep Markdown fast on narrow terminals".to_owned(),
+                pull_request: true,
+                status: "READY".to_owned(),
+                author: Some("octocat-long".to_owned()),
+                labels: vec!["performance".to_owned()],
+                changed_files: Some(12),
+                additions: Some(345),
+                deletions: Some(67),
+            },
+            HeaderPickerItem::Issue {
+                number: 43,
+                title: "Second issue remains independently clickable".to_owned(),
+                pull_request: false,
+                status: "OPEN".to_owned(),
+                author: None,
+                labels: Vec::new(),
+                changed_files: None,
+                additions: None,
+                deletions: None,
+            },
+        ],
+        0,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let overlay = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerOverlay)
+        .unwrap();
+    let first = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(0))
+        .unwrap();
+    let second = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerItem(1))
+        .unwrap();
+    assert_eq!(overlay.x, 0);
+    assert_eq!(overlay.width, 49);
+    assert_eq!(first.height, 3);
+    assert_eq!(second.y, first.bottom());
+    let mut first_text = String::new();
+    for y in first.y..first.bottom() {
+        for x in first.x..first.right() {
+            first_text.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    for text in [
+        "#42",
+        "PR",
+        "READY",
+        "Keep Markdown fast on narrow terminals",
+        "@octoca",
+        "12 files",
+        "+345",
+        "-67",
+        "performance",
+    ] {
+        assert!(first_text.contains(text), "rendered row: {first_text:?}");
+    }
+}
+
+#[test]
 fn repository_picker_labels_linked_worktrees_by_repository() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("hunkle");

@@ -421,8 +421,16 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let filtering = app.header_picker.filtering();
     let picker_chrome = if filtering { 4 } else { 1 };
     let item_offset = if filtering { 3 } else { 1 };
-    let visible_items =
-        header_picker_visible_items(frame.area().height, available_height, picker_chrome);
+    let mobile_issue_picker = kind == HeaderPickerKind::Issues && app.single_panel_layout();
+    let item_height = if mobile_issue_picker { 3 } else { 1 };
+    let visible_item_rows = if mobile_issue_picker {
+        usize::from(
+            available_height.saturating_sub(u16::try_from(picker_chrome).unwrap_or(u16::MAX)),
+        )
+    } else {
+        header_picker_visible_items(frame.area().height, available_height, picker_chrome)
+    };
+    let visible_items = (visible_item_rows / item_height).max(1);
     let row_count = if cloning_repository {
         5
     } else if creating_worktree {
@@ -442,20 +450,31 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         HeaderPickerKind::Issues => frame.area().width.saturating_mul(9) / 10,
         _ => 58,
     };
-    let width = frame
-        .area()
-        .width
-        .saturating_sub(2)
-        .min(maximum_width)
-        .max(12);
-    let x = anchor
-        .x
-        .min(frame.area().right().saturating_sub(width).saturating_sub(1));
+    let width = if mobile_issue_picker {
+        frame.area().width
+    } else {
+        frame
+            .area()
+            .width
+            .saturating_sub(2)
+            .min(maximum_width)
+            .max(12)
+    };
+    let x = if mobile_issue_picker {
+        frame.area().x
+    } else {
+        anchor
+            .x
+            .min(frame.area().right().saturating_sub(width).saturating_sub(1))
+    };
+    let picker_height = row_count
+        .saturating_mul(item_height)
+        .saturating_add(picker_chrome);
     let area = Rect::new(
         x,
         picker_y,
         width,
-        u16::try_from(row_count + picker_chrome).unwrap_or(available_height),
+        u16::try_from(picker_height).unwrap_or(available_height),
     );
     frame.render_widget(Clear, area);
     fill(frame, area, palette().surface_alt);
@@ -854,9 +873,12 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
         for (row, index) in rows.into_iter().enumerate() {
             let rect = Rect::new(
                 area.x,
-                area.y.saturating_add(item_offset + row as u16),
+                area.y.saturating_add(
+                    item_offset
+                        + u16::try_from(row.saturating_mul(item_height)).unwrap_or(u16::MAX),
+                ),
                 area.width,
-                1,
+                u16::try_from(item_height).unwrap_or(1),
             );
             let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerItem(index));
             let background = if app.header_picker.selected == index || hovered {
@@ -1113,6 +1135,7 @@ fn draw_issue_picker_row(
         pull_request,
         status,
         author,
+        labels,
         changed_files,
         additions,
         deletions,
@@ -1121,6 +1144,107 @@ fn draw_issue_picker_row(
     else {
         return;
     };
+    let (kind, kind_color) = if *pull_request {
+        ("PR", palette().purple)
+    } else {
+        ("ISSUE", palette().cyan)
+    };
+    let status_color = match status.as_str() {
+        "MERGED" => palette().purple,
+        "CLOSED" => palette().red,
+        "DRAFT" => palette().yellow,
+        "READY" => palette().green,
+        _ => palette().cyan,
+    };
+    if area.height >= 3 {
+        fill(frame, area, background);
+        let number_area = Rect::new(area.x.saturating_add(1), area.y, 7.min(area.width), 1);
+        let kind_area = Rect::new(number_area.right(), area.y, 7.min(area.width), 1);
+        let status_area = Rect::new(area.right().saturating_sub(8), area.y, 8.min(area.width), 1);
+        frame.render_widget(
+            Paragraph::new(format!("#{number}"))
+                .style(Style::default().fg(palette().muted).bg(background)),
+            number_area,
+        );
+        frame.render_widget(
+            Paragraph::new(format!(" {:^5} ", kind)).style(
+                Style::default()
+                    .fg(kind_color)
+                    .bg(palette().canvas)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            kind_area,
+        );
+        frame.render_widget(
+            Paragraph::new(format!(" {:^6} ", status)).style(
+                Style::default()
+                    .fg(status_color)
+                    .bg(palette().canvas)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            status_area,
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_width(
+                title,
+                usize::from(area.width.saturating_sub(2)),
+            ))
+            .style(Style::default().fg(palette().ink).bg(background)),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y.saturating_add(1),
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
+        let mut metadata = Vec::new();
+        if let Some(author) = author {
+            metadata.push(Span::styled(
+                format!("@{}", author.chars().take(6).collect::<String>()),
+                Style::default().fg(palette().muted),
+            ));
+        }
+        if let Some(files) = changed_files {
+            if !metadata.is_empty() {
+                metadata.push(Span::styled(" · ", Style::default().fg(palette().faint)));
+            }
+            metadata.push(Span::styled(
+                format!("{files} {}", if *files == 1 { "file" } else { "files" }),
+                Style::default().fg(palette().muted),
+            ));
+        }
+        if let Some(additions) = additions {
+            metadata.push(Span::styled(
+                format!("  +{additions}"),
+                Style::default().fg(palette().green),
+            ));
+        }
+        if let Some(deletions) = deletions {
+            metadata.push(Span::styled(
+                format!(" -{deletions}"),
+                Style::default().fg(palette().red),
+            ));
+        }
+        if let Some(label) = labels.first() {
+            if !metadata.is_empty() {
+                metadata.push(Span::styled(" · ", Style::default().fg(palette().faint)));
+            }
+            metadata.push(Span::styled(
+                label.clone(),
+                Style::default().fg(palette().soft),
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(metadata)).style(Style::default().bg(background)),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y.saturating_add(2),
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
+        return;
+    }
     const NUMBER_WIDTH: u16 = 7;
     const KIND_WIDTH: u16 = 7;
     const STATUS_WIDTH: u16 = 8;
@@ -1163,11 +1287,6 @@ fn draw_issue_picker_row(
             .style(Style::default().fg(palette().muted).bg(background)),
         number_area,
     );
-    let (kind, kind_color) = if *pull_request {
-        ("PR", palette().purple)
-    } else {
-        ("ISSUE", palette().cyan)
-    };
     frame.render_widget(
         Paragraph::new(format!(" {:^5} ", kind)).style(
             Style::default()
@@ -1187,13 +1306,6 @@ fn draw_issue_picker_row(
             .style(Style::default().fg(palette().ink).bg(background)),
         title_area,
     );
-    let status_color = match status.as_str() {
-        "MERGED" => palette().purple,
-        "CLOSED" => palette().red,
-        "DRAFT" => palette().yellow,
-        "READY" => palette().green,
-        _ => palette().cyan,
-    };
     frame.render_widget(
         Paragraph::new(format!(" {:^6} ", status)).style(
             Style::default()
