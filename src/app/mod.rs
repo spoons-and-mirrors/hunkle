@@ -2200,6 +2200,27 @@ impl App {
         (self.herdr.agent_key(index).as_ref() == Some(&scroll.agent)).then_some(scroll.offset)
     }
 
+    pub(crate) fn agent_preview_swipe(&self, index: usize) -> Option<(i32, usize)> {
+        let drag = self.mobile_scroll_drag?;
+        if drag.agent_preview != Some(index)
+            || drag.axis == Some(MobileDragAxis::Vertical)
+            || self.herdr.agents.len() < 2
+        {
+            return None;
+        }
+        let offset = i32::from(drag.previous.x) - i32::from(drag.start.x);
+        let vertical = drag.start.y.abs_diff(drag.previous.y);
+        if offset == 0 || (drag.axis.is_none() && offset.unsigned_abs() <= u32::from(vertical)) {
+            return None;
+        }
+        let neighbor = if offset < 0 {
+            (index + 1) % self.herdr.agents.len()
+        } else {
+            (index + self.herdr.agents.len() - 1) % self.herdr.agents.len()
+        };
+        Some((offset, neighbor))
+    }
+
     pub(crate) fn agent_preview_request(&self, index: usize) -> Option<(usize, usize)> {
         let selection = self
             .agent_preview_request_selection

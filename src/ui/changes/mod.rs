@@ -807,6 +807,96 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
     for (target, rect) in targets {
         app.regions.register_hit_target(target, rect);
     }
+    if let Some((offset, neighbor)) = app.agent_preview_swipe(index) {
+        let repository = app.herdr.agent_repository_name(neighbor).unwrap_or("agent");
+        slide_agent_preview(frame, history, offset, repository);
+    }
+}
+
+fn slide_agent_preview(frame: &mut Frame<'_>, area: Rect, offset: i32, neighbor: &str) {
+    let maximum = i32::from(area.width.saturating_sub(2));
+    let offset = offset.clamp(-maximum, maximum);
+    if offset == 0 || area.is_empty() {
+        return;
+    }
+    let width = usize::from(area.width);
+    let mut page = Vec::with_capacity(width.saturating_mul(usize::from(area.height)));
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            page.push(frame.buffer_mut().cell((x, y)).cloned().unwrap());
+        }
+    }
+
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().surface_alt);
+    let reveal_width = u16::try_from(offset.unsigned_abs())
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    let reveal = if offset > 0 {
+        Rect::new(area.x, area.y, reveal_width, area.height)
+    } else {
+        Rect::new(
+            area.right().saturating_sub(reveal_width),
+            area.y,
+            reveal_width,
+            area.height,
+        )
+    };
+    let direction = if offset > 0 { "‹" } else { "›" };
+    let label = if offset > 0 {
+        format!("{direction} {neighbor}")
+    } else {
+        format!("{neighbor} {direction}")
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_width(&label, usize::from(reveal.width)))
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(palette().accent)
+                    .bg(palette().surface_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        Rect::new(
+            reveal.x,
+            reveal.y.saturating_add(reveal.height / 2),
+            reveal.width,
+            u16::from(reveal.height > 0),
+        ),
+    );
+
+    for source_y in 0..usize::from(area.height) {
+        for source_x in 0..width {
+            let destination_x = i32::try_from(source_x).unwrap_or(i32::MAX) + offset;
+            let Ok(destination_x) = usize::try_from(destination_x) else {
+                continue;
+            };
+            if destination_x >= width {
+                continue;
+            }
+            let source = page[source_y * width + source_x].clone();
+            if let Some(cell) = frame.buffer_mut().cell_mut((
+                area.x
+                    .saturating_add(u16::try_from(destination_x).unwrap_or(u16::MAX)),
+                area.y
+                    .saturating_add(u16::try_from(source_y).unwrap_or(u16::MAX)),
+            )) {
+                *cell = source;
+            }
+        }
+    }
+
+    let edge_x = if offset > 0 {
+        area.x.saturating_add(reveal_width)
+    } else {
+        area.right().saturating_sub(reveal_width).saturating_sub(1)
+    };
+    let edge = if offset > 0 { "▌" } else { "▐" };
+    for y in area.y..area.bottom() {
+        if let Some(cell) = frame.buffer_mut().cell_mut((edge_x, y)) {
+            cell.set_symbol(edge).set_fg(palette().accent);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -615,6 +615,14 @@ fn mobile_agent_preview_swipes_between_agents() {
             message: 0,
         })
         .unwrap();
+    let first_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    let live_x = first_screen.find("LIVE").unwrap();
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
         first.x + 20,
@@ -625,6 +633,22 @@ fn mobile_agent_preview_swipes_between_agents() {
         first.x + 8,
         first.y + 9,
     ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let dragging_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert_eq!(dragging_screen.find("LIVE").unwrap(), live_x - 12);
+    assert_eq!(dragging_screen.matches("LIVE").count(), 1);
+    assert!(dragging_screen.contains("second-repo"));
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(0))
+            .is_some()
+    );
     app.handle_mouse(mouse(
         MouseEventKind::Up(MouseButton::Left),
         first.x + 8,

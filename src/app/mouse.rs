@@ -450,19 +450,18 @@ impl App {
         if let Some(mut drag) = self.mobile_scroll_drag {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
-                    let preview_agent = self.agent_preview_at(drag.start);
                     if point != drag.previous {
                         drag.moved = true;
                         let horizontal = drag.start.x.abs_diff(point.x);
                         let vertical = drag.start.y.abs_diff(point.y);
                         if drag.axis.is_none() {
-                            drag.axis = if preview_agent.is_some()
+                            drag.axis = if drag.agent_preview.is_some()
                                 && horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD
                                 && horizontal > vertical
                             {
                                 Some(MobileDragAxis::Horizontal)
                             } else if vertical > 0
-                                && (preview_agent.is_none() || vertical >= horizontal)
+                                && (drag.agent_preview.is_none() || vertical >= horizontal)
                             {
                                 Some(MobileDragAxis::Vertical)
                             } else {
@@ -481,7 +480,7 @@ impl App {
                     self.mobile_scroll_drag = (!released).then_some(drag);
                     if released {
                         if drag.axis == Some(MobileDragAxis::Horizontal) {
-                            if let Some(agent) = preview_agent {
+                            if let Some(agent) = drag.agent_preview {
                                 self.cycle_agent_preview(agent, point.x < drag.start.x);
                             }
                         } else if !drag.moved {
@@ -514,11 +513,13 @@ impl App {
         if self.begin_mouse_control(point) {
             return true;
         }
+        let agent_preview = self.agent_preview_at(point);
         self.mobile_scroll_drag = Some(MobileScrollDrag {
             start: point,
             previous: point,
             moved: false,
             axis: None,
+            agent_preview,
             modifiers: mouse.modifiers,
         });
         true

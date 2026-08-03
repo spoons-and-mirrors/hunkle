@@ -281,6 +281,7 @@ pub(crate) struct MobileScrollDrag {
     pub(crate) previous: Position,
     pub(crate) moved: bool,
     pub(crate) axis: Option<MobileDragAxis>,
+    pub(crate) agent_preview: Option<usize>,
     pub(crate) modifiers: KeyModifiers,
 }
 
