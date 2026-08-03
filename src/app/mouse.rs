@@ -5,16 +5,23 @@ use std::time::{Duration, Instant};
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, CloneField, ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag,
-    GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, Mode, SettingsHitTarget, SettingsPage,
-    View, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
+    ACTION_ITEMS, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget, FileSearchHitTarget,
+    GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, MobileScrollDrag, Mode,
+    SettingsHitTarget, SettingsPage, View, changes::ChangesEffect, file_editor::FileEditor,
+    scroll_table,
 };
 
-const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 const AGENT_PREVIEW_BUTTON_FLASH: Duration = Duration::from_millis(150);
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.handle_mobile_scroll_gesture(mouse) {
+            return;
+        }
+        self.handle_mouse_inner(mouse);
+    }
+
+    fn handle_mouse_inner(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         if self.agent_preview_picker_open
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -250,7 +257,11 @@ impl App {
             match self.regions.hit_target_at(point) {
                 Some(HitTarget::Agent(index)) => {
                     self.selection.clear();
-                    self.toggle_agent_visibility(index);
+                    if self.single_panel_layout() && self.agents_pane_visible() {
+                        self.open_agent_detail(index);
+                    } else {
+                        self.toggle_agent_visibility(index);
+                    }
                     return;
                 }
                 Some(HitTarget::AgentStashToggle) => {
@@ -374,8 +385,8 @@ impl App {
         }
 
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.scroll_at(point, 1),
-            MouseEventKind::ScrollUp => self.scroll_at(point, -1),
+            MouseEventKind::ScrollDown => self.scroll_at(point, 1, true),
+            MouseEventKind::ScrollUp => self.scroll_at(point, -1, true),
             MouseEventKind::Down(MouseButton::Right) => {
                 let effect = self
                     .regions
@@ -389,6 +400,137 @@ impl App {
                     });
                 self.apply_changes_effect(effect);
             }
+            _ => {}
+        }
+    }
+
+    fn handle_mobile_scroll_gesture(&mut self, mouse: MouseEvent) -> bool {
+        if self.mode == Mode::FileEdit {
+            self.mobile_scroll_drag = None;
+            return false;
+        }
+        if self.dragging_splitter
+            || self.dragging_agents
+            || self.dragging_diff_scrollbar
+            || self.dragging_graph_column.is_some()
+            || self.workspace_explorer.dragging_splitter
+            || self.file_drag.is_some()
+        {
+            self.mobile_scroll_drag = None;
+            return false;
+        }
+        let point = Position::new(mouse.column, mouse.row);
+        if let Some(mut drag) = self.mobile_scroll_drag {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+                    if point != drag.previous {
+                        drag.moved = true;
+                        let delta = drag.previous.y as isize - point.y as isize;
+                        if delta != 0 {
+                            self.scroll_mobile_at(drag.start, delta);
+                        }
+                        drag.previous = point;
+                    }
+                    let released = mouse.kind == MouseEventKind::Up(MouseButton::Left);
+                    self.mobile_scroll_drag = (!released).then_some(drag);
+                    if released && !drag.moved {
+                        self.handle_mouse_inner(MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            column: drag.start.x,
+                            row: drag.start.y,
+                            modifiers: drag.modifiers,
+                        });
+                        self.handle_mouse_inner(MouseEvent {
+                            kind: MouseEventKind::Up(MouseButton::Left),
+                            column: drag.start.x,
+                            row: drag.start.y,
+                            modifiers: drag.modifiers,
+                        });
+                    }
+                    return true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.mobile_scroll_drag = None;
+                }
+                _ => return true,
+            }
+        }
+        if !self.single_panel_layout() || mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+        self.selection.clear();
+        if self.begin_mouse_control(point) {
+            return true;
+        }
+        self.mobile_scroll_drag = Some(MobileScrollDrag {
+            start: point,
+            previous: point,
+            moved: false,
+            modifiers: mouse.modifiers,
+        });
+        true
+    }
+
+    fn scroll_mobile_at(&mut self, point: Position, delta: isize) {
+        if self.header_picker.is_open() {
+            if matches!(
+                self.regions.hit_target_at(point),
+                Some(
+                    HitTarget::HeaderPickerOverlay
+                        | HitTarget::HeaderPickerItem(_)
+                        | HitTarget::HeaderPickerDeleteWorktree(_),
+                )
+            ) {
+                self.hovered_hit_target = None;
+                self.header_picker.scroll_by(delta);
+            }
+            return;
+        }
+        if matches!(
+            self.regions.hit_target_at(point),
+            Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. })
+        ) {
+            for _ in 0..delta.unsigned_abs() {
+                self.cycle_agent_message(point, delta < 0);
+            }
+            return;
+        }
+        let kind = if delta < 0 {
+            MouseEventKind::ScrollUp
+        } else {
+            MouseEventKind::ScrollDown
+        };
+        let event = MouseEvent {
+            kind,
+            column: point.x,
+            row: point.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        match self.mode {
+            Mode::ActionMenu => self.actions.move_selection(delta),
+            Mode::AuthorFilter => self.author_filter.move_selection(delta),
+            Mode::Explorer => {
+                for _ in 0..delta.unsigned_abs() {
+                    self.handle_explorer_mouse(event);
+                }
+            }
+            Mode::Command => self.actions.scroll_by(delta),
+            Mode::Normal if self.view == View::RepositorySearch => {
+                for _ in 0..delta.unsigned_abs() {
+                    self.handle_file_search_mouse(event);
+                }
+            }
+            Mode::Settings if self.settings_page == SettingsPage::Shortcuts => {
+                let key = if delta < 0 {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                };
+                for _ in 0..delta.unsigned_abs() {
+                    self.handle_shortcut_settings(KeyEvent::new(key, KeyModifiers::NONE));
+                }
+            }
+            Mode::Normal | Mode::Commit => self.scroll_at(point, delta, false),
             _ => {}
         }
     }
@@ -517,6 +659,7 @@ impl App {
             .regions
             .agents_splitter
             .is_some_and(|rect| rect.contains(point))
+            && !self.single_panel_layout()
         {
             self.mode = Mode::Normal;
             self.dragging_agents = true;
@@ -652,7 +795,11 @@ impl App {
                 return;
             }
             Some(HitTarget::Agent(index)) => {
-                self.toggle_agent_visibility(index);
+                if self.single_panel_layout() && self.agents_pane_visible() {
+                    self.open_agent_detail(index);
+                } else {
+                    self.toggle_agent_visibility(index);
+                }
                 return;
             }
             Some(HitTarget::AgentStashToggle) => {
@@ -718,7 +865,7 @@ impl App {
             .changes
             .is_some_and(|rect| rect.contains(point))
         {
-            self.show_main_pane();
+            self.show_previous_panel();
         } else if self.regions.graph.is_some_and(|rect| rect.contains(point)) {
             self.toggle_graph();
         } else if self
@@ -740,7 +887,7 @@ impl App {
                 let repo = self.session.data();
                 self.changes.toggle_selected_explorer_directory(repo);
             } else {
-                self.show_main_pane();
+                self.show_detail_panel();
             }
         } else if self.select_agents_row(point) {
         } else if self.select_graph_row(point) {
@@ -906,12 +1053,13 @@ impl App {
                 self.dismiss_agent_preview();
                 self.last_worktree_file_click = None;
                 self.mode = Mode::Normal;
+                self.single_panel_detail_open = false;
             }
             Some(ChangesEffect::PaneActivated) => {
                 self.dismiss_agent_preview();
                 self.last_worktree_file_click = None;
                 self.mode = Mode::Normal;
-                self.show_main_pane();
+                self.show_detail_panel();
             }
             Some(ChangesEffect::AgentsPaneActivated) => {
                 self.show_agents_pane();
@@ -943,7 +1091,7 @@ impl App {
                 {
                     return;
                 }
-                self.show_main_pane();
+                self.show_detail_panel();
             }
             None => {}
         }
@@ -1003,7 +1151,7 @@ impl App {
         self.select_agent_preview(index);
     }
 
-    fn select_agent_preview(&mut self, index: usize) {
+    pub(super) fn select_agent_preview(&mut self, index: usize) {
         let Some(key) = self.herdr.agent_key(index) else {
             return;
         };
@@ -1322,9 +1470,9 @@ impl App {
         true
     }
 
-    fn scroll_at(&mut self, point: Position, delta: isize) {
+    fn scroll_at(&mut self, point: Position, delta: isize, wheel: bool) {
         if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
-            let amount = delta.saturating_mul(2);
+            let amount = delta.saturating_mul(if wheel { 2 } else { 1 });
             let current = self.regions.commit_scroll;
             let next = if amount < 0 {
                 current.saturating_sub(amount.unsigned_abs())
@@ -1343,7 +1491,7 @@ impl App {
                 .sqlite_objects
                 .map_or(0, |rect| usize::from(rect.height));
             self.changes
-                .scroll_sqlite_objects(viewport, delta.saturating_mul(3));
+                .scroll_sqlite_objects(viewport, delta.saturating_mul(if wheel { 3 } else { 1 }));
         } else if self
             .regions
             .sqlite_rows
@@ -1354,16 +1502,18 @@ impl App {
                 .sqlite_rows
                 .map_or(0, |rect| usize::from(rect.height));
             self.changes
-                .scroll_sqlite_rows(viewport, delta.saturating_mul(3));
+                .scroll_sqlite_rows(viewport, delta.saturating_mul(if wheel { 3 } else { 1 }));
         } else if self.regions.diff.is_some_and(|rect| rect.contains(point)) {
-            self.changes
-                .scroll_diff_by(self.regions.diff_scroll_max, delta.saturating_mul(3));
+            self.changes.scroll_diff_by(
+                self.regions.diff_scroll_max,
+                delta.saturating_mul(if wheel { 3 } else { 1 }),
+            );
         } else if self
             .regions
             .explorer_list
             .is_some_and(|rect| rect.contains(point))
         {
-            self.scroll_explorer(delta.saturating_mul(3));
+            self.scroll_explorer(delta.saturating_mul(if wheel { 3 } else { 1 }));
         } else if self
             .regions
             .agents_list
@@ -1375,13 +1525,13 @@ impl App {
             .worktree_list
             .is_some_and(|rect| rect.contains(point))
         {
-            self.scroll_worktree(delta.saturating_mul(3));
+            self.scroll_worktree(delta.saturating_mul(if wheel { 3 } else { 1 }));
         } else if self
             .regions
             .graph_table
             .is_some_and(|rect| rect.contains(point))
         {
-            self.scroll_graph(delta.saturating_mul(3));
+            self.scroll_graph(delta.saturating_mul(if wheel { 3 } else { 1 }));
         }
     }
 

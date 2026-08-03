@@ -13,15 +13,15 @@ pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::app::{
     AgentActivityPreview, AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator,
-    ExplorerHitTarget, GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind,
-    HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget, LeftPane, Mode, Settings,
-    SettingsHitTarget, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus, StashedAgent,
-    View,
+    ExplorerHitTarget, FOOTER_MARQUEE_PAUSE, FOOTER_MARQUEE_STEP, GraphColumn, GraphHitTarget,
+    HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget,
+    LeftPane, Mode, Settings, SettingsHitTarget, SettingsPage, SettingsStore, ShortcutAction,
+    SqliteFocus, StashedAgent, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    BranchPickerStep, display_path, draw, palette, selected_display_range, text,
+    BranchPickerStep, display_path, draw, marquee_window, palette, selected_display_range, text,
     wrapped_editor_cursor,
 };
 
@@ -45,6 +45,54 @@ fn footer_abbreviates_paths_under_home() {
     };
     let path = std::path::PathBuf::from(home).join("project");
     assert_eq!(display_path(&path), "~/project");
+}
+
+#[test]
+fn overflowing_footer_path_scrolls_out_waits_then_scrolls_back() {
+    let path = " /projects/a-very-long-repository:main";
+    let width = 20;
+    assert_eq!(marquee_window(path, width, 0), " /projects/a-very-lo");
+    assert_eq!(marquee_window(path, width, 1), "/projects/a-very-lon");
+
+    let travel = UnicodeWidthStr::width(path) - width;
+    let pause_frames =
+        (FOOTER_MARQUEE_PAUSE.as_millis() / FOOTER_MARQUEE_STEP.as_millis()) as usize;
+    assert_eq!(marquee_window(path, width, travel), "long-repository:main");
+    assert_eq!(
+        marquee_window(path, width, travel + pause_frames),
+        "long-repository:main"
+    );
+    assert_eq!(
+        marquee_window(path, width, travel + pause_frames + 1),
+        "-long-repository:mai"
+    );
+    assert_eq!(
+        marquee_window(path, width, travel * 2 + pause_frames),
+        " /projects/a-very-lo"
+    );
+}
+
+#[test]
+fn narrow_footer_only_shows_the_repository_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let footer: String = terminal.backend().buffer().content[47 * 49..]
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert_eq!(footer.trim(), format!("{}:main", root.display()));
+    assert!(app.regions.changes.is_none());
+    assert!(app.regions.graph.is_none());
+    assert!(app.regions.left_pane_toggle.is_none());
+    assert!(app.regions.explorer.is_none());
+    assert!(app.regions.settings.is_none());
+    assert!(app.regions.help.is_none());
 }
 
 #[test]
@@ -103,6 +151,16 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
         .collect();
     assert!(screen.contains("COMMIT"));
     assert!(screen.contains("MESSAGE"));
+
+    let mut narrow_terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+    narrow_terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.worktree.is_none());
+    assert_eq!(app.regions.diff.unwrap().width, 49);
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    assert!(!app.graph_commit_open);
+    narrow_terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.graph_table.is_some());
+    assert!(app.regions.diff.is_none());
 
     fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
     let mut dirty_app = App::new(root.to_path_buf());

@@ -41,6 +41,26 @@ use metadata::*;
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
     let sidebar_pane = app.changes.pane;
     let preview_pane = app.changes.preview_pane;
+    if app.single_panel_layout() {
+        if app.agents_pane_visible() {
+            app.reset_media_presentation();
+            if app.single_panel_detail_visible() {
+                draw_agent_history_pane(frame, app, area);
+            } else {
+                draw_agents_panel(frame, app, area);
+            }
+        } else if ((app.single_panel_detail_visible() || app.graph_commit_open) && draw_details)
+            || app.mode == Mode::FileEdit
+        {
+            app.changes.pane = preview_pane;
+            draw_pane(frame, app, area, true);
+            app.changes.pane = sidebar_pane;
+        } else {
+            app.reset_media_presentation();
+            draw_pane(frame, app, area, false);
+        }
+        return;
+    }
     if draw_details && sidebar_pane != preview_pane {
         app.changes.pane = preview_pane;
         draw_pane(frame, app, area, true);
@@ -57,23 +77,29 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         return;
     }
 
-    let left_width = app
-        .settings
-        .worktree_width
-        .clamp(24, area.width.saturating_sub(25));
-    let columns = [
-        Rect::new(area.x, area.y, left_width, area.height),
-        Rect::new(
-            area.x.saturating_add(left_width).saturating_add(1),
-            area.y,
-            area.width.saturating_sub(left_width).saturating_sub(1),
-            area.height,
-        ),
-    ];
-    app.regions.worktree = Some(columns[0]);
-    app.regions.diff = Some(columns[1]);
-    app.regions.split_bounds = Some(area);
-    app.regions.splitter = Some(Rect::new(columns[0].right(), area.y, 1, area.height));
+    let single_panel = app.single_panel_layout();
+    let columns = if single_panel {
+        [area, area]
+    } else {
+        let left_width = app
+            .settings
+            .worktree_width
+            .clamp(24, area.width.saturating_sub(25));
+        [
+            Rect::new(area.x, area.y, left_width, area.height),
+            Rect::new(
+                area.x.saturating_add(left_width).saturating_add(1),
+                area.y,
+                area.width.saturating_sub(left_width).saturating_sub(1),
+                area.height,
+            ),
+        ]
+    };
+    app.regions.worktree = (!single_panel || !draw_details).then_some(columns[0]);
+    app.regions.diff = (!single_panel || draw_details).then_some(columns[1]);
+    app.regions.split_bounds = (!single_panel).then_some(area);
+    app.regions.splitter =
+        (!single_panel).then(|| Rect::new(columns[0].right(), area.y, 1, area.height));
     frame.render_widget(Clear, columns[0]);
     app.regions.clear_hit_targets_in(columns[0]);
     app.regions.worktree_list = None;
@@ -288,6 +314,12 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         );
         draw_agent_history_pane(frame, app, worktree_content);
         return;
+    }
+    if single_panel {
+        clear_sidebar_regions(app);
+        app.regions.clear_hit_targets_in(columns[1]);
+        frame.render_widget(Clear, columns[1]);
+        fill(frame, columns[1], palette().panel);
     }
     let repo = app.session.data().expect("checked above");
 
@@ -607,16 +639,50 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         );
     }
     draw_hunk_actions(frame, app, diff_body, visible_hunks);
-    draw_commit_editor(
-        frame,
-        app,
-        commit_area,
-        actions_row,
-        local_workspace,
-        has_changes,
-        details_ready,
+    if !single_panel {
+        draw_commit_editor(
+            frame,
+            app,
+            commit_area,
+            actions_row,
+            local_workspace,
+            has_changes,
+            details_ready,
+        );
+        draw_agent_history_pane(frame, app, worktree_content);
+    }
+}
+
+fn draw_agents_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    fill(frame, area, palette().panel);
+    let content = area.inner(Margin::new(1, 0));
+    let tabs = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);
+    let header = Rect::new(content.x, tabs.bottom().saturating_add(1), content.width, 1);
+    let list = Rect::new(
+        content.x,
+        header.bottom(),
+        content.width,
+        content.bottom().saturating_sub(header.bottom()),
     );
-    draw_agent_history_pane(frame, app, worktree_content);
+    app.regions.worktree = Some(area);
+    app.regions.agents_splitter = Some(header);
+    app.regions.agents_bounds = Some(list);
+    app.regions.agents_list = Some(list);
+    draw_sidebar_tabs(frame, app, tabs);
+    draw_agents_section(frame, app);
+}
+
+fn clear_sidebar_regions(app: &mut App) {
+    app.regions.worktree = None;
+    app.regions.worktree_list = None;
+    app.regions.explorer_list = None;
+    app.regions.agents_list = None;
+    app.regions.agents_splitter = None;
+    app.regions.agents_bounds = None;
+    app.regions.commit = None;
+    app.regions.actions = None;
+    app.regions.files_add = None;
+    app.regions.files_root = None;
 }
 
 pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect) {

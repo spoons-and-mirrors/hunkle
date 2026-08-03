@@ -6,7 +6,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Block::default().style(Style::default().bg(palette().surface_alt)),
         row,
     );
-    let fullscreen_rect = app.herdr.is_enabled().then(|| {
+    let fullscreen_rect = (app.herdr.is_enabled() && !app.single_panel_layout()).then(|| {
         let label = " ⛶ ";
         let width = UnicodeWidthStr::width(label) as u16;
         let rect = Rect::new(area.right().saturating_sub(width), area.y, width, 1);

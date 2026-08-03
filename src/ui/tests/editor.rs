@@ -1,6 +1,65 @@
 use super::*;
 
 #[test]
+fn inline_editor_renders_and_accepts_input_at_phone_width() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("notes.txt"), "first\nsecond\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    app.file_editor =
+        Some(crate::app::FileEditor::open(root, RepoPath::from("notes.txt"), 1, 0).unwrap());
+    app.mode = Mode::FileEdit;
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert_eq!(app.regions.diff.unwrap().width, 49);
+    assert_eq!(app.regions.preview_body.unwrap().width, 46);
+    let panel = app.regions.diff.unwrap();
+    let body = app.regions.preview_body.unwrap();
+    assert_eq!(terminal.backend().buffer()[(panel.x, body.y)].symbol(), "1");
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(screen.contains("EDIT"));
+    assert!(screen.contains("first"));
+
+    let body = app.regions.preview_body.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        body.x,
+        body.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        body.x + 3,
+        body.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        body.x + 3,
+        body.y,
+    ));
+    assert!(app.file_editor.as_ref().unwrap().has_selection());
+    app.file_editor.as_mut().unwrap().clear_selection();
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    app.handle_paste(" pasted ");
+    assert!(app.file_editor.as_ref().unwrap().text().contains('x'));
+    assert!(
+        app.file_editor
+            .as_ref()
+            .unwrap()
+            .text()
+            .contains(" pasted ")
+    );
+}
+
+#[test]
 fn selects_visible_text_and_suppresses_clicks_after_dragging() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

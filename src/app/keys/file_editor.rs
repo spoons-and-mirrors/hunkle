@@ -216,7 +216,7 @@ impl App {
     pub(crate) fn file_editor_viewport_too_small(&self) -> bool {
         self.regions
             .screen
-            .is_some_and(|screen| screen.width < 60 || screen.height < 16)
+            .is_some_and(|screen| screen.width < APP_MIN_WIDTH || screen.height < 16)
     }
 
     pub(crate) fn selected_file_editor_lines(&self) -> Option<(usize, usize)> {

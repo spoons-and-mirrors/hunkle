@@ -99,6 +99,12 @@ pub(super) fn draw_explorer_changes(
     if !draw_details {
         return;
     }
+    if app.single_panel_layout() {
+        clear_sidebar_regions(app);
+        app.regions.clear_hit_targets_in(columns[1]);
+        frame.render_widget(Clear, columns[1]);
+        fill(frame, columns[1], palette().panel);
+    }
 
     let issue_preview = app.changes.issue_preview.clone();
     let selected_path = issue_preview.as_ref().map_or_else(

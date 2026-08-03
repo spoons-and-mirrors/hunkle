@@ -1,5 +1,17 @@
 use super::*;
 
+pub(crate) const APP_MIN_WIDTH: u16 = 40;
+pub(crate) const SPLIT_VIEW_MIN_WIDTH: u16 = 60;
+pub(crate) const FOOTER_MARQUEE_STEP: Duration = Duration::from_millis(120);
+pub(crate) const FOOTER_MARQUEE_PAUSE: Duration = Duration::from_secs(20);
+
+pub(crate) struct FooterMarquee {
+    pub(super) value: String,
+    pub(super) width: usize,
+    pub(super) started: Instant,
+    pub(super) next_frame: Instant,
+}
+
 pub(crate) struct CommitDraftResult {
     pub(super) root: PathBuf,
     pub(super) result: Result<(PathBuf, Option<String>), String>,
@@ -245,6 +257,14 @@ pub(crate) struct GraphColumnDrag {
     pub origin_x: u16,
     pub left_width: u16,
     pub right_width: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MobileScrollDrag {
+    pub(crate) start: Position,
+    pub(crate) previous: Position,
+    pub(crate) moved: bool,
+    pub(crate) modifiers: KeyModifiers,
 }
 
 #[derive(Debug, Clone, Copy)]
