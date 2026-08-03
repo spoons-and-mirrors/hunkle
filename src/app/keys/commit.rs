@@ -80,10 +80,6 @@ impl App {
             self.mode = Mode::Normal;
             return;
         }
-        if self.magic_commit_running_for_active_repository() {
-            self.notice = Some("Magic Commit is still running".to_owned());
-            return;
-        }
         if self.session.commit_running() {
             self.notice = Some("A commit is already running".to_owned());
             return;
@@ -104,10 +100,6 @@ impl App {
     }
 
     pub(crate) fn generate_commit_message(&mut self) {
-        if self.magic_commit_running_for_active_repository() {
-            self.notice = Some("Magic Commit is still running".to_owned());
-            return;
-        }
         let Some(repo) = self.git_repository() else {
             self.notice = Some("Open a Git repository first".to_owned());
             return;
@@ -135,73 +127,6 @@ impl App {
             }
             Err(error) => self.notice = Some(error),
         }
-    }
-
-    pub(crate) fn start_magic_commit(&mut self) {
-        if self.mode != Mode::Normal || self.session.open_running() {
-            return;
-        }
-        self.header_picker.close();
-        if self.magic_commit_running_for_active_repository() {
-            if self.magic_commit_runner.cancel() {
-                self.notice = Some("Cancelling Magic Commit…".to_owned());
-            }
-            return;
-        }
-        if self.session.commit_running() || self.session.command_running() {
-            self.notice = Some("Another Git operation is already running".to_owned());
-            return;
-        }
-        if self.commit_message_running() {
-            self.notice = Some("Wait for commit message generation to finish".to_owned());
-            return;
-        }
-        let Some(repository) = self.git_repository() else {
-            self.notice = Some("Magic Commit requires a Git repository".to_owned());
-            return;
-        };
-        if !repository.details_ready {
-            self.notice = Some("Repository details are still loading".to_owned());
-            return;
-        }
-        if repository.changes.is_empty() {
-            self.notice = Some("No changes to commit".to_owned());
-            return;
-        }
-        let root = repository.root.clone();
-        let model = self.settings.opencode_model.clone();
-        let variant = self
-            .settings
-            .opencode_reasoning
-            .variant()
-            .map(str::to_owned);
-        match self.magic_commit_runner.start(root, model, variant) {
-            Ok(()) => self.notice = Some("Magic Commit is organizing logical commits…".to_owned()),
-            Err(error) => self.notice = Some(error),
-        }
-    }
-
-    pub(crate) fn receive_magic_commit(&mut self, completion: MagicCommitCompletion) {
-        let active = self
-            .repository()
-            .is_some_and(|repository| same_path(&repository.root, &completion.root));
-        if active
-            && let Some(request) = self
-                .session
-                .request_refresh(RefreshScope::ALL, self.settings.fetch_interval())
-        {
-            self.track_refresh_request(request, false);
-        }
-        self.notice = Some(match completion.result {
-            Ok(()) if active => "Magic Commit finished".to_owned(),
-            Ok(()) => format!("Magic Commit finished for {}", completion.root.display()),
-            Err(error) if error.starts_with("Magic Commit cancelled;") => error,
-            Err(error) if active => error,
-            Err(error) => format!(
-                "Magic Commit failed for {}: {error}",
-                completion.root.display()
-            ),
-        });
     }
 
     pub(crate) fn receive_generated_commit_message(&mut self, completion: CommitMessageCompletion) {

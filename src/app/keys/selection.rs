@@ -1,15 +1,6 @@
 use super::super::*;
 
 impl App {
-    fn magic_commit_blocks_staging(&mut self) -> bool {
-        if self.magic_commit_running_for_active_repository() {
-            self.notice = Some("Magic Commit is using the Git index".to_owned());
-            true
-        } else {
-            false
-        }
-    }
-
     pub(crate) fn move_selection(&mut self, delta: isize) {
         match self.visible_view() {
             View::Changes => {
@@ -87,9 +78,6 @@ impl App {
     }
 
     pub(crate) fn toggle_stage(&mut self) {
-        if self.magic_commit_blocks_staging() {
-            return;
-        }
         let Some(repo) = self.repository() else {
             return;
         };
@@ -108,9 +96,6 @@ impl App {
     }
 
     pub(crate) fn stage_hunk(&mut self, index: usize, preserve_selection: bool) {
-        if self.magic_commit_blocks_staging() {
-            return;
-        }
         let path_is_invalid = self.repository().is_some_and(|repo| {
             self.changes
                 .selected_change_index(repo)
@@ -140,9 +125,6 @@ impl App {
     }
 
     pub(crate) fn stage_all(&mut self) {
-        if self.magic_commit_blocks_staging() {
-            return;
-        }
         if self.require_git_repository() {
             let _ = self.session.start_mutation(Mutation::StageAll);
         }
@@ -160,9 +142,6 @@ impl App {
     }
 
     pub(crate) fn unstage_all(&mut self) {
-        if self.magic_commit_blocks_staging() {
-            return;
-        }
         if self.require_git_repository() {
             let _ = self.session.start_mutation(Mutation::UnstageAll);
         }

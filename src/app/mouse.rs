@@ -638,10 +638,6 @@ impl App {
                 self.generate_commit_message();
                 return;
             }
-            Some(HitTarget::MagicCommit) => {
-                self.start_magic_commit();
-                return;
-            }
             Some(HitTarget::MarkdownPreviewToggle) => {
                 self.toggle_markdown_preview();
                 return;

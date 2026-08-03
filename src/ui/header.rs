@@ -16,18 +16,12 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Style::default()
                     .fg(if app.herdr.fullscreen_running() {
                         palette().faint
-                    } else if hovered {
-                        palette().canvas
+                    } else if hovered || app.herdr.fullscreen() {
+                        palette().accent
                     } else {
                         palette().cyan
                     })
-                    .bg(if hovered && !app.herdr.fullscreen_running() {
-                        palette().selected
-                    } else if app.herdr.fullscreen() {
-                        palette().accent
-                    } else {
-                        palette().raised
-                    })
+                    .bg(palette().surface_alt)
                     .add_modifier(Modifier::BOLD),
             ),
             rect,
