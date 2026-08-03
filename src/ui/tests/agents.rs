@@ -628,11 +628,7 @@ fn mobile_agent_preview_swipes_between_agents() {
         first.x + 20,
         first.y + 8,
     ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Drag(MouseButton::Left),
-        first.x + 8,
-        first.y + 9,
-    ));
+    app.handle_mouse(mouse(MouseEventKind::Moved, first.x + 8, first.y + 9));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let dragging_screen = terminal
         .backend()
@@ -692,6 +688,39 @@ fn mobile_agent_preview_swipes_between_agents() {
         MouseEventKind::Up(MouseButton::Left),
         second.x + 20,
         second.y + 7,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(0))
+            .is_some()
+    );
+
+    let first = app
+        .regions
+        .hit_target_rect(HitTarget::AgentTooltip {
+            agent: 0,
+            message: 0,
+        })
+        .unwrap();
+    app.handle_mouse(mouse(MouseEventKind::ScrollRight, first.x + 8, first.y + 8));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(1))
+            .is_some()
+    );
+    let second = app
+        .regions
+        .hit_target_rect(HitTarget::AgentTooltip {
+            agent: 1,
+            message: 0,
+        })
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollLeft,
+        second.x + 8,
+        second.y + 8,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
