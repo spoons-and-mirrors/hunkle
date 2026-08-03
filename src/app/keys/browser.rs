@@ -278,15 +278,6 @@ impl App {
                 self.header_picker.move_selection(1);
             }
             KeyCode::Enter => self.activate_header_picker(self.header_picker.selected),
-            KeyCode::Backspace => self.edit_header_picker_query(TextInput::backspace),
-            KeyCode::Delete => self.edit_header_picker_query(TextInput::delete),
-            KeyCode::Left => self.header_picker.query.move_left(),
-            KeyCode::Right => self.header_picker.query.move_right(),
-            KeyCode::Home => self.header_picker.query.move_home(),
-            KeyCode::End => self.header_picker.query.move_end(),
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.header_picker.query.select_all();
-            }
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.header_picker.query.move_end();
             }
@@ -296,14 +287,12 @@ impl App {
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.edit_header_picker_query(TextInput::delete_word);
             }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.edit_header_picker_query(|input| input.insert_char(character));
+            _ => {
+                if self.header_picker.query.handle_edit_key(key) == EditOutcome::Edited {
+                    self.header_picker.message = None;
+                    self.header_picker.apply_filter();
+                }
             }
-            _ => {}
         }
     }
 
@@ -413,15 +402,6 @@ impl App {
                 }
                 self.open_header_worktree_bases();
             }
-            KeyCode::Backspace => self.header_picker.worktree_name.backspace(),
-            KeyCode::Delete => self.header_picker.worktree_name.delete(),
-            KeyCode::Left => self.header_picker.worktree_name.move_left(),
-            KeyCode::Right => self.header_picker.worktree_name.move_right(),
-            KeyCode::Home => self.header_picker.worktree_name.move_home(),
-            KeyCode::End => self.header_picker.worktree_name.move_end(),
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.header_picker.worktree_name.select_all();
-            }
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.header_picker.worktree_name.move_end();
             }
@@ -431,14 +411,9 @@ impl App {
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.header_picker.worktree_name.delete_word();
             }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.header_picker.worktree_name.insert_char(character);
+            _ => {
+                self.header_picker.worktree_name.handle_edit_key(key);
             }
-            _ => {}
         }
         if !matches!(key.code, KeyCode::Enter) {
             self.header_picker.message = None;
@@ -534,15 +509,6 @@ impl App {
                     self.notice = Some("Cloning repository…".to_owned());
                 }
             }
-            KeyCode::Backspace => self.header_picker.clone_input_mut().backspace(),
-            KeyCode::Delete => self.header_picker.clone_input_mut().delete(),
-            KeyCode::Left => self.header_picker.clone_input_mut().move_left(),
-            KeyCode::Right => self.header_picker.clone_input_mut().move_right(),
-            KeyCode::Home => self.header_picker.clone_input_mut().move_home(),
-            KeyCode::End => self.header_picker.clone_input_mut().move_end(),
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.header_picker.clone_input_mut().select_all();
-            }
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.header_picker.clone_input_mut().move_end();
             }
@@ -552,14 +518,9 @@ impl App {
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.header_picker.clone_input_mut().delete_word();
             }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.header_picker.clone_input_mut().insert_char(character);
+            _ => {
+                self.header_picker.clone_input_mut().handle_edit_key(key);
             }
-            _ => {}
         }
         if !matches!(key.code, KeyCode::Enter) {
             self.header_picker.message = None;
@@ -599,15 +560,6 @@ impl App {
                         Some("Wait for the current Git operation".to_owned());
                 }
             }
-            KeyCode::Backspace => self.header_picker.branch_name.backspace(),
-            KeyCode::Delete => self.header_picker.branch_name.delete(),
-            KeyCode::Left => self.header_picker.branch_name.move_left(),
-            KeyCode::Right => self.header_picker.branch_name.move_right(),
-            KeyCode::Home => self.header_picker.branch_name.move_home(),
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.header_picker.branch_name.select_all();
-            }
-            KeyCode::End => self.header_picker.branch_name.move_end(),
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.header_picker.branch_name.move_end();
             }
@@ -617,14 +569,9 @@ impl App {
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.header_picker.branch_name.delete_word();
             }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.header_picker.branch_name.insert_char(character);
+            _ => {
+                self.header_picker.branch_name.handle_edit_key(key);
             }
-            _ => {}
         }
         if !matches!(key.code, KeyCode::Enter) {
             self.header_picker.message = None;

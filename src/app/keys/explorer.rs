@@ -33,31 +33,10 @@ impl App {
                     self.file_search.move_scope(-1, repo);
                 }
             }
-            KeyCode::Left => {
-                self.file_search.query.move_left();
-            }
-            KeyCode::Right => {
-                self.file_search.query.move_right();
-            }
-            KeyCode::Home => self.file_search.query.move_home(),
-            KeyCode::End => self.file_search.query.move_end(),
-            KeyCode::Delete => {
-                if let Some(repo) = self.session.data() {
-                    self.file_search.delete(repo);
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(repo) = self.session.data() {
-                    self.file_search.backspace(repo);
-                }
-            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(repo) = self.session.data() {
                     self.file_search.clear(repo);
                 }
-            }
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.file_search.query.select_all();
             }
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(repo) = self.session.data() {
@@ -84,16 +63,11 @@ impl App {
                     self.file_search.toggle_ignored(repo);
                 }
             }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
+            _ => {
                 if let Some(repo) = self.session.data() {
-                    self.file_search.push(character, repo);
+                    self.file_search.handle_edit_key(key, repo);
                 }
             }
-            _ => {}
         }
     }
 

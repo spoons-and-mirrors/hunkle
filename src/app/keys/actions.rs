@@ -103,9 +103,6 @@ impl App {
 
         match key.code {
             KeyCode::Enter => self.herdr_prompt.submit(),
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.herdr_prompt.input.select_all();
-            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.herdr_prompt.input.clear();
                 self.herdr_prompt.error = None;
@@ -118,27 +115,11 @@ impl App {
                 self.herdr_prompt.input.delete_word();
                 self.herdr_prompt.error = None;
             }
-            KeyCode::Left => self.herdr_prompt.input.move_left(),
-            KeyCode::Right => self.herdr_prompt.input.move_right(),
-            KeyCode::Home => self.herdr_prompt.input.move_home(),
-            KeyCode::End => self.herdr_prompt.input.move_end(),
-            KeyCode::Delete => {
-                self.herdr_prompt.input.delete();
-                self.herdr_prompt.error = None;
+            _ => {
+                if self.herdr_prompt.input.handle_edit_key(key) == EditOutcome::Edited {
+                    self.herdr_prompt.error = None;
+                }
             }
-            KeyCode::Backspace => {
-                self.herdr_prompt.input.backspace();
-                self.herdr_prompt.error = None;
-            }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.herdr_prompt.input.insert_char(character);
-                self.herdr_prompt.error = None;
-            }
-            _ => {}
         }
     }
 

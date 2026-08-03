@@ -79,7 +79,7 @@ pub(super) use crate::{
 
 use actions::{ActionId, action_command, display_git_command, parse_command_args, parse_git_args};
 use explorer::PickerCommand;
-pub(crate) use text_input::TextInput;
+pub(crate) use text_input::{EditOutcome, TextInput};
 
 mod types;
 pub(crate) use types::*;
@@ -584,38 +584,24 @@ impl App {
 
     pub fn handle_paste(&mut self, text: &str) {
         if self.header_picker.naming_branch() {
-            let text = text
-                .chars()
-                .filter(|character| !matches!(character, '\r' | '\n'))
-                .collect::<String>();
-            self.header_picker.branch_name.insert(&text);
+            self.header_picker.branch_name.insert_single_line(text);
             self.header_picker.message = None;
             return;
         }
         if self.header_picker.cloning_repository() {
-            let text = text
-                .chars()
-                .filter(|character| !matches!(character, '\r' | '\n'))
-                .collect::<String>();
-            self.header_picker.clone_input_mut().insert(&text);
+            self.header_picker
+                .clone_input_mut()
+                .insert_single_line(text);
             self.header_picker.message = None;
             return;
         }
         if self.header_picker.creating_worktree() {
-            let text = text
-                .chars()
-                .filter(|character| !matches!(character, '\r' | '\n'))
-                .collect::<String>();
-            self.header_picker.worktree_name.insert(&text);
+            self.header_picker.worktree_name.insert_single_line(text);
             self.header_picker.message = None;
             return;
         }
         if self.header_picker.filtering() {
-            let text = text
-                .chars()
-                .filter(|character| !matches!(character, '\r' | '\n'))
-                .collect::<String>();
-            self.header_picker.query.insert(&text);
+            self.header_picker.query.insert_single_line(text);
             self.header_picker.message = None;
             self.header_picker.apply_filter();
             return;
@@ -1602,9 +1588,6 @@ impl App {
                 self.mode = Mode::Normal;
                 self.flush_commit_draft();
             }
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.commit_input.select_all();
-            }
             KeyCode::Backspace
                 if key
                     .modifiers
@@ -1612,23 +1595,12 @@ impl App {
             {
                 self.commit_input.delete_word();
             }
-            KeyCode::Left => self.commit_input.move_left(),
-            KeyCode::Right => self.commit_input.move_right(),
             KeyCode::Up => self.commit_input.move_up(input_width),
             KeyCode::Down => self.commit_input.move_down(input_width),
-            KeyCode::Home => self.commit_input.move_home(),
-            KeyCode::End => self.commit_input.move_end(),
-            KeyCode::Delete => self.commit_input.delete(),
             KeyCode::Enter => self.commit_input.insert_char('\n'),
-            KeyCode::Backspace => self.commit_input.backspace(),
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.commit_input.insert_char(character);
+            _ => {
+                self.commit_input.handle_edit_key(key);
             }
-            _ => {}
         }
         if self.commit_input.text() != previous {
             self.schedule_commit_draft();

@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use crossterm::event::KeyEvent;
 use ratatui::widgets::ListState;
 use regex::{Regex, RegexBuilder};
 
@@ -19,7 +20,7 @@ use crate::{
     repo_path::RepoPath,
 };
 
-use super::{TextInput, fuzzy::fuzzy_text_score_lower};
+use super::{EditOutcome, TextInput, fuzzy::fuzzy_text_score_lower};
 
 const MAX_FILE_RESULTS: usize = 40;
 const MAX_ALL_FILE_RESULTS: usize = 6;
@@ -301,22 +302,8 @@ impl FileSearch {
         self.preview_worker.request(root.to_path_buf(), path);
     }
 
-    pub(crate) fn push(&mut self, character: char, repository: &RepositoryData) {
-        self.query.insert_char(character);
-        self.refresh(repository);
-    }
-
     pub(crate) fn paste(&mut self, text: &str, repository: &RepositoryData) {
-        let text = text
-            .chars()
-            .filter(|character| !matches!(character, '\r' | '\n'))
-            .collect::<String>();
-        self.query.insert(&text);
-        self.refresh(repository);
-    }
-
-    pub(crate) fn backspace(&mut self, repository: &RepositoryData) {
-        self.query.backspace();
+        self.query.insert_single_line(text);
         self.refresh(repository);
     }
 
@@ -325,14 +312,21 @@ impl FileSearch {
         self.refresh(repository);
     }
 
-    pub(crate) fn delete(&mut self, repository: &RepositoryData) {
-        self.query.delete();
-        self.refresh(repository);
-    }
-
     pub(crate) fn delete_word(&mut self, repository: &RepositoryData) {
         self.query.delete_word();
         self.refresh(repository);
+    }
+
+    pub(crate) fn handle_edit_key(
+        &mut self,
+        key: KeyEvent,
+        repository: &RepositoryData,
+    ) -> EditOutcome {
+        let outcome = self.query.handle_edit_key(key);
+        if outcome == EditOutcome::Edited {
+            self.refresh(repository);
+        }
+        outcome
     }
 
     pub(crate) fn set_scope(&mut self, scope: SearchScope, repository: &RepositoryData) {

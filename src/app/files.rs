@@ -7,7 +7,7 @@ use crate::{
     repo_path::{RepoPath, display_os_str},
 };
 
-use super::{App, LeftPane, Mode, TextInput, View};
+use super::{App, EditOutcome, LeftPane, Mode, TextInput, View};
 
 #[derive(Debug, Clone)]
 pub(crate) enum FileDialogKind {
@@ -118,9 +118,6 @@ impl App {
                 match key.code {
                     KeyCode::Esc => self.close_file_dialog(),
                     KeyCode::Enter => self.submit_file_name(),
-                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        dialog.input.select_all();
-                    }
                     KeyCode::Backspace
                         if key
                             .modifiers
@@ -129,21 +126,13 @@ impl App {
                         dialog.input.delete_word();
                         dialog.error = None;
                     }
-                    KeyCode::Left => dialog.input.move_left(),
-                    KeyCode::Right => dialog.input.move_right(),
-                    KeyCode::Home => dialog.input.move_home(),
-                    KeyCode::End => dialog.input.move_end(),
-                    KeyCode::Delete => dialog.input.delete(),
-                    KeyCode::Backspace => dialog.input.backspace(),
-                    KeyCode::Char(character)
-                        if !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                    {
-                        dialog.input.insert_char(character);
-                        dialog.error = None;
+                    _ => {
+                        if dialog.input.handle_edit_key(key) == EditOutcome::Edited
+                            && matches!(key.code, KeyCode::Char(_))
+                        {
+                            dialog.error = None;
+                        }
                     }
-                    _ => {}
                 }
             }
             FileDialogKind::Delete { .. } => match key.code {
