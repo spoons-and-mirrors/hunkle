@@ -3,6 +3,9 @@ use std::{
     fs::{self, File, OpenOptions},
     io,
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -35,12 +38,260 @@ struct TimingRecord {
     timing: AgentTiming,
 }
 
+pub(super) struct Persistence {
+    sender: Sender<Request>,
+    receiver: Receiver<Completion>,
+    disconnected: bool,
+}
+
+struct Request {
+    submitted: HashMap<AgentTimingKey, AgentTiming>,
+    clear_generation: u64,
+    operation: Operation,
+}
+
+enum Operation {
+    Snapshot {
+        agents: Vec<AgentPane>,
+        now_ms: u64,
+    },
+    Status {
+        key: AgentTimingKey,
+        status: super::AgentStatus,
+        state_change_seq: u64,
+        now_ms: u64,
+    },
+    Reset {
+        agents: Vec<AgentPane>,
+        now_ms: u64,
+    },
+}
+
+struct Completion {
+    submitted: HashMap<AgentTimingKey, AgentTiming>,
+    clear_generation: u64,
+    result: io::Result<PersistedTimings>,
+}
+
+struct PersistedTimings {
+    timings: HashMap<AgentTimingKey, AgentTiming>,
+    cleared_at_ms: u64,
+}
+
+impl Persistence {
+    pub(super) fn new(path: PathBuf) -> Self {
+        let (sender, requests) = mpsc::channel();
+        let (completions, receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("agent-timing-persistence".to_owned())
+            .spawn(move || persistence_loop(path, requests, completions))
+            .expect("agent timing persistence worker should start");
+        Self {
+            sender,
+            receiver,
+            disconnected: false,
+        }
+    }
+
+    pub(super) fn sync(
+        &self,
+        local: &HashMap<AgentTimingKey, AgentTiming>,
+        agents: &[AgentPane],
+        now_ms: u64,
+        clear_generation: u64,
+    ) -> io::Result<()> {
+        self.send(
+            local,
+            clear_generation,
+            Operation::Snapshot {
+                agents: agents.to_vec(),
+                now_ms,
+            },
+        )
+    }
+
+    pub(super) fn observe_status(
+        &self,
+        local: &HashMap<AgentTimingKey, AgentTiming>,
+        key: AgentTimingKey,
+        status: super::AgentStatus,
+        state_change_seq: u64,
+        now_ms: u64,
+        clear_generation: u64,
+    ) -> io::Result<()> {
+        self.send(
+            local,
+            clear_generation,
+            Operation::Status {
+                key,
+                status,
+                state_change_seq,
+                now_ms,
+            },
+        )
+    }
+
+    pub(super) fn reset(
+        &self,
+        local: &HashMap<AgentTimingKey, AgentTiming>,
+        agents: &[AgentPane],
+        now_ms: u64,
+        clear_generation: u64,
+    ) -> io::Result<()> {
+        self.send(
+            local,
+            clear_generation,
+            Operation::Reset {
+                agents: agents.to_vec(),
+                now_ms,
+            },
+        )
+    }
+
+    pub(super) fn poll(
+        &mut self,
+        local: &mut HashMap<AgentTimingKey, AgentTiming>,
+        clear_generation: u64,
+    ) -> Option<io::Result<bool>> {
+        if self.disconnected {
+            return None;
+        }
+        match self.receiver.try_recv() {
+            Ok(completion) => Some(completion.result.map(|persisted| {
+                if completion.clear_generation == clear_generation {
+                    reconcile(local, &completion.submitted, persisted)
+                } else {
+                    false
+                }
+            })),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.disconnected = true;
+                Some(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "agent timing persistence worker stopped",
+                )))
+            }
+        }
+    }
+
+    fn send(
+        &self,
+        local: &HashMap<AgentTimingKey, AgentTiming>,
+        clear_generation: u64,
+        operation: Operation,
+    ) -> io::Result<()> {
+        self.sender
+            .send(Request {
+                submitted: local.clone(),
+                clear_generation,
+                operation,
+            })
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "agent timing persistence worker stopped",
+                )
+            })
+    }
+}
+
+fn persistence_loop(path: PathBuf, requests: Receiver<Request>, completions: Sender<Completion>) {
+    let mut pending = None;
+    loop {
+        let mut request = match pending.take().map(Ok).unwrap_or_else(|| requests.recv()) {
+            Ok(request) => request,
+            Err(_) => return,
+        };
+        if matches!(request.operation, Operation::Snapshot { .. }) {
+            loop {
+                match requests.try_recv() {
+                    Ok(next) if matches!(next.operation, Operation::Snapshot { .. }) => {
+                        request = next;
+                    }
+                    Ok(next) => {
+                        pending = Some(next);
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+
+        let submitted = request.submitted.clone();
+        let clear_generation = request.clear_generation;
+        let result = execute(&path, &request);
+        if completions
+            .send(Completion {
+                submitted,
+                clear_generation,
+                result,
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+fn execute(path: &Path, request: &Request) -> io::Result<PersistedTimings> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut delay = Duration::from_millis(10);
+    loop {
+        let mut timings = request.submitted.clone();
+        let result = match &request.operation {
+            Operation::Snapshot { agents, now_ms } => sync(path, &mut timings, agents, *now_ms),
+            Operation::Status {
+                key,
+                status,
+                state_change_seq,
+                now_ms,
+            } => observe_status(path, &mut timings, key, *status, *state_change_seq, *now_ms),
+            Operation::Reset { agents, now_ms } => reset(path, &mut timings, agents, *now_ms),
+        };
+        match result {
+            Ok(cleared_at_ms) => {
+                return Ok(PersistedTimings {
+                    timings,
+                    cleared_at_ms,
+                });
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+                delay = (delay * 2).min(Duration::from_millis(200));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn reconcile(
+    local: &mut HashMap<AgentTimingKey, AgentTiming>,
+    submitted: &HashMap<AgentTimingKey, AgentTiming>,
+    mut persisted: PersistedTimings,
+) -> bool {
+    for (key, timing) in local.iter() {
+        if submitted.get(key) != Some(timing) && timing.last_seen_ms > persisted.cleared_at_ms {
+            merge_timing(&mut persisted.timings, key.clone(), timing.clone());
+        }
+    }
+    if *local == persisted.timings {
+        false
+    } else {
+        *local = persisted.timings;
+        true
+    }
+}
+
 pub(super) fn sync(
     path: &Path,
     local: &mut HashMap<AgentTimingKey, AgentTiming>,
     agents: &[AgentPane],
     now_ms: u64,
-) -> io::Result<()> {
+) -> io::Result<u64> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -51,9 +302,10 @@ pub(super) fn sync(
         Err(_) => true,
     } || !path.exists();
     let loaded = loaded.unwrap_or_default();
+    let cleared_at_ms = loaded.cleared_at_ms;
     let mut shared = loaded.timings;
 
-    merge_local_timings(&mut shared, local, loaded.cleared_at_ms);
+    merge_local_timings(&mut shared, local, cleared_at_ms);
     migrate_session_timings(&mut shared, agents);
     update(&mut shared, agents, now_ms);
     prune(
@@ -62,10 +314,10 @@ pub(super) fn sync(
     );
 
     if needs_rewrite || &shared != local {
-        save(path, &shared, loaded.cleared_at_ms)?;
+        save(path, &shared, cleared_at_ms)?;
         *local = shared;
     }
-    Ok(())
+    Ok(cleared_at_ms)
 }
 
 fn migrate_session_timings(
@@ -108,6 +360,44 @@ pub(super) fn update(
     }
 }
 
+pub(super) fn update_snapshot(
+    timings: &mut HashMap<AgentTimingKey, AgentTiming>,
+    agents: &[AgentPane],
+    now_ms: u64,
+) {
+    migrate_session_timings(timings, agents);
+    update(timings, agents, now_ms);
+    prune(
+        timings,
+        agents.iter().map(|agent| &agent.runtime.timing_key),
+    );
+}
+
+pub(super) fn observe_status_local(
+    timings: &mut HashMap<AgentTimingKey, AgentTiming>,
+    key: &AgentTimingKey,
+    status: super::AgentStatus,
+    state_change_seq: u64,
+    now_ms: u64,
+) {
+    if let Some(timing) = timings.get_mut(key) {
+        timing.observe_event(status, now_ms);
+    } else if status.should_track_timing() {
+        let mut timing = AgentTiming::new(status, state_change_seq, now_ms);
+        timing.awaiting_sequence = true;
+        timings.insert(key.clone(), timing);
+    }
+}
+
+pub(super) fn reset_local(
+    timings: &mut HashMap<AgentTimingKey, AgentTiming>,
+    agents: &[AgentPane],
+    now_ms: u64,
+) {
+    timings.clear();
+    update(timings, agents, now_ms);
+}
+
 pub(super) fn observe_status(
     path: &Path,
     local: &mut HashMap<AgentTimingKey, AgentTiming>,
@@ -115,14 +405,15 @@ pub(super) fn observe_status(
     status: super::AgentStatus,
     state_change_seq: u64,
     now_ms: u64,
-) -> io::Result<()> {
+) -> io::Result<u64> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let _lock = IndexLock::acquire(path)?;
     let loaded = load(path).unwrap_or_default();
+    let cleared_at_ms = loaded.cleared_at_ms;
     let mut shared = loaded.timings;
-    merge_local_timings(&mut shared, local, loaded.cleared_at_ms);
+    merge_local_timings(&mut shared, local, cleared_at_ms);
     if let Some(timing) = shared.get_mut(key) {
         timing.observe_event(status, now_ms);
     } else if status.should_track_timing() {
@@ -131,9 +422,9 @@ pub(super) fn observe_status(
         shared.insert(key.clone(), timing);
     }
     prune(&mut shared, std::iter::once(key));
-    save(path, &shared, loaded.cleared_at_ms)?;
+    save(path, &shared, cleared_at_ms)?;
     *local = shared;
-    Ok(())
+    Ok(cleared_at_ms)
 }
 
 pub(super) fn reset(
@@ -141,7 +432,7 @@ pub(super) fn reset(
     local: &mut HashMap<AgentTimingKey, AgentTiming>,
     agents: &[AgentPane],
     now_ms: u64,
-) -> io::Result<()> {
+) -> io::Result<u64> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -150,7 +441,7 @@ pub(super) fn reset(
     update(&mut reset, agents, now_ms);
     save(path, &reset, now_ms)?;
     *local = reset;
-    Ok(())
+    Ok(now_ms)
 }
 
 fn prune<'a>(
@@ -335,6 +626,47 @@ fn unlock(_file: &File) {}
 mod tests {
     use super::*;
     use crate::app::herdr_session::AgentStatus;
+
+    #[test]
+    fn persistence_worker_merges_shared_history_without_losing_newer_local_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-timings.json");
+        let shared_key = AgentTimingKey::Terminal("shared".to_owned());
+        let local_key = AgentTimingKey::Terminal("local".to_owned());
+        save(
+            &path,
+            &HashMap::from([(
+                shared_key.clone(),
+                AgentTiming::new(AgentStatus::Idle, 1, 1_000),
+            )]),
+            0,
+        )
+        .unwrap();
+        let mut local = HashMap::from([(
+            local_key.clone(),
+            AgentTiming::new(AgentStatus::Working, 2, 2_000),
+        )]);
+        let mut persistence = Persistence::new(path);
+
+        persistence.sync(&local, &[], 2_000, 0).unwrap();
+        local
+            .get_mut(&local_key)
+            .unwrap()
+            .observe(AgentStatus::Done, 2, 3_000);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(result) = persistence.poll(&mut local, 0) {
+                result.unwrap();
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(local.contains_key(&shared_key));
+        assert_eq!(local[&local_key].status, AgentStatus::Done);
+    }
 
     #[test]
     fn migrates_the_active_session_timer_to_the_agent() {

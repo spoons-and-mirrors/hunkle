@@ -7,7 +7,7 @@ its design is still changing.
 
 ## Steps
 
-- [ ] Move Herdr timing-index persistence off the UI thread. Keep timing state
+- [x] Move Herdr timing-index persistence off the UI thread. Keep timing state
   immediately current in memory, serialize writes through one coalescing worker,
   retain cross-process merge and clear-watermark behavior, and report failures
   asynchronously.

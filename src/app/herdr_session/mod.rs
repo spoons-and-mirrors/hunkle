@@ -369,7 +369,9 @@ pub(crate) struct HerdrSession {
     spinner_frame: usize,
     next_spinner: Instant,
     agent_timings: HashMap<AgentTimingKey, AgentTiming>,
-    agent_timings_path: Option<PathBuf>,
+    agent_timing_persistence: Option<timings::Persistence>,
+    agent_timing_clear_generation: u64,
+    agent_timing_persistence_notice: Option<String>,
     agent_layouts: HashMap<AgentTimingKey, client::AgentLayout>,
     agent_layouts_path: Option<PathBuf>,
     displayed_agent_key: Option<AgentTimingKey>,
@@ -442,7 +444,11 @@ impl HerdrSession {
             spinner_frame: 0,
             next_spinner: Instant::now(),
             agent_timings: HashMap::new(),
-            agent_timings_path,
+            agent_timing_persistence: agent_timings_path
+                .filter(|_| enabled)
+                .map(timings::Persistence::new),
+            agent_timing_clear_generation: 0,
+            agent_timing_persistence_notice: None,
             agent_layouts: HashMap::new(),
             agent_layouts_path: None,
             displayed_agent_key: None,
@@ -478,6 +484,22 @@ impl HerdrSession {
             return HerdrSessionPoll::default();
         }
         let mut poll = HerdrSessionPoll::default();
+        if let Some(notice) = self.agent_timing_persistence_notice.take() {
+            poll.notice = Some(notice);
+        }
+        if let Some(persistence) = self.agent_timing_persistence.as_mut() {
+            while let Some(result) =
+                persistence.poll(&mut self.agent_timings, self.agent_timing_clear_generation)
+            {
+                match result {
+                    Ok(changed) => poll.changed |= changed,
+                    Err(error) => {
+                        poll.notice =
+                            Some(format!("Could not persist agent timing history: {error}"));
+                    }
+                }
+            }
+        }
         while let Ok(completion) = self.receiver.try_recv() {
             poll.changed = true;
             match completion {
@@ -657,11 +679,17 @@ impl HerdrSession {
                 .filter(|agent| self.host_workspace_id.as_deref() == Some(&agent.workspace_id))
                 .collect()
         };
-        let synced = self.agent_timings_path.as_deref().is_some_and(|path| {
-            timings::sync(path, &mut self.agent_timings, &agents, now_ms).is_ok()
-        });
-        if !synced {
-            timings::update(&mut self.agent_timings, &agents, now_ms);
+        timings::update_snapshot(&mut self.agent_timings, &agents, now_ms);
+        if let Some(persistence) = self.agent_timing_persistence.as_ref()
+            && let Err(error) = persistence.sync(
+                &self.agent_timings,
+                &agents,
+                now_ms,
+                self.agent_timing_clear_generation,
+            )
+        {
+            self.agent_timing_persistence_notice =
+                Some(format!("Could not persist agent timing history: {error}"));
         }
         let previous = &self.agents;
         let mut ranked = agents.into_iter().enumerate().collect::<Vec<_>>();
@@ -952,14 +980,19 @@ impl HerdrSession {
 
     pub(crate) fn clear_agent_timing_history(&mut self) -> Result<(), String> {
         let now_ms = unix_time_ms();
-        if let Some(path) = self.agent_timings_path.as_deref() {
-            timings::reset(path, &mut self.agent_timings, &self.agents, now_ms)
-                .map_err(|error| format!("Could not clear agent timing history: {error}"))
-        } else {
-            self.agent_timings.clear();
-            timings::update(&mut self.agent_timings, &self.agents, now_ms);
-            Ok(())
+        self.agent_timing_clear_generation = self.agent_timing_clear_generation.wrapping_add(1);
+        timings::reset_local(&mut self.agent_timings, &self.agents, now_ms);
+        if let Some(persistence) = self.agent_timing_persistence.as_ref() {
+            persistence
+                .reset(
+                    &self.agent_timings,
+                    &self.agents,
+                    now_ms,
+                    self.agent_timing_clear_generation,
+                )
+                .map_err(|error| format!("Could not clear agent timing history: {error}"))?;
         }
+        Ok(())
     }
 
     pub(crate) fn agent_change_stats(&self, index: usize) -> Option<(u64, u64)> {
@@ -1216,25 +1249,25 @@ impl HerdrSession {
         agent.runtime.status = event.status;
         let key = agent.runtime.timing_key.clone();
         let state_change_seq = agent.runtime.state_change_seq;
-        let synced = self.agent_timings_path.as_deref().is_some_and(|path| {
-            timings::observe_status(
-                path,
-                &mut self.agent_timings,
-                &key,
+        timings::observe_status_local(
+            &mut self.agent_timings,
+            &key,
+            event.status,
+            state_change_seq,
+            now_ms,
+        );
+        if let Some(persistence) = self.agent_timing_persistence.as_ref()
+            && let Err(error) = persistence.observe_status(
+                &self.agent_timings,
+                key,
                 event.status,
                 state_change_seq,
                 now_ms,
+                self.agent_timing_clear_generation,
             )
-            .is_ok()
-        });
-        if !synced {
-            if let Some(timing) = self.agent_timings.get_mut(&key) {
-                timing.observe_event(event.status, now_ms);
-            } else if event.status.should_track_timing() {
-                let mut timing = AgentTiming::new(event.status, state_change_seq, now_ms);
-                timing.awaiting_sequence = true;
-                self.agent_timings.insert(key, timing);
-            }
+        {
+            self.agent_timing_persistence_notice =
+                Some(format!("Could not persist agent timing history: {error}"));
         }
     }
 
