@@ -138,9 +138,9 @@ pub(crate) fn draw_agent_pane_picker(
     let frame_area = frame.area();
     let area = Rect::new(
         frame_area.x,
-        frame_area.y.saturating_add(1),
+        frame_area.y.saturating_add(2),
         frame_area.width,
-        frame_area.height.saturating_sub(1),
+        frame_area.height.saturating_sub(2),
     );
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);

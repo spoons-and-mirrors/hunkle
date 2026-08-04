@@ -30,7 +30,7 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
         .content
         .iter()
         .enumerate()
-        .filter(|(index, cell)| cell.symbol() == "▀" && index / 100 != 1)
+        .filter(|(index, cell)| cell.symbol() == "▀" && index / 100 != 2)
         .collect();
     assert!(!image_cells.is_empty());
     assert!(image_cells.iter().all(|(index, _)| {
@@ -51,7 +51,7 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
             .content
             .iter()
             .enumerate()
-            .any(|(index, cell)| cell.symbol() == "▀" && index / 100 != 1)
+            .any(|(index, cell)| cell.symbol() == "▀" && index / 100 != 2)
     );
 
     app.mode = Mode::Normal;
@@ -76,7 +76,7 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
             .content
             .iter()
             .enumerate()
-            .any(|(index, cell)| cell.symbol() == "▀" && index / 100 != 1)
+            .any(|(index, cell)| cell.symbol() == "▀" && index / 100 != 2)
     );
 }
 

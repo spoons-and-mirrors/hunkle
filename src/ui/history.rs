@@ -346,6 +346,10 @@ pub(super) fn draw_author_filter(
 }
 
 fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<'static> {
+    let is_head = commit
+        .refs
+        .iter()
+        .any(|reference| reference == "HEAD" || reference.starts_with("HEAD -> "));
     let graph = Line::from(
         commit
             .graph
@@ -361,11 +365,7 @@ fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<
     );
 
     let mut description = Vec::new();
-    if commit
-        .refs
-        .iter()
-        .any(|reference| reference == "HEAD" || reference.starts_with("HEAD -> "))
-    {
+    if is_head {
         description.push(ref_badge("HEAD", palette().green));
         description.push(Span::raw(" "));
     }
@@ -398,6 +398,11 @@ fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<
         Cell::from(commit.author.clone()).style(Style::default().fg(palette().muted)),
         Cell::from(short_oid).style(Style::default().fg(palette().muted)),
     ])
+    .style(if is_head {
+        Style::default().bg(palette().inactive_selected)
+    } else {
+        Style::default()
+    })
 }
 
 fn commit_graph_color(commit: &Commit) -> Color {
@@ -441,6 +446,7 @@ fn ref_badge(label: &str, color: Color) -> Span<'static> {
 mod tests {
     use super::*;
     use crate::git::GraphCell;
+    use ratatui::style::Styled;
 
     #[test]
     fn branch_badges_use_the_commit_graph_node_color() {
@@ -472,6 +478,28 @@ mod tests {
             }),
             palette().accent
         );
+    }
+
+    #[test]
+    fn head_commit_row_uses_the_subtle_selection_background() {
+        let mut commit = Commit {
+            oid: "abc".to_owned(),
+            parents: Vec::new(),
+            refs: vec!["HEAD -> main".to_owned()],
+            author: "Ada".to_owned(),
+            date: "today".to_owned(),
+            subject: "Current commit".to_owned(),
+            message: String::new(),
+            graph: Vec::new(),
+        };
+
+        assert_eq!(
+            Styled::style(&graph_row(&commit, None)).bg,
+            Some(palette().inactive_selected)
+        );
+
+        commit.refs = vec!["main".to_owned()];
+        assert_eq!(Styled::style(&graph_row(&commit, None)).bg, None);
     }
 
     #[test]

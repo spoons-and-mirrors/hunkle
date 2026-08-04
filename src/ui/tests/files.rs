@@ -21,6 +21,14 @@ fn narrow_layout_drills_from_changes_into_a_full_width_detail_panel() {
     assert!(app.regions.diff.is_none());
     assert!(app.regions.splitter.is_none());
     assert!(app.regions.agents_list.is_none());
+    let tabs = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
+        .unwrap();
+    let tab_padding = &terminal.backend().buffer()[(tabs.x, tabs.y - 1)];
+    assert_eq!(tab_padding.symbol(), "▄");
+    assert_eq!(tab_padding.fg, super::palette().panel);
+    assert_eq!(tab_padding.bg, super::palette().canvas);
 
     let row = app
         .changes

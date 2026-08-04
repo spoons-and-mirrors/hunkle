@@ -314,17 +314,17 @@ fn renders_every_primary_surface() {
     app.commit_message_generator = CommitMessageGenerator::ready_for_test();
     let settings_path = root.join(".git/hunkle-test-config");
     app.settings_store = SettingsStore::at(settings_path.clone());
-    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(120, 37)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.regions.worktree.unwrap().x, 0);
-    assert_eq!(app.regions.worktree.unwrap().y, 1);
+    assert_eq!(app.regions.worktree.unwrap().y, 2);
     assert_eq!(app.regions.diff.unwrap().right(), 120);
     let left = app.regions.worktree.unwrap();
     let right = app.regions.diff.unwrap();
     for point in [(left.x, left.y), (right.x, right.y)] {
         let cell = &terminal.backend().buffer()[point];
         assert_eq!(cell.symbol(), "▀");
-        assert_eq!(cell.fg, super::palette().surface_alt);
+        assert_eq!(cell.fg, super::palette().panel);
         assert_eq!(cell.bg, super::palette().panel);
     }
     assert_eq!(
@@ -332,16 +332,16 @@ fn renders_every_primary_surface() {
         super::palette().canvas
     );
     assert!(app.regions.changes.is_none());
-    assert_eq!(app.regions.graph.unwrap().y, 35);
-    assert_eq!(app.regions.help.unwrap().y, 35);
+    assert_eq!(app.regions.graph.unwrap().y, 36);
+    assert_eq!(app.regions.help.unwrap().y, 36);
     assert!(app.regions.graph.unwrap().x > 0);
     assert_eq!(app.regions.help.unwrap().right(), 120);
     let buffer = terminal.backend().buffer();
     let agents = app.regions.agents_splitter.unwrap();
     let agents_offset = usize::from(agents.y) * 120 + usize::from(agents.x);
-    assert_eq!(buffer.content[0].bg, super::palette().surface_alt);
+    assert_eq!(buffer.content[0].bg, super::palette().panel);
     assert_eq!(
-        buffer.content[36 * 120 - 1].bg,
+        buffer.content[37 * 120 - 1].bg,
         super::palette().surface_alt
     );
     assert_eq!(buffer.content[agents_offset].bg, super::palette().panel);
@@ -361,13 +361,13 @@ fn renders_every_primary_surface() {
     );
     assert!(agents_header.contains("AGENTS "));
     assert!(agents_header.contains('─'));
-    let header: String = terminal.backend().buffer().content[..120]
+    let header: String = terminal.backend().buffer().content[120..240]
         .iter()
         .map(|cell| cell.symbol())
         .collect();
     assert!(header.contains("basetree"));
     assert!(header.contains("main"));
-    let footer: String = terminal.backend().buffer().content[35 * 120..]
+    let footer: String = terminal.backend().buffer().content[36 * 120..]
         .iter()
         .map(|cell| cell.symbol())
         .collect();
@@ -383,7 +383,7 @@ fn renders_every_primary_surface() {
     for shortcut in ["g Git Graph", "F2 Files", "o Explorer"] {
         let offset = footer.find(shortcut).unwrap();
         assert_eq!(
-            terminal.backend().buffer().content[35 * 120 + offset].fg,
+            terminal.backend().buffer().content[36 * 120 + offset].fg,
             super::palette().orange
         );
     }
@@ -430,7 +430,7 @@ fn renders_every_primary_surface() {
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
     assert_eq!(app.changes.pane, LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let footer: String = terminal.backend().buffer().content[35 * 120..]
+    let footer: String = terminal.backend().buffer().content[36 * 120..]
         .iter()
         .map(|cell| cell.symbol())
         .collect();
@@ -1819,7 +1819,7 @@ fn wait_for_halfblock_render(terminal: &mut Terminal<TestBackend>, app: &mut App
             .content
             .iter()
             .enumerate()
-            .any(|(index, cell)| cell.symbol() == "▀" && index / width != 1)
+            .any(|(index, cell)| cell.symbol() == "▀" && index / width != 2)
         {
             return;
         }

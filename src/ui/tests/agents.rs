@@ -1065,7 +1065,7 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         .hit_target_rect(HitTarget::HeaderFullscreen)
         .unwrap();
     assert_eq!(fullscreen.right(), 120);
-    assert_eq!(fullscreen.y, 0);
+    assert_eq!(fullscreen.y, 1);
     assert_eq!(
         terminal.backend().buffer()[(fullscreen.x + 1, fullscreen.y)].symbol(),
         "⛶"

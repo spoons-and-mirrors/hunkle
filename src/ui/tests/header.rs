@@ -611,14 +611,30 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let issue = app.regions.hit_target_rect(HitTarget::HeaderIssue).unwrap();
     let agent = app.regions.hit_target_rect(HitTarget::HeaderAgent).unwrap();
     assert_eq!(repository.x, 1);
-    assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), "▀");
+    assert_eq!(terminal.backend().buffer()[(0, 2)].symbol(), "▀");
     assert_eq!(
-        terminal.backend().buffer()[(0, 1)].fg,
+        terminal.backend().buffer()[(0, 2)].fg,
+        super::palette().panel
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(0, 2)].bg,
+        super::palette().panel
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(0, 0)].bg,
+        super::palette().panel
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x + 1, repository.y - 1)].symbol(),
+        "▄"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x + 1, repository.y - 1)].fg,
         super::palette().surface_alt
     );
     assert_eq!(
-        terminal.backend().buffer()[(0, 1)].bg,
-        super::palette().panel
+        terminal.backend().buffer()[(repository.x + 1, repository.y - 1)].bg,
+        super::palette().canvas
     );
     assert_eq!(repository.right().saturating_add(1), worktrees.x);
     assert!(worktrees.right() <= branch.x);
@@ -1116,7 +1132,7 @@ fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
     assert_eq!(
         app.regions
             .hit_target_rect(HitTarget::AgentPanePickerOverlay),
-        Some(ratatui::layout::Rect::new(0, 1, 100, 29))
+        Some(ratatui::layout::Rect::new(0, 2, 100, 28))
     );
     let left = app
         .regions
@@ -1202,7 +1218,7 @@ fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
             .hit_target_rect(HitTarget::HeaderAgent)
             .is_none()
     );
-    assert_eq!((repository.y, worktree.y, branch.y), (0, 0, 0));
+    assert_eq!((repository.y, worktree.y, branch.y), (1, 1, 1));
     assert_eq!(
         terminal.backend().buffer()[(repository.x, repository.y)].fg,
         super::palette().yellow

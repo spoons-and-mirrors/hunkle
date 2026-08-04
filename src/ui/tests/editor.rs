@@ -139,7 +139,7 @@ fn inline_editor_keeps_line_numbers_in_a_fixed_gutter() {
     assert_eq!(buffer[(editor_panel.x, editor_panel.y)].symbol(), "▀");
     assert_eq!(
         buffer[(editor_panel.x, editor_panel.y)].fg,
-        super::palette().surface_alt
+        super::palette().panel
     );
     assert_eq!(
         buffer[(editor_panel.x, editor_panel.y)].bg,

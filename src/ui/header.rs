@@ -2,15 +2,16 @@ use super::*;
 
 pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let herdr_available = app.herdr_available();
-    let row = Rect::new(area.x, area.y, area.width, 1);
+    let row = area;
+    let content_y = area.bottom().saturating_sub(1);
     frame.render_widget(
-        Block::default().style(Style::default().bg(palette().surface_alt)),
+        Block::default().style(Style::default().bg(palette().panel)),
         row,
     );
     let fullscreen_rect = (herdr_available && !app.single_panel_layout()).then(|| {
         let label = " ⛶ ";
         let width = UnicodeWidthStr::width(label) as u16;
-        let rect = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
+        let rect = Rect::new(area.right().saturating_sub(width), content_y, width, 1);
         let hovered = app.hovered_hit_target == Some(HitTarget::HeaderFullscreen);
         frame.render_widget(
             Paragraph::new(label).alignment(Alignment::Center).style(
@@ -22,7 +23,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     } else {
                         palette().cyan
                     })
-                    .bg(palette().surface_alt)
+                    .bg(palette().panel)
                     .add_modifier(Modifier::BOLD),
             ),
             rect,
@@ -39,7 +40,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let Some(repo) = app.repository() else {
         frame.render_widget(
             Paragraph::new("  No workspace selected").style(Style::default().fg(palette().muted)),
-            Rect::new(row.x, row.y, header_right.saturating_sub(row.x), 1),
+            Rect::new(row.x, content_y, header_right.saturating_sub(row.x), 1),
         );
         return;
     };
@@ -143,9 +144,9 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         frame.render_widget(
             Paragraph::new(truncate_width(&text, usize::from(width))).style(style),
-            Rect::new(*x, area.y, width, 1),
+            Rect::new(*x, content_y, width, 1),
         );
-        let rect = Rect::new(*x, area.y, width, 1);
+        let rect = Rect::new(*x, content_y, width, 1);
         *x = x.saturating_add(width);
         Some(rect)
     };
@@ -172,6 +173,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .min(20),
     );
     if let Some(rect) = repository_rect {
+        draw_header_card_top_padding(frame, rect);
         draw_header_badge_border(frame, rect, palette().yellow);
         app.regions
             .register_hit_target(HitTarget::HeaderRepository, rect);
@@ -209,6 +211,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .min(18),
         );
         if let Some(rect) = worktree_rect {
+            draw_header_card_top_padding(frame, rect);
             draw_header_badge_border(frame, rect, palette().orange);
             app.regions
                 .register_hit_target(HitTarget::HeaderWorktrees, rect);
@@ -234,6 +237,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             branch_limit,
         );
         if let Some(rect) = branch_rect {
+            draw_header_card_top_padding(frame, rect);
             draw_header_badge_border(frame, rect, palette().accent);
             app.regions
                 .register_hit_target(HitTarget::HeaderBranch, rect);
@@ -253,6 +257,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 room.saturating_sub(issue_width.saturating_add(agent_width).saturating_add(2)),
             );
             if let Some(rect) = diff_rect {
+                draw_header_card_top_padding(frame, rect);
                 draw_header_badge_border(frame, rect, palette().purple);
                 app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
             }
@@ -271,6 +276,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 room.saturating_sub(agent_width.saturating_add(1)),
             );
             if let Some(rect) = issue_rect {
+                draw_header_card_top_padding(frame, rect);
                 draw_header_badge_border(frame, rect, palette().cyan);
                 app.regions
                     .register_hit_target(HitTarget::HeaderIssue, rect);
@@ -290,6 +296,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     room,
                 );
                 if let Some(rect) = agent_rect {
+                    draw_header_card_top_padding(frame, rect);
                     draw_header_badge_border(frame, rect, palette().green);
                     app.regions
                         .register_hit_target(HitTarget::HeaderAgent, rect);
@@ -317,7 +324,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .style(Style::default().fg(palette().yellow)),
             Rect::new(
                 content_right,
-                area.y,
+                content_y,
                 header_right.saturating_sub(content_right),
                 1,
             ),
@@ -341,12 +348,14 @@ fn branch_badge(branch: &str, dirty: bool, ahead: u64, behind: u64, width: usize
 
 pub(super) fn draw_main_top_padding(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let transition = Rect::new(area.x, area.y, area.width, 1);
+    let glyph = if app.single_panel_layout() && app.regions.worktree.is_some() {
+        "▄"
+    } else {
+        "▀"
+    };
     frame.render_widget(
-        Paragraph::new("▀".repeat(usize::from(transition.width))).style(
-            Style::default()
-                .fg(palette().surface_alt)
-                .bg(palette().canvas),
-        ),
+        Paragraph::new(glyph.repeat(usize::from(transition.width)))
+            .style(Style::default().fg(palette().panel).bg(palette().canvas)),
         transition,
     );
     if let (Some(bounds), Some(left)) = (app.regions.split_bounds, app.regions.worktree) {
@@ -357,11 +366,8 @@ pub(super) fn draw_main_top_padding(frame: &mut Frame<'_>, app: &App, area: Rect
                 continue;
             }
             frame.render_widget(
-                Paragraph::new("▀".repeat(usize::from(pane.width))).style(
-                    Style::default()
-                        .fg(palette().surface_alt)
-                        .bg(palette().panel),
-                ),
+                Paragraph::new("▀".repeat(usize::from(pane.width)))
+                    .style(Style::default().fg(palette().panel).bg(palette().panel)),
                 pane,
             );
         }
@@ -402,6 +408,16 @@ pub(super) fn draw_header_badge_border(frame: &mut Frame<'_>, rect: Rect, color:
     if let Some(cell) = frame.buffer_mut().cell_mut((rect.x, rect.y)) {
         cell.set_symbol("▌").set_fg(color);
     }
+}
+
+fn draw_header_card_top_padding(frame: &mut Frame<'_>, rect: Rect) {
+    draw_half_padding(
+        frame,
+        Rect::new(rect.x, rect.y.saturating_sub(1), rect.width, 1),
+        '▄',
+        palette().surface_alt,
+        palette().canvas,
+    );
 }
 
 pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
