@@ -492,6 +492,12 @@ pub(crate) enum MobileDragAxis {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ScrollTarget {
     HeaderPicker,
+    ActionMenu,
+    AuthorFilter,
+    WorkspaceExplorer,
+    WorkspaceExplorerSurroundings,
+    CommandOutput,
+    SettingsShortcuts,
     Commit,
     Worktree,
     Explorer,
@@ -608,6 +614,9 @@ impl Regions {
             Some(HitTarget::AgentPreviewMessageTimeline(agent)) => {
                 Some(ScrollTarget::AgentTimeline(agent))
             }
+            Some(HitTarget::Explorer(
+                ExplorerHitTarget::SurroundingsPane | ExplorerHitTarget::Surrounding { .. },
+            )) => Some(ScrollTarget::WorkspaceExplorerSurroundings),
             Some(
                 HitTarget::AgentTooltip { agent, .. }
                 | HitTarget::AgentMessage { agent, .. }

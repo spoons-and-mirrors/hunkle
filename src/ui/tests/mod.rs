@@ -15,8 +15,8 @@ pub(super) use crate::app::{
     AgentActivityPreview, AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator,
     ExplorerHitTarget, FOOTER_MARQUEE_PAUSE, FOOTER_MARQUEE_STEP, GraphColumn, GraphHitTarget,
     HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget,
-    LeftPane, Mode, Settings, SettingsHitTarget, SettingsPage, SettingsStore, ShortcutAction,
-    SqliteFocus, StashedAgent, View,
+    LeftPane, Mode, ScrollTarget, Settings, SettingsHitTarget, SettingsPage, SettingsStore,
+    ShortcutAction, SqliteFocus, StashedAgent, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
@@ -1093,6 +1093,11 @@ fn renders_every_primary_surface() {
     assert!(action_screen.contains("Commit"));
     assert!(action_screen.contains("Run Git command"));
     let action_list = app.regions.action_list.unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(action_list.x, action_list.y)),
+        Some(ScrollTarget::ActionMenu)
+    );
     app.handle_mouse(mouse(
         MouseEventKind::Moved,
         action_list.x + 2,
@@ -1115,6 +1120,11 @@ fn renders_every_primary_surface() {
     assert!(app.regions.command_output.is_some());
     let command_overlay = app.regions.command_overlay.unwrap();
     let command_output = app.regions.command_output.unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(command_output.x, command_output.y)),
+        Some(ScrollTarget::CommandOutput)
+    );
     assert_eq!(
         command_output.bottom().saturating_add(1),
         command_overlay.bottom().saturating_sub(5)
@@ -1379,6 +1389,11 @@ fn renders_every_primary_surface() {
         .regions
         .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterItem(second_author)))
         .unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(second_author_row.x, second_author_row.y)),
+        Some(ScrollTarget::AuthorFilter)
+    );
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Moved,
         column: second_author_row.x + 1,
@@ -1592,6 +1607,15 @@ fn renders_every_primary_surface() {
         .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane))
         .unwrap()
         .width;
+    let surroundings = app
+        .regions
+        .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane))
+        .unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(surroundings.x, surroundings.y)),
+        Some(ScrollTarget::WorkspaceExplorerSurroundings)
+    );
     let splitter = app
         .regions
         .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Splitter))
@@ -1628,6 +1652,10 @@ fn renders_every_primary_surface() {
         .regions
         .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Path))
         .unwrap();
+    assert_eq!(
+        app.regions.scroll_target_at(Position::new(path.x, path.y)),
+        Some(ScrollTarget::WorkspaceExplorer)
+    );
     click(&mut app, path.x + 2, path.y + 1);
     assert!(app.workspace_explorer.editing_path);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1755,6 +1783,11 @@ fn renders_every_primary_surface() {
             ShortcutAction::OpenExplorer,
         )))
         .unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(explorer_row.x, explorer_row.y)),
+        Some(ScrollTarget::SettingsShortcuts)
+    );
     click(&mut app, explorer_row.x + 1, explorer_row.y);
     assert!(app.shortcut_capture);
     app.shortcut_capture = false;

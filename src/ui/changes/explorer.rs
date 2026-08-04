@@ -1,15 +1,14 @@
 use super::*;
 
-pub(super) fn draw_explorer_changes(
+pub(super) fn draw_explorer_master(
     frame: &mut Frame<'_>,
     app: &mut App,
-    columns: [Rect; 2],
-    draw_details: bool,
+    area: Rect,
     single_panel: bool,
 ) {
     app.regions.worktree_list = None;
     app.regions.commit = None;
-    let content = columns[0].inner(Margin::new(1, 0));
+    let content = area.inner(Margin::new(1, 0));
     let header = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);
     let controls = Rect::new(
         content.x,
@@ -99,16 +98,9 @@ pub(super) fn draw_explorer_changes(
     frame.render_widget(List::new(items), list_area);
     draw_agents_section(frame, app);
     draw_agent_history_pane(frame, app, content, single_panel);
-    if !draw_details {
-        return;
-    }
-    if single_panel {
-        clear_sidebar_regions(app);
-        app.regions.clear_targets_in(columns[1]);
-        frame.render_widget(Clear, columns[1]);
-        fill(frame, columns[1], palette().panel);
-    }
+}
 
+pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let issue_preview = app.changes.preview.issue().cloned();
     let selected_path = issue_preview.as_ref().map_or_else(
         || {
@@ -118,17 +110,16 @@ pub(super) fn draw_explorer_changes(
         |issue| issue.title.clone(),
     );
     let preview_header = Rect::new(
-        columns[1].x.saturating_add(1),
-        columns[1].y.saturating_add(1),
-        columns[1].width.saturating_sub(2),
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
         1,
     );
     let preview_body = Rect::new(
         preview_header.x,
         preview_header.y.saturating_add(2),
         preview_header.width,
-        columns[1]
-            .bottom()
+        area.bottom()
             .saturating_sub(preview_header.y.saturating_add(3)),
     );
     let media_loaded = app.changes.preview.image().is_some();
@@ -327,7 +318,7 @@ pub(super) fn draw_explorer_changes(
             |issue| format!("issue-{}.md", issue.number),
         );
         let mut layout =
-            prepare_preview_layout(app, columns[1], preview_body, &path, markdown_rendered, 0);
+            prepare_preview_layout(app, area, preview_body, &path, markdown_rendered, 0);
         if let Some(editable_path) = editable_path.as_ref()
             && let Some(line) = app.changes.take_preview_line(editable_path)
             && let Some(row) = app
@@ -336,7 +327,7 @@ pub(super) fn draw_explorer_changes(
                 .rendered_row_for_source_line(line)
         {
             app.changes.diff_scroll = row;
-            layout = prepare_preview_layout(app, columns[1], preview_body, &path, false, 0);
+            layout = prepare_preview_layout(app, area, preview_body, &path, false, 0);
         }
         if !markdown_rendered && editable_path.is_some() && !layout.preview_body.is_empty() {
             app.regions.preview_body = Some(layout.preview_body);

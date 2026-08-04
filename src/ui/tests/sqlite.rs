@@ -14,6 +14,7 @@ fn renders_sqlite_databases_from_the_files_view() {
     drop(connection);
 
     let mut app = App::new(directory.path().to_path_buf());
+    app.settings.worktree_width = 38;
     wait_for(&mut app, |app| app.changes.preview.database().is_some());
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

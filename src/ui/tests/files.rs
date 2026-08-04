@@ -68,6 +68,22 @@ fn narrow_layout_drills_from_changes_into_a_full_width_detail_panel() {
     assert!(app.regions.worktree.is_none());
     assert_eq!(app.regions.diff.unwrap().width, 49);
 
+    let preview_origin = app.changes.preview.origin().clone();
+    terminal.backend_mut().resize(100, 48);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.worktree.is_some());
+    assert!(app.regions.diff.is_some());
+    assert!(app.regions.splitter.is_some());
+    assert_eq!(app.changes.worktree_state.selected(), selected);
+    assert_eq!(app.changes.preview.origin(), &preview_origin);
+
+    terminal.backend_mut().resize(49, 48);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.worktree.is_none());
+    assert_eq!(app.regions.diff.unwrap().width, 49);
+    assert_eq!(app.changes.worktree_state.selected(), selected);
+    assert_eq!(app.changes.preview.origin(), &preview_origin);
+
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.worktree_list.is_some());

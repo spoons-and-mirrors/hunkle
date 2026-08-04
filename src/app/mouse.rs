@@ -485,11 +485,7 @@ impl App {
                         if drag.axis == Some(MobileDragAxis::Vertical) {
                             let delta = drag.previous.y as isize - point.y as isize;
                             if delta != 0 {
-                                self.scroll_mobile_at(
-                                    drag.scroll_target.clone(),
-                                    drag.start,
-                                    delta,
-                                );
+                                self.scroll_mobile(drag.scroll_target.clone(), delta);
                             }
                         }
                         drag.previous = point;
@@ -569,89 +565,29 @@ impl App {
         }
     }
 
-    fn scroll_mobile_at(&mut self, target: Option<ScrollTarget>, point: Position, delta: isize) {
-        if let Some(target) = target {
-            match target {
-                ScrollTarget::HeaderPicker => {
-                    self.hovered_hit_target = None;
-                    self.header_picker.scroll_by(delta);
-                }
-                ScrollTarget::Commit => self.scroll_commit(delta, false),
-                ScrollTarget::Worktree => self.scroll_worktree(delta),
-                ScrollTarget::Explorer => self.scroll_explorer(delta),
-                ScrollTarget::Agents => self.herdr.scroll_agents(delta),
-                ScrollTarget::Preview => self.scroll_diff_by(delta),
-                ScrollTarget::SqliteObjects => {
-                    let viewport = self
-                        .regions
-                        .sqlite_objects
-                        .map_or(0, |rect| usize::from(rect.height));
-                    self.changes.scroll_sqlite_objects(viewport, delta);
-                }
-                ScrollTarget::SqliteRows => {
-                    let viewport = self
-                        .regions
-                        .sqlite_rows
-                        .map_or(0, |rect| usize::from(rect.height));
-                    self.changes.scroll_sqlite_rows(viewport, delta);
-                }
-                ScrollTarget::Graph => self.scroll_graph(delta),
-                ScrollTarget::RepositorySearch => self.file_search.move_selection(delta),
-                ScrollTarget::AgentTimeline(agent) => {
-                    self.scroll_agent_preview_timeline(agent, delta > 0);
-                }
-                ScrollTarget::AgentTranscript(agent) => {
-                    self.set_agent_preview_scroll(agent, delta);
-                }
-            }
+    fn scroll_mobile(&mut self, target: Option<ScrollTarget>, delta: isize) {
+        let Some(target) = target else {
             return;
-        }
-        if self.header_picker.is_open() {
-            if matches!(
-                self.regions.hit_target_at(point),
-                Some(
-                    HitTarget::HeaderPickerOverlay
-                        | HitTarget::HeaderPickerItem(_)
-                        | HitTarget::HeaderPickerDeleteBranch(_)
-                        | HitTarget::HeaderPickerDeleteWorktree(_),
-                )
-            ) {
+        };
+        match target {
+            ScrollTarget::HeaderPicker => {
                 self.hovered_hit_target = None;
                 self.header_picker.scroll_by(delta);
             }
-            return;
-        }
-        if self.scroll_agent_preview_message_timeline(point, delta > 0)
-            || self.scroll_agent_preview_transcript(point, delta)
-        {
-            return;
-        }
-        let kind = if delta < 0 {
-            MouseEventKind::ScrollUp
-        } else {
-            MouseEventKind::ScrollDown
-        };
-        let event = MouseEvent {
-            kind,
-            column: point.x,
-            row: point.y,
-            modifiers: KeyModifiers::NONE,
-        };
-        match self.mode {
-            Mode::ActionMenu => self.actions.move_selection(delta),
-            Mode::AuthorFilter => self.author_filter.move_selection(delta),
-            Mode::Explorer => {
-                for _ in 0..delta.unsigned_abs() {
-                    self.handle_explorer_mouse(event);
+            ScrollTarget::ActionMenu => self.actions.move_selection(delta),
+            ScrollTarget::AuthorFilter => self.author_filter.move_selection(delta),
+            ScrollTarget::WorkspaceExplorer => {
+                if self.workspace_explorer.editing_path {
+                    self.workspace_explorer.move_match_selection(delta);
+                } else {
+                    self.workspace_explorer.move_selection(delta);
                 }
             }
-            Mode::Command => self.actions.scroll_by(delta),
-            Mode::Normal if self.view() == View::RepositorySearch => {
-                for _ in 0..delta.unsigned_abs() {
-                    self.handle_file_search_mouse(event);
-                }
+            ScrollTarget::WorkspaceExplorerSurroundings => {
+                self.workspace_explorer.move_surrounding_selection(delta);
             }
-            Mode::Settings if self.settings_page == SettingsPage::Shortcuts => {
+            ScrollTarget::CommandOutput => self.actions.scroll_by(delta),
+            ScrollTarget::SettingsShortcuts => {
                 let key = if delta < 0 {
                     KeyCode::Up
                 } else {
@@ -661,8 +597,33 @@ impl App {
                     self.handle_shortcut_settings(KeyEvent::new(key, KeyModifiers::NONE));
                 }
             }
-            Mode::Normal | Mode::Commit => self.scroll_at(point, delta, false),
-            _ => {}
+            ScrollTarget::Commit => self.scroll_commit(delta, false),
+            ScrollTarget::Worktree => self.scroll_worktree(delta),
+            ScrollTarget::Explorer => self.scroll_explorer(delta),
+            ScrollTarget::Agents => self.herdr.scroll_agents(delta),
+            ScrollTarget::Preview => self.scroll_diff_by(delta),
+            ScrollTarget::SqliteObjects => {
+                let viewport = self
+                    .regions
+                    .sqlite_objects
+                    .map_or(0, |rect| usize::from(rect.height));
+                self.changes.scroll_sqlite_objects(viewport, delta);
+            }
+            ScrollTarget::SqliteRows => {
+                let viewport = self
+                    .regions
+                    .sqlite_rows
+                    .map_or(0, |rect| usize::from(rect.height));
+                self.changes.scroll_sqlite_rows(viewport, delta);
+            }
+            ScrollTarget::Graph => self.scroll_graph(delta),
+            ScrollTarget::RepositorySearch => self.file_search.move_selection(delta),
+            ScrollTarget::AgentTimeline(agent) => {
+                self.scroll_agent_preview_timeline(agent, delta > 0);
+            }
+            ScrollTarget::AgentTranscript(agent) => {
+                self.set_agent_preview_scroll(agent, delta);
+            }
         }
     }
 

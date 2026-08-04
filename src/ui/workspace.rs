@@ -1,3 +1,9 @@
+//! Responsive composition for the shared workspace.
+//!
+//! This module selects and arranges feature surfaces. Feature renderers receive
+//! explicit areas and must not choose the global composition themselves. See
+//! `docs/adr/0009-responsive-workspace-composition.md` before extending it.
+
 use super::*;
 
 enum WorkspacePlan {
@@ -42,8 +48,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
                 changes::ChangesPlan::Columns {
                     areas,
                     sidebar_pane,
-                    preview_pane,
-                    draw_preview: matches!(detail, DetailSurface::Preview(_)),
+                    preview_pane: matches!(detail, DetailSurface::Preview(_))
+                        .then_some(preview_pane),
                 },
             );
             if matches!(detail, DetailSurface::Graph) {

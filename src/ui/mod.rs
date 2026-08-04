@@ -111,6 +111,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 &app.settings.shortcuts,
             );
             for (target, rect) in targets {
+                if target == HitTarget::Explorer(crate::app::ExplorerHitTarget::Overlay) {
+                    app.regions
+                        .register_scroll_target(ScrollTarget::WorkspaceExplorer, rect);
+                }
                 app.regions.register_hit_target(target, rect);
             }
         }
@@ -134,6 +138,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 app.fetch_running(),
             );
             for (target, rect) in targets {
+                if app.settings_page == crate::app::SettingsPage::Shortcuts
+                    && target == HitTarget::Settings(crate::app::SettingsHitTarget::Overlay)
+                {
+                    app.regions
+                        .register_scroll_target(ScrollTarget::SettingsShortcuts, rect);
+                }
                 app.regions.register_hit_target(target, rect);
             }
         }
@@ -148,6 +158,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 &mut app.author_filter,
                 &app.settings.shortcuts,
             ) {
+                if target == HitTarget::Graph(GraphHitTarget::FilterOverlay) {
+                    app.regions
+                        .register_scroll_target(ScrollTarget::AuthorFilter, rect);
+                }
                 app.regions.register_hit_target(target, rect);
             }
         }
@@ -161,12 +175,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             let regions = overlays::draw_action_menu(frame, anchor, app.actions.selection);
             app.regions.action_menu = Some(regions.overlay);
             app.regions.action_list = Some(regions.list);
+            app.regions
+                .register_scroll_target(ScrollTarget::ActionMenu, regions.list);
         }
         Mode::Command => {
             dim(frame);
             let regions = overlays::draw_command(frame, &mut app.actions);
             app.regions.command_overlay = Some(regions.overlay);
             app.regions.command_output = Some(regions.output);
+            app.regions
+                .register_scroll_target(ScrollTarget::CommandOutput, regions.output);
         }
         Mode::HerdrPrompt => {
             dim(frame);
