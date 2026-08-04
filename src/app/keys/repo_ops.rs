@@ -20,8 +20,38 @@ impl App {
         let key = self.settings.shortcuts.remap_author_filter(key);
         match self.author_filter.handle_key(key) {
             Some(AuthorFilterEffect::Close) => self.mode = Mode::Normal,
-            Some(AuthorFilterEffect::Changed) => self.reconcile_graph_selection(),
+            Some(AuthorFilterEffect::Changed) => {
+                self.graph_search
+                    .apply(self.author_filter.visible_indices());
+                self.reconcile_graph_selection();
+            }
             None => {}
+        }
+    }
+
+    pub(crate) fn focus_graph_search(&mut self) {
+        if self.visible_view() == View::Graph && !self.graph_commit_open {
+            self.graph_search_focused = true;
+            self.graph_search.input.focus();
+        }
+    }
+
+    pub(crate) fn handle_graph_search(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.graph_search.input.clear();
+                self.graph_search
+                    .apply(self.author_filter.visible_indices());
+                self.graph_search_focused = false;
+                self.reconcile_graph_selection();
+            }
+            KeyCode::Enter => self.graph_search_focused = false,
+            _ if self.graph_search.input.handle_edit_key(key) == EditOutcome::Edited => {
+                self.graph_search
+                    .apply(self.author_filter.visible_indices());
+                self.reconcile_graph_selection();
+            }
+            _ => {}
         }
     }
 

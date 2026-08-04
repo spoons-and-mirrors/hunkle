@@ -851,6 +851,12 @@ impl App {
     }
 
     pub(super) fn handle_primary_left_click(&mut self, point: Position) {
+        let target = self.regions.hit_target_at(point);
+        if target == Some(HitTarget::Graph(GraphHitTarget::Search)) {
+            self.focus_graph_search();
+            return;
+        }
+        self.graph_search_focused = false;
         if !self
             .regions
             .worktree_list
@@ -864,7 +870,7 @@ impl App {
             self.mode = Mode::Normal;
             self.flush_commit_draft();
         }
-        match self.regions.hit_target_at(point) {
+        match target {
             Some(HitTarget::Changes(target)) => {
                 let effect = self
                     .session
@@ -1355,6 +1361,8 @@ impl App {
                 Some(HitTarget::Graph(GraphHitTarget::FilterItem(index))) => {
                     self.author_filter.select(index);
                     if self.author_filter.toggle(index) {
+                        self.graph_search
+                            .apply(self.author_filter.visible_indices());
                         self.reconcile_graph_selection();
                     }
                 }

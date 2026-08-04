@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{
         AuthorFilter, CommitSummaryCache, GraphColumn, GraphColumnRegion, GraphHitTarget,
-        HitTarget, Settings, ShortcutAction, Shortcuts,
+        GraphSearch, HitTarget, Settings, ShortcutAction, Shortcuts,
     },
     git::{Commit, RepositoryData},
 };
@@ -27,6 +27,8 @@ pub(super) struct GraphView<'a> {
     pub repo: Option<&'a RepositoryData>,
     pub summaries: &'a CommitSummaryCache,
     pub author_filter: &'a AuthorFilter,
+    pub search: &'a GraphSearch,
+    pub search_focused: bool,
     pub state: &'a mut TableState,
     pub scroll_to_selection: &'a mut bool,
     pub settings: &'a Settings,
@@ -38,6 +40,8 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         repo,
         summaries,
         author_filter,
+        search,
+        search_focused,
         state,
         scroll_to_selection,
         settings,
@@ -74,19 +78,31 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
-    let graph_region = Rect::new(
+    let search_area = Rect::new(table_area.x, table_area.y, table_area.width, 1);
+    let commit_table_area = Rect::new(
         table_area.x,
-        table_area.y.saturating_add(2),
+        table_area.y.saturating_add(1),
         table_area.width,
-        table_area.height.saturating_sub(2),
+        table_area.height.saturating_sub(1),
     );
+    let graph_region = Rect::new(
+        commit_table_area.x,
+        commit_table_area.y.saturating_add(2),
+        commit_table_area.width,
+        commit_table_area.height.saturating_sub(2),
+    );
+    draw_graph_search(frame, search_area, search, search_focused);
 
     let column_widths = graph_column_widths(table_area.width, repo.graph_width, settings);
     let widths = column_widths.map(Constraint::Length);
 
-    let visible = author_filter.visible_indices();
+    let visible = search.visible_indices();
     let viewport = usize::from(graph_region.height);
     let selected = state.selected();
+    let selected_is_head = selected
+        .and_then(|selected| visible.get(selected))
+        .and_then(|index| repo.commits.get(*index))
+        .is_some_and(commit_is_head);
     let mut offset = state.offset().min(visible.len().saturating_sub(1));
     if *scroll_to_selection && let Some(selected) = selected {
         if selected < offset {
@@ -133,11 +149,15 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
     let table = Table::new(rows, widths)
         .header(headers)
         .column_spacing(1)
-        .row_highlight_style(Style::default().bg(palette().selected));
+        .row_highlight_style(Style::default().bg(if selected_is_head {
+            palette().add_bg
+        } else {
+            palette().selected
+        }));
     let mut visible_state = TableState::default();
     visible_state.select(selected.and_then(|selected| selected.checked_sub(offset)));
-    frame.render_stateful_widget(table, table_area, &mut visible_state);
-    let column_starts = graph_column_starts(table_area.x, column_widths);
+    frame.render_stateful_widget(table, commit_table_area, &mut visible_state);
+    let column_starts = graph_column_starts(commit_table_area.x, column_widths);
     let graph_columns = [
         GraphColumn::Graph,
         GraphColumn::Description,
@@ -150,7 +170,12 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         .map(|index| {
             let left = graph_columns[index - 1];
             let right = graph_columns[index];
-            let splitter = Rect::new(column_starts[index].saturating_sub(1), table_area.y, 1, 1);
+            let splitter = Rect::new(
+                column_starts[index].saturating_sub(1),
+                commit_table_area.y,
+                1,
+                1,
+            );
             frame.render_widget(
                 Paragraph::new("│").style(Style::default().fg(if dragging_column == Some(right) {
                     palette().accent
@@ -169,23 +194,60 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         })
         .collect::<Vec<_>>();
     if visible.is_empty() {
+        let message = if !search.input.is_empty() {
+            "No commits match the graph search"
+        } else {
+            "No commits match the author filter"
+        };
         frame.render_widget(
-            Paragraph::new("No commits match the author filter")
-                .style(Style::default().fg(palette().faint)),
+            Paragraph::new(message).style(Style::default().fg(palette().faint)),
             graph_region,
         );
     }
     let author_width = column_widths[4];
     let author_x = column_starts[4];
-    let author_header = Rect::new(author_x, table_area.y, author_width, 1);
+    let author_header = Rect::new(author_x, commit_table_area.y, author_width, 1);
     GraphRegions {
         table: Some(graph_region),
-        targets: vec![(
-            HitTarget::Graph(GraphHitTarget::AuthorHeader),
-            author_header,
-        )],
+        targets: vec![
+            (HitTarget::Graph(GraphHitTarget::Search), search_area),
+            (
+                HitTarget::Graph(GraphHitTarget::AuthorHeader),
+                author_header,
+            ),
+        ],
         columns,
     }
+}
+
+fn draw_graph_search(frame: &mut Frame<'_>, area: Rect, search: &GraphSearch, focused: bool) {
+    let input = &search.input;
+    let mut text = input.text().to_owned();
+    if focused && input.cursor_visible() {
+        text.insert(input.cursor(), '▌');
+    }
+    let line = if text.is_empty() {
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(palette().accent)),
+            Span::styled(
+                "Search commits by description, date, or hash",
+                Style::default().fg(palette().faint),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(palette().accent)),
+            Span::styled(text, Style::default().fg(palette().ink)),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(if focused {
+            palette().surface_alt
+        } else {
+            palette().panel
+        })),
+        area,
+    );
 }
 
 fn graph_column_widths(width: u16, graph_width: usize, settings: &Settings) -> [u16; 6] {
@@ -346,10 +408,7 @@ pub(super) fn draw_author_filter(
 }
 
 fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<'static> {
-    let is_head = commit
-        .refs
-        .iter()
-        .any(|reference| reference == "HEAD" || reference.starts_with("HEAD -> "));
+    let is_head = commit_is_head(commit);
     let graph = Line::from(
         commit
             .graph
@@ -399,10 +458,17 @@ fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<
         Cell::from(short_oid).style(Style::default().fg(palette().muted)),
     ])
     .style(if is_head {
-        Style::default().bg(palette().inactive_selected)
+        Style::default().bg(palette().add_bg)
     } else {
         Style::default()
     })
+}
+
+fn commit_is_head(commit: &Commit) -> bool {
+    commit
+        .refs
+        .iter()
+        .any(|reference| reference == "HEAD" || reference.starts_with("HEAD -> "))
 }
 
 fn commit_graph_color(commit: &Commit) -> Color {
@@ -481,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn head_commit_row_uses_the_subtle_selection_background() {
+    fn head_commit_row_uses_the_subtle_green_background() {
         let mut commit = Commit {
             oid: "abc".to_owned(),
             parents: Vec::new(),
@@ -495,7 +561,7 @@ mod tests {
 
         assert_eq!(
             Styled::style(&graph_row(&commit, None)).bg,
-            Some(palette().inactive_selected)
+            Some(palette().add_bg)
         );
 
         commit.refs = vec!["main".to_owned()];

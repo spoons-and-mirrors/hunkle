@@ -332,7 +332,7 @@ fn renders_every_primary_surface() {
     assert_eq!(splitter_top.bg, super::palette().canvas);
     assert_eq!(
         terminal.backend().buffer()[(left.right(), left.y + 2)].bg,
-        super::palette().surface_alt
+        super::palette().canvas
     );
     assert!(app.regions.changes.is_none());
     assert_eq!(app.regions.graph.unwrap().y, 36);
@@ -1268,10 +1268,37 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("HEAD"));
     assert!(screen.contains("Render Test"));
     assert!(!screen.contains("Detailed body line."));
+    assert!(screen.contains("Search commits by description, date, or hash"));
     assert!(screen.contains("CHANGES"));
     assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
     assert_eq!(app.regions.graph_columns.len(), 5);
+    let graph_search = app
+        .regions
+        .hit_target_rect(HitTarget::Graph(GraphHitTarget::Search))
+        .unwrap();
+    click(&mut app, graph_search.x + 2, graph_search.y);
+    assert!(app.graph_search_focused);
+    app.handle_paste("initial commit");
+    assert_eq!(app.visible_graph_indices(), &[1]);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.graph_search_focused);
+    assert_eq!(app.visible_graph_indices(), &[0, 1]);
+    click(&mut app, graph_search.x + 2, graph_search.y);
+    app.handle_paste("Render Test");
+    assert!(
+        app.visible_graph_indices().is_empty(),
+        "query={:?} visible={:?}",
+        app.graph_search.input.text(),
+        app.visible_graph_indices()
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let graph = app.regions.graph_table.unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(graph.x, graph.y)].bg,
+        super::palette().add_bg
+    );
     assert!(
         app.regions
             .graph_columns
@@ -1368,7 +1395,7 @@ fn renders_every_primary_surface() {
         .regions
         .hit_target_rect(HitTarget::Graph(GraphHitTarget::AuthorHeader))
         .unwrap();
-    assert_eq!(author_header.y, worktree.y + 1);
+    assert_eq!(author_header.y, graph_search.y + 1);
     click(&mut app, author_header.x, author_header.y);
     assert_eq!(app.mode, Mode::AuthorFilter);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

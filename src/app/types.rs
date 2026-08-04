@@ -230,6 +230,7 @@ impl AgentPaneDirection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GraphHitTarget {
+    Search,
     AuthorHeader,
     FilterOverlay,
     FilterItem(usize),

@@ -8,6 +8,7 @@ mod file_editor;
 mod file_search;
 mod files;
 mod fuzzy;
+mod graph_search;
 mod header_picker;
 mod herdr_prompt;
 mod herdr_session;
@@ -29,6 +30,7 @@ pub(crate) use explorer::{ExplorerHitTarget, SurroundingEntry};
 pub(crate) use file_editor::{FileEditor, TAB_WIDTH};
 pub(crate) use file_search::{FileSearch, FileSearchRow, SearchDestination, SearchScope};
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
+pub(crate) use graph_search::GraphSearch;
 pub(crate) use header_picker::{
     BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
     RepositoryPickerStep, WorktreePickerStep,
@@ -123,6 +125,8 @@ pub struct App {
     pub graph_state: TableState,
     pub(crate) graph_scroll_to_selection: bool,
     pub(crate) author_filter: AuthorFilter,
+    pub(crate) graph_search: GraphSearch,
+    pub(crate) graph_search_focused: bool,
     pub(crate) commit_summaries: CommitSummaryCache,
     pub(crate) issues: IssueCatalog,
     pub(crate) commit_input: TextInput,
@@ -268,8 +272,10 @@ impl App {
         linked_worktrees.observe_herdr(herdr.linked_worktree_observation());
         linked_worktrees.refresh();
         let mut author_filter = AuthorFilter::default();
+        let mut graph_search = GraphSearch::default();
         if let Some(repo) = session.data() {
             author_filter.sync(&repo.root, &repo.commits);
+            graph_search.sync(&repo.root, &repo.commits, author_filter.visible_indices());
         }
         let mut workspace_explorer = Explorer::with_favorites(start, explorer_favorites_path);
         workspace_explorer.left_pane_width = settings.explorer_left_pane_width;
@@ -285,6 +291,8 @@ impl App {
             graph_state,
             graph_scroll_to_selection: true,
             author_filter,
+            graph_search,
+            graph_search_focused: false,
             commit_summaries: CommitSummaryCache::default(),
             issues: IssueCatalog::default(),
             commit_input: TextInput::default(),
@@ -463,10 +471,9 @@ impl App {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn visible_graph_indices(&self) -> &[usize] {
         if self.repository().is_some() {
-            self.author_filter.visible_indices()
+            self.graph_search.visible_indices()
         } else {
             &[]
         }
@@ -474,13 +481,13 @@ impl App {
 
     pub(crate) fn selected_graph_commit(&self) -> Option<&git::Commit> {
         let selected = self.graph_state.selected()?;
-        let index = *self.author_filter.visible_indices().get(selected)?;
+        let index = *self.visible_graph_indices().get(selected)?;
         self.repository()?.commits.get(index)
     }
 
     fn visible_graph_len(&self) -> usize {
         self.repository()
-            .map_or(0, |_| self.author_filter.visible_indices().len())
+            .map_or(0, |_| self.visible_graph_indices().len())
     }
 
     fn reconcile_graph_selection(&mut self) {
@@ -650,6 +657,13 @@ impl App {
             return;
         }
         if self.mode == Mode::Normal
+            && self.visible_view() == View::Graph
+            && self.graph_search_focused
+        {
+            self.handle_graph_search(key);
+            return;
+        }
+        if self.mode == Mode::Normal
             && self
                 .settings
                 .shortcuts
@@ -728,6 +742,16 @@ impl App {
             if let Some(repo) = self.session.data() {
                 self.file_search.paste(text, repo);
             }
+            return;
+        }
+        if self.mode == Mode::Normal
+            && self.visible_view() == View::Graph
+            && self.graph_search_focused
+        {
+            self.graph_search.input.insert_single_line(text);
+            self.graph_search
+                .apply(self.author_filter.visible_indices());
+            self.reconcile_graph_selection();
             return;
         }
         if self.mode == Mode::Normal && self.paste_clipboard_files(text) {
@@ -1158,8 +1182,14 @@ impl App {
                     let local = self.session.data().is_some_and(RepositoryData::is_local);
                     self.graph_state = TableState::default();
                     self.graph_scroll_to_selection = true;
+                    self.graph_search_focused = false;
                     if let Some(repo) = self.session.data() {
                         self.author_filter.sync(&repo.root, &repo.commits);
+                        self.graph_search.sync(
+                            &repo.root,
+                            &repo.commits,
+                            self.author_filter.visible_indices(),
+                        );
                     }
                     self.changes
                         .reset_repository(self.session.data(), prepared_file_tree);
@@ -1225,7 +1255,12 @@ impl App {
                     if let Some((selection, selected_oid)) = self.pending_reload.take() {
                         let repo = self.session.data().expect("reloaded repository");
                         self.author_filter.sync(&repo.root, &repo.commits);
-                        let visible = self.author_filter.visible_indices();
+                        self.graph_search.sync(
+                            &repo.root,
+                            &repo.commits,
+                            self.author_filter.visible_indices(),
+                        );
+                        let visible = self.graph_search.visible_indices();
                         let commit_index = selected_oid.and_then(|oid| {
                             visible
                                 .iter()
@@ -1357,7 +1392,7 @@ impl App {
                 .regions
                 .graph_table
                 .map_or(40, |region| usize::from(region.height));
-            let visible = self.author_filter.visible_indices();
+            let visible = self.graph_search.visible_indices();
             oids.extend(
                 visible
                     .iter()

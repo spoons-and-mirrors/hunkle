@@ -36,7 +36,7 @@ For agent-driven development across linked worktrees, install each checkout into
 its own ignored `target` directory instead of replacing the global binary:
 
 ```sh
-cargo install --path . --root target/hunkle-install --target-dir target --force --locked
+cargo hunkle-install-local
 ```
 
 When the open workspace contains that local install, Hunkle shows `↻` in the
@@ -45,6 +45,10 @@ the workspace open. Each worktree therefore has an independent build channel;
 installing from another worktree cannot replace the binary currently in use.
 The local target directory is explicit so a user-level Cargo configuration
 cannot make worktrees share stale build artifacts.
+
+For a deliberate one-time update of the globally launched bootstrap binary,
+use `cargo hunkle-install-global`. Development agents are instructed to use only
+the local command.
 
 hunkle opens exactly the current or requested directory. When that directory is
 a Git repository root, Git status and history are available. The Changes pane

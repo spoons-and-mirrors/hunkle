@@ -119,7 +119,7 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
             if app.dragging_splitter {
                 palette().accent
             } else {
-                palette().surface_alt
+                palette().canvas
             },
         );
     }

@@ -103,6 +103,11 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let agent_width = (show_agent_actions && herdr_available)
         .then(|| UnicodeWidthStr::width(agent_badge) as u16)
         .unwrap_or_default();
+    let local_agent_width = if agent_width > 0 {
+        usize::from(card_gap_width) + usize::from(agent_width)
+    } else {
+        0
+    };
     let comparison = show_agent_actions
         .then(|| {
             app.changes
@@ -149,7 +154,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         0
     };
     let badge_width = if is_local {
-        1 + repository_width + usize::from(card_gap_width) + "LOCAL".len()
+        1 + repository_width + usize::from(card_gap_width) + "LOCAL".len() + local_agent_width
     } else {
         1 + repository_width
             + usize::from(card_gap_width)
@@ -224,6 +229,27 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Style::default().fg(palette().muted),
             room,
         );
+        if agent_width > 0 {
+            let room = content_right.saturating_sub(x);
+            let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
+            let room = content_right.saturating_sub(x);
+            let agent_rect = render(
+                frame,
+                &mut x,
+                agent_badge.to_owned(),
+                header_badge_style(
+                    palette().green,
+                    app.hovered_hit_target == Some(HitTarget::HeaderAgent),
+                ),
+                room,
+            );
+            if let Some(rect) = agent_rect {
+                draw_header_card_top_padding(frame, rect);
+                draw_header_badge_border(frame, rect, palette().green);
+                app.regions
+                    .register_hit_target(HitTarget::HeaderAgent, rect);
+            }
+        }
     } else {
         let room = content_right.saturating_sub(x);
         let worktree_rect = render(

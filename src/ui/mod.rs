@@ -151,6 +151,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 repo: app.session.data(),
                 summaries: &app.commit_summaries,
                 author_filter: &app.author_filter,
+                search: &app.graph_search,
+                search_focused: app.graph_search_focused,
                 state: &mut app.graph_state,
                 scroll_to_selection: &mut app.graph_scroll_to_selection,
                 settings: &app.settings,

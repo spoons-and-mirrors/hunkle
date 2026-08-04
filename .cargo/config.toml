@@ -1,0 +1,3 @@
+[alias]
+hunkle-install-local = "install --path . --root target/hunkle-install --target-dir target --force --locked"
+hunkle-install-global = "install --path . --target-dir target --force --locked"

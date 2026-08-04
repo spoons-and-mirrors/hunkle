@@ -2,6 +2,24 @@ use super::*;
 use crate::app::WorktreePickerStep;
 
 #[test]
+fn local_workspace_keeps_the_agent_action() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert!(app.repository().unwrap().is_local());
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderAgent)
+            .is_some()
+    );
+    assert!(screen_text(&terminal).contains("AGENT"));
+}
+
+#[test]
 fn local_build_control_restarts_from_the_open_worktree() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
