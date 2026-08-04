@@ -119,6 +119,7 @@ pub(crate) enum HitTarget {
     FileSearch(FileSearchHitTarget),
     Settings(SettingsHitTarget),
     Agent(AgentKey),
+    AgentPaneId(String),
     AgentStashToggle,
     AgentStash(AgentKey),
     StashedAgent(usize),

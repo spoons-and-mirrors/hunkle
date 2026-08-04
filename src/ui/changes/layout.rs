@@ -64,6 +64,7 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
         matches!(
             target,
             HitTarget::Agent(_)
+                | HitTarget::AgentPaneId(_)
                 | HitTarget::AgentStashToggle
                 | HitTarget::AgentStash(_)
                 | HitTarget::StashedAgent(_)

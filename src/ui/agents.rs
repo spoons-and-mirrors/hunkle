@@ -227,6 +227,8 @@ pub(super) fn draw(
             .map(format_duration);
         let change_stats = herdr.agent_change_stats(index);
         let is_hovered = hovered_card == Some(group_index);
+        let pane_id_hovered =
+            hovered.as_ref() == Some(&HitTarget::AgentPaneId(agent.pane_id.clone()));
         let background = row_background(&state, is_hovered);
         if row_area.y > list.y {
             let previous_background = group_index
@@ -246,10 +248,11 @@ pub(super) fn draw(
             );
         }
         fill(frame, full_row_area, background);
-        draw_row(
+        let pane_id_area = draw_row(
             frame,
             row_area,
             destination,
+            Some(&agent.pane_id),
             session,
             agent_count,
             change_stats,
@@ -259,9 +262,13 @@ pub(super) fn draw(
             state,
             in_host_tab,
             is_hovered,
+            pane_id_hovered,
         );
         last_card = Some((full_row_area, background));
         targets.push((HitTarget::Agent(agent_key.clone()), full_row_area));
+        if let Some(pane_id_area) = pane_id_area {
+            targets.push((HitTarget::AgentPaneId(agent.pane_id.clone()), pane_id_area));
+        }
         if is_hovered && full_row_area.width >= 7 {
             let stash = Rect::new(full_row_area.right() - 7, full_row_area.y, 7, 1);
             frame.render_widget(
@@ -371,6 +378,7 @@ fn draw_stashed_agents(
                 repository: &agent.repository_label,
                 branch: &agent.branch,
             },
+            None,
             agent.session_name.as_deref().unwrap_or(&agent.harness),
             1,
             None,
@@ -382,6 +390,7 @@ fn draw_stashed_agents(
             AgentEntryState::default(),
             false,
             is_hovered,
+            false,
         );
         last_card = Some((full_row_area, background));
         targets.push((HitTarget::StashedAgent(index), full_row_area));
@@ -1266,6 +1275,7 @@ fn draw_row(
     frame: &mut Frame<'_>,
     area: Rect,
     destination: AgentCardDestination<'_>,
+    pane_id: Option<&str>,
     session: &str,
     agent_count: usize,
     change_stats: Option<(u64, u64)>,
@@ -1275,20 +1285,23 @@ fn draw_row(
     state: AgentEntryState,
     in_host_tab: bool,
     hovered: bool,
-) {
+    pane_id_hovered: bool,
+) -> Option<Rect> {
     if area.width == 0 || area.height == 0 {
-        return;
+        return None;
     }
     let background = row_background(&state, hovered);
     fill(frame, area, background);
     let status_area = draw_agent_status(frame, area, status, spinner_frame, background);
-    draw_agent_card_header(
+    let pane_id_area = draw_agent_card_header(
         frame,
         Rect::new(area.x, area.y, status_area.x.saturating_sub(area.x), 1),
         destination,
+        pane_id,
         elapsed,
         background,
         in_host_tab,
+        pane_id_hovered,
     );
     if area.height > 1 {
         draw_agent_card_detail(
@@ -1300,18 +1313,21 @@ fn draw_row(
             background,
         );
     }
+    pane_id_area
 }
 
 fn draw_agent_card_header(
     frame: &mut Frame<'_>,
     area: Rect,
     destination: AgentCardDestination<'_>,
+    pane_id: Option<&str>,
     elapsed: Option<&str>,
     background: Color,
     highlighted: bool,
-) {
+    pane_id_hovered: bool,
+) -> Option<Rect> {
     if area.width < 2 || area.height == 0 {
-        return;
+        return None;
     }
     let time_width = elapsed
         .map(|time| u16::try_from(UnicodeWidthStr::width(time)).unwrap_or(u16::MAX))
@@ -1329,24 +1345,65 @@ fn draw_agent_card_header(
     let marker_right = elapsed_x.saturating_sub(u16::from(time_width > 0));
     let available = marker_right.saturating_sub(area.x).saturating_sub(1);
     let mut widths = [
+        pane_id.map(|_| badge_width("id")).unwrap_or(0),
         badge_width(destination.repository).min(20),
         badge_width(destination.branch).min(20),
     ];
-    while widths[0].saturating_add(widths[1]).saturating_add(1) > available {
-        let index = usize::from(widths[1] > widths[0]);
-        if widths[index] <= 3 {
-            let other = 1 - index;
-            if widths[other] <= 3 {
-                break;
-            }
-            widths[other] -= 1;
-        } else {
-            widths[index] -= 1;
-        }
+    let gap_width = if pane_id.is_some() { 2 } else { 1 };
+    while widths
+        .iter()
+        .copied()
+        .reduce(u16::saturating_add)
+        .unwrap_or(0)
+        .saturating_add(gap_width)
+        > available
+    {
+        let Some((index, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > 3)
+            .max_by_key(|(_, width)| **width)
+        else {
+            break;
+        };
+        widths[index] -= 1;
     }
+    let pane_id_area = pane_id.map(|_| Rect::new(area.x, area.y, widths[0].min(available), 1));
+    if let Some(pane_id_area) = pane_id_area {
+        draw_badge_with_background(
+            frame,
+            pane_id_area,
+            "id",
+            if pane_id_hovered {
+                palette().canvas
+            } else {
+                palette().soft
+            },
+            background,
+            if pane_id_hovered {
+                palette().accent
+            } else {
+                palette().raised
+            },
+        );
+    }
+    let repository_x = if pane_id.is_some() {
+        area.x.saturating_add(widths[0]).saturating_add(1)
+    } else {
+        area.x
+    };
     draw_badge(
         frame,
-        Rect::new(area.x, area.y, widths[0].min(available), 1),
+        Rect::new(
+            repository_x,
+            area.y,
+            widths[1].min(
+                area.x
+                    .saturating_add(available)
+                    .saturating_sub(repository_x),
+            ),
+            1,
+        ),
         destination.repository,
         if highlighted {
             palette().yellow
@@ -1355,19 +1412,20 @@ fn draw_agent_card_header(
         },
         background,
     );
-    let branch_x = area.x.saturating_add(widths[0]).saturating_add(1);
+    let branch_x = repository_x.saturating_add(widths[1]).saturating_add(1);
     draw_badge(
         frame,
         Rect::new(
             branch_x,
             area.y,
-            widths[1].min(area.x.saturating_add(available).saturating_sub(branch_x)),
+            widths[2].min(area.x.saturating_add(available).saturating_sub(branch_x)),
             1,
         ),
         destination.branch,
         palette().accent,
         background,
     );
+    pane_id_area.filter(|area| area.width >= 3)
 }
 
 fn draw_agent_card_detail(
@@ -1488,11 +1546,29 @@ fn draw_badge(
     foreground: Color,
     outer_background: Color,
 ) {
+    draw_badge_with_background(
+        frame,
+        area,
+        label,
+        foreground,
+        outer_background,
+        palette().raised,
+    );
+}
+
+fn draw_badge_with_background(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    foreground: Color,
+    outer_background: Color,
+    badge_background: Color,
+) {
     if area.width < 2 || area.height == 0 {
         return;
     }
     frame.render_widget(
-        Paragraph::new("▐").style(Style::default().fg(palette().raised).bg(outer_background)),
+        Paragraph::new("▐").style(Style::default().fg(badge_background).bg(outer_background)),
         Rect::new(area.x, area.y, 1, 1),
     );
     frame.render_widget(
@@ -1503,7 +1579,7 @@ fn draw_badge(
         .style(
             Style::default()
                 .fg(foreground)
-                .bg(palette().raised)
+                .bg(badge_background)
                 .add_modifier(Modifier::BOLD),
         ),
         Rect::new(
@@ -1514,7 +1590,7 @@ fn draw_badge(
         ),
     );
     frame.render_widget(
-        Paragraph::new("▌").style(Style::default().fg(palette().raised).bg(outer_background)),
+        Paragraph::new("▌").style(Style::default().fg(badge_background).bg(outer_background)),
         Rect::new(area.right().saturating_sub(1), area.y, 1, 1),
     );
 }

@@ -24,6 +24,13 @@ impl App {
 
     fn handle_mouse_inner(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(HitTarget::AgentPaneId(pane_id)) = self.regions.hit_target_at(point)
+        {
+            self.selection.clear();
+            self.copy_request = Some(format!("herdr_pane_id {pane_id}"));
+            return;
+        }
         if self.agent_preview_picker_open
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && !matches!(

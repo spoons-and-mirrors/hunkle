@@ -13,8 +13,26 @@ pub(super) fn draw_commit_editor(
         draw_commit_message_action(frame, actions_row, app, has_changes);
     }
     let commit_active = app.mode == Mode::Commit;
-    fill(frame, commit_area, palette().canvas);
+    fill(frame, commit_area, palette().panel);
     let commit_content = commit_area.inner(Margin::new(1, 0));
+    fill(frame, commit_content, palette().canvas);
+    if commit_area.width >= 2 {
+        for y in commit_area.y..commit_area.bottom() {
+            if let Some(cell) = frame.buffer_mut().cell_mut((commit_area.x, y)) {
+                cell.set_symbol("▐")
+                    .set_fg(palette().canvas)
+                    .set_bg(palette().panel);
+            }
+            if let Some(cell) = frame
+                .buffer_mut()
+                .cell_mut((commit_area.right().saturating_sub(1), y))
+            {
+                cell.set_symbol("▌")
+                    .set_fg(palette().canvas)
+                    .set_bg(palette().panel);
+            }
+        }
+    }
     let (commit_text, commit_height) = if local_workspace {
         (
             Text::from(vec![

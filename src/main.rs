@@ -195,7 +195,7 @@ fn main() -> Result<()> {
         }
         if let Some(text) = app.take_copy_request() {
             app.notice = Some(match selection::copy_to_clipboard(&text) {
-                Ok(()) => "Copied selection".to_owned(),
+                Ok(()) => "Copied to clipboard".to_owned(),
                 Err(error) => format!("Could not copy selection: {error}"),
             });
             dirty = true;

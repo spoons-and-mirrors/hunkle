@@ -218,6 +218,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .collect();
     assert!(row.contains("HUNK"));
     assert!(row.contains("fea"));
+    assert!(!row.contains("w1:p1"));
+    assert!(row.find("id").unwrap() < row.find("HUNK").unwrap());
     assert!(row.contains('⠋'));
     assert!(detail.contains("Refine agent timers"));
     assert!(detail.contains("+128"));
@@ -231,7 +233,19 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .collect::<String>();
     assert!(!idle_screen.contains("Please refine"));
 
-    app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 2, area.y));
+    let pane_id = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPaneId("w1:p1".to_owned()))
+        .unwrap();
+    let card_x = pane_id.right().saturating_add(2);
+    click(&mut app, pane_id.x + 1, pane_id.y);
+    assert_eq!(
+        app.take_copy_request().as_deref(),
+        Some("herdr_pane_id w1:p1")
+    );
+    assert!(!app.agents_pane_visible());
+
+    app.handle_mouse(mouse(MouseEventKind::Moved, card_x, area.y));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     assert!(!app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -520,11 +534,11 @@ fn renders_and_targets_agents_in_the_normal_view() {
         app.regions.agent_preview_scroll_max
     );
 
-    click(&mut app, area.x + 2, area.y);
+    click(&mut app, card_x, area.y);
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.agents_pane_visible());
 
-    app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
+    app.handle_mouse(mouse(MouseEventKind::Moved, card_x, area.y));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     assert!(app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -538,7 +552,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     );
 
     app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
-    app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 3, area.y));
+    app.handle_mouse(mouse(MouseEventKind::Moved, card_x, area.y));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     assert!(app.agents_pane_visible());
     open_agents_pane(&mut app);

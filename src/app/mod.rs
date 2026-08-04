@@ -2242,6 +2242,7 @@ impl App {
             self.hovered_hit_target,
             Some(
                 HitTarget::Agent(_)
+                    | HitTarget::AgentPaneId(_)
                     | HitTarget::AgentStashToggle
                     | HitTarget::AgentStash(_)
                     | HitTarget::StashedAgent(_)

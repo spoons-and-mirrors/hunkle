@@ -327,7 +327,6 @@ fn renders_every_primary_surface() {
         assert_eq!(cell.bg, super::palette().canvas);
     }
     let splitter_top = &terminal.backend().buffer()[(left.right(), left.y)];
-    assert_eq!(splitter_top.symbol(), " ");
     assert_eq!(splitter_top.bg, super::palette().canvas);
     app.dragging_splitter = true;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -404,6 +403,14 @@ fn renders_every_primary_surface() {
     assert_eq!(app.view, View::Graph);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let commit = app.regions.commit.unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(commit.x, commit.y)].symbol(),
+        "▐"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(commit.right() - 1, commit.y)].symbol(),
+        "▌"
+    );
     let commit_text: String = (commit.y..commit.bottom())
         .flat_map(|y| (commit.x..commit.right()).map(move |x| (x, y)))
         .map(|position| terminal.backend().buffer()[position].symbol())
@@ -1164,7 +1171,9 @@ fn renders_every_primary_surface() {
         &buffer.content[usize::from(commit.y) * width + usize::from(commit.x.saturating_add(1))];
     let focus_edge = &buffer.content[usize::from(commit.y) * width + usize::from(commit.x)];
     assert_eq!(input_cell.bg, super::palette().selected);
-    assert_eq!(focus_edge.bg, super::palette().canvas);
+    assert_eq!(focus_edge.symbol(), "▐");
+    assert_eq!(focus_edge.fg, super::palette().canvas);
+    assert_eq!(focus_edge.bg, super::palette().panel);
     app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
     assert_eq!(app.commit_input.text(), "x");
     app.commit_input.set("Subject");
