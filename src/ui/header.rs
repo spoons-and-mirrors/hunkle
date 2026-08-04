@@ -1,11 +1,14 @@
 use super::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let herdr_available = app.herdr_available();
     let row = area;
     let content_y = area.bottom().saturating_sub(1);
+    let card_gap = if app.single_panel_layout() { " " } else { "  " };
+    let card_gap_width = UnicodeWidthStr::width(card_gap) as u16;
     frame.render_widget(
-        Block::default().style(Style::default().bg(palette().panel)),
+        Block::default().style(Style::default().bg(palette().canvas)),
         row,
     );
     let fullscreen_rect = (herdr_available && !app.single_panel_layout()).then(|| {
@@ -23,7 +26,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     } else {
                         palette().cyan
                     })
-                    .bg(palette().panel)
+                    .bg(palette().canvas)
                     .add_modifier(Modifier::BOLD),
             ),
             rect,
@@ -34,9 +37,34 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         rect
     });
-    let header_right = fullscreen_rect
+    let controls_right = fullscreen_rect
         .map(|rect| rect.x.saturating_sub(1))
         .unwrap_or_else(|| area.right());
+    let local_build_rect = app.local_build_available().then(|| {
+        let label = " ↻ ";
+        let width = UnicodeWidthStr::width(label) as u16;
+        let rect = Rect::new(controls_right.saturating_sub(width), content_y, width, 1);
+        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderLocalBuild);
+        frame.render_widget(
+            Paragraph::new(label).alignment(Alignment::Center).style(
+                Style::default()
+                    .fg(if hovered {
+                        palette().accent
+                    } else {
+                        palette().green
+                    })
+                    .bg(palette().canvas)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            rect,
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderLocalBuild, rect);
+        rect
+    });
+    let header_right = local_build_rect
+        .map(|rect| rect.x.saturating_sub(1))
+        .unwrap_or(controls_right);
     let Some(repo) = app.repository() else {
         frame.render_widget(
             Paragraph::new("  No workspace selected").style(Style::default().fg(palette().muted)),
@@ -91,15 +119,15 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         requested_comparison_width.min(available.saturating_sub(
             1 + 5
-                + 1
+                + usize::from(card_gap_width)
                 + 5
-                + 1
+                + usize::from(card_gap_width)
                 + usize::from(branch_width)
-                + 1
+                + usize::from(card_gap_width)
                 + usize::from(diff_width)
-                + 1
+                + usize::from(card_gap_width)
                 + usize::from(issue_width)
-                + 1
+                + usize::from(card_gap_width)
                 + usize::from(agent_width),
         ))
     };
@@ -110,19 +138,25 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .saturating_add(2)
         .min(18);
     let action_width = if show_agent_actions {
-        1 + usize::from(diff_width)
-            + 1
+        usize::from(card_gap_width)
+            + usize::from(diff_width)
+            + usize::from(card_gap_width)
             + usize::from(issue_width)
-            + 1
+            + usize::from(card_gap_width)
             + usize::from(agent_width)
             + comparison_width
     } else {
         0
     };
     let badge_width = if is_local {
-        1 + repository_width + 1 + "LOCAL".len()
+        1 + repository_width + usize::from(card_gap_width) + "LOCAL".len()
     } else {
-        1 + repository_width + 1 + worktree_width + 1 + usize::from(branch_width) + action_width
+        1 + repository_width
+            + usize::from(card_gap_width)
+            + worktree_width
+            + usize::from(card_gap_width)
+            + usize::from(branch_width)
+            + action_width
     };
     let notice_budget = available
         .saturating_sub(badge_width.saturating_add(4))
@@ -179,7 +213,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .register_hit_target(HitTarget::HeaderRepository, rect);
     }
     let room = content_right.saturating_sub(x);
-    let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+    let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
 
     if is_local {
         let room = content_right.saturating_sub(x);
@@ -206,7 +240,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .saturating_add(issue_width)
                     .saturating_add(agent_width)
                     .saturating_add(comparison_width as u16)
-                    .saturating_add(4),
+                    .saturating_add(4u16.saturating_sub(card_gap_width.saturating_sub(1))),
             )
             .min(18),
         );
@@ -217,14 +251,14 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .register_hit_target(HitTarget::HeaderWorktrees, rect);
         }
         let room = content_right.saturating_sub(x);
-        let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+        let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
         let room = content_right.saturating_sub(x);
         let branch_limit = room.saturating_sub(
             diff_width
                 .saturating_add(issue_width)
                 .saturating_add(agent_width)
                 .saturating_add(comparison_width as u16)
-                .saturating_add(2),
+                .saturating_add(2 + card_gap_width.saturating_sub(1).saturating_mul(3)),
         );
         let branch_rect = render(
             frame,
@@ -244,7 +278,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         if show_agent_actions {
             let room = content_right.saturating_sub(x);
-            let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+            let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
             let room = content_right.saturating_sub(x);
             let diff_rect = render(
                 frame,
@@ -254,7 +288,11 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     palette().purple,
                     app.hovered_hit_target == Some(HitTarget::HeaderDiff),
                 ),
-                room.saturating_sub(issue_width.saturating_add(agent_width).saturating_add(2)),
+                room.saturating_sub(
+                    issue_width
+                        .saturating_add(agent_width)
+                        .saturating_add(card_gap_width.saturating_mul(2)),
+                ),
             );
             if let Some(rect) = diff_rect {
                 draw_header_card_top_padding(frame, rect);
@@ -262,7 +300,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
             }
             let room = content_right.saturating_sub(x);
-            let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+            let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
             let room = content_right.saturating_sub(x);
             let issue_rect = render(
                 frame,
@@ -273,7 +311,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     app.hovered_hit_target == Some(HitTarget::HeaderIssue)
                         || app.header_picker.kind == Some(HeaderPickerKind::Issues),
                 ),
-                room.saturating_sub(agent_width.saturating_add(1)),
+                room.saturating_sub(agent_width.saturating_add(card_gap_width)),
             );
             if let Some(rect) = issue_rect {
                 draw_header_card_top_padding(frame, rect);
@@ -283,7 +321,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             }
             if herdr_available {
                 let room = content_right.saturating_sub(x);
-                let _ = render(frame, &mut x, " ".to_owned(), Style::default(), room);
+                let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
                 let room = content_right.saturating_sub(x);
                 let agent_rect = render(
                     frame,
@@ -348,29 +386,15 @@ fn branch_badge(branch: &str, dirty: bool, ahead: u64, behind: u64, width: usize
 
 pub(super) fn draw_main_top_padding(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let transition = Rect::new(area.x, area.y, area.width, 1);
-    let glyph = if app.single_panel_layout() && app.regions.worktree.is_some() {
-        "▄"
-    } else {
-        "▀"
-    };
-    frame.render_widget(
-        Paragraph::new(glyph.repeat(usize::from(transition.width)))
-            .style(Style::default().fg(palette().panel).bg(palette().canvas)),
-        transition,
-    );
-    if let (Some(bounds), Some(left)) = (app.regions.split_bounds, app.regions.worktree) {
-        let right_x = left.right().saturating_add(1);
-        let right = Rect::new(right_x, bounds.y, bounds.right().saturating_sub(right_x), 1);
-        for pane in [Rect::new(left.x, left.y, left.width, 1), right] {
-            if pane.is_empty() {
-                continue;
-            }
-            frame.render_widget(
-                Paragraph::new("▀".repeat(usize::from(pane.width)))
-                    .style(Style::default().fg(palette().panel).bg(palette().panel)),
-                pane,
-            );
-        }
+    fill(frame, transition, palette().canvas);
+    if app.dragging_splitter
+        && let Some(splitter) = app.regions.splitter
+    {
+        fill(
+            frame,
+            Rect::new(splitter.x, transition.y, splitter.width, 1),
+            palette().accent,
+        );
     }
 }
 
@@ -396,7 +420,7 @@ pub(super) fn header_badge_style(background: Color, hovered: bool) -> Style {
     let (foreground, background) = if hovered {
         (background, palette().raised)
     } else {
-        (palette().ink, palette().surface_alt)
+        (palette().ink, palette().panel)
     };
     Style::default()
         .fg(foreground)
@@ -405,8 +429,10 @@ pub(super) fn header_badge_style(background: Color, hovered: bool) -> Style {
 }
 
 pub(super) fn draw_header_badge_border(frame: &mut Frame<'_>, rect: Rect, color: Color) {
-    if let Some(cell) = frame.buffer_mut().cell_mut((rect.x, rect.y)) {
-        cell.set_symbol("▌").set_fg(color);
+    if let Some(x) = rect.x.checked_sub(1)
+        && let Some(cell) = frame.buffer_mut().cell_mut((x, rect.y))
+    {
+        cell.set_symbol("▌").set_fg(color).set_bg(palette().canvas);
     }
 }
 
@@ -415,9 +441,31 @@ fn draw_header_card_top_padding(frame: &mut Frame<'_>, rect: Rect) {
         frame,
         Rect::new(rect.x, rect.y.saturating_sub(1), rect.width, 1),
         '▄',
-        palette().surface_alt,
+        palette().panel,
         palette().canvas,
     );
+}
+
+pub(super) fn draw_header_card_bottom_padding(frame: &mut Frame<'_>, app: &App) {
+    for target in [
+        HitTarget::HeaderRepository,
+        HitTarget::HeaderWorktrees,
+        HitTarget::HeaderBranch,
+        HitTarget::HeaderDiff,
+        HitTarget::HeaderIssue,
+        HitTarget::HeaderAgent,
+    ] {
+        let Some(rect) = app.regions.hit_target_rect(target) else {
+            continue;
+        };
+        draw_half_padding(
+            frame,
+            Rect::new(rect.x, rect.bottom(), rect.width, 1),
+            '▀',
+            palette().panel,
+            palette().canvas,
+        );
+    }
 }
 
 pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
@@ -1012,14 +1060,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                 ),
                 HeaderPickerItem::Branch(branch) => (
                     branch.name.clone(),
-                    if branch.remote {
-                        "remote"
-                    } else if branch.current {
-                        "current"
-                    } else {
-                        "local"
-                    }
-                    .to_owned(),
+                    branch_picker_detail(branch),
                     None,
                     branch.current,
                     Some(4),
@@ -1028,14 +1069,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
                 ),
                 HeaderPickerItem::BranchBase(branch) => (
                     branch.name.clone(),
-                    if branch.remote {
-                        "remote"
-                    } else if branch.current {
-                        "current"
-                    } else {
-                        "local"
-                    }
-                    .to_owned(),
+                    branch_picker_detail(branch),
                     None,
                     branch.current,
                     Some(4),
@@ -1202,6 +1236,52 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.register_hit_target(delete_target, delete);
         }
     }
+}
+
+fn branch_picker_detail(branch: &crate::git::Branch) -> String {
+    let location = branch_picker_location(branch);
+    let age = branch.last_touched_at.map(branch_age).unwrap_or_default();
+    let age = truncate_start_width(&age, 8);
+    let separator = if age.is_empty() { "   " } else { " · " };
+    format!("{location:<7}{separator}{age:>8}")
+}
+
+fn branch_picker_location(branch: &crate::git::Branch) -> &'static str {
+    if branch.remote {
+        "remote"
+    } else if branch.current {
+        "current"
+    } else {
+        "local"
+    }
+}
+
+fn branch_age(timestamp: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .unwrap_or(timestamp);
+    let seconds = now.saturating_sub(timestamp).max(0) as u64;
+    if seconds < 60 {
+        return "just now".to_owned();
+    }
+    if seconds < 3_600 {
+        return format!("{}m ago", seconds / 60);
+    }
+    if seconds < 86_400 {
+        return format!("{}h ago", seconds / 3_600);
+    }
+    if seconds < 604_800 {
+        return format!("{}d ago", seconds / 86_400);
+    }
+    if seconds < 2_592_000 {
+        return format!("{}w ago", seconds / 604_800);
+    }
+    if seconds < 31_536_000 {
+        return format!("{}mo ago", seconds / 2_592_000);
+    }
+    format!("{}y ago", seconds / 31_536_000)
 }
 
 fn draw_issue_picker_row(

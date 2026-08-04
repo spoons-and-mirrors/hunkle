@@ -10,7 +10,7 @@ pub(super) fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> R
         return Rect::new(content.x, list_y, content.width, available);
     }
 
-    let live_count = app.herdr.agents.len();
+    let live_count = app.herdr.agent_card_count();
     let agent_count = if app.herdr.showing_stash {
         live_count.max(app.herdr.stashed_agents().len())
     } else {

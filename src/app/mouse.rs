@@ -144,6 +144,10 @@ impl App {
                     self.start_header_agent();
                     return;
                 }
+                Some(HitTarget::HeaderLocalBuild) => {
+                    self.request_local_build_restart();
+                    return;
+                }
                 Some(HitTarget::HeaderFullscreen) => {
                     self.toggle_fullscreen();
                     return;

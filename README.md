@@ -32,6 +32,18 @@ cargo run -p hunkle
 cargo run -p hunkle -- /path/to/repository
 ```
 
+For agent-driven development across linked worktrees, install each checkout into
+its own ignored `target` directory instead of replacing the global binary:
+
+```sh
+cargo install --path . --root target/hunkle-install --force --locked
+```
+
+When the open workspace contains that local install, Hunkle shows `↻` in the
+top-right. Click it to restart Hunkle with that workspace's binary while keeping
+the workspace open. Each worktree therefore has an independent build channel;
+installing from another worktree cannot replace the binary currently in use.
+
 hunkle opens exactly the current or requested directory. When that directory is
 a Git repository root, Git status and history are available. The Changes pane
 uses the Git graph as its detail surface while the working tree is clean, then
@@ -160,6 +172,7 @@ terminal, are shared between Hunkle processes, and persist across restarts in
 ## Mouse
 
 - Click header controls to switch views, refresh, open Explorer, or open help.
+- Click `↻` at the top-right to run the Hunkle build installed in the open worktree.
 - Drag the divider between Changes and Diff to resize either panel.
 - Hover an agent to preview its latest user message. Scroll over the card or
   preview to cycle through the last five messages, or hover the history squares

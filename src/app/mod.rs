@@ -168,6 +168,7 @@ pub struct App {
     pub regions: Regions,
     pub(crate) selection: SelectionState,
     copy_request: Option<String>,
+    restart_request: Option<PathBuf>,
     pub should_quit: bool,
     pub(crate) settings_store: SettingsStore,
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
@@ -329,6 +330,7 @@ impl App {
             regions: Regions::default(),
             selection: SelectionState::default(),
             copy_request: None,
+            restart_request: None,
             should_quit: false,
             settings_store,
             pending_reload: None,
@@ -548,6 +550,35 @@ impl App {
         self.session.can_restart()
             && !self.commit_message_running()
             && !self.file_editor.as_ref().is_some_and(FileEditor::dirty)
+    }
+
+    pub(crate) fn local_build_available(&self) -> bool {
+        self.local_build_executable()
+            .is_some_and(|path| path.is_file())
+    }
+
+    pub(crate) fn request_local_build_restart(&mut self) {
+        let Some(executable) = self.local_build_executable().filter(|path| path.is_file()) else {
+            self.notice = Some("Local Hunkle build is unavailable".to_owned());
+            return;
+        };
+        self.restart_request = Some(executable);
+        self.notice = Some("Reloading local Hunkle build…".to_owned());
+    }
+
+    pub(crate) fn take_restart_request(&mut self) -> Option<PathBuf> {
+        self.restart_request.take()
+    }
+
+    fn local_build_executable(&self) -> Option<PathBuf> {
+        Some(
+            self.repository()?
+                .root
+                .join("target")
+                .join("hunkle-install")
+                .join("bin")
+                .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX)),
+        )
     }
 
     pub(crate) fn dirty_file_edit(&self) -> bool {
@@ -2150,7 +2181,7 @@ impl App {
             .saturating_add_signed(delta)
             .min(self.herdr.agents.len() - 1);
         if index != current {
-            self.herdr.scroll_agents(delta);
+            self.herdr.agent_scroll = self.herdr.agent_card_index(index).unwrap_or(0);
         }
         self.select_agent_preview(index);
     }

@@ -2,6 +2,38 @@ use super::*;
 use crate::app::WorktreePickerStep;
 
 #[test]
+fn local_build_control_restarts_from_the_open_worktree() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let executable = root
+        .join("target")
+        .join("hunkle-install")
+        .join("bin")
+        .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX));
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::write(&executable, "local build").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let local_build = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderLocalBuild)
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(local_build.x + 1, local_build.y)].symbol(),
+        "↻"
+    );
+    click(&mut app, local_build.x, local_build.y);
+    assert_eq!(
+        app.take_restart_request().as_deref(),
+        Some(executable.as_path())
+    );
+}
+
+#[test]
 fn errors_use_the_full_footer_instead_of_the_header() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -592,7 +624,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
 
     let mut app = App::new(root.to_path_buf());
     enable_herdr(&mut app);
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(107, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let repository = app
@@ -611,18 +643,14 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let issue = app.regions.hit_target_rect(HitTarget::HeaderIssue).unwrap();
     let agent = app.regions.hit_target_rect(HitTarget::HeaderAgent).unwrap();
     assert_eq!(repository.x, 1);
-    assert_eq!(terminal.backend().buffer()[(0, 2)].symbol(), "▀");
-    assert_eq!(
-        terminal.backend().buffer()[(0, 2)].fg,
-        super::palette().panel
-    );
+    assert_eq!(terminal.backend().buffer()[(0, 2)].symbol(), " ");
     assert_eq!(
         terminal.backend().buffer()[(0, 2)].bg,
-        super::palette().panel
+        super::palette().canvas
     );
     assert_eq!(
         terminal.backend().buffer()[(0, 0)].bg,
-        super::palette().panel
+        super::palette().canvas
     );
     assert_eq!(
         terminal.backend().buffer()[(repository.x + 1, repository.y - 1)].symbol(),
@@ -630,61 +658,73 @@ fn header_cards_open_pickers_and_checkout_branches() {
     );
     assert_eq!(
         terminal.backend().buffer()[(repository.x + 1, repository.y - 1)].fg,
-        super::palette().surface_alt
+        super::palette().panel
     );
     assert_eq!(
         terminal.backend().buffer()[(repository.x + 1, repository.y - 1)].bg,
         super::palette().canvas
     );
-    assert_eq!(repository.right().saturating_add(1), worktrees.x);
+    assert_eq!(repository.right().saturating_add(2), worktrees.x);
     assert!(worktrees.right() <= branch.x);
-    assert_eq!(branch.right().saturating_add(1), diff.x);
-    assert_eq!(diff.right().saturating_add(1), issue.x);
-    assert_eq!(issue.right().saturating_add(1), agent.x);
+    assert_eq!(branch.right().saturating_add(2), diff.x);
+    assert_eq!(diff.right().saturating_add(2), issue.x);
+    assert_eq!(issue.right().saturating_add(2), agent.x);
     assert_eq!(
-        terminal.backend().buffer()[(repository.x, repository.y)].symbol(),
+        terminal.backend().buffer()[(repository.x - 1, repository.y)].symbol(),
         "▌"
     );
     assert_eq!(
-        terminal.backend().buffer()[(repository.x, repository.y)].fg,
+        terminal.backend().buffer()[(repository.x - 1, repository.y)].fg,
         super::palette().yellow
     );
     assert_eq!(
-        terminal.backend().buffer()[(repository.x, repository.y)].bg,
-        super::palette().surface_alt
+        terminal.backend().buffer()[(repository.x - 1, repository.y)].bg,
+        super::palette().canvas
     );
     assert_eq!(
         terminal.backend().buffer()[(repository.x + 1, repository.y)].bg,
-        super::palette().surface_alt
+        super::palette().panel
     );
     assert_eq!(
-        terminal.backend().buffer()[(worktrees.x, worktrees.y)].fg,
+        terminal.backend().buffer()[(worktrees.x - 1, worktrees.y)].fg,
         super::palette().orange
     );
     assert_eq!(
-        terminal.backend().buffer()[(branch.x, branch.y)].fg,
+        terminal.backend().buffer()[(branch.x - 1, branch.y)].fg,
         super::palette().accent
     );
     assert_eq!(
-        terminal.backend().buffer()[(diff.x, diff.y)].fg,
+        terminal.backend().buffer()[(diff.x - 1, diff.y)].fg,
         super::palette().purple
     );
     assert_eq!(
-        terminal.backend().buffer()[(issue.x, issue.y)].fg,
+        terminal.backend().buffer()[(issue.x - 1, issue.y)].fg,
         super::palette().cyan
     );
     assert_eq!(
-        terminal.backend().buffer()[(agent.x, agent.y)].fg,
+        terminal.backend().buffer()[(agent.x - 1, agent.y)].fg,
         super::palette().green
     );
     for card in [repository, worktrees, branch, diff, issue, agent] {
         assert_eq!(
             terminal.backend().buffer()[(card.x + 1, card.y)].bg,
-            super::palette().surface_alt
+            super::palette().panel
         );
         assert_eq!(
             terminal.backend().buffer()[(card.x + 1, card.y)].fg,
             super::palette().ink
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(card.x + 1, card.bottom())].symbol(),
+            "▀"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(card.x + 1, card.bottom())].fg,
+            super::palette().panel
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(card.x + 1, card.bottom())].bg,
+            super::palette().canvas
         );
     }
     app.handle_mouse(mouse(MouseEventKind::Moved, repository.x + 1, repository.y));
@@ -710,15 +750,15 @@ fn header_cards_open_pickers_and_checkout_branches() {
         super::palette().raised
     );
     app.header_picker.close();
-    assert_eq!(worktrees.width, " basetr…".width() as u16);
+    assert_eq!(worktrees.width, " basetree ".width() as u16);
     let worktree_text = (worktrees.x..worktrees.right())
         .map(|x| terminal.backend().buffer()[(x, worktrees.y)].symbol())
         .collect::<String>();
-    assert_eq!(worktree_text, "▌basetr…");
+    assert_eq!(worktree_text, " basetree ");
     let branch_text = (branch.x..branch.right())
         .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
         .collect::<String>();
-    assert_eq!(branch_text, format!("▌{long_branch} ↑1 "));
+    assert_eq!(branch_text, format!(" {long_branch} ↑1 "));
 
     click(&mut app, agent.x, agent.y);
     assert_eq!(app.header_picker.kind, None);
@@ -1005,7 +1045,8 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let current_text = (current_row.x..current_row.right())
         .map(|x| terminal.backend().buffer()[(x, current_row.y)].symbol())
         .collect::<String>();
-    assert!(current_text.trim_end().ends_with("current"));
+    assert!(current_text.contains("current"));
+    assert!(current_text.contains("ago") || current_text.contains("just now"));
     let unselected_index = app
         .header_picker
         .items
@@ -1016,6 +1057,14 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .regions
         .hit_target_rect(HitTarget::HeaderPickerItem(unselected_index))
         .unwrap();
+    let unselected_text = (unselected_row.x..unselected_row.right())
+        .map(|x| terminal.backend().buffer()[(x, unselected_row.y)].symbol())
+        .collect::<String>();
+    assert_eq!(
+        current_text.find("current"),
+        unselected_text.find("local"),
+        "branch locations should share a column: current={current_text:?}, local={unselected_text:?}"
+    );
     assert_eq!(
         terminal.backend().buffer()[(unselected_row.x, unselected_row.y)].bg,
         super::palette().surface_alt
@@ -1077,7 +1126,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let linked_text = (linked_card.x..linked_card.right())
         .map(|x| terminal.backend().buffer()[(x, linked_card.y)].symbol())
         .collect::<String>();
-    assert_eq!(linked_text, "▌linked ");
+    assert_eq!(linked_text, " linked ");
 }
 
 #[test]
@@ -1220,15 +1269,15 @@ fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
     );
     assert_eq!((repository.y, worktree.y, branch.y), (1, 1, 1));
     assert_eq!(
-        terminal.backend().buffer()[(repository.x, repository.y)].fg,
+        terminal.backend().buffer()[(repository.x - 1, repository.y)].fg,
         super::palette().yellow
     );
     assert_eq!(
-        terminal.backend().buffer()[(worktree.x, worktree.y)].fg,
+        terminal.backend().buffer()[(worktree.x - 1, worktree.y)].fg,
         super::palette().orange
     );
     assert_eq!(
-        terminal.backend().buffer()[(branch.x, branch.y)].fg,
+        terminal.backend().buffer()[(branch.x - 1, branch.y)].fg,
         super::palette().accent
     );
 

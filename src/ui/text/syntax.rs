@@ -130,17 +130,16 @@ pub(super) fn syntax_spans_for_language(code: &str, language: Language) -> Vec<S
 
 impl Language {
     pub(super) fn from_path(path: &str) -> Self {
-        match path
-            .rsplit('.')
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "rs" => Self::Rust,
-            "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "vue" | "svelte" => Self::JavaScript,
-            "py" | "pyi" | "rb" => Self::Python,
-            "sh" | "bash" | "zsh" | "fish" => Self::Shell,
+        Self::from_name(path.rsplit('.').next().unwrap_or_default())
+    }
+
+    pub(super) fn from_name(name: &str) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "rs" | "rust" => Self::Rust,
+            "js" | "jsx" | "javascript" | "ts" | "tsx" | "typescript" | "mjs" | "cjs" | "vue"
+            | "svelte" => Self::JavaScript,
+            "py" | "pyi" | "python" | "rb" | "ruby" => Self::Python,
+            "sh" | "bash" | "zsh" | "fish" | "shell" | "console" => Self::Shell,
             "sql" | "db" | "sqlite" | "sqlite3" => Self::Sql,
             "json" | "jsonc" | "toml" | "yaml" | "yml" => Self::Data,
             _ => Self::Generic,

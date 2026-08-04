@@ -9,7 +9,10 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::super::palette;
+use super::{
+    super::palette,
+    syntax::{Language, syntax_spans_for_language},
+};
 
 const MAX_RENDERED_LINES: usize = 30_000;
 
@@ -18,7 +21,26 @@ pub(crate) fn styled_markdown(
     width: usize,
     wrap_tables: bool,
 ) -> Vec<Line<'static>> {
-    let mut renderer = MarkdownRenderer::new(width, wrap_tables);
+    styled_markdown_with_breaks(markdown, width, wrap_tables, false, true)
+}
+
+pub(crate) fn styled_markdown_preserving_breaks(
+    markdown: &str,
+    width: usize,
+    wrap_tables: bool,
+) -> Vec<Line<'static>> {
+    styled_markdown_with_breaks(markdown, width, wrap_tables, true, false)
+}
+
+fn styled_markdown_with_breaks(
+    markdown: &str,
+    width: usize,
+    wrap_tables: bool,
+    preserve_soft_breaks: bool,
+    show_code_language: bool,
+) -> Vec<Line<'static>> {
+    let mut renderer =
+        MarkdownRenderer::new(width, wrap_tables, preserve_soft_breaks, show_code_language);
     for event in Parser::new_ext(markdown, markdown_options()) {
         if renderer.at_line_limit() {
             renderer.truncated = true;
@@ -82,11 +104,14 @@ struct TableState {
 struct MarkdownRenderer {
     width: usize,
     wrap_tables: bool,
+    preserve_soft_breaks: bool,
+    show_code_language: bool,
     lines: Vec<Line<'static>>,
     spans: Vec<Span<'static>>,
     styles: Vec<Style>,
     blocks: Vec<BlockState>,
     code_block: bool,
+    code_language: Language,
     table: Option<TableState>,
     links: Vec<LinkState>,
     metadata_depth: usize,
@@ -94,15 +119,23 @@ struct MarkdownRenderer {
 }
 
 impl MarkdownRenderer {
-    fn new(width: usize, wrap_tables: bool) -> Self {
+    fn new(
+        width: usize,
+        wrap_tables: bool,
+        preserve_soft_breaks: bool,
+        show_code_language: bool,
+    ) -> Self {
         Self {
             width,
             wrap_tables,
+            preserve_soft_breaks,
+            show_code_language,
             lines: Vec::new(),
             spans: Vec::new(),
             styles: Vec::new(),
             blocks: Vec::new(),
             code_block: false,
+            code_language: Language::Generic,
             table: None,
             links: Vec::new(),
             metadata_depth: 0,
@@ -129,7 +162,13 @@ impl MarkdownRenderer {
                     .fg(palette().yellow)
                     .bg(palette().surface_alt),
             ),
-            Event::SoftBreak => self.push_text(" "),
+            Event::SoftBreak => {
+                if self.preserve_soft_breaks {
+                    self.finish_line(false);
+                } else {
+                    self.push_text(" ");
+                }
+            }
             Event::HardBreak => self.finish_line(false),
             Event::Rule => {
                 self.finish_line(false);
@@ -191,7 +230,14 @@ impl MarkdownRenderer {
             Tag::CodeBlock(kind) => {
                 self.blank_line();
                 self.code_block = true;
-                if let CodeBlockKind::Fenced(language) = kind
+                self.code_language = match &kind {
+                    CodeBlockKind::Fenced(info) => {
+                        Language::from_name(info.split_whitespace().next().unwrap_or_default())
+                    }
+                    CodeBlockKind::Indented => Language::Generic,
+                };
+                if self.show_code_language
+                    && let CodeBlockKind::Fenced(language) = kind
                     && !language.is_empty()
                 {
                     self.push_styled(
@@ -328,6 +374,7 @@ impl MarkdownRenderer {
             TagEnd::CodeBlock => {
                 self.finish_line(false);
                 self.code_block = false;
+                self.code_language = Language::Generic;
                 self.blank_line();
             }
             TagEnd::List(_) => {
@@ -406,6 +453,10 @@ impl MarkdownRenderer {
     }
 
     fn push_text(&mut self, text: &str) {
+        if self.code_block {
+            self.push_code_text(text);
+            return;
+        }
         let mut parts = text.split('\n').peekable();
         while let Some(part) = parts.next() {
             if !part.is_empty() {
@@ -419,6 +470,27 @@ impl MarkdownRenderer {
                 if self.code_block {
                     self.ensure_prefix();
                 }
+                self.finish_line(true);
+            }
+        }
+    }
+
+    fn push_code_text(&mut self, text: &str) {
+        let mut parts = text.split('\n').peekable();
+        while let Some(part) = parts.next() {
+            self.ensure_prefix();
+            if !part.is_empty() {
+                let code = expand_tabs(part, spans_width(&self.spans));
+                let base = self.current_style();
+                self.spans.extend(
+                    syntax_spans_for_language(&code, self.code_language)
+                        .into_iter()
+                        .map(|span| {
+                            Span::styled(span.content.into_owned(), base.patch(span.style))
+                        }),
+                );
+            }
+            if parts.peek().is_some() {
                 self.finish_line(true);
             }
         }
@@ -1053,6 +1125,53 @@ mod tests {
         assert!(text.contains("A strong link (https://example.com)."));
         assert!(text.contains("* one"));
         assert!(text.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn can_preserve_soft_breaks_while_styling_inline_markdown() {
+        let lines = styled_markdown_preserving_breaks("**bold**\n`code`", 80, true);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].content, "bold");
+        assert!(lines[0].spans[0].style != Style::default());
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(palette().yellow))
+        );
+    }
+
+    #[test]
+    fn syntax_highlights_fenced_code_without_a_language_caption() {
+        let lines = styled_markdown_preserving_breaks(
+            "```rust\nfn preview() {\n    println!(\"works\");\n}\n```",
+            80,
+            false,
+        );
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(!text.contains("rust"), "{text:?}");
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| { span.content == "fn" && span.style.fg == Some(palette().purple) })
+        );
+        assert!(
+            lines.iter().flat_map(|line| &line.spans).any(|span| {
+                span.content == "preview" && span.style.fg == Some(palette().orange)
+            })
+        );
+        assert!(
+            lines.iter().flat_map(|line| &line.spans).any(|span| {
+                span.content == "\"works\"" && span.style.fg == Some(palette().green)
+            })
+        );
     }
 
     #[test]

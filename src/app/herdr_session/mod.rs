@@ -783,7 +783,9 @@ impl HerdrSession {
                 .map(|agent| agent.runtime.timing_key.clone());
         }
         self.prune_agent_layout_history();
-        self.agent_scroll = self.agent_scroll.min(self.agents.len().saturating_sub(1));
+        self.agent_scroll = self
+            .agent_scroll
+            .min(self.agent_card_count().saturating_sub(1));
     }
 
     pub(crate) fn agent_elapsed(
@@ -811,6 +813,38 @@ impl HerdrSession {
         self.agents
             .iter()
             .position(|agent| agent.runtime.timing_key == key.0)
+    }
+
+    pub(crate) fn agent_card_groups(&self) -> Vec<(usize, usize)> {
+        let mut groups: Vec<(usize, usize)> = Vec::new();
+        for index in 0..self.agents.len() {
+            let agent = &self.agents[index];
+            if let Some((_, count)) = groups.iter_mut().find(|(representative, _)| {
+                let representative = &self.agents[*representative];
+                representative.workspace_id == agent.workspace_id
+                    && representative.tab_id == agent.tab_id
+            }) {
+                *count += 1;
+            } else {
+                groups.push((index, 1));
+            }
+        }
+        groups
+    }
+
+    pub(crate) fn agent_card_count(&self) -> usize {
+        self.agent_card_groups().len()
+    }
+
+    pub(crate) fn agent_card_index(&self, index: usize) -> Option<usize> {
+        let agent = self.agents.get(index)?;
+        self.agent_card_groups()
+            .iter()
+            .position(|(representative, _)| {
+                let representative = &self.agents[*representative];
+                representative.workspace_id == agent.workspace_id
+                    && representative.tab_id == agent.tab_id
+            })
     }
 
     pub(crate) fn stashed_agents(&self) -> &[StashedAgent] {
@@ -898,7 +932,9 @@ impl HerdrSession {
             branch,
         });
         self.agents.remove(index);
-        self.agent_scroll = self.agent_scroll.min(self.agents.len().saturating_sub(1));
+        self.agent_scroll = self
+            .agent_scroll
+            .min(self.agent_card_count().saturating_sub(1));
         self.agent_stash_running = true;
 
         if let Some(identity) = identity {

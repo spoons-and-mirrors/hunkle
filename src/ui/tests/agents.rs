@@ -437,6 +437,10 @@ fn renders_and_targets_agents_in_the_normal_view() {
         terminal.backend().buffer()[(user_message.x + 2, user_message.y + 1)].symbol(),
         "Y"
     );
+    assert_eq!(
+        terminal.backend().buffer()[(user_message.x + 2, user_message.y + 1)].bg,
+        super::palette().canvas
+    );
     assert!(
         (user_message.bottom() + 1..tooltip.bottom().saturating_sub(1)).any(|y| {
             terminal.backend().buffer()[(user_message.x, y)].symbol() == "▀"
@@ -1478,6 +1482,58 @@ fn conversation_preview_scopes_requests_to_the_selected_user_message() {
 }
 
 #[test]
+fn collapses_agents_sharing_a_tab_into_one_card() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let snapshot = serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE", "focused": false }],
+            "agents": (0..2).map(|index| serde_json::json!({
+                "agent": "opencode",
+                "agent_status": "idle",
+                "focused": false,
+                "pane_id": format!("w1:p{index}"),
+                "tab_id": "w1:t1",
+                "workspace_id": "w1"
+            })).collect::<Vec<_>>(),
+            "panes": (0..2).map(|index| serde_json::json!({
+                "pane_id": format!("w1:p{index}"),
+                "tab_id": "w1:t1",
+                "workspace_id": "w1"
+            })).collect::<Vec<_>>()
+        } }
+    });
+    let mut app = App::new(root.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&snapshot);
+    let first_key = agent_key(&app, 0);
+    let second_key = agent_key(&app, 1);
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert_eq!(app.settings.agents_height, 5);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Agent(first_key))
+            .is_some()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Agent(second_key))
+            .is_none()
+    );
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(screen.contains("2 agents"));
+}
+
+#[test]
 fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -1491,12 +1547,12 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
                     "agent_status": "idle",
                     "focused": false,
                     "pane_id": format!("w1:p{index}"),
-                    "tab_id": "w1:t1",
+                    "tab_id": format!("w1:t{index}"),
                     "workspace_id": "w1"
                 })).collect::<Vec<_>>(),
                 "panes": (0..count).map(|index| serde_json::json!({
                     "pane_id": format!("w1:p{index}"),
-                    "tab_id": "w1:t1",
+                    "tab_id": format!("w1:t{index}"),
                     "workspace_id": "w1"
                 })).collect::<Vec<_>>()
             } }

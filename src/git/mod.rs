@@ -215,6 +215,7 @@ pub struct Branch {
     pub remote: bool,
     pub current: bool,
     pub default: bool,
+    pub last_touched_at: Option<i64>,
 }
 
 impl Branch {

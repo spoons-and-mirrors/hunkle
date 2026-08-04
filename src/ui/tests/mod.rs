@@ -321,15 +321,18 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.diff.unwrap().right(), 120);
     let left = app.regions.worktree.unwrap();
     let right = app.regions.diff.unwrap();
-    for point in [(left.x, left.y), (right.x, right.y)] {
+    for point in [(left.x, left.y), (right.right().saturating_sub(1), right.y)] {
         let cell = &terminal.backend().buffer()[point];
-        assert_eq!(cell.symbol(), "▀");
-        assert_eq!(cell.fg, super::palette().panel);
-        assert_eq!(cell.bg, super::palette().panel);
+        assert_eq!(cell.symbol(), " ");
+        assert_eq!(cell.bg, super::palette().canvas);
     }
+    let splitter_top = &terminal.backend().buffer()[(left.right(), left.y)];
+    assert_eq!(splitter_top.symbol(), "▀");
+    assert_eq!(splitter_top.fg, super::palette().panel);
+    assert_eq!(splitter_top.bg, super::palette().canvas);
     assert_eq!(
-        terminal.backend().buffer()[(left.right(), left.y)].bg,
-        super::palette().canvas
+        terminal.backend().buffer()[(left.right(), left.y + 2)].bg,
+        super::palette().surface_alt
     );
     assert!(app.regions.changes.is_none());
     assert_eq!(app.regions.graph.unwrap().y, 36);
@@ -339,7 +342,7 @@ fn renders_every_primary_surface() {
     let buffer = terminal.backend().buffer();
     let agents = app.regions.agents_splitter.unwrap();
     let agents_offset = usize::from(agents.y) * 120 + usize::from(agents.x);
-    assert_eq!(buffer.content[0].bg, super::palette().panel);
+    assert_eq!(buffer.content[0].bg, super::palette().canvas);
     assert_eq!(
         buffer.content[37 * 120 - 1].bg,
         super::palette().surface_alt
