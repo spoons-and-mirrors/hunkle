@@ -181,12 +181,14 @@ fn repository_refresh_preserves_an_active_branch_comparison() {
             remote: false,
             current: true,
             default: true,
+            last_touched_at: None,
         },
         Branch {
             name: "topic".to_owned(),
             remote: false,
             current: false,
             default: false,
+            last_touched_at: None,
         },
     ];
     let mut state = ChangesState::new(Some(&repo));

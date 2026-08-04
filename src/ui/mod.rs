@@ -164,6 +164,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     }
     draw_main_top_padding(frame, app, layout[1]);
+    draw_header_card_bottom_padding(frame, app);
     draw_navigation(frame, app, layout[2]);
     match app.mode {
         Mode::Explorer => {

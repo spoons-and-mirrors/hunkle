@@ -136,14 +136,10 @@ fn inline_editor_keeps_line_numbers_in_a_fixed_gutter() {
     let body = app.regions.preview_body.unwrap();
     let editor_panel = app.regions.diff.unwrap();
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(editor_panel.x, editor_panel.y)].symbol(), "▀");
-    assert_eq!(
-        buffer[(editor_panel.x, editor_panel.y)].fg,
-        super::palette().panel
-    );
+    assert_eq!(buffer[(editor_panel.x, editor_panel.y)].symbol(), " ");
     assert_eq!(
         buffer[(editor_panel.x, editor_panel.y)].bg,
-        super::palette().panel
+        super::palette().canvas
     );
     let first_gutter = (body.x.saturating_sub(7)..body.x)
         .map(|x| buffer[(x, body.y)].symbol())

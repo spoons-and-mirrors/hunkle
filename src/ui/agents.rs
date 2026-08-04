@@ -16,7 +16,8 @@ use crate::app::{
 };
 
 use super::{
-    fill, palette, preview::hard_wrap_preview_lines, text::word_wrapped_height, truncate_width,
+    fill, palette, preview::hard_wrap_preview_lines, text::styled_markdown_preserving_breaks,
+    truncate_width,
 };
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -154,6 +155,7 @@ pub(super) fn draw(
 
     let card_height = if list.height >= 2 { 2 } else { 1 };
     let card_gap = 1;
+    let card_groups = herdr.agent_card_groups();
     let top_padding = u16::from(list.height > card_height);
     let card_list = Rect::new(
         list.x,
@@ -165,7 +167,7 @@ pub(super) fn draw(
     let viewport = usize::from((card_list.height + card_gap) / item_step).max(1);
     let scroll = herdr
         .agent_scroll
-        .min(herdr.agents.len().saturating_sub(viewport));
+        .min(card_groups.len().saturating_sub(viewport));
     let hovered_agent = match hovered.as_ref() {
         Some(HitTarget::Agent(index) | HitTarget::AgentStash(index)) => Some(index),
         Some(
@@ -181,8 +183,11 @@ pub(super) fn draw(
         _ => None,
     }
     .and_then(|key| herdr.agent_index(key));
+    let hovered_card = hovered_agent.and_then(|index| herdr.agent_card_index(index));
     let mut last_card = None;
-    for (screen_row, index) in (scroll..herdr.agents.len()).enumerate() {
+    for (group_index, (index, agent_count)) in card_groups.iter().copied().enumerate().skip(scroll)
+    {
+        let screen_row = group_index - scroll;
         if screen_row >= viewport {
             break;
         }
@@ -222,15 +227,18 @@ pub(super) fn draw(
             .agent_elapsed(index, settings.agent_time_display)
             .map(format_duration);
         let change_stats = herdr.agent_change_stats(index);
-        let is_hovered = hovered_agent == Some(index);
+        let is_hovered = hovered_card == Some(group_index);
         let background = row_background(&state, is_hovered);
         if row_area.y > list.y {
-            let previous_background = index.checked_sub(1).map(|previous| {
-                row_background(
-                    &herdr.agent_entry_state(previous),
-                    hovered_agent == Some(previous),
-                )
-            });
+            let previous_background = group_index
+                .checked_sub(1)
+                .and_then(|previous| card_groups.get(previous))
+                .map(|(previous, _)| {
+                    row_background(
+                        &herdr.agent_entry_state(*previous),
+                        hovered_card == group_index.checked_sub(1),
+                    )
+                });
             draw_agent_gap(
                 frame,
                 Rect::new(list.x, row_area.y - 1, list.width, 1),
@@ -244,6 +252,7 @@ pub(super) fn draw(
             row_area,
             destination,
             session,
+            agent_count,
             change_stats,
             elapsed.as_deref(),
             agent.runtime.status,
@@ -364,6 +373,7 @@ fn draw_stashed_agents(
                 branch: &agent.branch,
             },
             agent.session_name.as_deref().unwrap_or(&agent.harness),
+            1,
             None,
             Some(&format_duration(Duration::from_millis(
                 now_ms.saturating_sub(agent.stashed_at_ms),
@@ -570,13 +580,14 @@ pub(super) fn draw_history(
         main.width.saturating_sub(1),
         viewport.height,
     );
-    let user_height =
-        message_wrapped_height(&message.text, usize::from(main.width.saturating_sub(4)))
-            .saturating_add(3)
-            .min(8)
-            .min(usize::from(viewport.height))
-            .max(3);
     let content_width = usize::from(cards.width.saturating_sub(3).max(1));
+    let user_lines = styled_agent_text(&message.text, content_width);
+    let user_height = user_lines
+        .len()
+        .saturating_add(3)
+        .min(8)
+        .min(usize::from(viewport.height))
+        .max(3);
     let live = status == AgentStatus::Working && selected_message + 1 == messages.len();
     let (mut blocks, request_height) = build_request_transcript(
         message,
@@ -609,11 +620,7 @@ pub(super) fn draw_history(
     );
     let user_block = TranscriptBlock {
         user: true,
-        lines: message
-            .text
-            .split('\n')
-            .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().soft)))
-            .collect(),
+        lines: user_lines,
         start: 0,
         height: user_height,
         elapsed: None,
@@ -820,6 +827,18 @@ fn build_request_transcript(
     (blocks, document_height)
 }
 
+fn styled_agent_text(text: &str, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    hard_wrap_preview_lines(
+        styled_markdown_preserving_breaks(text, width, true),
+        width,
+        0,
+        usize::MAX,
+        false,
+        false,
+    )
+}
+
 fn draw_transcript_card(
     frame: &mut Frame<'_>,
     block: &TranscriptBlock,
@@ -846,7 +865,7 @@ fn draw_transcript_card(
         cards.width,
         u16::try_from(visible_end - visible_start).unwrap_or(u16::MAX),
     );
-    let background = palette().surface_alt;
+    let background = palette().canvas;
     let accent = if block.user {
         palette().yellow
     } else {
@@ -976,13 +995,9 @@ fn request_content(
             let AgentRequestPartPreview::Text(text) = part else {
                 unreachable!();
             };
-            for line in text.split('\n') {
-                height += word_wrapped_height(line, width).max(1);
-                lines.push(Line::styled(
-                    line.to_owned(),
-                    Style::default().fg(palette().soft),
-                ));
-            }
+            let text_lines = styled_agent_text(text, width);
+            height += text_lines.len().max(1);
+            lines.extend(text_lines);
             continue;
         };
         if matches!(activity, AgentActivityPreview::Reasoning) {
@@ -1024,10 +1039,8 @@ fn request_summary(
             AgentRequestPartPreview::Text(text) => Some(text),
             AgentRequestPartPreview::Activity(_) => None,
         })
-        .flat_map(|text| text.split('\n'))
-        .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().soft)))
-        .collect();
-    let text = hard_wrap_preview_lines(text, width, 0, usize::MAX, false, false);
+        .flat_map(|text| styled_agent_text(text, width))
+        .collect::<Vec<_>>();
     let tools = request
         .parts
         .iter()
@@ -1230,12 +1243,6 @@ fn draw_transcript_progress(frame: &mut Frame<'_>, area: Rect, scroll: usize, sc
     );
 }
 
-fn message_wrapped_height(text: &str, width: usize) -> usize {
-    text.split('\n')
-        .map(|line| word_wrapped_height(line, width).max(1))
-        .sum()
-}
-
 fn row_background(state: &AgentEntryState, hovered: bool) -> Color {
     if state.selected || hovered {
         palette().selected
@@ -1273,6 +1280,7 @@ fn draw_row(
     area: Rect,
     destination: AgentCardDestination<'_>,
     session: &str,
+    agent_count: usize,
     change_stats: Option<(u64, u64)>,
     elapsed: Option<&str>,
     status: AgentStatus,
@@ -1300,6 +1308,7 @@ fn draw_row(
             frame,
             Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
             session,
+            agent_count,
             change_stats,
             background,
         );
@@ -1378,6 +1387,7 @@ fn draw_agent_card_detail(
     frame: &mut Frame<'_>,
     area: Rect,
     session: &str,
+    agent_count: usize,
     change_stats: Option<(u64, u64)>,
     background: Color,
 ) {
@@ -1401,21 +1411,42 @@ fn draw_agent_card_detail(
         stats_width,
         1,
     );
-    let stats_gap = u16::from(stats_width > 0);
+    let group_label = (agent_count > 1).then(|| format!("{agent_count} agents"));
+    let group_width = group_label
+        .as_ref()
+        .map(|label| {
+            u16::try_from(UnicodeWidthStr::width(label.as_str()))
+                .unwrap_or(u16::MAX)
+                .min(area.width.saturating_sub(2))
+        })
+        .unwrap_or(0);
+    let group_right = stats_area.x.saturating_sub(u16::from(stats_width > 0));
+    let group_x = group_right.saturating_sub(group_width).max(area.x);
+    let group_width = group_right.saturating_sub(group_x);
     let session_x = area.x.saturating_add(1);
-    let trailing_x = if stats_width > 0 {
+    let trailing_x = if group_width > 0 {
+        group_x
+    } else if stats_width > 0 {
         stats_area.x
     } else {
         area.right()
     };
+    let session_gap = u16::from(group_width > 0 || stats_width > 0);
     let session_width = trailing_x
         .saturating_sub(session_x)
-        .saturating_sub(stats_gap);
+        .saturating_sub(session_gap);
     frame.render_widget(
         Paragraph::new(truncate_width(session, usize::from(session_width)))
             .style(Style::default().fg(palette().muted).bg(background)),
         Rect::new(session_x, area.y, session_width, 1),
     );
+    if let Some(group_label) = group_label {
+        frame.render_widget(
+            Paragraph::new(truncate_width(&group_label, usize::from(group_width)))
+                .style(Style::default().fg(palette().cyan).bg(background)),
+            Rect::new(group_x, area.y, group_width, 1),
+        );
+    }
     if let Some((additions, deletions)) = stats {
         frame.render_widget(
             Paragraph::new(Line::from(vec![

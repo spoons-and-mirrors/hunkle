@@ -112,11 +112,15 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
     if draw_details {
         fill(frame, columns[1], palette().panel);
     }
-    if app.dragging_splitter {
+    if let Some(splitter) = app.regions.splitter {
         fill(
             frame,
-            Rect::new(columns[0].right(), area.y, 1, area.height),
-            palette().accent,
+            splitter,
+            if app.dragging_splitter {
+                palette().accent
+            } else {
+                palette().surface_alt
+            },
         );
     }
     if app.changes.pane == LeftPane::Files {

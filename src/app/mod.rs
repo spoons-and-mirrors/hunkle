@@ -2150,7 +2150,7 @@ impl App {
             .saturating_add_signed(delta)
             .min(self.herdr.agents.len() - 1);
         if index != current {
-            self.herdr.scroll_agents(delta);
+            self.herdr.agent_scroll = self.herdr.agent_card_index(index).unwrap_or(0);
         }
         self.select_agent_preview(index);
     }

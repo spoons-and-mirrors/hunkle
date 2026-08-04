@@ -360,7 +360,7 @@ pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
         root,
         &[
             "for-each-ref",
-            "--format=%(HEAD)%00%(refname)%00%(refname:short)%00%(symref:short)%00",
+            "--format=%(HEAD)%00%(refname)%00%(refname:short)%00%(symref:short)%00%(committerdate:unix)%00",
             "refs/heads",
             "refs/remotes",
         ],
@@ -373,7 +373,7 @@ pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
     let fields = output.stdout.split(|byte| *byte == 0);
     let mut branches = fields
         .collect::<Vec<_>>()
-        .chunks_exact(4)
+        .chunks_exact(5)
         .filter_map(|fields| {
             let text = |field: &[u8]| String::from_utf8_lossy(field).into_owned();
             let refname = text(trim_ascii(fields[1]));
@@ -397,6 +397,7 @@ pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
                 remote: refname.starts_with("refs/remotes/"),
                 current: trim_ascii(fields[0]) == b"*",
                 default: false,
+                last_touched_at: String::from_utf8_lossy(trim_ascii(fields[4])).parse().ok(),
             })
         })
         .collect::<Vec<_>>();
