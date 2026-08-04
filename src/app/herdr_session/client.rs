@@ -1442,22 +1442,50 @@ fn replace_pane_with_agent_with(
         let _ = runner(&["pane".to_owned(), "close".to_owned(), replacement_pane_id]);
         return Err(error);
     }
-    let move_args = vec![
+    let idle_shell = runner(&[
         "pane".to_owned(),
-        "move".to_owned(),
+        "process-info".to_owned(),
+        "--pane".to_owned(),
         pane_id.clone(),
-        "--new-tab".to_owned(),
-        "--workspace".to_owned(),
-        workspace_id,
-        "--label".to_owned(),
-        parked_tab_label,
-        "--no-focus".to_owned(),
-    ];
-    if let Err(error) = runner(&move_args) {
+    ])
+    .ok()
+    .is_some_and(|value| pane_is_idle_shell(&value));
+    let displaced_result = if idle_shell {
+        runner(&["pane".to_owned(), "close".to_owned(), pane_id])
+    } else {
+        runner(&[
+            "pane".to_owned(),
+            "move".to_owned(),
+            pane_id,
+            "--new-tab".to_owned(),
+            "--workspace".to_owned(),
+            workspace_id,
+            "--label".to_owned(),
+            parked_tab_label,
+            "--no-focus".to_owned(),
+        ])
+    };
+    if let Err(error) = displaced_result {
         let _ = runner(&["pane".to_owned(), "close".to_owned(), replacement_pane_id]);
         return Err(error);
     }
     Ok(replacement_pane_id)
+}
+
+fn pane_is_idle_shell(value: &Value) -> bool {
+    let Some(process_info) = value.pointer("/result/process_info") else {
+        return false;
+    };
+    let Some(shell_pid) = process_info.get("shell_pid").and_then(Value::as_u64) else {
+        return false;
+    };
+    process_info
+        .get("foreground_processes")
+        .and_then(Value::as_array)
+        .is_some_and(|processes| {
+            processes.len() == 1
+                && processes[0].get("pid").and_then(Value::as_u64) == Some(shell_pid)
+        })
 }
 
 fn opencode_command(session_id: Option<&str>) -> Result<String, String> {
@@ -2929,6 +2957,9 @@ mod tests {
                 ["pane", "run", "w1:p4", "opencode --session ses_123"]
                     .map(str::to_owned)
                     .to_vec(),
+                ["pane", "process-info", "--pane", "w1:p2"]
+                    .map(str::to_owned)
+                    .to_vec(),
                 [
                     "pane",
                     "move",
@@ -3047,7 +3078,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            calls[3],
+            calls[4],
             [
                 "pane",
                 "move",
@@ -3061,6 +3092,48 @@ mod tests {
             ]
             .map(str::to_owned)
             .to_vec()
+        );
+    }
+
+    #[test]
+    fn closes_an_idle_shell_instead_of_parking_it() {
+        let mut calls = Vec::new();
+        replace_pane_with_agent_with(
+            PathBuf::from("/tmp/feature"),
+            "w1".to_owned(),
+            "w1:p2".to_owned(),
+            None,
+            |args| {
+                calls.push(args.to_vec());
+                Ok(match calls.len() {
+                    1 => serde_json::json!({
+                        "result": { "pane": { "cwd": "/tmp/displaced" } }
+                    }),
+                    2 => serde_json::json!({
+                        "result": { "pane": { "pane_id": "w1:p4" } }
+                    }),
+                    4 => serde_json::json!({
+                        "result": {
+                            "process_info": {
+                                "shell_pid": 42,
+                                "foreground_processes": [{ "pid": 42, "name": "bash" }]
+                            }
+                        }
+                    }),
+                    _ => Value::Null,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls[4],
+            ["pane", "close", "w1:p2"].map(str::to_owned).to_vec()
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|call| !call.contains(&"--new-tab".to_owned()))
         );
     }
 

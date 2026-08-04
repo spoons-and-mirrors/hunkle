@@ -135,8 +135,9 @@ Hunkle opens the result after creation. Hunkle-created worktrees are stored in
 When Hunkle runs inside Herdr, click the green **AGENT** header card or press
 `Ctrl+Space` to start an OpenCode agent at the repository, worktree, and branch
 shown in the header. Choose which non-Hunkle pane in the active Herdr tab to
-replace. The displaced pane is parked in its own tab, named after its starting
-directory, so it cannot be merged into another agent's saved layout.
+replace. If the displaced pane contains only an idle shell, Hunkle closes it after
+the agent starts. A pane with a foreground process is parked in its own tab,
+named after its starting directory, so the process and its output are preserved.
 
 The Agents section acts as a live per-agent layout switcher. Clicking an agent
 restores its complete pane layout around the fixed Hunkle pane, keeps keyboard
