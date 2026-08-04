@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph, Wrap},
@@ -28,6 +28,7 @@ struct TranscriptBlock {
     start: usize,
     height: usize,
     elapsed: Option<String>,
+    request_count: usize,
     request: Option<usize>,
     expandable: bool,
 }
@@ -173,8 +174,6 @@ pub(super) fn draw(
         Some(
             HitTarget::AgentPreviewPicker(agent)
             | HitTarget::AgentPreviewPickerItem(agent)
-            | HitTarget::AgentPreviewPrevious(agent)
-            | HitTarget::AgentPreviewNext(agent)
             | HitTarget::AgentPreviewMessageTimeline(agent)
             | HitTarget::AgentPreviewRequest { agent, .. }
             | HitTarget::AgentTooltip { agent, .. }
@@ -402,10 +401,9 @@ pub(super) fn draw_history(
     selected_message: Option<usize>,
     transcript_scroll: Option<usize>,
     expanded_requests: &[usize],
-    pressed_navigation: Option<bool>,
     picker_open: bool,
     hovered: Option<HitTarget>,
-    repository_anchor: Option<Rect>,
+    status_area: Rect,
     area: Rect,
 ) -> (Vec<(HitTarget, Rect)>, usize, usize) {
     if area.width < 24 || area.height < 10 {
@@ -427,76 +425,18 @@ pub(super) fn draw_history(
         AgentStatus::Idle => None,
         AgentStatus::Unknown => Some(("UNKNOWN", palette().faint)),
     };
-    let agent_count = herdr.agents.len();
     let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
-    let repository_width = badge_width(repository)
-        .min(repository_anchor.map_or_else(|| area.width.saturating_sub(6), |anchor| anchor.width));
-    let repository_area = repository_anchor.map_or_else(
-        || Rect::new(area.x, area.y, repository_width, 1),
-        |anchor| Rect::new(anchor.x, anchor.y, repository_width, 1),
-    );
-    let previous_button = Rect::new(area.right().saturating_sub(6), area.y, 3.min(area.width), 1);
-    let next_button = Rect::new(
-        previous_button.right(),
-        area.y,
-        area.right().saturating_sub(previous_button.right()),
+    let repository_width = badge_width(repository).min(area.width);
+    let repository_area = Rect::new(
+        area.x
+            .saturating_add(area.width.saturating_sub(repository_width) / 2),
+        area.y.saturating_sub(1),
+        repository_width,
         1,
-    );
-    let button_style = |pressed| {
-        Style::default()
-            .fg(if agent_count <= 1 {
-                palette().faint
-            } else if pressed {
-                palette().canvas
-            } else {
-                palette().accent
-            })
-            .bg(if pressed {
-                palette().selected
-            } else {
-                palette().raised
-            })
-            .add_modifier(Modifier::BOLD)
-    };
-    frame.render_widget(
-        Paragraph::new(" ← ")
-            .alignment(ratatui::layout::Alignment::Center)
-            .style(button_style(pressed_navigation == Some(false))),
-        previous_button,
-    );
-    draw_badge(
-        frame,
-        repository_area,
-        repository,
-        palette().cyan,
-        palette().panel,
-    );
-    frame.render_widget(
-        Paragraph::new(" → ")
-            .alignment(ratatui::layout::Alignment::Center)
-            .style(button_style(pressed_navigation == Some(true))),
-        next_button,
     );
     if let Some((phase, phase_color)) = phase {
         let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
-        let phase_x = area.x;
-        let phase_right = previous_button.x.saturating_sub(1);
-        let phase_area = Rect::new(
-            if repository_anchor.is_some() {
-                phase_x
-            } else {
-                repository_area.right().saturating_add(1)
-            },
-            area.y,
-            if repository_anchor.is_some() {
-                phase_right.saturating_sub(phase_x)
-            } else {
-                previous_button
-                    .x
-                    .saturating_sub(repository_area.right().saturating_add(2))
-            },
-            1,
-        );
+        let phase_area = Rect::new(status_area.x, status_area.y, status_area.width, 1);
         if phase_area.width >= phase_width.saturating_add(2) {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -508,7 +448,7 @@ pub(super) fn draw_history(
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]))
-                .alignment(ratatui::layout::Alignment::Right)
+                .alignment(Alignment::Right)
                 .style(Style::default().bg(palette().panel)),
                 phase_area,
             );
@@ -521,24 +461,19 @@ pub(super) fn draw_history(
             repository_area,
         ));
     }
-    if agent_count > 1 && area.width >= 6 {
-        navigation_targets.push((
-            HitTarget::AgentPreviewPrevious(agent_key.clone()),
-            previous_button,
-        ));
-        navigation_targets.push((HitTarget::AgentPreviewNext(agent_key.clone()), next_button));
-    }
     if messages.is_empty() {
         frame.render_widget(
             Paragraph::new("Waiting for conversation history…")
                 .style(Style::default().fg(palette().faint).bg(palette().panel))
                 .wrap(Wrap { trim: true }),
-            Rect::new(
-                area.x,
-                area.y.saturating_add(2),
-                area.width,
-                area.height.saturating_sub(2),
-            ),
+            Rect::new(area.x, area.y, area.width, area.height),
+        );
+        draw_badge(
+            frame,
+            repository_area,
+            repository,
+            palette().cyan,
+            palette().panel,
         );
         draw_agent_preview_picker(
             frame,
@@ -556,23 +491,27 @@ pub(super) fn draw_history(
         .unwrap_or_else(|| messages.len().saturating_sub(1))
         .min(messages.len().saturating_sub(1));
     let message = &messages[selected_message];
-    let main = Rect::new(
-        area.x,
-        area.y.saturating_add(2),
-        area.width,
-        area.bottom().saturating_sub(area.y.saturating_add(2)),
-    );
-    let message_selector = Rect::new(
-        main.x.saturating_add(2),
-        main.y,
-        main.width.saturating_sub(3),
-        1.min(main.height),
-    );
+    let main = Rect::new(area.x, area.y, area.width, area.height);
+    let message_selector = Rect::new(main.x, main.y, main.width, 2.min(main.height));
+    let content_width = usize::from(main.width.saturating_sub(4).max(1));
+    let user_lines = styled_agent_text(&message.text, content_width);
+    let desired_user_height = user_lines.len().saturating_add(2).min(8).max(3);
+    let user_y = message_selector.bottom();
+    let user_height = u16::try_from(desired_user_height)
+        .unwrap_or(u16::MAX)
+        .min(main.bottom().saturating_sub(user_y));
+    let user_viewport = Rect::new(main.x.saturating_sub(1), user_y, main.width, user_height);
     let viewport = Rect::new(
         main.x.saturating_sub(1),
-        main.y.saturating_add(2),
+        user_viewport.bottom(),
         main.width,
-        main.bottom().saturating_sub(main.y.saturating_add(2)),
+        main.bottom().saturating_sub(user_viewport.bottom()),
+    );
+    let user_cards = Rect::new(
+        main.x.saturating_add(1),
+        user_viewport.y,
+        main.width.saturating_sub(1),
+        user_viewport.height,
     );
     let cards = Rect::new(
         main.x.saturating_add(1),
@@ -580,27 +519,15 @@ pub(super) fn draw_history(
         main.width.saturating_sub(1),
         viewport.height,
     );
-    let content_width = usize::from(cards.width.saturating_sub(3).max(1));
-    let user_lines = styled_agent_text(&message.text, content_width);
-    let user_height = user_lines
-        .len()
-        .saturating_add(3)
-        .min(8)
-        .min(usize::from(viewport.height))
-        .max(3);
     let live = status == AgentStatus::Working && selected_message + 1 == messages.len();
-    let (mut blocks, request_height) = build_request_transcript(
+    let (blocks, request_height) = build_request_transcript(
         message,
         content_width,
         live,
         herdr.spinner_frame(),
         expanded_requests,
     );
-    for block in &mut blocks {
-        block.start = block.start.saturating_add(user_height);
-    }
-    let document_height = user_height.saturating_add(request_height);
-    let scroll_max = document_height.saturating_sub(usize::from(viewport.height));
+    let scroll_max = request_height.saturating_sub(usize::from(viewport.height));
     let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
     let mut targets = vec![(
         HitTarget::AgentTooltip {
@@ -609,7 +536,6 @@ pub(super) fn draw_history(
         },
         area,
     )];
-    targets.extend(navigation_targets);
     draw_message_timeline(
         frame,
         message_selector,
@@ -618,16 +544,25 @@ pub(super) fn draw_history(
         messages.len(),
         &mut targets,
     );
+    targets.extend(navigation_targets);
+    draw_badge(
+        frame,
+        repository_area,
+        repository,
+        palette().cyan,
+        palette().panel,
+    );
     let user_block = TranscriptBlock {
         user: true,
         lines: user_lines,
         start: 0,
-        height: user_height,
-        elapsed: None,
+        height: usize::from(user_viewport.height),
+        elapsed: message_total_duration(message).map(format_preview_duration),
+        request_count: message.requests.len(),
         request: None,
         expandable: false,
     };
-    if let Some(rect) = draw_transcript_card(frame, &user_block, cards, viewport, scroll) {
+    if let Some(rect) = draw_transcript_card(frame, &user_block, user_cards, user_viewport, 0) {
         targets.push((
             HitTarget::AgentMessage {
                 agent: agent_key.clone(),
@@ -651,7 +586,13 @@ pub(super) fn draw_history(
             ));
         }
     }
-    draw_transcript_progress(frame, viewport, scroll, scroll_max);
+    let progress_viewport = Rect::new(
+        main.x.saturating_sub(1),
+        user_viewport.y,
+        main.width,
+        main.bottom().saturating_sub(user_viewport.y),
+    );
+    draw_transcript_progress(frame, progress_viewport, scroll, scroll_max);
     draw_agent_preview_picker(
         frame,
         herdr,
@@ -679,10 +620,8 @@ fn draw_agent_preview_picker(
         return;
     }
     let y = anchor.bottom();
-    let height = u16::try_from(herdr.agents.len())
-        .unwrap_or(u16::MAX)
-        .min(bounds.bottom().saturating_sub(y));
-    if height == 0 {
+    let available_height = bounds.bottom().saturating_sub(y);
+    if available_height < 2 {
         return;
     }
     let desired_width = herdr
@@ -694,25 +633,46 @@ fn draw_agent_preview_picker(
             let agent = herdr.agent_display_name(index).unwrap_or("agent");
             UnicodeWidthStr::width(repository)
                 .saturating_add(UnicodeWidthStr::width(agent))
-                .saturating_add(6)
+                .saturating_add(7)
         })
         .max()
         .unwrap_or(0);
     let width = u16::try_from(desired_width)
         .unwrap_or(u16::MAX)
         .max(anchor.width)
+        .max(24.min(bounds.width))
+        .min(58)
         .min(bounds.width);
-    let x = anchor.x.min(bounds.right().saturating_sub(width));
+    let maximum_x = bounds.right().saturating_sub(width);
+    let x = anchor
+        .x
+        .saturating_add(anchor.width / 2)
+        .saturating_sub(width / 2)
+        .clamp(bounds.x, maximum_x);
+    let item_count = herdr
+        .agents
+        .len()
+        .min(usize::from(available_height.saturating_sub(1)));
+    let height = u16::try_from(item_count.saturating_add(1)).unwrap_or(available_height);
     let popover = Rect::new(x, y, width, height);
     frame.render_widget(Clear, popover);
-    fill(frame, popover, palette().raised);
-    for (row, index) in (0..herdr.agents.len())
-        .take(usize::from(height))
-        .enumerate()
-    {
+    fill(frame, popover, palette().surface_alt);
+    frame.render_widget(
+        Paragraph::new(format!(" AGENTS · {}", herdr.agents.len())).style(
+            Style::default()
+                .fg(palette().muted)
+                .bg(palette().surface_alt),
+        ),
+        Rect::new(x, y, width, 1),
+    );
+    if let Some(agent_key) = herdr.agent_key(selected) {
+        targets.push((HitTarget::AgentPreviewPicker(agent_key), popover));
+    }
+    for (row, index) in (0..herdr.agents.len()).take(item_count).enumerate() {
         let rect = Rect::new(
             x,
-            y.saturating_add(u16::try_from(row).unwrap_or(0)),
+            y.saturating_add(1)
+                .saturating_add(u16::try_from(row).unwrap_or(0)),
             width,
             1,
         );
@@ -724,35 +684,49 @@ fn draw_agent_preview_picker(
             hovered.as_ref() == Some(&HitTarget::AgentPreviewPickerItem(agent_key.clone()));
         let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
         let agent = herdr.agent_display_name(index).unwrap_or("agent");
-        let text = truncate_width(
-            &format!(
-                " {}  {}  {}",
-                if current { "◉" } else { "○" },
-                repository,
-                agent
-            ),
-            usize::from(width),
+        let background = if hovered {
+            palette().selected
+        } else {
+            palette().surface_alt
+        };
+        fill(frame, rect, background);
+        let detail_width = u16::try_from(UnicodeWidthStr::width(agent))
+            .unwrap_or(u16::MAX)
+            .min(rect.width.saturating_sub(8))
+            .min(rect.width / 2);
+        let detail = Rect::new(
+            rect.right().saturating_sub(detail_width).saturating_sub(1),
+            rect.y,
+            detail_width,
+            1,
         );
+        let label = Rect::new(rect.x, rect.y, detail.x.saturating_sub(rect.x), 1);
         frame.render_widget(
-            Paragraph::new(text).style(
+            Paragraph::new(truncate_width(
+                &format!(" {} {repository}", if current { "●" } else { " " }),
+                usize::from(label.width),
+            ))
+            .style(
                 Style::default()
                     .fg(if current {
-                        palette().yellow
+                        palette().accent
                     } else {
                         palette().ink
                     })
-                    .bg(if hovered {
-                        palette().selected
-                    } else {
-                        palette().raised
-                    })
+                    .bg(background)
                     .add_modifier(if current {
                         Modifier::BOLD
                     } else {
                         Modifier::empty()
                     }),
             ),
-            rect,
+            label,
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_width(agent, usize::from(detail.width)))
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(palette().muted).bg(background)),
+            detail,
         );
         targets.push((HitTarget::AgentPreviewPickerItem(agent_key), rect));
     }
@@ -806,6 +780,7 @@ fn build_request_transcript(
             start: document_height,
             height,
             elapsed: request.duration_ms.map(format_preview_duration),
+            request_count: 0,
             request: Some(request_index),
             expandable,
         });
@@ -819,6 +794,7 @@ fn build_request_transcript(
             start: 0,
             height: height.saturating_add(2),
             elapsed: None,
+            request_count: 0,
             request: None,
             expandable: false,
         });
@@ -897,19 +873,34 @@ fn draw_transcript_card(
                 .style(Style::default().fg(background).bg(palette().panel)),
             Rect::new(cards.x, y, cards.width, 1),
         );
-        let elapsed_width = block.elapsed.as_deref().map_or(0, |elapsed| {
-            u16::try_from(UnicodeWidthStr::width(elapsed))
-                .unwrap_or(u16::MAX)
-                .saturating_add(2)
-        });
-        if let Some(elapsed) = block.elapsed.as_deref() {
-            let width = elapsed_width;
+        let label = if block.user {
+            let request_word = if block.request_count == 1 {
+                "request"
+            } else {
+                "requests"
+            };
+            if let Some(elapsed) = block.elapsed.as_deref() {
+                Some(format!(
+                    " {} {request_word} · total {elapsed} ",
+                    block.request_count
+                ))
+            } else {
+                Some(format!(" {} {request_word} ", block.request_count))
+            }
+        } else {
+            block
+                .elapsed
+                .as_deref()
+                .map(|elapsed| format!(" {elapsed} "))
+        };
+        if let Some(label) = label {
+            let width = u16::try_from(UnicodeWidthStr::width(label.as_str())).unwrap_or(u16::MAX);
             if cards.width > width.saturating_add(2) {
                 frame.render_widget(
-                    Paragraph::new(format!(" {elapsed} ")).style(
+                    Paragraph::new(label).style(
                         Style::default()
                             .fg(accent)
-                            .bg(palette().panel)
+                            .bg(background)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Rect::new(
@@ -922,23 +913,7 @@ fn draw_transcript_card(
             }
         }
     }
-    if block.user && local_start <= 1 && local_end > 1 {
-        frame.render_widget(
-            Paragraph::new("YOU").style(
-                Style::default()
-                    .fg(accent)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Rect::new(
-                cards.x.saturating_add(2),
-                y.saturating_add(u16::try_from(1_usize.saturating_sub(local_start)).unwrap_or(0)),
-                cards.width.saturating_sub(3),
-                1,
-            ),
-        );
-    }
-    let content_offset = 1 + usize::from(block.user);
+    let content_offset = 1;
     let content_start = local_start.max(content_offset);
     let content_end = local_end.min(block.height.saturating_sub(1));
     if content_start < content_end {
@@ -1219,7 +1194,7 @@ fn draw_message_timeline(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().panel)),
         timeline,
     );
-    targets.push((HitTarget::AgentPreviewMessageTimeline(agent), timeline));
+    targets.push((HitTarget::AgentPreviewMessageTimeline(agent), area));
 }
 
 fn draw_transcript_progress(frame: &mut Frame<'_>, area: Rect, scroll: usize, scroll_max: usize) {
@@ -1232,15 +1207,27 @@ fn draw_transcript_progress(frame: &mut Frame<'_>, area: Rect, scroll: usize, sc
         Rect::new(area.x, area.y, 1, area.height),
     );
     let extent = area.height.saturating_sub(1);
-    let offset = scroll
-        .saturating_mul(usize::from(extent))
-        .checked_div(scroll_max)
-        .and_then(|offset| u16::try_from(offset).ok())
-        .unwrap_or(extent);
+    let offset = if scroll_max == 0 {
+        0
+    } else {
+        scroll
+            .saturating_mul(usize::from(extent))
+            .checked_div(scroll_max)
+            .and_then(|offset| u16::try_from(offset).ok())
+            .unwrap_or(extent)
+    };
     frame.render_widget(
         Paragraph::new("●").style(Style::default().fg(palette().yellow).bg(palette().panel)),
         Rect::new(area.x, area.y.saturating_add(offset), 1, 1),
     );
+}
+
+fn message_total_duration(message: &AgentUserMessage) -> Option<u64> {
+    message
+        .requests
+        .iter()
+        .filter_map(|request| request.duration_ms)
+        .reduce(u64::saturating_add)
 }
 
 fn row_background(state: &AgentEntryState, hovered: bool) -> Color {

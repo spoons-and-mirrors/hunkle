@@ -124,8 +124,6 @@ pub(crate) enum HitTarget {
     StashedAgent(usize),
     AgentPreviewPicker(AgentKey),
     AgentPreviewPickerItem(AgentKey),
-    AgentPreviewPrevious(AgentKey),
-    AgentPreviewNext(AgentKey),
     AgentPreviewMessageTimeline(AgentKey),
     AgentPreviewRequest {
         agent: AgentKey,
