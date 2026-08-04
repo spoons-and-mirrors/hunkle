@@ -27,6 +27,7 @@ struct TranscriptBlock {
     start: usize,
     height: usize,
     elapsed: Option<String>,
+    request_count: usize,
     request: Option<usize>,
     expandable: bool,
 }
@@ -552,17 +553,32 @@ pub(super) fn draw_history(
         area.width,
         area.bottom().saturating_sub(area.y.saturating_add(2)),
     );
-    let message_selector = Rect::new(
-        main.x.saturating_add(2),
-        main.y,
-        main.width.saturating_sub(3),
-        1.min(main.height),
+    let message_selector = Rect::new(main.x, main.y, main.width, 1.min(main.height));
+    let desired_user_height =
+        message_wrapped_height(&message.text, usize::from(main.width.saturating_sub(4)))
+            .saturating_add(3)
+            .min(8)
+            .max(3);
+    let user_height = u16::try_from(desired_user_height)
+        .unwrap_or(u16::MAX)
+        .min(main.bottom().saturating_sub(message_selector.bottom()));
+    let user_viewport = Rect::new(
+        main.x.saturating_sub(1),
+        message_selector.bottom(),
+        main.width,
+        user_height,
     );
     let viewport = Rect::new(
         main.x.saturating_sub(1),
-        main.y.saturating_add(2),
+        user_viewport.bottom(),
         main.width,
-        main.bottom().saturating_sub(main.y.saturating_add(2)),
+        main.bottom().saturating_sub(user_viewport.bottom()),
+    );
+    let user_cards = Rect::new(
+        main.x.saturating_add(1),
+        user_viewport.y,
+        main.width.saturating_sub(1),
+        user_viewport.height,
     );
     let cards = Rect::new(
         main.x.saturating_add(1),
@@ -570,26 +586,16 @@ pub(super) fn draw_history(
         main.width.saturating_sub(1),
         viewport.height,
     );
-    let user_height =
-        message_wrapped_height(&message.text, usize::from(main.width.saturating_sub(4)))
-            .saturating_add(3)
-            .min(8)
-            .min(usize::from(viewport.height))
-            .max(3);
     let content_width = usize::from(cards.width.saturating_sub(3).max(1));
     let live = status == AgentStatus::Working && selected_message + 1 == messages.len();
-    let (mut blocks, request_height) = build_request_transcript(
+    let (blocks, request_height) = build_request_transcript(
         message,
         content_width,
         live,
         herdr.spinner_frame(),
         expanded_requests,
     );
-    for block in &mut blocks {
-        block.start = block.start.saturating_add(user_height);
-    }
-    let document_height = user_height.saturating_add(request_height);
-    let scroll_max = document_height.saturating_sub(usize::from(viewport.height));
+    let scroll_max = request_height.saturating_sub(usize::from(viewport.height));
     let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
     let mut targets = vec![(
         HitTarget::AgentTooltip {
@@ -615,12 +621,13 @@ pub(super) fn draw_history(
             .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().soft)))
             .collect(),
         start: 0,
-        height: user_height,
-        elapsed: None,
+        height: usize::from(user_viewport.height),
+        elapsed: message_total_duration(message).map(format_preview_duration),
+        request_count: message.requests.len(),
         request: None,
         expandable: false,
     };
-    if let Some(rect) = draw_transcript_card(frame, &user_block, cards, viewport, scroll) {
+    if let Some(rect) = draw_transcript_card(frame, &user_block, user_cards, user_viewport, 0) {
         targets.push((
             HitTarget::AgentMessage {
                 agent: agent_key.clone(),
@@ -644,7 +651,13 @@ pub(super) fn draw_history(
             ));
         }
     }
-    draw_transcript_progress(frame, viewport, scroll, scroll_max);
+    let progress_viewport = Rect::new(
+        main.x.saturating_sub(1),
+        user_viewport.y,
+        main.width,
+        main.bottom().saturating_sub(user_viewport.y),
+    );
+    draw_transcript_progress(frame, progress_viewport, scroll, scroll_max);
     draw_agent_preview_picker(
         frame,
         herdr,
@@ -799,6 +812,7 @@ fn build_request_transcript(
             start: document_height,
             height,
             elapsed: request.duration_ms.map(format_preview_duration),
+            request_count: 0,
             request: Some(request_index),
             expandable,
         });
@@ -812,6 +826,7 @@ fn build_request_transcript(
             start: 0,
             height: height.saturating_add(2),
             elapsed: None,
+            request_count: 0,
             request: None,
             expandable: false,
         });
@@ -878,16 +893,31 @@ fn draw_transcript_card(
                 .style(Style::default().fg(background).bg(palette().panel)),
             Rect::new(cards.x, y, cards.width, 1),
         );
-        let elapsed_width = block.elapsed.as_deref().map_or(0, |elapsed| {
-            u16::try_from(UnicodeWidthStr::width(elapsed))
-                .unwrap_or(u16::MAX)
-                .saturating_add(2)
-        });
-        if let Some(elapsed) = block.elapsed.as_deref() {
-            let width = elapsed_width;
+        let label = if block.user {
+            let request_word = if block.request_count == 1 {
+                "request"
+            } else {
+                "requests"
+            };
+            if let Some(elapsed) = block.elapsed.as_deref() {
+                Some(format!(
+                    " {} {request_word} · total {elapsed} ",
+                    block.request_count
+                ))
+            } else {
+                Some(format!(" {} {request_word} ", block.request_count))
+            }
+        } else {
+            block
+                .elapsed
+                .as_deref()
+                .map(|elapsed| format!(" {elapsed} "))
+        };
+        if let Some(label) = label {
+            let width = u16::try_from(UnicodeWidthStr::width(label.as_str())).unwrap_or(u16::MAX);
             if cards.width > width.saturating_add(2) {
                 frame.render_widget(
-                    Paragraph::new(format!(" {elapsed} ")).style(
+                    Paragraph::new(label).style(
                         Style::default()
                             .fg(accent)
                             .bg(palette().panel)
@@ -1206,7 +1236,7 @@ fn draw_message_timeline(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().panel)),
         timeline,
     );
-    targets.push((HitTarget::AgentPreviewMessageTimeline(agent), timeline));
+    targets.push((HitTarget::AgentPreviewMessageTimeline(agent), area));
 }
 
 fn draw_transcript_progress(frame: &mut Frame<'_>, area: Rect, scroll: usize, scroll_max: usize) {
@@ -1234,6 +1264,14 @@ fn message_wrapped_height(text: &str, width: usize) -> usize {
     text.split('\n')
         .map(|line| word_wrapped_height(line, width).max(1))
         .sum()
+}
+
+fn message_total_duration(message: &AgentUserMessage) -> Option<u64> {
+    message
+        .requests
+        .iter()
+        .filter_map(|request| request.duration_ms)
+        .reduce(u64::saturating_add)
 }
 
 fn row_background(state: &AgentEntryState, hovered: bool) -> Color {

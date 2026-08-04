@@ -292,6 +292,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert!(hovered_screen.contains("› tool  apply_patch"));
     assert!(!hovered_screen.contains("›  tool"));
     assert!(hovered_screen.contains("12.3s"));
+    assert!(hovered_screen.contains("5 requests"));
+    assert!(hovered_screen.contains("total 15.3s"));
     assert!(hovered_screen.contains("reasoning  4.2s"));
     let history = app
         .regions
@@ -322,7 +324,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
                 .to_owned()
         })
         .collect::<String>();
-    assert_eq!(timeline_symbols, "○ ○ ○ ○ ●");
+    assert_eq!(timeline_symbols.trim(), "○ ○ ○ ○ ●");
+    assert_eq!(message_timeline.width, history.width);
     assert!(message_timeline.y < text_row);
     assert!(text_row < tool_row);
     assert_eq!(reasoning_row, tool_row + 1);
@@ -359,7 +362,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
                 .to_owned()
         })
         .collect::<String>();
-    assert_eq!(timeline_symbols, "○ ○ ○ ● ○");
+    assert_eq!(timeline_symbols.trim(), "○ ○ ○ ● ○");
     app.handle_mouse(mouse(
         MouseEventKind::ScrollDown,
         message_timeline.x,
@@ -412,6 +415,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .unwrap();
     assert_eq!(app.regions.agent_preview_scroll, 0);
     assert_eq!(user_message.x, tooltip.x + 1);
+    assert_eq!(user_message.y, message_timeline.y + 1);
     assert_eq!(
         terminal.backend().buffer()[(tooltip.x.saturating_sub(1), user_message.y)].symbol(),
         "●"
@@ -656,14 +660,16 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
         .collect::<String>();
     assert!(expanded_screen.contains("agent line 39"));
     assert!(expanded_screen.contains("tool_3"));
-    assert!(!expanded_screen.contains("user line 00"));
+    assert!(expanded_screen.contains("user line 00"));
+    assert!(expanded_screen.contains("1 request"));
+    assert!(expanded_screen.contains("total 9s"));
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentMessage {
                 agent: key.clone(),
                 message: 0,
             })
-            .is_none()
+            .is_some()
     );
 
     for _ in 0..10 {
@@ -1423,7 +1429,7 @@ fn conversation_preview_scopes_requests_to_the_selected_user_message() {
                 .to_owned()
         })
         .collect::<String>();
-    assert!(timeline_symbols.ends_with('●'));
+    assert!(timeline_symbols.trim_end().ends_with('●'));
     app.handle_mouse(mouse(
         MouseEventKind::ScrollUp,
         message_timeline.x,
@@ -1466,7 +1472,7 @@ fn conversation_preview_scopes_requests_to_the_selected_user_message() {
         })
         .collect::<String>();
     assert_eq!(timeline_symbols.matches('●').count(), 1);
-    assert!(timeline_symbols.ends_with("● ○"));
+    assert!(timeline_symbols.trim_end().ends_with("● ○"));
     assert!(screen.contains("Request 49"));
     assert!(screen.contains("Response 49"));
 }
