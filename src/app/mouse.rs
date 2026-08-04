@@ -8,8 +8,8 @@ use super::{
     ACTION_ITEMS, AgentKey, AgentPreviewExpandedRequests, AgentPreviewMessageSelection,
     AgentPreviewTranscriptScroll, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget,
     FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane,
-    MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, SettingsHitTarget, SettingsPage, View,
-    changes::ChangesEffect, file_editor::FileEditor, scroll_table,
+    MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, ScrollTarget, SettingsHitTarget,
+    SettingsPage, View, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
 const AGENT_PREVIEW_BUTTON_FLASH: Duration = Duration::from_millis(150);
@@ -384,7 +384,7 @@ impl App {
         if self.mode == Mode::Files {
             return;
         }
-        if self.mode == Mode::Normal && self.view == View::RepositorySearch {
+        if self.mode == Mode::Normal && self.view() == View::RepositorySearch {
             self.handle_file_search_mouse(mouse);
             return;
         }
@@ -485,7 +485,11 @@ impl App {
                         if drag.axis == Some(MobileDragAxis::Vertical) {
                             let delta = drag.previous.y as isize - point.y as isize;
                             if delta != 0 {
-                                self.scroll_mobile_at(drag.start, delta);
+                                self.scroll_mobile_at(
+                                    drag.scroll_target.clone(),
+                                    drag.start,
+                                    delta,
+                                );
                             }
                         }
                         drag.previous = point;
@@ -527,7 +531,9 @@ impl App {
                 _ => return true,
             }
         }
-        if !self.single_panel_layout() || mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+        if !self.layout_profile().is_single()
+            || mouse.kind != MouseEventKind::Down(MouseButton::Left)
+        {
             return false;
         }
         self.selection.clear();
@@ -535,12 +541,14 @@ impl App {
             return true;
         }
         let agent_preview = self.agent_preview_at(point);
+        let scroll_target = self.regions.scroll_target_at(point);
         self.mobile_scroll_drag = Some(MobileScrollDrag {
             start: point,
             previous: point,
             moved: false,
             axis: None,
             agent_preview,
+            scroll_target,
             modifiers: mouse.modifiers,
         });
         true
@@ -561,7 +569,43 @@ impl App {
         }
     }
 
-    fn scroll_mobile_at(&mut self, point: Position, delta: isize) {
+    fn scroll_mobile_at(&mut self, target: Option<ScrollTarget>, point: Position, delta: isize) {
+        if let Some(target) = target {
+            match target {
+                ScrollTarget::HeaderPicker => {
+                    self.hovered_hit_target = None;
+                    self.header_picker.scroll_by(delta);
+                }
+                ScrollTarget::Commit => self.scroll_commit(delta, false),
+                ScrollTarget::Worktree => self.scroll_worktree(delta),
+                ScrollTarget::Explorer => self.scroll_explorer(delta),
+                ScrollTarget::Agents => self.herdr.scroll_agents(delta),
+                ScrollTarget::Preview => self.scroll_diff_by(delta),
+                ScrollTarget::SqliteObjects => {
+                    let viewport = self
+                        .regions
+                        .sqlite_objects
+                        .map_or(0, |rect| usize::from(rect.height));
+                    self.changes.scroll_sqlite_objects(viewport, delta);
+                }
+                ScrollTarget::SqliteRows => {
+                    let viewport = self
+                        .regions
+                        .sqlite_rows
+                        .map_or(0, |rect| usize::from(rect.height));
+                    self.changes.scroll_sqlite_rows(viewport, delta);
+                }
+                ScrollTarget::Graph => self.scroll_graph(delta),
+                ScrollTarget::RepositorySearch => self.file_search.move_selection(delta),
+                ScrollTarget::AgentTimeline(agent) => {
+                    self.scroll_agent_preview_timeline(agent, delta > 0);
+                }
+                ScrollTarget::AgentTranscript(agent) => {
+                    self.set_agent_preview_scroll(agent, delta);
+                }
+            }
+            return;
+        }
         if self.header_picker.is_open() {
             if matches!(
                 self.regions.hit_target_at(point),
@@ -602,7 +646,7 @@ impl App {
                 }
             }
             Mode::Command => self.actions.scroll_by(delta),
-            Mode::Normal if self.view == View::RepositorySearch => {
+            Mode::Normal if self.view() == View::RepositorySearch => {
                 for _ in 0..delta.unsigned_abs() {
                     self.handle_file_search_mouse(event);
                 }
@@ -746,7 +790,7 @@ impl App {
             .regions
             .agents_splitter
             .is_some_and(|rect| rect.contains(point))
-            && !self.single_panel_layout()
+            && !self.layout_profile().is_single()
         {
             self.mode = Mode::Normal;
             self.dragging_agents = true;
@@ -823,7 +867,7 @@ impl App {
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
-            Mode::Normal if self.view == View::RepositorySearch => {
+            Mode::Normal if self.view() == View::RepositorySearch => {
                 let global_navigation = [
                     self.regions.graph,
                     self.regions.left_pane_toggle,
@@ -836,7 +880,7 @@ impl App {
                 .any(|rect| rect.contains(point));
                 if global_navigation {
                     self.file_search.close();
-                    self.view = self.search_return_view;
+                    self.navigation.close_search();
                     self.handle_primary_left_click(point);
                 } else {
                     self.handle_file_search_mouse(mouse);
@@ -1146,7 +1190,7 @@ impl App {
                 self.dismiss_agent_preview();
                 self.last_worktree_file_click = None;
                 self.mode = Mode::Normal;
-                self.single_panel_detail_open = false;
+                self.navigation.close_changes_detail();
             }
             Some(ChangesEffect::PaneActivated) => {
                 self.dismiss_agent_preview();
@@ -1255,7 +1299,7 @@ impl App {
         }
 
         self.last_agent_click = None;
-        if self.single_panel_layout() && self.agents_pane_visible() {
+        if self.layout_profile().is_single() && self.agents_pane_visible() {
             self.open_agent_detail(index);
         } else {
             self.show_agent(index);
@@ -1605,18 +1649,22 @@ impl App {
         else {
             return false;
         };
+        self.scroll_agent_preview_timeline(key, forward);
+        true
+    }
+
+    fn scroll_agent_preview_timeline(&mut self, key: AgentKey, forward: bool) {
         let Some(agent) = self.herdr.agent_index(&key) else {
-            return true;
+            return;
         };
         let Some(message) = self.agent_preview_message(agent).or_else(|| {
             self.herdr
                 .agent_user_messages(agent)
                 .and_then(|messages| messages.len().checked_sub(1))
         }) else {
-            return true;
+            return;
         };
         self.select_agent_preview_message(key, message, forward);
-        true
     }
 
     fn toggle_agent_preview_request(&mut self, key: AgentKey, message: usize, request: usize) {
@@ -1699,15 +1747,7 @@ impl App {
 
     fn scroll_at(&mut self, point: Position, delta: isize, wheel: bool) {
         if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
-            let amount = delta.saturating_mul(if wheel { 2 } else { 1 });
-            let current = self.regions.commit_scroll;
-            let next = if amount < 0 {
-                current.saturating_sub(amount.unsigned_abs())
-            } else {
-                current.saturating_add(amount as usize)
-            }
-            .min(self.regions.commit_scroll_max);
-            self.commit_scroll = Some(next);
+            self.scroll_commit(delta, wheel);
         } else if self
             .regions
             .sqlite_objects
@@ -1760,6 +1800,18 @@ impl App {
         {
             self.scroll_graph(delta.saturating_mul(if wheel { 3 } else { 1 }));
         }
+    }
+
+    fn scroll_commit(&mut self, delta: isize, wheel: bool) {
+        let amount = delta.saturating_mul(if wheel { 2 } else { 1 });
+        let current = self.regions.commit_scroll;
+        let next = if amount < 0 {
+            current.saturating_sub(amount.unsigned_abs())
+        } else {
+            current.saturating_add(amount as usize)
+        }
+        .min(self.regions.commit_scroll_max);
+        self.commit_scroll = Some(next);
     }
 
     fn scroll_graph(&mut self, delta: isize) {

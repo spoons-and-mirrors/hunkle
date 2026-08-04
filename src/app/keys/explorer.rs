@@ -18,7 +18,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.file_search.close();
-                self.view = self.search_return_view;
+                self.navigation.close_search();
             }
             KeyCode::Enter => self.activate_file_search_result(),
             KeyCode::Down => self.file_search.move_selection(1),
@@ -108,8 +108,7 @@ impl App {
             Some(repository.files_fingerprint),
         );
         self.file_search.open(repository.inventory_truncated);
-        self.search_return_view = self.view;
-        self.view = View::RepositorySearch;
+        self.navigation.open_search();
     }
 
     pub(crate) fn activate_file_search_result(&mut self) {

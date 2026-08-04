@@ -1,6 +1,11 @@
 use super::*;
 
-pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+pub(super) fn draw_header(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    profile: LayoutProfile,
+) {
     let herdr_available = app.herdr_available();
     let row = area;
     let content_y = area.bottom().saturating_sub(1);
@@ -8,7 +13,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Block::default().style(Style::default().bg(palette().panel)),
         row,
     );
-    let fullscreen_rect = (herdr_available && !app.single_panel_layout()).then(|| {
+    let fullscreen_rect = (herdr_available && !profile.is_single()).then(|| {
         let label = " ⛶ ";
         let width = UnicodeWidthStr::width(label) as u16;
         let rect = Rect::new(area.right().saturating_sub(width), content_y, width, 1);
@@ -346,9 +351,14 @@ fn branch_badge(branch: &str, dirty: bool, ahead: u64, behind: u64, width: usize
     format!(" {branch}{suffix}")
 }
 
-pub(super) fn draw_main_top_padding(frame: &mut Frame<'_>, app: &App, area: Rect) {
+pub(super) fn draw_main_top_padding(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    profile: LayoutProfile,
+) {
     let transition = Rect::new(area.x, area.y, area.width, 1);
-    let glyph = if app.single_panel_layout() && app.regions.worktree.is_some() {
+    let glyph = if profile.is_single() && app.regions.worktree.is_some() {
         "▄"
     } else {
         "▀"
@@ -420,7 +430,7 @@ fn draw_header_card_top_padding(frame: &mut Frame<'_>, rect: Rect) {
     );
 }
 
-pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App, profile: LayoutProfile) {
     let Some(kind) = app.header_picker.kind else {
         return;
     };
@@ -441,7 +451,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let filtering = app.header_picker.filtering();
     let picker_chrome = if filtering { 4 } else { 1 };
     let item_offset = if filtering { 3 } else { 1 };
-    let mobile_issue_picker = kind == HeaderPickerKind::Issues && app.single_panel_layout();
+    let mobile_issue_picker = kind == HeaderPickerKind::Issues && profile.is_single();
     let item_height = if mobile_issue_picker { 3 } else { 1 };
     let visible_item_rows = if mobile_issue_picker {
         usize::from(

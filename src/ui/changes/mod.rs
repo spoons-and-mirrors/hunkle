@@ -11,7 +11,7 @@ pub(super) use unicode_width::UnicodeWidthStr;
 pub(super) use crate::{
     app::{
         App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, PreviewOrigin,
-        ShortcutAction, TextInput, View,
+        ScrollTarget, ShortcutAction, TextInput, View,
     },
     git::{Change, Commit, DiffSummary},
     repo_path::{RepoPath, display_os_str},
@@ -38,70 +38,100 @@ use layout::*;
 mod metadata;
 use metadata::*;
 
-pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
-    let sidebar_pane = app.changes.pane;
-    let preview_pane = app.changes.preview.pane();
-    if app.single_panel_layout() {
-        if app.agents_pane_visible() {
-            app.reset_media_presentation();
-            if app.single_panel_detail_visible() {
-                draw_agent_history_pane(frame, app, area);
-            } else {
-                draw_agents_panel(frame, app, area);
-            }
-        } else if ((app.single_panel_detail_visible() || app.graph_commit_open) && draw_details)
-            || app.mode == Mode::FileEdit
-        {
-            app.changes.pane = preview_pane;
-            draw_pane(frame, app, area, true);
-            app.changes.pane = sidebar_pane;
-        } else {
-            app.reset_media_presentation();
-            draw_pane(frame, app, area, false);
-        }
-        return;
-    }
-    if draw_details && sidebar_pane != preview_pane {
-        app.changes.pane = preview_pane;
-        draw_pane(frame, app, area, true);
-        app.changes.pane = sidebar_pane;
-        draw_pane(frame, app, area, false);
-        return;
-    }
-    draw_pane(frame, app, area, draw_details);
+pub(super) enum ChangesPlan {
+    SingleMaster {
+        area: Rect,
+        pane: LeftPane,
+    },
+    SinglePreview {
+        area: Rect,
+        pane: LeftPane,
+    },
+    SingleAgents {
+        area: Rect,
+    },
+    SingleAgentHistory {
+        area: Rect,
+    },
+    Columns {
+        areas: [Rect; 2],
+        sidebar_pane: LeftPane,
+        preview_pane: LeftPane,
+        draw_preview: bool,
+    },
 }
 
-fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: bool) {
+pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, plan: ChangesPlan) {
+    match plan {
+        ChangesPlan::SingleMaster { area, pane } => {
+            app.reset_media_presentation();
+            draw_pane(frame, app, [area, area], pane, false, true);
+        }
+        ChangesPlan::SinglePreview { area, pane } => {
+            draw_pane(frame, app, [area, area], pane, true, true);
+        }
+        ChangesPlan::SingleAgents { area } => {
+            app.reset_media_presentation();
+            draw_agents_panel(frame, app, area);
+        }
+        ChangesPlan::SingleAgentHistory { area } => {
+            app.reset_media_presentation();
+            draw_agent_history_pane(frame, app, area, true);
+        }
+        ChangesPlan::Columns {
+            areas,
+            sidebar_pane,
+            preview_pane,
+            draw_preview,
+        } => {
+            if draw_preview && sidebar_pane != preview_pane {
+                draw_pane(frame, app, areas, preview_pane, true, false);
+                draw_pane(frame, app, areas, sidebar_pane, false, false);
+            } else {
+                draw_pane(frame, app, areas, sidebar_pane, draw_preview, false);
+            }
+        }
+    }
+}
+
+fn draw_pane(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    columns: [Rect; 2],
+    pane: LeftPane,
+    draw_details: bool,
+    single_panel: bool,
+) {
+    let area = if single_panel {
+        columns[0]
+    } else {
+        Rect::new(
+            columns[0].x,
+            columns[0].y,
+            columns[1].right().saturating_sub(columns[0].x),
+            columns[0].height,
+        )
+    };
     if app.repository().is_none() {
         super::draw_empty(frame, area, "Open a repository to inspect its changes");
         return;
     }
 
-    let single_panel = app.single_panel_layout();
-    let columns = if single_panel {
-        [area, area]
-    } else {
-        let left_width = app
-            .settings
-            .worktree_width
-            .clamp(24, area.width.saturating_sub(25));
-        [
-            Rect::new(area.x, area.y, left_width, area.height),
-            Rect::new(
-                area.x.saturating_add(left_width).saturating_add(1),
-                area.y,
-                area.width.saturating_sub(left_width).saturating_sub(1),
-                area.height,
-            ),
-        ]
-    };
     app.regions.worktree = (!single_panel || !draw_details).then_some(columns[0]);
-    app.regions.diff = (!single_panel || draw_details).then_some(columns[1]);
+    if draw_details {
+        app.regions.diff = Some(columns[1]);
+    } else if single_panel {
+        app.regions.diff = None;
+    }
+    if draw_details {
+        app.regions
+            .register_scroll_target(ScrollTarget::Preview, columns[1]);
+    }
     app.regions.split_bounds = (!single_panel).then_some(area);
     app.regions.splitter =
         (!single_panel).then(|| Rect::new(columns[0].right(), area.y, 1, area.height));
     frame.render_widget(Clear, columns[0]);
-    app.regions.clear_hit_targets_in(columns[0]);
+    app.regions.clear_targets_in(columns[0]);
     app.regions.worktree_list = None;
     app.regions.explorer_list = None;
     app.regions.commit = None;
@@ -119,8 +149,8 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
             palette().accent,
         );
     }
-    if app.changes.pane == LeftPane::Files {
-        draw_explorer_changes(frame, app, columns, draw_details);
+    if pane == LeftPane::Files {
+        draw_explorer_changes(frame, app, columns, draw_details, single_panel);
         return;
     }
 
@@ -138,6 +168,8 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         5,
     );
     app.regions.commit = Some(commit_area);
+    app.regions
+        .register_scroll_target(ScrollTarget::Commit, commit_area);
     let actions_row = Rect::new(
         worktree_content.x,
         commit_area.bottom(),
@@ -151,13 +183,15 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
         1,
     );
     let worktree_list_y = staging_row.bottom();
-    let worktree_list = layout_agents_pane(app, worktree_content, worktree_list_y);
+    let worktree_list = layout_agents_pane(app, worktree_content, worktree_list_y, single_panel);
     app.regions.worktree_list = Some(worktree_list);
+    app.regions
+        .register_scroll_target(ScrollTarget::Worktree, worktree_list);
     app.regions.register_hit_target(
         HitTarget::Changes(app.changes.worktree_background_target()),
         worktree_list,
     );
-    draw_sidebar_tabs(frame, app, worktree_header);
+    draw_sidebar_tabs(frame, app, worktree_header, pane);
     let repo = app.session.data().expect("checked above");
     let local_workspace = repo.is_local();
     let details_ready = repo.details_ready;
@@ -312,12 +346,12 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
             has_changes,
             details_ready,
         );
-        draw_agent_history_pane(frame, app, worktree_content);
+        draw_agent_history_pane(frame, app, worktree_content, single_panel);
         return;
     }
     if single_panel {
         clear_sidebar_regions(app);
-        app.regions.clear_hit_targets_in(columns[1]);
+        app.regions.clear_targets_in(columns[1]);
         frame.render_widget(Clear, columns[1]);
         fill(frame, columns[1], palette().panel);
     }
@@ -647,7 +681,7 @@ fn draw_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect, draw_details: boo
             has_changes,
             details_ready,
         );
-        draw_agent_history_pane(frame, app, worktree_content);
+        draw_agent_history_pane(frame, app, worktree_content, single_panel);
     }
 }
 
@@ -666,7 +700,9 @@ fn draw_agents_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.regions.agents_splitter = Some(header);
     app.regions.agents_bounds = Some(list);
     app.regions.agents_list = Some(list);
-    draw_sidebar_tabs(frame, app, tabs);
+    app.regions
+        .register_scroll_target(ScrollTarget::Agents, list);
+    draw_sidebar_tabs(frame, app, tabs, app.sidebar_pane());
     draw_agents_section(frame, app);
 }
 
@@ -683,18 +719,23 @@ fn clear_sidebar_regions(app: &mut App) {
     app.regions.files_root = None;
 }
 
-pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect) -> Rect {
+pub(super) fn draw_sidebar_tabs(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    pane: LeftPane,
+) -> Rect {
     let agents_active = app.agents_pane_visible();
     let mut tabs = vec![
         (
             "CHANGES",
             ChangesHitTarget::WorktreeTab,
-            !agents_active && app.changes.pane == LeftPane::Worktree,
+            !agents_active && pane == LeftPane::Worktree,
         ),
         (
             "FILES",
             ChangesHitTarget::FilesTab,
-            !agents_active && app.changes.pane == LeftPane::Files,
+            !agents_active && pane == LeftPane::Files,
         ),
     ];
     if app.herdr_available() {
@@ -738,7 +779,12 @@ pub(super) fn draw_sidebar_tabs(frame: &mut Frame<'_>, app: &mut App, area: Rect
     )
 }
 
-pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, content: Rect) {
+pub(super) fn draw_agent_history_pane(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    content: Rect,
+    single_panel: bool,
+) {
     if !app.agents_pane_visible() {
         return;
     }
@@ -754,7 +800,7 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
     );
     frame.render_widget(Clear, pane);
     fill(frame, pane, palette().panel);
-    app.regions.clear_hit_targets_in(pane);
+    app.regions.clear_targets_in(pane);
     app.regions.worktree_list = None;
     app.regions.explorer_list = None;
     app.regions.commit = None;
@@ -768,7 +814,7 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         pane.width,
         u16::from(pane.height > 1),
     );
-    let tabs_trailing = draw_sidebar_tabs(frame, app, header);
+    let tabs_trailing = draw_sidebar_tabs(frame, app, header, app.sidebar_pane());
     let history = Rect::new(
         pane.x,
         header.bottom().saturating_add(1),
@@ -785,8 +831,7 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         );
         return;
     };
-    let repository_anchor = app
-        .single_panel_layout()
+    let repository_anchor = single_panel
         .then_some(tabs_trailing)
         .filter(|anchor| anchor.width >= 3);
     app.herdr.request_agent_latest_user_message(index);

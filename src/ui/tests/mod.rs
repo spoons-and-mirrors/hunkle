@@ -149,9 +149,9 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
     run_git(root, &["commit", "-m", "initial"]);
 
     let mut app = App::new(root.to_path_buf());
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
     assert_eq!(app.visible_view(), View::Graph);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -160,7 +160,7 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
     assert!(app.regions.diff.is_none());
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.graph_commit_open);
+    assert!(app.graph_commit_open());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen: String = terminal
         .backend()
@@ -177,14 +177,14 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
     assert!(app.regions.worktree.is_none());
     assert_eq!(app.regions.diff.unwrap().width, 49);
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-    assert!(!app.graph_commit_open);
+    assert!(!app.graph_commit_open());
     narrow_terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.graph_table.is_some());
     assert!(app.regions.diff.is_none());
 
     fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
     let mut dirty_app = App::new(root.to_path_buf());
-    assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
+    assert_eq!(dirty_app.sidebar_pane(), LeftPane::Worktree);
     assert_eq!(dirty_app.visible_view(), View::Changes);
     terminal.draw(|frame| draw(frame, &mut dirty_app)).unwrap();
     assert!(dirty_app.regions.graph_table.is_none());
@@ -390,7 +390,7 @@ fn renders_every_primary_surface() {
 
     let graph_toggle = app.regions.graph.unwrap();
     click(&mut app, graph_toggle.x, graph_toggle.y);
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let commit = app.regions.commit.unwrap();
     let commit_text: String = (commit.y..commit.bottom())
@@ -404,7 +404,7 @@ fn renders_every_primary_surface() {
             .is_some()
     );
     click(&mut app, graph_toggle.x, graph_toggle.y);
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
 
     let generate = app
         .regions
@@ -428,7 +428,7 @@ fn renders_every_primary_surface() {
 
     let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let footer: String = terminal.backend().buffer().content[36 * 120..]
         .iter()
@@ -447,7 +447,7 @@ fn renders_every_primary_surface() {
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::FilesTab))
         .unwrap();
     click(&mut app, files_tab.x, files_tab.y);
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.commit.is_none());
     assert!(app.regions.agents_list.is_some());
@@ -553,7 +553,7 @@ fn renders_every_primary_surface() {
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
         .unwrap();
     click(&mut app, worktree_tab.x, worktree_tab.y);
-    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    assert_eq!(app.sidebar_pane(), LeftPane::Worktree);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let stage_all = app
@@ -1238,7 +1238,7 @@ fn renders_every_primary_surface() {
         Some("Commit message cannot be empty")
     );
 
-    app.view = View::Graph;
+    app.set_view_for_test(View::Graph);
     app.mode = Mode::Normal;
     let visible_oid = app.repository().unwrap().commits[0].oid.clone();
     wait_for(&mut app, |app| {
@@ -1402,10 +1402,10 @@ fn renders_every_primary_surface() {
     });
     assert_eq!(app.graph_state.selected(), Some(1));
     assert_eq!(app.graph_state.offset(), graph_offset);
-    assert!(!app.graph_commit_open);
+    assert!(!app.graph_commit_open());
     click(&mut app, graph.x + 1, graph.y + 1);
     assert_eq!(app.graph_state.selected(), Some(1));
-    assert!(app.graph_commit_open);
+    assert!(app.graph_commit_open());
     wait_for_preview(&mut app);
     assert!(app.changes.preview.text().unwrap().contains("tracked.txt"));
     let commit_oid = app.repository().unwrap().commits[1].oid.clone();
@@ -1529,15 +1529,15 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.view, View::Graph);
-    assert!(!app.graph_commit_open);
+    assert_eq!(app.view(), View::Graph);
+    assert!(!app.graph_commit_open());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.graph_table.is_some());
     assert!(app.regions.diff_hunks.is_empty());
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.graph_state.selected(), Some(0));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.graph_commit_open);
+    assert!(app.graph_commit_open());
     wait_for_preview(&mut app);
     assert!(app.changes.preview.text().unwrap().contains("second.txt"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

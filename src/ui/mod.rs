@@ -5,6 +5,7 @@ mod overlays;
 pub(crate) mod preview;
 mod sqlite;
 mod text;
+mod workspace;
 
 #[cfg(test)]
 mod tests;
@@ -25,8 +26,8 @@ pub(super) use crate::{
     app::{
         APP_MIN_WIDTH, App, BranchPickerStep, CloneField, FOOTER_MARQUEE_PAUSE,
         FOOTER_MARQUEE_STEP, FileDialogKind, GraphHitTarget, HeaderPickerItem, HeaderPickerKind,
-        HitTarget, LeftPane, Mode, Regions, RepositoryPickerStep, ShortcutAction, TAB_WIDTH,
-        TextInput, View, WorktreePickerStep,
+        HitTarget, LayoutProfile, LeftPane, Mode, Regions, RepositoryPickerStep, ScrollTarget,
+        ShortcutAction, TAB_WIDTH, TextInput, View, WorktreePickerStep,
     },
     theme::{Palette, load_theme},
 };
@@ -46,6 +47,7 @@ fn palette() -> &'static Palette {
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.regions = Regions::default();
     app.regions.screen = Some(frame.area());
+    let profile = LayoutProfile::for_area(frame.area());
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().canvas).fg(palette().ink)),
         frame.area(),
@@ -75,7 +77,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    let hide_navigation = app.single_panel_detail_visible()
+    let hide_navigation = profile.is_single()
+        && app.workspace_detail_open()
         && app.agents_pane_visible()
         && !app.notice.as_deref().is_some_and(notice_is_error);
     let layout = Layout::vertical([
@@ -85,86 +88,20 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     ])
     .split(frame.area());
 
-    draw_header(frame, app, layout[0]);
+    draw_header(frame, app, layout[0], profile);
     let content = layout[1];
     let main_content = content;
     if app.workspace_loading_initial_state() {
         app.reset_media_presentation();
         draw_empty(frame, main_content, "Loading workspace…");
-        draw_navigation(frame, app, layout[2]);
+        draw_navigation(frame, app, layout[2], profile);
         draw_agent_pane_picker_overlay(frame, app);
         finish_selection(frame, app);
         return;
     }
-    let visible_view = app.visible_view();
-    if visible_view == View::RepositorySearch {
-        app.reset_media_presentation();
-        let search_root = app.repository().map(|repository| repository.root.clone());
-        let regions = overlays::draw_file_search(
-            frame,
-            &mut app.file_search,
-            search_root.as_deref(),
-            main_content,
-        );
-        app.regions.file_search = Some(regions.overlay);
-        app.regions.file_search_list = Some(regions.list);
-        for (target, rect) in regions.targets {
-            app.regions.register_hit_target(target, rect);
-        }
-    } else {
-        changes::draw(
-            frame,
-            app,
-            main_content,
-            visible_view != View::Graph || app.graph_commit_open,
-        );
-    }
-    if visible_view == View::Graph
-        && !app.graph_commit_open
-        && !(app.single_panel_layout() && app.agents_pane_visible())
-    {
-        app.reset_media_presentation();
-        let graph_area = app.regions.diff.unwrap_or(main_content);
-        frame.render_widget(Clear, graph_area);
-        app.regions.diff = None;
-        app.regions.diff_scrollbar = None;
-        app.regions.diff_scroll_thumb = None;
-        app.regions.diff_scroll_max = 0;
-        app.regions.diff_hunks.clear();
-        app.regions.clear_hit_targets_in(graph_area);
-        if app.single_panel_layout() {
-            app.regions.worktree = None;
-            app.regions.worktree_list = None;
-            app.regions.explorer_list = None;
-            app.regions.agents_list = None;
-            app.regions.agents_splitter = None;
-            app.regions.agents_bounds = None;
-            app.regions.commit = None;
-            app.regions.actions = None;
-            app.regions.files_add = None;
-            app.regions.files_root = None;
-        }
-        let graph_regions = history::draw_graph(
-            frame,
-            graph_area,
-            history::GraphView {
-                repo: app.session.data(),
-                summaries: &app.commit_summaries,
-                author_filter: &app.author_filter,
-                state: &mut app.graph_state,
-                scroll_to_selection: &mut app.graph_scroll_to_selection,
-                settings: &app.settings,
-                dragging_column: app.dragging_graph_column.map(|drag| drag.right),
-            },
-        );
-        app.regions.graph_table = graph_regions.table;
-        app.regions.graph_columns = graph_regions.columns;
-        for (target, rect) in graph_regions.targets {
-            app.regions.register_hit_target(target, rect);
-        }
-    }
-    draw_main_top_padding(frame, app, layout[1]);
-    draw_navigation(frame, app, layout[2]);
+    workspace::draw(frame, app, main_content, profile);
+    draw_main_top_padding(frame, app, layout[1], profile);
+    draw_navigation(frame, app, layout[2], profile);
     match app.mode {
         Mode::Explorer => {
             dim(frame);
@@ -240,8 +177,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             ));
         }
         Mode::FileEdit => {
-            draw_file_editor(frame, app);
-            draw_main_top_padding(frame, app, layout[1]);
+            draw_file_editor(frame, app, profile);
+            draw_main_top_padding(frame, app, layout[1], profile);
         }
         Mode::Editor => {
             dim(frame);
@@ -280,7 +217,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_agent_pane_picker_overlay(frame, app);
     if app.header_picker.is_open() {
         dim_except_header_controls(frame, app);
-        draw_header_picker(frame, app);
+        draw_header_picker(frame, app, profile);
     }
     finish_selection(frame, app);
 }
@@ -355,7 +292,7 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
-fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: LayoutProfile) {
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().surface_alt)),
         area,
@@ -378,7 +315,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
         return;
     }
-    if app.single_panel_layout() {
+    if profile.is_single() {
         app.regions.changes = None;
         app.regions.graph = None;
         app.regions.left_pane_toggle = None;
@@ -417,7 +354,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let compact = area.width < 100;
     let (left_pane_action, left_pane_label) = if app.agents_pane_visible() {
         (ShortcutAction::ShowChanges, "Changes")
-    } else if app.changes.pane == LeftPane::Worktree {
+    } else if app.sidebar_pane() == LeftPane::Worktree {
         (ShortcutAction::ShowFiles, "Files")
     } else if app.herdr_available() {
         (ShortcutAction::ShowAgents, "Agents")
@@ -432,7 +369,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.settings.shortcuts.label(action)
         }
     };
-    let show_back = app.single_panel_detail_visible() || app.graph_commit_open;
+    let show_back = (profile.is_single() && app.workspace_detail_open()) || app.graph_commit_open();
     let mut labels = Vec::new();
     if show_back {
         labels.push(("esc".to_owned(), "Back"));

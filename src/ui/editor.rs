@@ -6,7 +6,7 @@ use crate::repo_path::RepoPath;
 
 use super::*;
 
-pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: LayoutProfile) {
     let Some(panel) = app.regions.diff else {
         return;
     };
@@ -16,7 +16,7 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App) {
         panel.width.saturating_sub(2),
         1,
     );
-    let narrow = app.single_panel_layout();
+    let narrow = profile.is_single();
     let body = Rect::new(
         if narrow { panel.x } else { header.x },
         header.y.saturating_add(2),

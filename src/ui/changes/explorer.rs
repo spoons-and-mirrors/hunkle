@@ -5,6 +5,7 @@ pub(super) fn draw_explorer_changes(
     app: &mut App,
     columns: [Rect; 2],
     draw_details: bool,
+    single_panel: bool,
 ) {
     app.regions.worktree_list = None;
     app.regions.commit = None;
@@ -16,7 +17,7 @@ pub(super) fn draw_explorer_changes(
         content.width,
         1,
     );
-    let list_area = layout_agents_pane(app, content, controls.bottom());
+    let list_area = layout_agents_pane(app, content, controls.bottom(), single_panel);
     let add_width = 7.min(controls.width);
     let add_button = Rect::new(
         controls.right().saturating_sub(add_width),
@@ -31,7 +32,7 @@ pub(super) fn draw_explorer_changes(
         1,
     );
     let drop_target = app.file_drop_target().cloned();
-    draw_sidebar_tabs(frame, app, header);
+    draw_sidebar_tabs(frame, app, header, LeftPane::Files);
     frame.render_widget(
         Paragraph::new(format!("{} FILES", app.changes.explorer_rows().len()))
             .style(Style::default().fg(palette().faint)),
@@ -54,6 +55,8 @@ pub(super) fn draw_explorer_changes(
         );
     }
     app.regions.explorer_list = Some(list_area);
+    app.regions
+        .register_scroll_target(ScrollTarget::Explorer, list_area);
     app.regions.files_add = Some(add_button);
     app.regions.files_root = Some(root_target);
 
@@ -95,13 +98,13 @@ pub(super) fn draw_explorer_changes(
     };
     frame.render_widget(List::new(items), list_area);
     draw_agents_section(frame, app);
-    draw_agent_history_pane(frame, app, content);
+    draw_agent_history_pane(frame, app, content, single_panel);
     if !draw_details {
         return;
     }
-    if app.single_panel_layout() {
+    if single_panel {
         clear_sidebar_regions(app);
-        app.regions.clear_hit_targets_in(columns[1]);
+        app.regions.clear_targets_in(columns[1]);
         frame.render_widget(Clear, columns[1]);
         fill(frame, columns[1], palette().panel);
     }
@@ -243,7 +246,7 @@ pub(super) fn draw_explorer_changes(
             button,
         );
     }
-    let media_visible = media_loaded && app.view == View::Changes && app.mode == Mode::Normal;
+    let media_visible = media_loaded && app.view() == View::Changes && app.mode == Mode::Normal;
     if media_visible {
         app.regions.diff_scroll_max = 0;
         app.regions.diff_scrollbar = None;

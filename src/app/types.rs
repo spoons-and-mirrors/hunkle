@@ -5,6 +5,27 @@ pub(crate) const SPLIT_VIEW_MIN_WIDTH: u16 = 60;
 pub(crate) const FOOTER_MARQUEE_STEP: Duration = Duration::from_millis(120);
 pub(crate) const FOOTER_MARQUEE_PAUSE: Duration = Duration::from_secs(20);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum LayoutProfile {
+    Single,
+    #[default]
+    Columns,
+}
+
+impl LayoutProfile {
+    pub(crate) fn for_area(area: Rect) -> Self {
+        if area.width < SPLIT_VIEW_MIN_WIDTH {
+            Self::Single
+        } else {
+            Self::Columns
+        }
+    }
+
+    pub(crate) fn is_single(self) -> bool {
+        self == Self::Single
+    }
+}
+
 pub(crate) struct FooterMarquee {
     pub(super) value: String,
     pub(super) width: usize,
@@ -22,6 +43,183 @@ pub enum View {
     Changes,
     Graph,
     RepositorySearch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WorkspaceSurface {
+    #[default]
+    Master,
+    Detail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceContent {
+    Changes(WorkspaceSurface),
+    Graph(WorkspaceSurface),
+    Search,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkspaceNavigation {
+    content: WorkspaceContent,
+    search_return: WorkspaceContent,
+    agents: Option<WorkspaceSurface>,
+}
+
+impl Default for WorkspaceNavigation {
+    fn default() -> Self {
+        let content = WorkspaceContent::Changes(WorkspaceSurface::Master);
+        Self {
+            content,
+            search_return: content,
+            agents: None,
+        }
+    }
+}
+
+impl WorkspaceNavigation {
+    pub(crate) fn view(self) -> View {
+        match self.content {
+            WorkspaceContent::Changes(_) => View::Changes,
+            WorkspaceContent::Graph(_) => View::Graph,
+            WorkspaceContent::Search => View::RepositorySearch,
+        }
+    }
+
+    pub(crate) fn showing(self, view: View) -> bool {
+        self.view() == view
+    }
+
+    pub(crate) fn show_changes(&mut self) {
+        self.content = WorkspaceContent::Changes(WorkspaceSurface::Master);
+    }
+
+    pub(crate) fn show_graph(&mut self) {
+        self.content = WorkspaceContent::Graph(WorkspaceSurface::Master);
+    }
+
+    pub(crate) fn open_search(&mut self) {
+        if !self.showing(View::RepositorySearch) {
+            self.search_return = self.content;
+            self.content = WorkspaceContent::Search;
+        }
+    }
+
+    pub(crate) fn close_search(&mut self) {
+        if self.showing(View::RepositorySearch) {
+            self.content = self.search_return;
+        }
+    }
+
+    pub(crate) fn changes_detail_open(self) -> bool {
+        self.content == WorkspaceContent::Changes(WorkspaceSurface::Detail)
+    }
+
+    pub(crate) fn show_changes_detail(&mut self) {
+        self.content = WorkspaceContent::Changes(WorkspaceSurface::Detail);
+    }
+
+    pub(crate) fn close_changes_detail(&mut self) {
+        if self.changes_detail_open() {
+            self.show_changes();
+        }
+    }
+
+    pub(crate) fn graph_commit_open(self) -> bool {
+        self.content == WorkspaceContent::Graph(WorkspaceSurface::Detail)
+    }
+
+    pub(crate) fn show_graph_commit(&mut self) {
+        self.content = WorkspaceContent::Graph(WorkspaceSurface::Detail);
+    }
+
+    pub(crate) fn close_graph_commit(&mut self) {
+        if self.graph_commit_open() {
+            self.show_graph();
+        }
+    }
+
+    pub(crate) fn agents_selected(self) -> bool {
+        self.agents.is_some()
+    }
+
+    pub(crate) fn agent_detail_open(self) -> bool {
+        self.agents == Some(WorkspaceSurface::Detail)
+    }
+
+    pub(crate) fn select_agents(&mut self) {
+        self.close_changes_detail();
+        self.agents = Some(WorkspaceSurface::Master);
+    }
+
+    pub(crate) fn show_agent_detail(&mut self) {
+        self.agents = Some(WorkspaceSurface::Detail);
+    }
+
+    pub(crate) fn close_agent_detail(&mut self) {
+        if self.agent_detail_open() {
+            self.agents = Some(WorkspaceSurface::Master);
+        }
+    }
+
+    pub(crate) fn select_sidebar(&mut self) {
+        self.agents = None;
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    #[test]
+    fn layout_profile_selects_composition_at_workspace_boundary() {
+        assert!(LayoutProfile::for_area(Rect::new(0, 0, 59, 40)).is_single());
+        assert!(!LayoutProfile::for_area(Rect::new(0, 0, 60, 40)).is_single());
+    }
+
+    #[test]
+    fn workspace_navigation_preserves_primary_selection_across_layers() {
+        let mut navigation = WorkspaceNavigation::default();
+        navigation.select_agents();
+        navigation.show_agent_detail();
+        navigation.show_graph();
+        navigation.show_graph_commit();
+        navigation.open_search();
+
+        assert!(navigation.showing(View::RepositorySearch));
+        assert!(navigation.agents_selected());
+        assert!(navigation.agent_detail_open());
+
+        navigation.close_search();
+        assert!(navigation.showing(View::Graph));
+        assert!(navigation.agents_selected());
+        assert!(navigation.agent_detail_open());
+        assert!(navigation.graph_commit_open());
+
+        navigation.close_graph_commit();
+        assert!(!navigation.graph_commit_open());
+        assert!(navigation.agent_detail_open());
+
+        navigation.close_agent_detail();
+        assert!(navigation.agents_selected());
+        assert!(!navigation.agent_detail_open());
+    }
+
+    #[test]
+    fn nested_scroll_target_owns_the_gesture() {
+        let mut regions = Regions::default();
+        regions.register_scroll_target(ScrollTarget::Preview, Rect::new(0, 0, 20, 20));
+        regions.register_scroll_target(ScrollTarget::SqliteRows, Rect::new(5, 5, 10, 10));
+
+        assert_eq!(
+            regions.scroll_target_at(Position::new(7, 7)),
+            Some(ScrollTarget::SqliteRows)
+        );
+        assert_eq!(
+            regions.scroll_target_at(Position::new(2, 2)),
+            Some(ScrollTarget::Preview)
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,6 +479,7 @@ pub(crate) struct MobileScrollDrag {
     pub(crate) moved: bool,
     pub(crate) axis: Option<MobileDragAxis>,
     pub(crate) agent_preview: Option<AgentKey>,
+    pub(crate) scroll_target: Option<ScrollTarget>,
     pub(crate) modifiers: KeyModifiers,
 }
 
@@ -288,6 +487,28 @@ pub(crate) struct MobileScrollDrag {
 pub(crate) enum MobileDragAxis {
     Horizontal,
     Vertical,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollTarget {
+    HeaderPicker,
+    Commit,
+    Worktree,
+    Explorer,
+    Agents,
+    Preview,
+    SqliteObjects,
+    SqliteRows,
+    Graph,
+    RepositorySearch,
+    AgentTimeline(AgentKey),
+    AgentTranscript(AgentKey),
+}
+
+#[derive(Clone, Debug)]
+struct ScrollRegion {
+    target: ScrollTarget,
+    rect: Rect,
 }
 
 #[derive(Debug, Clone)]
@@ -364,11 +585,43 @@ pub struct Regions {
     pub file_dialog_secondary: Option<Rect>,
     pub diff_hunks: Vec<DiffHunkRegion>,
     hit_regions: Vec<HitRegion>,
+    scroll_regions: Vec<ScrollRegion>,
 }
 
 impl Regions {
     pub(crate) fn register_hit_target(&mut self, target: HitTarget, rect: Rect) {
         self.hit_regions.push(HitRegion { target, rect });
+    }
+
+    pub(crate) fn register_scroll_target(&mut self, target: ScrollTarget, rect: Rect) {
+        self.scroll_regions.push(ScrollRegion { target, rect });
+    }
+
+    pub(crate) fn scroll_target_at(&self, point: Position) -> Option<ScrollTarget> {
+        let semantic_target = match self.hit_target_at(point) {
+            Some(
+                HitTarget::HeaderPickerOverlay
+                | HitTarget::HeaderPickerItem(_)
+                | HitTarget::HeaderPickerDeleteBranch(_)
+                | HitTarget::HeaderPickerDeleteWorktree(_),
+            ) => Some(ScrollTarget::HeaderPicker),
+            Some(HitTarget::AgentPreviewMessageTimeline(agent)) => {
+                Some(ScrollTarget::AgentTimeline(agent))
+            }
+            Some(
+                HitTarget::AgentTooltip { agent, .. }
+                | HitTarget::AgentMessage { agent, .. }
+                | HitTarget::AgentPreviewRequest { agent, .. },
+            ) => Some(ScrollTarget::AgentTranscript(agent)),
+            _ => None,
+        };
+        semantic_target.or_else(|| {
+            self.scroll_regions
+                .iter()
+                .rev()
+                .find(|region| region.rect.contains(point))
+                .map(|region| region.target.clone())
+        })
     }
 
     pub(crate) fn hit_target_at(&self, point: Position) -> Option<HitTarget> {
@@ -398,8 +651,10 @@ impl Regions {
             .map(|region| region.rect)
     }
 
-    pub(crate) fn clear_hit_targets_in(&mut self, rect: Rect) {
+    pub(crate) fn clear_targets_in(&mut self, rect: Rect) {
         self.hit_regions
+            .retain(|region| region.rect.intersection(rect).is_empty());
+        self.scroll_regions
             .retain(|region| region.rect.intersection(rect).is_empty());
     }
 }
