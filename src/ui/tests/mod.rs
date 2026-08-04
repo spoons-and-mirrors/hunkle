@@ -6,7 +6,7 @@ pub(super) use crossterm::event::{
 pub(super) use ratatui::{
     Terminal,
     backend::TestBackend,
-    layout::Position,
+    layout::{Position, Rect},
     style::{Color, Modifier},
 };
 pub(super) use unicode_width::UnicodeWidthStr;
@@ -21,8 +21,8 @@ pub(super) use crate::app::{
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    BranchPickerStep, display_path, draw, marquee_window, palette, selected_display_range, text,
-    wrapped_editor_cursor,
+    BranchPickerStep, changes, display_path, draw, marquee_window, palette, selected_display_range,
+    text, wrapped_editor_cursor,
 };
 
 mod agents;
@@ -56,6 +56,34 @@ fn screen_text(terminal: &Terminal<TestBackend>) -> String {
         .iter()
         .map(|cell| cell.symbol())
         .collect()
+}
+
+#[test]
+fn columns_render_one_empty_workspace_without_a_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().join("missing"));
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            changes::draw(
+                frame,
+                &mut app,
+                changes::ChangesPlan::Columns {
+                    areas: [Rect::new(0, 0, 38, 30), Rect::new(39, 0, 61, 30)],
+                    sidebar_pane: LeftPane::Worktree,
+                    preview_pane: Some(LeftPane::Worktree),
+                },
+            );
+        })
+        .unwrap();
+
+    assert_eq!(
+        screen_text(&terminal)
+            .matches("Open a repository to inspect its changes")
+            .count(),
+        1
+    );
 }
 
 #[test]

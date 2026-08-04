@@ -337,7 +337,9 @@ fn draw_detail(
     single_panel: bool,
 ) {
     if app.repository().is_none() {
-        super::draw_empty(frame, area, "Open a repository to inspect its changes");
+        if single_panel {
+            super::draw_empty(frame, area, "Open a repository to inspect its changes");
+        }
         return;
     }
 
