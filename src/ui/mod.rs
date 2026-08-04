@@ -165,7 +165,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.register_hit_target(target, rect);
         }
     }
-    draw_main_top_padding(frame, app, layout[1]);
+    draw_main_top_padding(frame, layout[1]);
     draw_header_card_bottom_padding(frame, app);
     draw_navigation(frame, app, layout[2]);
     match app.mode {
@@ -244,7 +244,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::FileEdit => {
             draw_file_editor(frame, app);
-            draw_main_top_padding(frame, app, layout[1]);
+            draw_main_top_padding(frame, layout[1]);
         }
         Mode::Editor => {
             dim(frame);
@@ -361,7 +361,7 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
 
 fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(
-        Block::default().style(Style::default().bg(palette().surface_alt)),
+        Block::default().style(Style::default().bg(palette().canvas)),
         area,
     );
     if let Some(error) = app
@@ -375,7 +375,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Paragraph::new(error).style(
                 Style::default()
                     .fg(palette().red)
-                    .bg(palette().surface_alt)
+                    .bg(palette().canvas)
                     .add_modifier(Modifier::BOLD),
             ),
             area,
@@ -485,13 +485,13 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let background = active.then_some(palette().raised);
         spans.push(Span::styled(
             " ",
-            Style::default().bg(background.unwrap_or(palette().surface_alt)),
+            Style::default().bg(background.unwrap_or(palette().canvas)),
         ));
         spans.push(Span::styled(
             key.as_str(),
             Style::default()
                 .fg(palette().orange)
-                .bg(background.unwrap_or(palette().surface_alt))
+                .bg(background.unwrap_or(palette().canvas))
                 .add_modifier(if active {
                     Modifier::BOLD
                 } else {
@@ -507,7 +507,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     } else {
                         palette().muted
                     })
-                    .bg(background.unwrap_or(palette().surface_alt))
+                    .bg(background.unwrap_or(palette().canvas))
                     .add_modifier(if active {
                         Modifier::BOLD
                     } else {
@@ -517,7 +517,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         spans.push(Span::styled(
             " ",
-            Style::default().bg(background.unwrap_or(palette().surface_alt)),
+            Style::default().bg(background.unwrap_or(palette().canvas)),
         ));
         let width = UnicodeWidthStr::width(key.as_str()) as u16
             + if compact {

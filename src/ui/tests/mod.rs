@@ -327,9 +327,20 @@ fn renders_every_primary_surface() {
         assert_eq!(cell.bg, super::palette().canvas);
     }
     let splitter_top = &terminal.backend().buffer()[(left.right(), left.y)];
-    assert_eq!(splitter_top.symbol(), "▀");
-    assert_eq!(splitter_top.fg, super::palette().panel);
+    assert_eq!(splitter_top.symbol(), " ");
     assert_eq!(splitter_top.bg, super::palette().canvas);
+    app.dragging_splitter = true;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(left.right(), left.y)].bg,
+        super::palette().canvas
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(left.right(), left.y + 1)].bg,
+        super::palette().accent
+    );
+    app.dragging_splitter = false;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
         terminal.backend().buffer()[(left.right(), left.y + 2)].bg,
         super::palette().canvas
@@ -343,10 +354,7 @@ fn renders_every_primary_surface() {
     let agents = app.regions.agents_splitter.unwrap();
     let agents_offset = usize::from(agents.y) * 120 + usize::from(agents.x);
     assert_eq!(buffer.content[0].bg, super::palette().canvas);
-    assert_eq!(
-        buffer.content[37 * 120 - 1].bg,
-        super::palette().surface_alt
-    );
+    assert_eq!(buffer.content[37 * 120 - 1].bg, super::palette().canvas);
     assert_eq!(buffer.content[agents_offset].bg, super::palette().panel);
     let agents_header: String = (agents.x..agents.right())
         .map(|x| terminal.backend().buffer()[(x, agents.y)].symbol())

@@ -660,7 +660,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
     let diff = app.regions.hit_target_rect(HitTarget::HeaderDiff).unwrap();
     let issue = app.regions.hit_target_rect(HitTarget::HeaderIssue).unwrap();
     let agent = app.regions.hit_target_rect(HitTarget::HeaderAgent).unwrap();
-    assert_eq!(repository.x, 1);
+    assert_eq!(repository.x, 2);
     assert_eq!(terminal.backend().buffer()[(0, 2)].symbol(), " ");
     assert_eq!(
         terminal.backend().buffer()[(0, 2)].bg,
@@ -753,6 +753,30 @@ fn header_cards_open_pickers_and_checkout_branches() {
     );
     assert_eq!(
         terminal.backend().buffer()[(repository.x + 1, repository.y)].fg,
+        super::palette().yellow
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x + 1, repository.y - 1)].fg,
+        super::palette().raised
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x + 1, repository.bottom())].fg,
+        super::palette().raised
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x - 1, repository.y - 1)].symbol(),
+        "▄"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x - 1, repository.y - 1)].fg,
+        super::palette().yellow
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x - 1, repository.bottom())].symbol(),
+        "▀"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(repository.x - 1, repository.bottom())].fg,
         super::palette().yellow
     );
     app.hovered_hit_target = None;

@@ -154,9 +154,9 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         0
     };
     let badge_width = if is_local {
-        1 + repository_width + usize::from(card_gap_width) + "LOCAL".len() + local_agent_width
+        2 + repository_width + usize::from(card_gap_width) + "LOCAL".len() + local_agent_width
     } else {
-        1 + repository_width
+        2 + repository_width
             + usize::from(card_gap_width)
             + worktree_width
             + usize::from(card_gap_width)
@@ -175,7 +175,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .as_deref()
         .map_or(0, |notice| UnicodeWidthStr::width(notice) + 2);
     let content_right = header_right.saturating_sub(notice_width as u16);
-    let mut x = area.x.saturating_add(1);
+    let mut x = area.x.saturating_add(2);
     let render = |frame: &mut Frame<'_>, x: &mut u16, text: String, style: Style, limit: u16| {
         let width = (UnicodeWidthStr::width(text.as_str()) as u16).min(limit);
         if width == 0 {
@@ -212,8 +212,13 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .min(20),
     );
     if let Some(rect) = repository_rect {
-        draw_header_card_top_padding(frame, rect);
-        draw_header_badge_border(frame, rect, palette().yellow);
+        draw_header_card_chrome(
+            frame,
+            app,
+            HitTarget::HeaderRepository,
+            rect,
+            palette().yellow,
+        );
         app.regions
             .register_hit_target(HitTarget::HeaderRepository, rect);
     }
@@ -244,8 +249,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 room,
             );
             if let Some(rect) = agent_rect {
-                draw_header_card_top_padding(frame, rect);
-                draw_header_badge_border(frame, rect, palette().green);
+                draw_header_card_chrome(frame, app, HitTarget::HeaderAgent, rect, palette().green);
                 app.regions
                     .register_hit_target(HitTarget::HeaderAgent, rect);
             }
@@ -271,8 +275,13 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .min(18),
         );
         if let Some(rect) = worktree_rect {
-            draw_header_card_top_padding(frame, rect);
-            draw_header_badge_border(frame, rect, palette().orange);
+            draw_header_card_chrome(
+                frame,
+                app,
+                HitTarget::HeaderWorktrees,
+                rect,
+                palette().orange,
+            );
             app.regions
                 .register_hit_target(HitTarget::HeaderWorktrees, rect);
         }
@@ -297,8 +306,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             branch_limit,
         );
         if let Some(rect) = branch_rect {
-            draw_header_card_top_padding(frame, rect);
-            draw_header_badge_border(frame, rect, palette().accent);
+            draw_header_card_chrome(frame, app, HitTarget::HeaderBranch, rect, palette().accent);
             app.regions
                 .register_hit_target(HitTarget::HeaderBranch, rect);
         }
@@ -321,8 +329,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 ),
             );
             if let Some(rect) = diff_rect {
-                draw_header_card_top_padding(frame, rect);
-                draw_header_badge_border(frame, rect, palette().purple);
+                draw_header_card_chrome(frame, app, HitTarget::HeaderDiff, rect, palette().purple);
                 app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
             }
             let room = content_right.saturating_sub(x);
@@ -340,8 +347,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 room.saturating_sub(agent_width.saturating_add(card_gap_width)),
             );
             if let Some(rect) = issue_rect {
-                draw_header_card_top_padding(frame, rect);
-                draw_header_badge_border(frame, rect, palette().cyan);
+                draw_header_card_chrome(frame, app, HitTarget::HeaderIssue, rect, palette().cyan);
                 app.regions
                     .register_hit_target(HitTarget::HeaderIssue, rect);
             }
@@ -360,8 +366,13 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     room,
                 );
                 if let Some(rect) = agent_rect {
-                    draw_header_card_top_padding(frame, rect);
-                    draw_header_badge_border(frame, rect, palette().green);
+                    draw_header_card_chrome(
+                        frame,
+                        app,
+                        HitTarget::HeaderAgent,
+                        rect,
+                        palette().green,
+                    );
                     app.regions
                         .register_hit_target(HitTarget::HeaderAgent, rect);
                 }
@@ -410,18 +421,9 @@ fn branch_badge(branch: &str, dirty: bool, ahead: u64, behind: u64, width: usize
     format!(" {branch}{suffix}")
 }
 
-pub(super) fn draw_main_top_padding(frame: &mut Frame<'_>, app: &App, area: Rect) {
+pub(super) fn draw_main_top_padding(frame: &mut Frame<'_>, area: Rect) {
     let transition = Rect::new(area.x, area.y, area.width, 1);
     fill(frame, transition, palette().canvas);
-    if app.dragging_splitter
-        && let Some(splitter) = app.regions.splitter
-    {
-        fill(
-            frame,
-            Rect::new(splitter.x, transition.y, splitter.width, 1),
-            palette().accent,
-        );
-    }
 }
 
 pub(super) fn repository_label(repo: &crate::git::RepositoryData) -> String {
@@ -454,44 +456,75 @@ pub(super) fn header_badge_style(background: Color, hovered: bool) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-pub(super) fn draw_header_badge_border(frame: &mut Frame<'_>, rect: Rect, color: Color) {
+fn draw_header_card_chrome(
+    frame: &mut Frame<'_>,
+    app: &App,
+    target: HitTarget,
+    rect: Rect,
+    color: Color,
+) {
+    let active = header_card_active(app, &target);
+    draw_half_padding(
+        frame,
+        Rect::new(rect.x, rect.y.saturating_sub(1), rect.width, 1),
+        '▄',
+        if active {
+            palette().raised
+        } else {
+            palette().panel
+        },
+        palette().canvas,
+    );
     if let Some(x) = rect.x.checked_sub(1)
         && let Some(cell) = frame.buffer_mut().cell_mut((x, rect.y))
     {
         cell.set_symbol("▌").set_fg(color).set_bg(palette().canvas);
     }
-}
-
-fn draw_header_card_top_padding(frame: &mut Frame<'_>, rect: Rect) {
-    draw_half_padding(
-        frame,
-        Rect::new(rect.x, rect.y.saturating_sub(1), rect.width, 1),
-        '▄',
-        palette().panel,
-        palette().canvas,
-    );
+    if active
+        && let Some(x) = rect.x.checked_sub(1)
+        && let Some(cell) = frame.buffer_mut().cell_mut((x, rect.y.saturating_sub(1)))
+    {
+        cell.set_symbol("▄").set_fg(color).set_bg(palette().canvas);
+    }
 }
 
 pub(super) fn draw_header_card_bottom_padding(frame: &mut Frame<'_>, app: &App) {
-    for target in [
-        HitTarget::HeaderRepository,
-        HitTarget::HeaderWorktrees,
-        HitTarget::HeaderBranch,
-        HitTarget::HeaderDiff,
-        HitTarget::HeaderIssue,
-        HitTarget::HeaderAgent,
+    for (target, color) in [
+        (HitTarget::HeaderRepository, palette().yellow),
+        (HitTarget::HeaderWorktrees, palette().orange),
+        (HitTarget::HeaderBranch, palette().accent),
+        (HitTarget::HeaderDiff, palette().purple),
+        (HitTarget::HeaderIssue, palette().cyan),
+        (HitTarget::HeaderAgent, palette().green),
     ] {
-        let Some(rect) = app.regions.hit_target_rect(target) else {
+        let Some(rect) = app.regions.hit_target_rect(target.clone()) else {
             continue;
         };
+        let active = header_card_active(app, &target);
         draw_half_padding(
             frame,
             Rect::new(rect.x, rect.bottom(), rect.width, 1),
             '▀',
-            palette().panel,
+            if active {
+                palette().raised
+            } else {
+                palette().panel
+            },
             palette().canvas,
         );
+        if active
+            && let Some(x) = rect.x.checked_sub(1)
+            && let Some(cell) = frame.buffer_mut().cell_mut((x, rect.bottom()))
+        {
+            cell.set_symbol("▀").set_fg(color).set_bg(palette().canvas);
+        }
     }
+}
+
+fn header_card_active(app: &App, target: &HitTarget) -> bool {
+    app.hovered_hit_target.as_ref() == Some(target)
+        || (target == &HitTarget::HeaderIssue
+            && app.header_picker.kind == Some(HeaderPickerKind::Issues))
 }
 
 pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
