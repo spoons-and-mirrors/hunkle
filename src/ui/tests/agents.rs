@@ -317,6 +317,10 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .regions
         .hit_target_rect(HitTarget::AgentPreviewMessageTimeline(key.clone()))
         .unwrap();
+    let repository = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPicker(key.clone()))
+        .unwrap();
     let timeline_symbols = (message_timeline.x..message_timeline.right())
         .map(|x| {
             terminal.backend().buffer()[(x, message_timeline.y)]
@@ -326,20 +330,20 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .collect::<String>();
     assert_eq!(timeline_symbols.trim(), "○ ○ ○ ○ ●");
     assert_eq!(message_timeline.width, history.width);
+    assert_eq!(message_timeline.height, 2);
+    assert_eq!(message_timeline.y, history.y);
+    assert_eq!(repository.y, message_timeline.y.saturating_sub(1));
+    assert_eq!(
+        repository.x,
+        history.x + history.width.saturating_sub(repository.width) / 2
+    );
     assert!(message_timeline.y < text_row);
     assert!(text_row < tool_row);
     assert_eq!(reasoning_row, tool_row + 1);
-    let scroll_max = app.regions.agent_preview_scroll_max;
-    assert!(scroll_max > 0);
-    assert_eq!(
-        app.regions.agent_preview_scroll,
-        app.regions.agent_preview_scroll_max
-    );
-
     app.handle_mouse(mouse(
         MouseEventKind::ScrollUp,
         message_timeline.x,
-        message_timeline.y,
+        message_timeline.y + 1,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let previous_screen = terminal
@@ -371,11 +375,19 @@ fn renders_and_targets_agents_in_the_normal_view() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.regions.agent_preview_scroll, 0);
 
+    let user_message = app
+        .regions
+        .hit_target_rect(HitTarget::AgentMessage {
+            agent: key.clone(),
+            message: 4,
+        })
+        .unwrap();
+    let transcript_row = user_message.bottom().saturating_add(1);
     let scroll_before = app.regions.agent_preview_scroll;
     app.handle_mouse(mouse(
         MouseEventKind::ScrollDown,
-        history.x + 8,
-        history.y + 6,
+        user_message.x + 2,
+        transcript_row,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agent_preview_scroll > scroll_before);
@@ -401,8 +413,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
     for _ in 0..100 {
         app.handle_mouse(mouse(
             MouseEventKind::ScrollUp,
-            tooltip.x + 8,
-            tooltip.y + 6,
+            user_message.x + 2,
+            transcript_row,
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -415,7 +427,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .unwrap();
     assert_eq!(app.regions.agent_preview_scroll, 0);
     assert_eq!(user_message.x, tooltip.x + 1);
-    assert_eq!(user_message.y, message_timeline.y + 1);
+    assert_eq!(user_message.y, message_timeline.y + 2);
     assert_eq!(
         terminal.backend().buffer()[(tooltip.x.saturating_sub(1), user_message.y)].symbol(),
         "●"
@@ -435,12 +447,51 @@ fn renders_and_targets_agents_in_the_normal_view() {
     );
     assert_eq!(
         terminal.backend().buffer()[(user_message.x + 2, user_message.y + 1)].symbol(),
-        "Y"
+        "P"
     );
     assert_eq!(
         terminal.backend().buffer()[(user_message.x + 2, user_message.y + 1)].bg,
         super::palette().canvas
     );
+    assert_eq!(
+        terminal.backend().buffer()[(user_message.right() - 2, user_message.y)].bg,
+        super::palette().canvas
+    );
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollUp,
+        user_message.x + 2,
+        user_message.y + 1,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let previous_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(previous_screen.contains("Fourth request"));
+    let previous_user_message = app
+        .regions
+        .hit_target_rect(HitTarget::AgentMessage {
+            agent: key.clone(),
+            message: 3,
+        })
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        previous_user_message.x + 2,
+        previous_user_message.y + 1,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let latest_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(latest_screen.contains("Please refine the agent timers"));
     assert!(
         (user_message.bottom() + 1..tooltip.bottom().saturating_sub(1)).any(|y| {
             terminal.backend().buffer()[(user_message.x, y)].symbol() == "▀"
@@ -459,12 +510,15 @@ fn renders_and_targets_agents_in_the_normal_view() {
     for _ in 0..100 {
         app.handle_mouse(mouse(
             MouseEventKind::ScrollDown,
-            tooltip.x + 8,
-            tooltip.y + 6,
+            user_message.x + 2,
+            user_message.bottom().saturating_add(1),
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.agent_preview_scroll, scroll_max);
+    assert_eq!(
+        app.regions.agent_preview_scroll,
+        app.regions.agent_preview_scroll_max
+    );
 
     click(&mut app, area.x + 2, area.y);
     assert_eq!(app.mode, Mode::Normal);
@@ -675,22 +729,32 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
             })
             .is_some()
     );
+    let request = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewRequest {
+            agent: key.clone(),
+            message: 0,
+            request: 0,
+        })
+        .unwrap();
+    let drag_start = request.y.saturating_add(2);
+    let drag_end = drag_start.saturating_add(7).min(request.bottom() - 1);
 
     for _ in 0..10 {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            preview.x + 4,
-            preview.y + 5,
+            request.x + 4,
+            drag_start,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            preview.x + 4,
-            preview.y + 12,
+            request.x + 4,
+            drag_end,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
-            preview.x + 4,
-            preview.y + 12,
+            request.x + 4,
+            drag_end,
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -802,10 +866,7 @@ fn mobile_agent_preview_swipes_between_agents() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert_eq!(
-        dragging_screen.find("LIVE").unwrap(),
-        live_x - usize::from(first.width / 2)
-    );
+    assert_eq!(dragging_screen.find("LIVE").unwrap(), live_x);
     app.handle_mouse(mouse(MouseEventKind::Moved, drag_start, first.y + 8));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let returned_screen = terminal
@@ -842,7 +903,7 @@ fn mobile_agent_preview_swipes_between_agents() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert_eq!(dragging_screen.find("LIVE").unwrap(), live_x - 12);
+    assert_eq!(dragging_screen.find("LIVE").unwrap(), live_x);
     assert_eq!(dragging_screen.matches("LIVE").count(), 1);
     assert!(dragging_screen.contains("second-repo"));
     assert!(
@@ -975,8 +1036,18 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
         .regions
         .hit_target_rect(HitTarget::AgentPreviewPicker(key.clone()))
         .unwrap();
-    assert_eq!(repository.y, agents_tab.y);
-    assert!(repository.x >= agents_tab.right().saturating_add(2));
+    let history = app
+        .regions
+        .hit_target_rect(HitTarget::AgentTooltip {
+            agent: key.clone(),
+            message: 0,
+        })
+        .unwrap();
+    assert_eq!(repository.y, agents_tab.y.saturating_add(2));
+    assert_eq!(
+        repository.x,
+        history.x + history.width.saturating_sub(repository.width) / 2
+    );
     let screen = terminal
         .backend()
         .buffer()
@@ -1004,7 +1075,7 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
 }
 
 #[test]
-fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
+fn agent_preview_picker_switches_without_activating_agent_layouts() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -1082,14 +1153,6 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     );
     assert!(!header_text.contains("1/2"));
     assert!(app.agents_pane_pinned);
-    let next = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPreviewNext(first_key.clone()))
-        .unwrap();
-    let previous = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPreviewPrevious(first_key.clone()))
-        .unwrap();
     let picker = app
         .regions
         .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
@@ -1101,7 +1164,16 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
             message: 0,
         })
         .unwrap();
-    assert_eq!(picker.x, history.x);
+    let agents_tab = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::AgentsTab))
+        .unwrap();
+    assert_eq!(
+        picker.x,
+        history.x + history.width.saturating_sub(picker.width) / 2
+    );
+    assert_eq!(picker.y, agents_tab.y.saturating_add(2));
+    assert_eq!(history.y, picker.y.saturating_add(1));
     assert_eq!(
         terminal.backend().buffer()[(picker.x, picker.y)].symbol(),
         "▐"
@@ -1110,15 +1182,22 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
         terminal.backend().buffer()[(picker.right() - 1, picker.y)].symbol(),
         "▌"
     );
-    assert!(picker.right() < previous.x);
-    assert_eq!(previous.right(), next.x);
-    assert_eq!(next.right(), history.right());
-    assert_eq!(
-        terminal.backend().buffer()[(next.x + 1, next.y)].symbol(),
-        "→"
-    );
-    assert_eq!(next.width, 3);
-    click(&mut app, next.x, next.y);
+    click(&mut app, picker.x + 1, picker.y);
+    assert!(app.agent_preview_picker_open());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(picker_screen.contains("AGENTS · 2"), "{picker_screen}");
+    let second_agent = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPickerItem(second_key.clone()))
+        .unwrap();
+    click(&mut app, second_agent.x + 1, second_agent.y);
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
@@ -1128,10 +1207,6 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     );
     assert!(app.agents_pane_pinned);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(
-        terminal.backend().buffer()[(next.x + 1, next.y)].bg,
-        super::palette().selected
-    );
     assert!(
         terminal
             .backend()
@@ -1178,16 +1253,17 @@ fn agent_preview_arrows_cycle_without_activating_agent_layouts() {
     assert!(stable_header.contains("second-re"));
     assert!(!stable_header.contains("first-repo"));
 
-    let previous = app
+    let picker = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewPrevious(second_key.clone()))
+        .hit_target_rect(HitTarget::AgentPreviewPicker(second_key.clone()))
         .unwrap();
-    assert_eq!(
-        terminal.backend().buffer()[(previous.x + 1, previous.y)].symbol(),
-        "←"
-    );
-    assert_eq!(previous.width, 3);
-    click(&mut app, previous.x, previous.y);
+    click(&mut app, picker.x + 1, picker.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let first_agent = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPickerItem(first_key.clone()))
+        .unwrap();
+    click(&mut app, first_agent.x + 1, first_agent.y);
     assert_eq!(
         app.hovered_hit_target,
         Some(HitTarget::AgentTooltip {
@@ -1259,9 +1335,9 @@ fn cached_agent_target_follows_the_agent_across_reordering_and_session_changes()
     let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
     open_agents_pane(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let next = app
+    let picker = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewNext(first_key))
+        .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
         .unwrap();
 
     let agents = snapshot["result"]["snapshot"]["agents"]
@@ -1272,7 +1348,15 @@ fn cached_agent_target_follows_the_agent_across_reordering_and_session_changes()
     agents[1]["state_change_seq"] = serde_json::json!(3);
     app.herdr.apply_snapshot_for_test(&snapshot);
 
-    click(&mut app, next.x, next.y);
+    click(&mut app, picker.x, picker.y);
+    assert_eq!(app.agents_pane_index(), Some(1));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let updated_second_key = agent_key(&app, 0);
+    let updated_second = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPickerItem(updated_second_key))
+        .unwrap();
+    click(&mut app, updated_second.x + 1, updated_second.y);
     assert_eq!(app.agents_pane_index(), Some(0));
     app.herdr
         .set_agent_user_messages_for_test(0, &[("New second request", None, 1, 0)]);

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
@@ -12,7 +12,6 @@ use super::{
     changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
-const AGENT_PREVIEW_BUTTON_FLASH: Duration = Duration::from_millis(150);
 const AGENT_PREVIEW_SWIPE_THRESHOLD: u16 = 4;
 
 impl App {
@@ -41,8 +40,6 @@ impl App {
                     HitTarget::Agent(key) | HitTarget::AgentStash(key) => Some(key),
                     HitTarget::AgentPreviewPicker(agent)
                     | HitTarget::AgentPreviewPickerItem(agent)
-                    | HitTarget::AgentPreviewPrevious(agent)
-                    | HitTarget::AgentPreviewNext(agent)
                     | HitTarget::AgentPreviewMessageTimeline(agent)
                     | HitTarget::AgentPreviewRequest { agent, .. }
                     | HitTarget::AgentTooltip { agent, .. }
@@ -921,14 +918,6 @@ impl App {
                 }
                 return;
             }
-            Some(HitTarget::AgentPreviewPrevious(key)) => {
-                self.cycle_agent_preview(&key, false);
-                return;
-            }
-            Some(HitTarget::AgentPreviewNext(key)) => {
-                self.cycle_agent_preview(&key, true);
-                return;
-            }
             Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => return,
             _ => {}
         }
@@ -1282,8 +1271,6 @@ impl App {
             current - 1
         };
         self.agent_preview_picker_open = false;
-        self.agent_preview_button_flash =
-            Some((forward, Instant::now() + AGENT_PREVIEW_BUTTON_FLASH));
         self.select_agent_preview(index);
     }
 
@@ -1605,9 +1592,12 @@ impl App {
     }
 
     fn scroll_agent_preview_message_timeline(&mut self, point: Position, forward: bool) -> bool {
-        let Some(HitTarget::AgentPreviewMessageTimeline(key)) = self.regions.hit_target_at(point)
-        else {
-            return false;
+        let key = match self.regions.hit_target_at(point) {
+            Some(
+                HitTarget::AgentPreviewMessageTimeline(key)
+                | HitTarget::AgentMessage { agent: key, .. },
+            ) => key,
+            _ => return false,
         };
         let Some(agent) = self.herdr.agent_index(&key) else {
             return true;
@@ -1664,7 +1654,6 @@ impl App {
         let agent = match self.regions.hit_target_at(point) {
             Some(
                 HitTarget::AgentTooltip { agent, .. }
-                | HitTarget::AgentMessage { agent, .. }
                 | HitTarget::AgentPreviewRequest { agent, .. },
             ) => agent,
             _ => return false,

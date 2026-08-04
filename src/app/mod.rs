@@ -153,7 +153,6 @@ pub struct App {
     agent_preview_expanded_requests: Option<AgentPreviewExpandedRequests>,
     agent_preview_picker_open: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
-    agent_preview_button_flash: Option<(bool, Instant)>,
     pub settings: Settings,
     pub settings_selection: usize,
     pub(crate) settings_page: SettingsPage,
@@ -315,7 +314,6 @@ impl App {
             agent_preview_expanded_requests: None,
             agent_preview_picker_open: false,
             hovered_hit_target: None,
-            agent_preview_button_flash: None,
             settings,
             settings_selection: 0,
             settings_page: SettingsPage::General,
@@ -789,13 +787,6 @@ impl App {
     pub fn poll_worker(&mut self) -> bool {
         let now = Instant::now();
         let mut changed = false;
-        if self
-            .agent_preview_button_flash
-            .is_some_and(|(_, deadline)| now >= deadline)
-        {
-            self.agent_preview_button_flash = None;
-            changed = true;
-        }
         if let Some(marquee) = &mut self.footer_marquee
             && now >= marquee.next_frame
         {
@@ -2212,7 +2203,6 @@ impl App {
         self.agent_preview_message_selection = None;
         self.agent_preview_expanded_requests = None;
         self.agent_preview_picker_open = false;
-        self.agent_preview_button_flash = None;
         if matches!(
             self.hovered_hit_target,
             Some(
@@ -2222,8 +2212,6 @@ impl App {
                     | HitTarget::StashedAgent(_)
                     | HitTarget::AgentPreviewPicker(_)
                     | HitTarget::AgentPreviewPickerItem(_)
-                    | HitTarget::AgentPreviewPrevious(_)
-                    | HitTarget::AgentPreviewNext(_)
                     | HitTarget::AgentPreviewMessageTimeline(_)
                     | HitTarget::AgentPreviewRequest { .. }
                     | HitTarget::AgentTooltip { .. }
@@ -2279,12 +2267,6 @@ impl App {
             Ok(()) => self.notice = Some("Loading active Herdr tab layout".to_owned()),
             Err(error) => self.notice = Some(format!("Could not restore agent: {error}")),
         }
-    }
-
-    pub(crate) fn agent_preview_button_flash(&self) -> Option<bool> {
-        self.agent_preview_button_flash
-            .filter(|(_, deadline)| Instant::now() < *deadline)
-            .map(|(forward, _)| forward)
     }
 
     pub(crate) fn agent_preview_picker_open(&self) -> bool {

@@ -773,12 +773,12 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         u16::from(pane.height > 1),
     );
     let tabs_trailing = draw_sidebar_tabs(frame, app, header);
+    let history_y = header.bottom().saturating_add(2);
     let history = Rect::new(
         pane.x,
-        header.bottom().saturating_add(1),
+        history_y,
         pane.width,
-        pane.bottom()
-            .saturating_sub(header.bottom().saturating_add(1)),
+        pane.bottom().saturating_sub(history_y),
     );
     let Some(index) = app.agents_pane_index() else {
         frame.render_widget(
@@ -789,10 +789,6 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         );
         return;
     };
-    let repository_anchor = app
-        .single_panel_layout()
-        .then_some(tabs_trailing)
-        .filter(|anchor| anchor.width >= 3);
     app.herdr.request_agent_latest_user_message(index);
     let (targets, scroll_max, scroll) = agents::draw_history(
         frame,
@@ -801,10 +797,9 @@ pub(super) fn draw_agent_history_pane(frame: &mut Frame<'_>, app: &mut App, cont
         app.agent_preview_message(index),
         app.agent_preview_transcript_scroll(index),
         app.agent_preview_expanded_requests(index),
-        app.agent_preview_button_flash(),
         app.agent_preview_picker_open(),
         app.hovered_hit_target.clone(),
-        repository_anchor,
+        tabs_trailing,
         history,
     );
     app.regions.agent_preview_scroll = scroll;
