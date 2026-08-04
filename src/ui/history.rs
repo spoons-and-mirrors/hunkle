@@ -99,10 +99,11 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
     let visible = search.visible_indices();
     let viewport = usize::from(graph_region.height);
     let selected = state.selected();
-    let selected_is_head = selected
+    let selected_head_background = selected
         .and_then(|selected| visible.get(selected))
         .and_then(|index| repo.commits.get(*index))
-        .is_some_and(commit_is_head);
+        .filter(|commit| commit_is_head(commit))
+        .map(commit_graph_highlight);
     let mut offset = state.offset().min(visible.len().saturating_sub(1));
     if *scroll_to_selection && let Some(selected) = selected {
         if selected < offset {
@@ -149,11 +150,9 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
     let table = Table::new(rows, widths)
         .header(headers)
         .column_spacing(1)
-        .row_highlight_style(Style::default().bg(if selected_is_head {
-            palette().add_bg
-        } else {
-            palette().selected
-        }));
+        .row_highlight_style(
+            Style::default().bg(selected_head_background.unwrap_or(palette().selected)),
+        );
     let mut visible_state = TableState::default();
     visible_state.select(selected.and_then(|selected| selected.checked_sub(offset)));
     frame.render_stateful_widget(table, commit_table_area, &mut visible_state);
@@ -458,7 +457,7 @@ fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<
         Cell::from(short_oid).style(Style::default().fg(palette().muted)),
     ])
     .style(if is_head {
-        Style::default().bg(palette().add_bg)
+        Style::default().bg(commit_graph_highlight(commit))
     } else {
         Style::default()
     })
@@ -479,6 +478,24 @@ fn commit_graph_color(commit: &Commit) -> Color {
         .map_or(palette().accent, |cell| {
             palette().graph_colors[cell.color % palette().graph_colors.len()]
         })
+}
+
+pub(super) fn commit_graph_highlight(commit: &Commit) -> Color {
+    match (palette().panel, commit_graph_color(commit)) {
+        (
+            Color::Rgb(background_red, background_green, background_blue),
+            Color::Rgb(red, green, blue),
+        ) => Color::Rgb(
+            blend_channel(background_red, red),
+            blend_channel(background_green, green),
+            blend_channel(background_blue, blue),
+        ),
+        (_, color) => color,
+    }
+}
+
+fn blend_channel(background: u8, color: u8) -> u8 {
+    ((u16::from(background) * 4 + u16::from(color)) / 5) as u8
 }
 
 fn commit_changes(summary: Option<&crate::git::DiffSummary>) -> Cell<'static> {
@@ -547,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn head_commit_row_uses_the_subtle_green_background() {
+    fn head_commit_row_uses_its_graph_color_for_the_background() {
         let mut commit = Commit {
             oid: "abc".to_owned(),
             parents: Vec::new(),
@@ -556,13 +573,17 @@ mod tests {
             date: "today".to_owned(),
             subject: "Current commit".to_owned(),
             message: String::new(),
-            graph: Vec::new(),
+            graph: vec![GraphCell {
+                symbol: '●',
+                color: 3,
+            }],
         };
 
         assert_eq!(
             Styled::style(&graph_row(&commit, None)).bg,
-            Some(palette().add_bg)
+            Some(commit_graph_highlight(&commit))
         );
+        assert_ne!(commit_graph_highlight(&commit), palette().add_bg);
 
         commit.refs = vec!["main".to_owned()];
         assert_eq!(Styled::style(&graph_row(&commit, None)).bg, None);

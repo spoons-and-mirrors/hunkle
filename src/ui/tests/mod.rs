@@ -1303,9 +1303,10 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let graph = app.regions.graph_table.unwrap();
+    let head = &app.repository().unwrap().commits[0];
     assert_eq!(
         terminal.backend().buffer()[(graph.x, graph.y)].bg,
-        super::palette().add_bg
+        super::history::commit_graph_highlight(head)
     );
     assert!(
         app.regions
