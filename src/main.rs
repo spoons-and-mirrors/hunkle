@@ -95,6 +95,9 @@ fn main() -> Result<()> {
             let _activity = diagnostics::activity("poll-workers", app.diagnostic_context());
             app.poll_worker()
         };
+        if restart_request.is_none() {
+            restart_request = app.take_restart_request();
+        }
         #[cfg(unix)]
         if restart_request.is_none()
             && let Some(coordinator) = restart_coordinator.as_mut()
@@ -218,7 +221,6 @@ fn main() -> Result<()> {
     app.shutdown();
     diagnostics::event("shutdown clean".to_owned());
 
-    #[cfg(unix)]
     if restarting && let Some(executable) = restart_request {
         let workspace = app
             .repository()
@@ -229,11 +231,20 @@ fn main() -> Result<()> {
             executable.display(),
             workspace.display()
         ));
+        #[cfg(unix)]
         stdin_nonblocking.restore()?;
         diagnostics::shutdown();
         restore_terminal();
-        let error = Command::new(executable).arg(workspace).exec();
-        return Err(error.into());
+        #[cfg(unix)]
+        {
+            let error = Command::new(executable).arg(workspace).exec();
+            return Err(error.into());
+        }
+        #[cfg(not(unix))]
+        {
+            Command::new(executable).arg(workspace).spawn()?;
+            return Ok(());
+        }
     }
 
     Ok(())

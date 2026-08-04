@@ -9,6 +9,6 @@
 
 ## Installation
 
-- At the end of every task that changes Hunkle, install the current checkout with `cargo install --path . --force --locked`.
-- After installing from inside Herdr, restart any open Hunkle process in place so it loads the new binary. Preserve its pane and tab layout, and do not restart unrelated panes or processes.
-- Restart Hunkle in one shell invocation after identifying its pane: `herdr pane send-text PANE_ID $'\x03' && sleep 0.1 && herdr pane run PANE_ID hunkle` (replace `PANE_ID` with the actual pane ID). Do not split a successful restart into separate stop, verification, start, and verification tool calls. `q && hunkle` is not valid because Hunkle, rather than the shell, receives `q`.
+- At the end of every task that changes Hunkle, install the current checkout into its worktree with `cargo install --path . --root target/hunkle-install --force --locked`.
+- Never replace the globally installed Hunkle binary as part of a development task.
+- Do not restart an open Hunkle process after installing. The user chooses when to load a worktree's build with the `↻` control in Hunkle's top-right corner.

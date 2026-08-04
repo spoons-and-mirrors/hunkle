@@ -90,6 +90,7 @@ pub(crate) enum HitTarget {
     HeaderDiff,
     HeaderIssue,
     HeaderAgent,
+    HeaderLocalBuild,
     HeaderFullscreen,
     AgentPanePickerOverlay,
     AgentPane(usize),

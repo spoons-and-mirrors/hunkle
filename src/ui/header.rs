@@ -37,9 +37,34 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         rect
     });
-    let header_right = fullscreen_rect
+    let controls_right = fullscreen_rect
         .map(|rect| rect.x.saturating_sub(1))
         .unwrap_or_else(|| area.right());
+    let local_build_rect = app.local_build_available().then(|| {
+        let label = " ↻ ";
+        let width = UnicodeWidthStr::width(label) as u16;
+        let rect = Rect::new(controls_right.saturating_sub(width), content_y, width, 1);
+        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderLocalBuild);
+        frame.render_widget(
+            Paragraph::new(label).alignment(Alignment::Center).style(
+                Style::default()
+                    .fg(if hovered {
+                        palette().accent
+                    } else {
+                        palette().green
+                    })
+                    .bg(palette().canvas)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            rect,
+        );
+        app.regions
+            .register_hit_target(HitTarget::HeaderLocalBuild, rect);
+        rect
+    });
+    let header_right = local_build_rect
+        .map(|rect| rect.x.saturating_sub(1))
+        .unwrap_or(controls_right);
     let Some(repo) = app.repository() else {
         frame.render_widget(
             Paragraph::new("  No workspace selected").style(Style::default().fg(palette().muted)),
