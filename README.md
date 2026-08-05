@@ -44,8 +44,9 @@ They stay offline to avoid an unnecessary crates.io index update. On a fresh
 machine or after adding a dependency, run `cargo hunkle-install-local-online` once
 to download it. The incremental cache stays inside that worktree's ignored
 `target` directory; `cargo hunkle-clean-local-cache` safely reclaims it when
-needed at the cost of one full rebuild. The cleanup leaves the installed Hunkle
-binary intact. When Hunkle opens a workspace containing that local install, it
+storage is genuinely constrained, at the cost of one full rebuild. It is not a
+routine build step. The cleanup leaves the installed Hunkle binary intact. When
+Hunkle opens a workspace containing that local install, it
 automatically restarts with the workspace's binary while keeping the workspace
 open. On Unix, running local builds also detect and load later installs
 automatically. Each worktree therefore has an independent build channel;
@@ -53,9 +54,12 @@ installing from another worktree cannot replace the binary currently in use. The
 local target directory is explicit so a user-level Cargo configuration cannot
 make worktrees share stale build artifacts.
 
-For a deliberate one-time update of the globally launched bootstrap binary,
-use `cargo hunkle-install-global`. Development agents are instructed to use only
-the local command.
+After completing all edits and verification for a task that changes Hunkle,
+development agents must run one final `cargo hunkle-install-local` immediately
+before handoff. They should not install at intermediate checkpoints. For a
+deliberate update of the globally launched bootstrap binary, explicitly ask the
+agent to also run `cargo hunkle-install-global`; the global release build is
+additional and never replaces the required local install.
 
 hunkle opens exactly the current or requested directory. When that directory is
 a Git repository root, Git status and history are available. The Changes pane

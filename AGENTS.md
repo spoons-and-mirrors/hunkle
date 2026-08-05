@@ -31,7 +31,9 @@
 
 ## Installation
 
-- At the end of every task that changes Hunkle, run `cargo hunkle-install-local` from the current worktree root unless the user explicitly requests a global installation. When explicitly requested, run `cargo hunkle-install-global` instead.
+- Before handing work back to the user after a task that changes Hunkle, run one final `cargo hunkle-install-local` from the current worktree root after all edits and verification are complete. Do not install at intermediate checkpoints. If a later edit is required, perform the final install again before handoff. This remains required when the user also requests a global installation.
 - The project-defined command installs to `target/hunkle-install` and builds in `target`, both inside the current worktree. Do not replace it with a direct `cargo install`; user-level Cargo configuration may otherwise share stale artifacts or replace another worktree's binary.
-- Do not run `cargo hunkle-install-global` or otherwise replace the globally installed Hunkle binary unless the user explicitly requests it for the current task.
+- Normal local installs are offline and reuse the incremental dev cache. If a fresh checkout or dependency change is unavailable locally, run `cargo hunkle-install-local-online` once, then continue using `cargo hunkle-install-local`.
+- Run `cargo hunkle-install-global` in addition to the required local install only when the user explicitly requests a global installation for the current task. Global installs use the optimized release profile and can require a long cold build.
+- Do not run `cargo hunkle-clean-local-cache` as routine maintenance or build optimization. It deliberately removes compiled dependencies and makes the next local install a full cold rebuild; use it only when the user asks to reclaim storage or storage is genuinely constrained.
 - Do not restart an open Hunkle process after installing. Hunkle automatically detects and loads the worktree's local build.
