@@ -343,6 +343,61 @@ fn oversized_markdown_uses_the_windowed_source_cache() {
 }
 
 #[test]
+fn sparse_source_line_index_matches_str_lines() {
+    for content in ["", "a", "a\n", "\n", "\n\n", "a\r\nb\r\n", "a\rb", "a\r"] {
+        let index = SourceLineIndex::new(content);
+        let expected = content.lines().collect::<Vec<_>>();
+        assert_eq!(index.count, expected.len(), "content={content:?}");
+        for (line, expected) in expected.iter().enumerate() {
+            assert_eq!(index.line(content, line), Some(*expected));
+        }
+        assert_eq!(index.line(content, expected.len()), None);
+    }
+
+    let content = (0..1_000)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    let index = SourceLineIndex::new(&content);
+    assert_eq!(index.checkpoints.len(), 4);
+    assert_eq!(index.line(&content, 999), Some("line 999"));
+}
+
+#[test]
+fn windowed_source_keeps_deep_line_numbers_and_positions() {
+    let content = (0..31_000)
+        .map(|line| format!("value {line}\n"))
+        .collect::<String>();
+    let mut presentation = PreviewPresentation::default();
+    let mut scroll = 30_500;
+
+    let preview = presentation.prepare(
+        PreviewInput {
+            content: PreviewContent::Source(&content),
+            generation: 1,
+            path: "src/generated.rs",
+            markdown: false,
+            show_initial_diff_header: false,
+            width: 100,
+            viewport_height: 4,
+            wrapped: false,
+        },
+        &mut scroll,
+    );
+
+    assert!(presentation.is_windowed());
+    assert_eq!(preview.lines.len(), 4);
+    assert!(preview.lines[0].spans[0].content.starts_with("30501  "));
+    assert_eq!(
+        presentation.source_position_at_rendered_position(&content, 30_500, 7, 7),
+        Some((30_501, 0)),
+    );
+    assert_eq!(
+        presentation.source_line(&content, 30_500),
+        Some("value 30500")
+    );
+}
+
+#[test]
 fn numbers_markdown_rows_and_leaves_wrapped_continuations_blank() {
     let lines = numbered_markdown_lines(
         styled_markdown(

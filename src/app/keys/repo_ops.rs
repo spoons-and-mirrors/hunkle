@@ -23,7 +23,7 @@ impl App {
             Some(AuthorFilterEffect::Changed) => {
                 self.graph_search
                     .apply(self.author_filter.visible_indices());
-                self.reconcile_graph_selection();
+                self.select_current_graph_search_match();
             }
             None => {}
         }
@@ -45,13 +45,34 @@ impl App {
                 self.graph_search_focused = false;
                 self.reconcile_graph_selection();
             }
-            KeyCode::Enter => self.graph_search_focused = false,
+            KeyCode::Enter => {
+                self.graph_search_focused = false;
+                self.open_selected_graph_commit();
+            }
+            KeyCode::Tab | KeyCode::Down => self.cycle_graph_search_match(true),
+            KeyCode::BackTab | KeyCode::Up => self.cycle_graph_search_match(false),
             _ if self.graph_search.input.handle_edit_key(key) == EditOutcome::Edited => {
                 self.graph_search
                     .apply(self.author_filter.visible_indices());
-                self.reconcile_graph_selection();
+                self.select_current_graph_search_match();
             }
             _ => {}
+        }
+    }
+
+    fn cycle_graph_search_match(&mut self, forward: bool) {
+        if let Some(position) = self.graph_search.cycle_match(forward) {
+            self.graph_state.select(Some(position));
+            self.graph_scroll_to_selection = true;
+        }
+    }
+
+    pub(crate) fn select_current_graph_search_match(&mut self) {
+        if let Some(position) = self.graph_search.current_match_position() {
+            self.graph_state.select(Some(position));
+            self.graph_scroll_to_selection = true;
+        } else {
+            self.reconcile_graph_selection();
         }
     }
 

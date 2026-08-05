@@ -27,6 +27,17 @@ pub(super) fn styled_source_window(
     start: usize,
     count: usize,
 ) -> Vec<Line<'static>> {
+    styled_source_window_from(source, path, width, 0, start, count)
+}
+
+pub(super) fn styled_source_window_from(
+    source: &str,
+    path: &str,
+    width: usize,
+    line_offset: usize,
+    start: usize,
+    count: usize,
+) -> Vec<Line<'static>> {
     let numbered = width >= 72;
     let language = Language::from_path(path);
     source
@@ -37,7 +48,10 @@ pub(super) fn styled_source_window(
         .map(|(index, line)| {
             let mut spans = if numbered {
                 vec![Span::styled(
-                    format!("{:>5}  ", index + 1),
+                    format!(
+                        "{:>5}  ",
+                        line_offset.saturating_add(index).saturating_add(1)
+                    ),
                     Style::default().fg(palette().faint),
                 )]
             } else {

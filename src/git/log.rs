@@ -107,5 +107,18 @@ fn compact_commit_date(date: String) -> String {
         "12" => "Dec",
         _ => return date,
     };
-    format!("{}{month} {}", &date[8..10], &date[11..16])
+    format!("{} {month} {}", &date[8..10], &date[11..16])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_date_separates_the_day_and_month() {
+        assert_eq!(
+            compact_commit_date("2026-08-05 14:20".to_owned()),
+            "05 Aug 14:20"
+        );
+    }
 }

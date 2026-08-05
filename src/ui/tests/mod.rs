@@ -21,8 +21,8 @@ pub(super) use crate::app::{
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    BranchPickerStep, changes, display_path, draw, marquee_window, palette, selected_display_range,
-    text, wrapped_editor_cursor,
+    BranchPickerStep, changes, display_path, draw, marquee_window, notice_is_error, palette,
+    selected_display_range, text, wrapped_editor_cursor,
 };
 
 mod agents;
@@ -95,6 +95,16 @@ fn footer_abbreviates_paths_under_home() {
     };
     let path = std::path::PathBuf::from(home).join("project");
     assert_eq!(display_path(&path), "~/project");
+}
+
+#[test]
+fn successful_stash_notice_is_not_an_error_when_the_session_title_contains_error() {
+    assert!(!notice_is_error(
+        "Stashed agent Sleev gateway launchctl bootstrap error"
+    ));
+    assert!(notice_is_error(
+        "Could not stash agent: Sleev gateway launchctl bootstrap error"
+    ));
 }
 
 #[test]
@@ -377,8 +387,8 @@ fn renders_every_primary_surface() {
     enable_herdr(&mut app);
     app.settings.graph_lane_width = 0;
     app.settings.graph_description_width = 0;
-    app.settings.graph_changes_width = 11;
-    app.settings.graph_date_width = 11;
+    app.settings.graph_changes_width = 12;
+    app.settings.graph_date_width = 12;
     app.settings.graph_author_width = 16;
     app.settings.graph_commit_width = 7;
     app.commit_message_generator = CommitMessageGenerator::ready_for_test();
@@ -1381,18 +1391,19 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("DATE"));
     assert!(!screen.contains("ALL BRANCHES"));
     assert!(!screen.contains("date order"));
-    assert!(screen.contains(&format!(
-        "+{} -{}",
-        visible_summary.additions, visible_summary.deletions
-    )));
+    assert!(screen.contains(&format!("+{}", visible_summary.additions)));
+    assert!(screen.contains(&format!("-{}", visible_summary.deletions)));
     assert!(screen.contains("HEAD"));
     assert!(screen.contains("Render Test"));
     assert!(!screen.contains("Detailed body line."));
-    assert!(screen.contains("Search commits by description, date, or hash"));
+    assert!(screen.contains("Press Space and search by description"));
     assert!(screen.contains("CHANGES"));
     assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
     assert_eq!(app.regions.graph_columns.len(), 5);
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    assert!(app.graph_search_focused);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let graph_search = app
         .regions
         .hit_target_rect(HitTarget::Graph(GraphHitTarget::Search))
@@ -1400,18 +1411,54 @@ fn renders_every_primary_surface() {
     click(&mut app, graph_search.x + 2, graph_search.y);
     assert!(app.graph_search_focused);
     app.handle_paste("initial commit");
-    assert_eq!(app.visible_graph_indices(), &[1]);
+    assert_eq!(app.visible_graph_indices(), &[0, 1]);
+    assert_eq!(app.graph_state.selected(), Some(1));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(screen_text(&terminal).contains("1/1"));
+    let graph = app.regions.graph_table.unwrap();
+    assert_eq!(graph_search.x + 1, graph.x);
+    assert_eq!(graph_search.right(), graph.right() + 1);
+    assert_eq!(
+        terminal.backend().buffer()[(graph_search.right() - 3, graph_search.y)].symbol(),
+        "1"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(graph_search.right() - 2, graph_search.y)].symbol(),
+        " "
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(graph_search.right() - 1, graph_search.y)].symbol(),
+        " "
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(graph.x, graph.y)].bg,
+        palette().surface_alt
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(graph.x, graph.y + 1)].bg,
+        palette().selected
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.graph_search_focused);
+    assert!(app.graph_commit_open());
+    app.set_graph_commit_open_for_test(false);
+    click(&mut app, graph_search.x + 2, graph_search.y);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!app.graph_search_focused);
     assert_eq!(app.visible_graph_indices(), &[0, 1]);
     click(&mut app, graph_search.x + 2, graph_search.y);
-    app.handle_paste("Render Test");
-    assert!(
-        app.visible_graph_indices().is_empty(),
-        "query={:?} visible={:?}",
-        app.graph_search.input.text(),
-        app.visible_graph_indices()
-    );
+    app.handle_paste("commit");
+    assert_eq!(app.graph_state.selected(), Some(0));
+    assert_eq!(app.graph_search.match_status(), Some((1, 2)));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.graph_state.selected(), Some(1));
+    assert_eq!(app.graph_search.match_status(), Some((2, 2)));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.graph_state.selected(), Some(0));
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.graph_state.selected(), Some(1));
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.graph_state.selected(), Some(0));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let graph = app.regions.graph_table.unwrap();
@@ -1433,8 +1480,15 @@ fn renders_every_primary_surface() {
             .any(|column| column.right == GraphColumn::Changes)
     );
     assert!(app.regions.graph_columns.iter().all(|column| {
-        terminal.backend().buffer()[(column.splitter.x, column.splitter.y)].symbol() == "│"
+        terminal.backend().buffer()[(column.splitter.right() - 1, column.splitter.y)].symbol()
+            == "│"
     }));
+    assert!(
+        app.regions
+            .graph_columns
+            .iter()
+            .all(|column| column.splitter.width == 2)
+    );
 
     let date_column = app
         .regions
@@ -1443,6 +1497,20 @@ fn renders_every_primary_surface() {
         .find(|column| column.right == GraphColumn::Date)
         .copied()
         .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        date_column.splitter.x,
+        date_column.splitter.y,
+    ));
+    assert!(app.dragging_graph_column.is_some());
+    assert_eq!(app.settings.graph_changes_width, date_column.left_width);
+    assert_eq!(app.settings.graph_date_width, date_column.right_width);
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        date_column.splitter.x,
+        date_column.splitter.y,
+    ));
+    assert!(app.dragging_graph_column.is_none());
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
         date_column.splitter.x,
@@ -1516,7 +1584,7 @@ fn renders_every_primary_surface() {
         .regions
         .hit_target_rect(HitTarget::Graph(GraphHitTarget::AuthorHeader))
         .unwrap();
-    assert_eq!(author_header.y, graph_search.y + 1);
+    assert_eq!(author_header.y, graph_search.y + 2);
     click(&mut app, author_header.x, author_header.y);
     assert_eq!(app.mode, Mode::AuthorFilter);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

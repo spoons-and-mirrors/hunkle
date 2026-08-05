@@ -138,27 +138,6 @@ fn repeated_open_keeps_the_first_workspace_request_active() {
 }
 
 #[test]
-fn local_build_restart_stays_anchored_after_opening_another_workspace() {
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    fs::write(first.path().join("first.txt"), "first\n").unwrap();
-    fs::write(second.path().join("second.txt"), "second\n").unwrap();
-    let expected = first
-        .path()
-        .join("target/hunkle-install/bin")
-        .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX));
-    let mut app = App::new(first.path().to_path_buf());
-
-    app.open_repository(second.path().to_path_buf());
-    wait_for_state(&mut app, |app| !app.session.open_running());
-
-    assert_eq!(
-        app.local_build_executable().as_deref(),
-        Some(expected.as_path())
-    );
-}
-
-#[test]
 fn successful_agent_creation_opens_its_destination() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
@@ -724,6 +703,31 @@ fn explorer_captures_typing_instead_of_normal_shortcuts() {
 }
 
 #[test]
+fn explorer_browse_finishes_while_the_explorer_is_hidden() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let nested = root.join("nested");
+    let child = nested.join("ready");
+    fs::create_dir_all(&child).unwrap();
+    initialize_repository(root);
+    let mut app = App::new(root.to_path_buf());
+    wait_for_state(&mut app, |app| app.repository().is_some());
+    app.mode = Mode::Normal;
+    app.workspace_explorer.navigate(nested.clone());
+
+    wait_for_state(&mut app, |app| !app.workspace_explorer.loading);
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.workspace_explorer.directory, nested);
+    assert!(
+        app.workspace_explorer
+            .entries
+            .iter()
+            .any(|entry| entry.path == child)
+    );
+}
+
+#[test]
 fn primary_navigation_has_stable_precedence_and_edits_settings() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config");
@@ -804,8 +808,8 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
             agents_height: 7,
             graph_lane_width: 0,
             graph_description_width: 0,
-            graph_changes_width: 11,
-            graph_date_width: 11,
+            graph_changes_width: 12,
+            graph_date_width: 12,
             graph_author_width: 16,
             graph_commit_width: 7,
             explorer_left_pane_width: None,
@@ -1638,6 +1642,28 @@ fn dirty_inline_editor_blocks_restart() {
 
     assert!(!app.can_restart());
     assert!(app.dirty_file_edit());
+}
+
+#[test]
+fn opening_a_workspace_queues_its_local_hunkle_build() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    initialize_repository(root);
+    let executable = root
+        .join("target")
+        .join("hunkle-install")
+        .join("bin")
+        .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX));
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::write(&executable, "local build").unwrap();
+    let mut app = App::opening(root.to_path_buf());
+
+    wait_for_state(&mut app, |app| !app.session.open_running());
+
+    assert_eq!(
+        app.take_restart_request().as_deref(),
+        Some(executable.as_path())
+    );
 }
 
 #[test]

@@ -20,38 +20,6 @@ fn local_workspace_keeps_the_agent_action() {
 }
 
 #[test]
-fn local_build_control_restarts_from_the_open_worktree() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    run_git(root, &["init", "-b", "main"]);
-    let executable = root
-        .join("target")
-        .join("hunkle-install")
-        .join("bin")
-        .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX));
-    fs::create_dir_all(executable.parent().unwrap()).unwrap();
-    fs::write(&executable, "local build").unwrap();
-    let mut app = App::new(root.to_path_buf());
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-
-    let local_build = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderLocalBuild)
-        .unwrap();
-    assert_eq!(
-        terminal.backend().buffer()[(local_build.x + 1, local_build.y)].symbol(),
-        "↻"
-    );
-    click(&mut app, local_build.x, local_build.y);
-    assert_eq!(
-        app.take_restart_request().as_deref(),
-        Some(executable.as_path())
-    );
-}
-
-#[test]
 fn errors_use_the_full_footer_instead_of_the_header() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

@@ -211,7 +211,9 @@ impl FileSearch {
             crate::diagnostics::drop_in_background("repo-search-index", previous);
         }
         self.files_fingerprint = files_fingerprint;
-        self.refresh_file_matches();
+        self.file_matches.clear();
+        self.match_count = 0;
+        self.rebuild_rows(None);
     }
 
     pub(crate) fn repository_refreshed(&mut self, repository: &RepositoryData) {
@@ -444,6 +446,9 @@ impl FileSearch {
 
     pub(crate) fn poll(&mut self, repository: Option<&RepositoryData>) -> bool {
         let mut changed = false;
+        let mut rows_changed = false;
+        let mut text_matches_changed = false;
+        let mut selected = None;
         while let Some(event) = self.worker.poll() {
             let Some(repository) = repository else {
                 continue;
@@ -454,39 +459,48 @@ impl FileSearch {
             {
                 continue;
             }
-            let selected = self.selected_destination();
+            selected.get_or_insert_with(|| self.selected_destination());
             match event {
+                SearchEvent::Files { matches, count, .. } => {
+                    self.file_matches = matches;
+                    self.match_count = count;
+                    rows_changed = true;
+                    changed = true;
+                }
                 SearchEvent::Batch { matches, .. } => {
                     self.text_matches.extend(matches);
-                    self.text_matches.sort_unstable_by(|left, right| {
-                        left.path
-                            .cmp(&right.path)
-                            .then_with(|| left.line.cmp(&right.line))
-                            .then_with(|| left.column.cmp(&right.column))
-                    });
-                    self.text_matches.dedup_by(|left, right| {
-                        left.path == right.path
-                            && left.line == right.line
-                            && left.column == right.column
-                    });
-                    self.text_match_count = self.text_matches.len();
-                    self.rebuild_rows(selected.as_ref());
+                    text_matches_changed = true;
+                    rows_changed = true;
                     changed = true;
                 }
                 SearchEvent::Complete { truncated, .. } => {
                     self.searching = false;
                     self.search_truncated = truncated;
-                    self.text_match_count = self.text_matches.len();
-                    self.rebuild_rows(selected.as_ref());
+                    rows_changed = true;
                     changed = true;
                 }
                 SearchEvent::Error { message, .. } => {
                     self.searching = false;
                     self.error = Some(message.split_whitespace().collect::<Vec<_>>().join(" "));
-                    self.rebuild_rows(selected.as_ref());
+                    rows_changed = true;
                     changed = true;
                 }
             }
+        }
+        if text_matches_changed {
+            self.text_matches.sort_unstable_by(|left, right| {
+                left.path
+                    .cmp(&right.path)
+                    .then_with(|| left.line.cmp(&right.line))
+                    .then_with(|| left.column.cmp(&right.column))
+            });
+            self.text_matches.dedup_by(|left, right| {
+                left.path == right.path && left.line == right.line && left.column == right.column
+            });
+            self.text_match_count = self.text_matches.len();
+        }
+        if rows_changed {
+            self.rebuild_rows(selected.as_ref().and_then(Option::as_ref));
         }
         if let Some(result) = self.preview_worker.poll()
             && self.preview_path.as_ref() == Some(&result.path)
@@ -506,11 +520,12 @@ impl FileSearch {
     fn refresh(&mut self, repository: &RepositoryData) {
         self.worker.cancel();
         self.text_matches.clear();
+        self.file_matches.clear();
+        self.match_count = 0;
         self.text_match_count = 0;
         self.search_truncated = false;
         self.error = None;
-        self.refresh_file_matches();
-        if self.query.text().trim().is_empty() || self.scope == SearchScope::Files {
+        if self.query.text().trim().is_empty() {
             self.searching = false;
             self.rebuild_rows(None);
             return;
@@ -522,11 +537,13 @@ impl FileSearch {
             fingerprint: repository.files_fingerprint,
             query: self.query.text().to_owned(),
             options: self.options,
+            scope: self.scope,
             index: Arc::clone(&self.index),
         });
         self.rebuild_rows(None);
     }
 
+    #[cfg(test)]
     fn refresh_file_matches(&mut self) {
         self.file_matches.clear();
         self.match_count = 0;
@@ -536,31 +553,11 @@ impl FileSearch {
             self.rebuild_rows(None);
             return;
         }
-        for file in self.index.iter() {
-            if file.ignored && !self.options.include_ignored {
-                continue;
-            }
-            let Some(score) = file_score(&terms, file) else {
-                continue;
-            };
-            self.match_count += 1;
-            let candidate = FileMatch {
-                path: file.path.clone(),
-                score,
-            };
-            if self.file_matches.len() < MAX_FILE_RESULTS {
-                self.file_matches.push(candidate);
-            } else if let Some((worst, _)) = self
-                .file_matches
-                .iter()
-                .enumerate()
-                .max_by(|(_, left), (_, right)| file_result_order(left, right))
-                && file_result_order(&candidate, &self.file_matches[worst]).is_lt()
-            {
-                self.file_matches[worst] = candidate;
-            }
-        }
-        self.file_matches.sort_by(file_result_order);
+        let (matches, count) =
+            collect_file_matches(&self.index, &terms, self.options.include_ignored, || false)
+                .expect("synchronous file matching is not cancelled");
+        self.file_matches = matches;
+        self.match_count = count;
         self.rebuild_rows(None);
     }
 
@@ -732,6 +729,44 @@ fn file_result_order(left: &FileMatch, right: &FileMatch) -> Ordering {
         .then_with(|| left.path.cmp(&right.path))
 }
 
+fn collect_file_matches(
+    index: &[IndexedFile],
+    terms: &[&str],
+    include_ignored: bool,
+    mut cancelled: impl FnMut() -> bool,
+) -> Option<(Vec<FileMatch>, usize)> {
+    let mut matches = Vec::with_capacity(MAX_FILE_RESULTS);
+    let mut count = 0;
+    for file in index {
+        if cancelled() {
+            return None;
+        }
+        if file.ignored && !include_ignored {
+            continue;
+        }
+        let Some(score) = file_score(terms, file) else {
+            continue;
+        };
+        count += 1;
+        let candidate = FileMatch {
+            path: file.path.clone(),
+            score,
+        };
+        if matches.len() < MAX_FILE_RESULTS {
+            matches.push(candidate);
+        } else if let Some((worst, _)) = matches
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| file_result_order(left, right))
+            && file_result_order(&candidate, &matches[worst]).is_lt()
+        {
+            matches[worst] = candidate;
+        }
+    }
+    matches.sort_by(file_result_order);
+    Some((matches, count))
+}
+
 struct SearchWorker {
     generation: Arc<AtomicU64>,
     pending: Arc<Mutex<Option<SearchRequest>>>,
@@ -816,10 +851,18 @@ struct SearchRequest {
     fingerprint: u64,
     query: String,
     options: SearchOptions,
+    scope: SearchScope,
     index: Arc<Vec<IndexedFile>>,
 }
 
 enum SearchEvent {
+    Files {
+        generation: u64,
+        root: PathBuf,
+        fingerprint: u64,
+        matches: Vec<FileMatch>,
+        count: usize,
+    },
     Batch {
         generation: u64,
         root: PathBuf,
@@ -843,7 +886,8 @@ enum SearchEvent {
 impl SearchEvent {
     fn generation(&self) -> u64 {
         match self {
-            Self::Batch { generation, .. }
+            Self::Files { generation, .. }
+            | Self::Batch { generation, .. }
             | Self::Complete { generation, .. }
             | Self::Error { generation, .. } => *generation,
         }
@@ -851,15 +895,17 @@ impl SearchEvent {
 
     fn root(&self) -> &Path {
         match self {
-            Self::Batch { root, .. } | Self::Complete { root, .. } | Self::Error { root, .. } => {
-                root
-            }
+            Self::Files { root, .. }
+            | Self::Batch { root, .. }
+            | Self::Complete { root, .. }
+            | Self::Error { root, .. } => root,
         }
     }
 
     fn fingerprint(&self) -> u64 {
         match self {
-            Self::Batch { fingerprint, .. }
+            Self::Files { fingerprint, .. }
+            | Self::Batch { fingerprint, .. }
             | Self::Complete { fingerprint, .. }
             | Self::Error { fingerprint, .. } => *fingerprint,
         }
@@ -871,6 +917,39 @@ fn run_search(
     active_generation: &AtomicU64,
     sender: &mpsc::Sender<SearchEvent>,
 ) {
+    if request.scope != SearchScope::Text {
+        let query = request.query.trim().to_lowercase();
+        let terms = query.split_whitespace().collect::<Vec<_>>();
+        let Some((matches, count)) = collect_file_matches(
+            &request.index,
+            &terms,
+            request.options.include_ignored,
+            || active_generation.load(AtomicOrdering::Acquire) != request.generation,
+        ) else {
+            return;
+        };
+        if sender
+            .send(SearchEvent::Files {
+                generation: request.generation,
+                root: request.root.clone(),
+                fingerprint: request.fingerprint,
+                matches,
+                count,
+            })
+            .is_err()
+        {
+            return;
+        }
+        if request.scope == SearchScope::Files {
+            let _ = sender.send(SearchEvent::Complete {
+                generation: request.generation,
+                root: request.root,
+                fingerprint: request.fingerprint,
+                truncated: false,
+            });
+            return;
+        }
+    }
     let matcher = match build_matcher(&request.query, request.options) {
         Ok(matcher) => matcher,
         Err(error) => {

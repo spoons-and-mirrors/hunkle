@@ -178,7 +178,6 @@ pub struct App {
     pub(crate) selection: SelectionState,
     copy_request: Option<String>,
     restart_request: Option<PathBuf>,
-    local_build_path: Option<PathBuf>,
     pub should_quit: bool,
     pub(crate) settings_store: SettingsStore,
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
@@ -247,14 +246,6 @@ impl App {
         } else {
             Mode::Explorer
         };
-        let local_build_path = session.data().map(|repository| {
-            repository
-                .root
-                .join("target")
-                .join("hunkle-install")
-                .join("bin")
-                .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX))
-        });
         let start = session
             .data()
             .and_then(|repo| repo.root.parent().map(Path::to_path_buf))
@@ -350,7 +341,6 @@ impl App {
             selection: SelectionState::default(),
             copy_request: None,
             restart_request: None,
-            local_build_path,
             should_quit: false,
             settings_store,
             pending_reload: None,
@@ -379,6 +369,7 @@ impl App {
             footer_marquee: None,
         };
         app.restore_commit_draft();
+        app.queue_local_build_restart();
         app
     }
 
@@ -614,18 +605,26 @@ impl App {
             && !self.file_editor.as_ref().is_some_and(FileEditor::dirty)
     }
 
-    pub(crate) fn local_build_available(&self) -> bool {
-        self.local_build_executable()
-            .is_some_and(|path| path.is_file())
-    }
-
-    pub(crate) fn request_local_build_restart(&mut self) {
+    fn queue_local_build_restart(&mut self) {
+        if self.restart_request.is_some() {
+            return;
+        }
         let Some(executable) = self.local_build_executable().filter(|path| path.is_file()) else {
-            self.notice = Some("Local Hunkle build is unavailable".to_owned());
             return;
         };
+        let Ok(current_executable) = std::env::current_exe() else {
+            diagnostics::event("local build handoff skipped; current executable unavailable");
+            return;
+        };
+        if same_path(&current_executable, &executable) {
+            return;
+        }
+        diagnostics::event(format!(
+            "local build handoff queued executable={}",
+            executable.display()
+        ));
         self.restart_request = Some(executable);
-        self.notice = Some("Reloading local Hunkle build…".to_owned());
+        self.notice = Some("Switching to workspace Hunkle build…".to_owned());
     }
 
     pub(crate) fn take_restart_request(&mut self) -> Option<PathBuf> {
@@ -633,7 +632,14 @@ impl App {
     }
 
     fn local_build_executable(&self) -> Option<PathBuf> {
-        self.local_build_path.clone()
+        Some(
+            self.repository()?
+                .root
+                .join("target")
+                .join("hunkle-install")
+                .join("bin")
+                .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX)),
+        )
     }
 
     pub(crate) fn dirty_file_edit(&self) -> bool {
@@ -809,7 +815,7 @@ impl App {
             self.graph_search.input.insert_single_line(text);
             self.graph_search
                 .apply(self.author_filter.visible_indices());
-            self.reconcile_graph_selection();
+            self.select_current_graph_search_match();
             return;
         }
         if self.mode == Mode::Normal && self.paste_clipboard_files(text) {
@@ -878,7 +884,8 @@ impl App {
             marquee.next_frame = now + FOOTER_MARQUEE_STEP;
             changed = true;
         }
-        changed |= self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
+        let explorer_changed = self.workspace_explorer.poll_index();
+        changed |= self.mode == Mode::Explorer && explorer_changed;
         changed |= self.file_search.poll(self.session.data());
         if self.herdr_available() {
             let scheduled_session = (self.mode == Mode::Scheduler
@@ -898,7 +905,10 @@ impl App {
             }
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
-                self.herdr.poll()
+                self.herdr.poll(
+                    self.regions.agent_cards_presented,
+                    self.regions.agent_surface_presented,
+                )
             };
             changed |= herdr_poll.changed;
             if herdr_poll.changed {
@@ -1226,6 +1236,7 @@ impl App {
             let prepared_file_tree = done.prepared_file_tree;
             let follow_up_refresh = done.follow_up_refresh;
             let inventory_refresh = done.inventory_refresh;
+            let refresh_scope = done.scope;
             match (done.kind, done.result) {
                 (LoadKind::Open, Ok(())) => {
                     if let (Some(state), Some(repository)) =
@@ -1301,6 +1312,7 @@ impl App {
                             .to_owned(),
                         )
                     });
+                    self.queue_local_build_restart();
                 }
                 (LoadKind::Open, Err(error)) => {
                     diagnostics::event(format!("workspace open failed error={error}"));
@@ -1325,21 +1337,26 @@ impl App {
                 (LoadKind::Reload, Ok(())) => {
                     if let Some((selection, selected_oid)) = self.pending_reload.take() {
                         let repo = self.session.data().expect("reloaded repository");
-                        self.author_filter.sync(&repo.root, &repo.commits);
-                        self.graph_search.sync(
-                            &repo.root,
-                            &repo.commits,
-                            self.author_filter.visible_indices(),
-                        );
-                        let visible = self.graph_search.visible_indices();
-                        let commit_index = selected_oid.and_then(|oid| {
-                            visible
-                                .iter()
-                                .position(|index| repo.commits[*index].oid == oid)
-                        });
-                        self.graph_state
-                            .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
-                        self.graph_scroll_to_selection = true;
+                        if refresh_scope.includes_graph() {
+                            self.author_filter.sync(&repo.root, &repo.commits);
+                            self.graph_search.sync(
+                                &repo.root,
+                                &repo.commits,
+                                self.author_filter.visible_indices(),
+                            );
+                            let visible = self.graph_search.visible_indices();
+                            let commit_index =
+                                self.graph_search.current_match_position().or_else(|| {
+                                    selected_oid.and_then(|oid| {
+                                        visible
+                                            .iter()
+                                            .position(|index| repo.commits[*index].oid == oid)
+                                    })
+                                });
+                            self.graph_state
+                                .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
+                            self.graph_scroll_to_selection = true;
+                        }
                         self.changes
                             .restore_selection(repo, selection, inventory_refresh);
                         if let Some(path) = self.pending_file_selection.take() {
@@ -1356,10 +1373,17 @@ impl App {
                             self.changes.set_pane(pane, Some(repo));
                             self.initial_pane_pending = false;
                         }
-                        if self.view() == View::RepositorySearch {
+                        if self.view() == View::RepositorySearch
+                            && (refresh_scope.includes_worktree()
+                                || refresh_scope.includes_inventory())
+                        {
                             self.file_search.repository_refreshed(repo);
-                        } else {
-                            self.file_search.invalidate();
+                        } else if refresh_scope.includes_inventory() {
+                            self.file_search.reindex(
+                                &repo.files,
+                                &repo.ignored_files,
+                                Some(repo.files_fingerprint),
+                            );
                         }
                     }
                     if self.notice.as_deref() == Some("Refreshing…") {
@@ -1410,6 +1434,15 @@ impl App {
                         });
                     }
                 }
+            }
+            #[cfg(not(test))]
+            if self.mode != Mode::Explorer
+                && let Some(repository) = self
+                    .session
+                    .data()
+                    .filter(|repository| repository.details_ready)
+            {
+                self.workspace_explorer.prewarm_index(&repository.root);
             }
         }
         drop(session_load_activity);
@@ -1494,6 +1527,14 @@ impl App {
             && matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc)
         {
             self.show_previous_panel();
+            return;
+        }
+        if self.visible_view() == View::Graph
+            && !self.graph_commit_open()
+            && key.code == KeyCode::Char(' ')
+            && key.modifiers.is_empty()
+        {
+            self.focus_graph_search();
             return;
         }
         if self
@@ -2220,6 +2261,10 @@ impl App {
         self.markdown_preview_available() && self.changes.markdown_rendered
     }
 
+    pub(crate) fn fullscreen_agent_activation_pending(&self) -> bool {
+        self.herdr.fullscreen() && self.last_agent_click.is_some()
+    }
+
     fn toggle_markdown_preview(&mut self) {
         if !self.markdown_preview_available() {
             return;
@@ -2228,8 +2273,11 @@ impl App {
     }
 
     fn toggle_fullscreen(&mut self) {
-        if let Err(error) = self.herdr.toggle_fullscreen() {
-            self.notice = Some(format!("Could not toggle fullscreen: {error}"));
+        match self.herdr.toggle_fullscreen() {
+            Ok(()) => self.last_agent_click = None,
+            Err(error) => {
+                self.notice = Some(format!("Could not toggle fullscreen: {error}"));
+            }
         }
     }
 
@@ -2258,8 +2306,7 @@ impl App {
 
     pub(crate) fn begin_render_frame(&mut self, area: Rect) -> LayoutProfile {
         self.layout_profile = LayoutProfile::for_area(area);
-        self.regions = Regions::default();
-        self.regions.screen = Some(area);
+        self.regions.begin_frame(area);
         self.layout_profile
     }
 

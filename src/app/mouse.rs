@@ -199,10 +199,6 @@ impl App {
                     self.open_scheduler();
                     return;
                 }
-                Some(HitTarget::HeaderLocalBuild) => {
-                    self.request_local_build_restart();
-                    return;
-                }
                 Some(HitTarget::HeaderFullscreen) => {
                     self.toggle_fullscreen();
                     return;
@@ -1145,8 +1141,14 @@ impl App {
             let Some(content) = self.changes.preview.text() else {
                 return;
             };
-            let displayed = content.lines().nth(display_line.saturating_sub(1));
-            let next = content.lines().nth(display_line);
+            let displayed = self
+                .changes
+                .preview_presentation
+                .source_line(content, display_line.saturating_sub(1));
+            let next = self
+                .changes
+                .preview_presentation
+                .source_line(content, display_line);
             if displayed.is_some_and(|line| line.starts_with("[Preview truncated"))
                 || displayed.is_some_and(str::is_empty)
                     && next.is_some_and(|line| line.starts_with("[Preview truncated"))
@@ -1449,7 +1451,7 @@ impl App {
                     if self.author_filter.toggle(index) {
                         self.graph_search
                             .apply(self.author_filter.visible_indices());
-                        self.reconcile_graph_selection();
+                        self.select_current_graph_search_match();
                     }
                 }
                 Some(HitTarget::Graph(GraphHitTarget::FilterOverlay)) => {}

@@ -3,7 +3,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender, SyncSender},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread::{self, JoinHandle},
     time::Instant,
 };
@@ -22,6 +25,7 @@ use favorites::FavoriteStore;
 
 const MAX_PREVIEW_ENTRIES: usize = 200;
 const MAX_SURROUNDING_CHILDREN: usize = 200;
+const INDEX_BATCH_SIZE: usize = 512;
 const DOUBLE_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
 pub(super) const MINIMUM_EXPLORER_PANE_WIDTH: u16 = 16;
 
@@ -73,24 +77,31 @@ pub struct Explorer {
     pub(crate) surroundings_state: ListState,
     pub(crate) surroundings_focused: bool,
     pub(crate) preview_entries: Vec<PickerEntry>,
-    directory_index: Arc<Vec<IndexedDirectory>>,
+    directory_index: Arc<DirectoryIndex>,
     index_roots: Vec<PathBuf>,
+    prewarmed_index_roots: Option<Vec<PathBuf>>,
     index_generation: u64,
-    index_loading: bool,
+    index_active_generation: Arc<AtomicU64>,
+    pub(crate) index_loading: bool,
     index_pending: Arc<Mutex<Option<IndexRequest>>>,
     index_wake: Option<SyncSender<()>>,
     index_rx: Receiver<IndexCompletion>,
-    index_worker: Option<JoinHandle<()>>,
     match_generation: u64,
     match_pending: Arc<Mutex<Option<MatchRequest>>>,
     match_wake: Option<SyncSender<()>>,
     match_rx: Receiver<MatchResult>,
     match_worker: Option<JoinHandle<()>>,
+    preview_generation: u64,
+    preview_active_generation: Arc<AtomicU64>,
+    pub(crate) preview_loading: bool,
+    preview_directory: Option<PathBuf>,
+    preview_pending: Arc<Mutex<Option<PreviewRequest>>>,
+    preview_wake: Option<SyncSender<()>>,
+    preview_rx: Receiver<PreviewCompletion>,
     browse_generation: u64,
     browse_pending: Arc<Mutex<Option<BrowseRequest>>>,
     browse_wake: Option<SyncSender<()>>,
     browse_rx: Receiver<BrowseCompletion>,
-    browse_worker: Option<JoinHandle<()>>,
     content_generation: u64,
     last_row_click: Option<(PathBuf, Instant)>,
     pub(crate) left_pane_width: Option<u16>,
@@ -135,6 +146,35 @@ struct IndexedDirectory {
     is_repo: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct DirectoryIndex {
+    chunks: Vec<Arc<[IndexedDirectory]>>,
+}
+
+impl DirectoryIndex {
+    fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    fn push(&mut self, entries: Vec<IndexedDirectory>) {
+        self.chunks.push(entries.into());
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &IndexedDirectory> {
+        self.chunks.iter().flat_map(|chunk| chunk.iter())
+    }
+}
+
+impl From<Vec<IndexedDirectory>> for DirectoryIndex {
+    fn from(entries: Vec<IndexedDirectory>) -> Self {
+        let mut index = Self::default();
+        if !entries.is_empty() {
+            index.push(entries);
+        }
+        index
+    }
+}
+
 #[derive(Debug)]
 struct IndexRequest {
     generation: u64,
@@ -143,7 +183,8 @@ struct IndexRequest {
 
 struct IndexCompletion {
     generation: u64,
-    index: Vec<IndexedDirectory>,
+    entries: Vec<IndexedDirectory>,
+    complete: bool,
 }
 
 #[derive(Debug)]
@@ -151,7 +192,7 @@ struct MatchRequest {
     generation: u64,
     query: String,
     directory: PathBuf,
-    index: Arc<Vec<IndexedDirectory>>,
+    index: Arc<DirectoryIndex>,
     selected_path: Option<PathBuf>,
 }
 
@@ -160,6 +201,17 @@ struct MatchResult {
     generation: u64,
     matches: Vec<PickerEntry>,
     selected_path: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct PreviewRequest {
+    generation: u64,
+    directory: PathBuf,
+}
+
+struct PreviewCompletion {
+    generation: u64,
+    entries: Vec<PickerEntry>,
 }
 
 pub(super) enum PickerCommand {
@@ -202,18 +254,35 @@ impl Explorer {
                 });
             }
         });
+        let preview_pending = Arc::new(Mutex::new(None::<PreviewRequest>));
+        let worker_pending = Arc::clone(&preview_pending);
+        let preview_active_generation = Arc::new(AtomicU64::new(0));
+        let worker_generation = Arc::clone(&preview_active_generation);
+        let (preview_wake, wake_rx) = mpsc::sync_channel::<()>(1);
+        let (preview_tx, preview_rx) = mpsc::channel();
+        thread::spawn(move || {
+            run_preview_worker(worker_pending, worker_generation, wake_rx, preview_tx);
+        });
         let index_pending = Arc::new(Mutex::new(None::<IndexRequest>));
         let worker_pending = Arc::clone(&index_pending);
+        let index_active_generation = Arc::new(AtomicU64::new(0));
+        let worker_generation = Arc::clone(&index_active_generation);
         let (index_wake, wake_rx) = mpsc::sync_channel::<()>(1);
         let (index_tx, index_rx) = mpsc::channel();
-        let index_worker = thread::spawn(move || {
-            run_index_worker(worker_pending, wake_rx, index_tx, index_directories);
+        thread::spawn(move || {
+            run_index_worker(
+                worker_pending,
+                worker_generation,
+                wake_rx,
+                index_tx,
+                index_directories_progressively,
+            );
         });
         let browse_pending = Arc::new(Mutex::new(None::<BrowseRequest>));
         let worker_pending = Arc::clone(&browse_pending);
         let (browse_wake, wake_rx) = mpsc::sync_channel::<()>(1);
         let (browse_tx, browse_rx) = mpsc::channel();
-        let browse_worker = thread::spawn(move || {
+        thread::spawn(move || {
             run_browse_worker(worker_pending, wake_rx, browse_tx, load_directory_entries);
         });
         let mut picker = Self {
@@ -232,24 +301,31 @@ impl Explorer {
             surroundings_state: ListState::default(),
             surroundings_focused: false,
             preview_entries: Vec::new(),
-            directory_index: Arc::new(Vec::new()),
+            directory_index: Arc::new(DirectoryIndex::default()),
             index_roots,
+            prewarmed_index_roots: None,
             index_generation: 0,
+            index_active_generation,
             index_loading: false,
             index_pending,
             index_wake: Some(index_wake),
             index_rx,
-            index_worker: Some(index_worker),
             match_generation: 0,
             match_pending,
             match_wake: Some(match_wake),
             match_rx,
             match_worker: Some(match_worker),
+            preview_generation: 0,
+            preview_active_generation,
+            preview_loading: false,
+            preview_directory: None,
+            preview_pending,
+            preview_wake: Some(preview_wake),
+            preview_rx,
             browse_generation: 0,
             browse_pending,
             browse_wake: Some(browse_wake),
             browse_rx,
-            browse_worker: Some(browse_worker),
             content_generation: 0,
             last_row_click: None,
             left_pane_width: None,
@@ -451,7 +527,7 @@ impl Explorer {
 
     pub(super) fn reload(&mut self) {
         self.cancel_match_search();
-        self.directory_index = Arc::new(Vec::new());
+        self.directory_index = Arc::new(DirectoryIndex::default());
         self.cancel_index();
         self.searching = false;
         self.reload_directory();
@@ -520,6 +596,14 @@ impl Explorer {
             self.searching = self.index_loading;
             changed = true;
         }
+        while let Ok(completion) = self.preview_rx.try_recv() {
+            if completion.generation != self.preview_generation {
+                continue;
+            }
+            self.preview_entries = completion.entries;
+            self.preview_loading = false;
+            changed = true;
+        }
         while let Ok(completion) = self.browse_rx.try_recv() {
             changed |= self.apply_browse_completion(completion);
         }
@@ -530,7 +614,7 @@ impl Explorer {
         self.cancel_match_search();
         let index_roots = search_roots(&path);
         if self.index_roots != index_roots {
-            self.directory_index = Arc::new(Vec::new());
+            self.directory_index = Arc::new(DirectoryIndex::default());
             self.cancel_index();
             self.index_roots = index_roots;
             self.searching = false;
@@ -539,6 +623,25 @@ impl Explorer {
         self.set_path_input(display_search_path(&self.directory));
         self.surroundings_focused = false;
         self.reload_directory();
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn prewarm_index(&mut self, directory: &Path) {
+        self.prewarm_index_roots(search_roots(directory));
+    }
+
+    fn prewarm_index_roots(&mut self, roots: Vec<PathBuf>) {
+        if self.prewarmed_index_roots.as_ref() == Some(&roots) {
+            return;
+        }
+        self.prewarmed_index_roots = Some(roots.clone());
+        if self.index_roots != roots {
+            self.cancel_match_search();
+            self.directory_index = Arc::new(DirectoryIndex::default());
+            self.cancel_index();
+            self.index_roots = roots;
+        }
+        self.start_index();
     }
 
     pub(super) fn accept_preview(&mut self, index: usize) {
@@ -702,13 +805,20 @@ impl Explorer {
         if completion.generation != self.index_generation {
             return false;
         }
-        self.directory_index = Arc::new(completion.index);
-        self.index_loading = false;
-        self.searching = false;
-        if self.editing_path {
+        let changed = !completion.entries.is_empty();
+        if changed {
+            Arc::make_mut(&mut self.directory_index).push(completion.entries);
+        }
+        if completion.complete {
+            self.index_loading = false;
+        }
+        let query = self.path_input.trim();
+        let uses_index =
+            !query.is_empty() && !query.contains(['/', '\\']) && !query.starts_with('~');
+        if self.editing_path && uses_index && (changed || completion.complete) {
             self.refresh_matches();
         }
-        true
+        changed || completion.complete
     }
 
     fn apply_browse_completion(&mut self, completion: BrowseCompletion) -> bool {
@@ -846,21 +956,7 @@ impl Explorer {
             self.start_match_search(query, selected_path);
             return;
         }
-        if !query.contains(['/', '\\']) && self.directory_index.is_empty() && !self.index_loading {
-            self.searching = true;
-            self.index_loading = true;
-            self.index_generation = self.index_generation.wrapping_add(1);
-            let request = IndexRequest {
-                generation: self.index_generation,
-                roots: self.index_roots.clone(),
-            };
-            if let Ok(mut pending) = self.index_pending.lock() {
-                *pending = Some(request);
-                if let Some(wake) = &self.index_wake {
-                    let _ = wake.try_send(());
-                }
-            }
-        }
+        self.start_index();
         if self.directory_index.is_empty() {
             self.searching = self.index_loading;
             self.matches.clear();
@@ -889,16 +985,50 @@ impl Explorer {
         }
     }
 
+    fn start_index(&mut self) {
+        if !self.directory_index.is_empty() || self.index_loading {
+            return;
+        }
+        self.index_loading = true;
+        self.index_generation = self.index_generation.wrapping_add(1);
+        self.index_active_generation
+            .store(self.index_generation, Ordering::Relaxed);
+        let request = IndexRequest {
+            generation: self.index_generation,
+            roots: self.index_roots.clone(),
+        };
+        if let Ok(mut pending) = self.index_pending.lock() {
+            *pending = Some(request);
+            if let Some(wake) = &self.index_wake {
+                let _ = wake.try_send(());
+            }
+        }
+    }
+
     fn cancel_match_search(&mut self) {
         self.match_generation = self.match_generation.wrapping_add(1);
         if let Ok(mut pending) = self.match_pending.lock() {
             *pending = None;
         }
+        self.cancel_preview();
         self.searching = false;
+    }
+
+    fn cancel_preview(&mut self) {
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.preview_active_generation
+            .store(self.preview_generation, Ordering::Relaxed);
+        self.preview_loading = false;
+        self.preview_directory = None;
+        if let Ok(mut pending) = self.preview_pending.lock() {
+            *pending = None;
+        }
     }
 
     fn cancel_index(&mut self) {
         self.index_generation = self.index_generation.wrapping_add(1);
+        self.index_active_generation
+            .store(self.index_generation, Ordering::Relaxed);
         self.index_loading = false;
         if let Ok(mut pending) = self.index_pending.lock() {
             *pending = None;
@@ -929,12 +1059,31 @@ impl Explorer {
     }
 
     fn refresh_preview(&mut self) {
-        self.preview_entries = self
+        let directory = self
             .match_state
             .selected()
             .and_then(|index| self.matches.get(index))
-            .map(|entry| load_child_directories(&entry.path, MAX_PREVIEW_ENTRIES, true))
-            .unwrap_or_default();
+            .map(|entry| entry.path.clone());
+        if self.preview_directory == directory {
+            return;
+        }
+        self.cancel_preview();
+        self.preview_entries.clear();
+        let Some(directory) = directory else {
+            return;
+        };
+        self.preview_loading = true;
+        self.preview_directory = Some(directory.clone());
+        let request = PreviewRequest {
+            generation: self.preview_generation,
+            directory,
+        };
+        if let Ok(mut pending) = self.preview_pending.lock() {
+            *pending = Some(request);
+            if let Some(wake) = &self.preview_wake {
+                let _ = wake.try_send(());
+            }
+        }
     }
 
     fn selected_match_path(&self) -> PathBuf {
@@ -971,16 +1120,15 @@ impl Explorer {
         if let Some(worker) = self.match_worker.take() {
             let _ = worker.join();
         }
+        self.preview_wake.take();
         self.cancel_index();
         self.index_wake.take();
-        self.index_worker.take();
         self.browse_generation = self.browse_generation.wrapping_add(1);
         self.loading = false;
         if let Ok(mut pending) = self.browse_pending.lock() {
             *pending = None;
         }
         self.browse_wake.take();
-        self.browse_worker.take();
     }
 }
 
@@ -1013,26 +1161,60 @@ fn run_browse_worker(
     }
 }
 
-fn run_index_worker(
-    pending: Arc<Mutex<Option<IndexRequest>>>,
+fn run_preview_worker(
+    pending: Arc<Mutex<Option<PreviewRequest>>>,
+    active_generation: Arc<AtomicU64>,
     wake_rx: Receiver<()>,
-    result_tx: Sender<IndexCompletion>,
-    load: impl Fn(&[PathBuf]) -> Vec<IndexedDirectory>,
+    result_tx: Sender<PreviewCompletion>,
 ) {
     while wake_rx.recv().is_ok() {
         let Some(request) = pending.lock().ok().and_then(|mut slot| slot.take()) else {
             continue;
         };
-        let index = load(&request.roots);
+        let cancelled = || active_generation.load(Ordering::Relaxed) != request.generation;
+        let entries =
+            load_child_directories_until(&request.directory, MAX_PREVIEW_ENTRIES, true, &cancelled);
+        if cancelled() {
+            continue;
+        }
         if result_tx
-            .send(IndexCompletion {
+            .send(PreviewCompletion {
                 generation: request.generation,
-                index,
+                entries,
             })
             .is_err()
         {
             break;
         }
+    }
+}
+
+fn run_index_worker(
+    pending: Arc<Mutex<Option<IndexRequest>>>,
+    active_generation: Arc<AtomicU64>,
+    wake_rx: Receiver<()>,
+    result_tx: Sender<IndexCompletion>,
+    load: impl Fn(&[PathBuf], &mut dyn FnMut(Vec<IndexedDirectory>, bool) -> bool, &dyn Fn() -> bool),
+) {
+    while wake_rx.recv().is_ok() {
+        let Some(request) = pending.lock().ok().and_then(|mut slot| slot.take()) else {
+            continue;
+        };
+        let generation = request.generation;
+        let cancelled = || active_generation.load(Ordering::Relaxed) != generation;
+        let mut publish = |entries, complete| {
+            if cancelled() {
+                return false;
+            }
+            result_tx
+                .send(IndexCompletion {
+                    generation,
+                    entries,
+                    complete,
+                })
+                .is_ok()
+        };
+        load(&request.roots, &mut publish, &cancelled);
     }
 }
 
@@ -1143,12 +1325,24 @@ fn load_directory_entries(directory: &Path) -> Result<BrowseResult, String> {
 }
 
 fn load_child_directories(directory: &Path, limit: usize, include_files: bool) -> Vec<PickerEntry> {
+    load_child_directories_until(directory, limit, include_files, &|| false)
+}
+
+fn load_child_directories_until(
+    directory: &Path,
+    limit: usize,
+    include_files: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Vec<PickerEntry> {
     let Ok(read_dir) = fs::read_dir(directory) else {
         return Vec::new();
     };
     let mut directories = Vec::new();
     let mut files = Vec::new();
     for entry in read_dir.filter_map(Result::ok) {
+        if cancelled() {
+            return Vec::new();
+        }
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
@@ -1174,6 +1368,9 @@ fn load_child_directories(directory: &Path, limit: usize, include_files: bool) -
             });
         }
     }
+    if cancelled() {
+        return Vec::new();
+    }
     directories.sort_by_cached_key(|entry| entry.label.to_lowercase());
     files.sort_by_cached_key(|entry| entry.label.to_lowercase());
     directories.extend(files);
@@ -1181,25 +1378,25 @@ fn load_child_directories(directory: &Path, limit: usize, include_files: bool) -
     directories
 }
 
-fn indexed_directory_matches(query: &str, index: &[IndexedDirectory]) -> Vec<PickerEntry> {
+fn indexed_directory_matches(query: &str, index: &DirectoryIndex) -> Vec<PickerEntry> {
     let query_lower = query.to_lowercase();
     let mut candidates = Vec::with_capacity(12);
     let compare =
-        |(left_score, left_depth, left_index): &(u32, usize, usize),
-         (right_score, right_depth, right_index): &(u32, usize, usize)| {
+        |(left_score, left_depth, left): &(u32, usize, &IndexedDirectory),
+         (right_score, right_depth, right): &(u32, usize, &IndexedDirectory)| {
             right_score
                 .cmp(left_score)
                 .then_with(|| left_depth.cmp(right_depth))
-                .then_with(|| index[*left_index].path.cmp(&index[*right_index].path))
+                .then_with(|| left.path.cmp(&right.path))
         };
-    for (directory_index, directory) in index.iter().enumerate() {
+    for directory in index.iter() {
         let Some(score) = fuzzy_text_score_lower(&query_lower, &directory.name_lower) else {
             continue;
         };
         let candidate = (
             score + if directory.is_repo { 750 } else { 0 },
             directory.depth,
-            directory_index,
+            directory,
         );
         if candidates.len() < 12 {
             candidates.push(candidate);
@@ -1215,10 +1412,10 @@ fn indexed_directory_matches(query: &str, index: &[IndexedDirectory]) -> Vec<Pic
     candidates.sort_by(compare);
     candidates
         .into_iter()
-        .map(|(_, _, directory_index)| PickerEntry {
-            label: display_search_path(&index[directory_index].path),
-            is_repo: index[directory_index].is_repo,
-            path: index[directory_index].path.clone(),
+        .map(|(_, _, directory)| PickerEntry {
+            label: display_search_path(&directory.path),
+            is_repo: directory.is_repo,
+            path: directory.path.clone(),
             action: PickerAction::Navigate,
         })
         .collect()
@@ -1267,34 +1464,75 @@ fn search_roots(current: &Path) -> Vec<PathBuf> {
     roots
 }
 
+#[cfg(test)]
 fn index_directories(roots: &[PathBuf]) -> Vec<IndexedDirectory> {
+    let mut index = Vec::new();
+    index_directories_progressively(
+        roots,
+        &mut |entries, _| {
+            index.extend(entries);
+            true
+        },
+        &|| false,
+    );
+    index
+}
+
+fn index_directories_progressively(
+    roots: &[PathBuf],
+    publish: &mut dyn FnMut(Vec<IndexedDirectory>, bool) -> bool,
+    cancelled: &dyn Fn() -> bool,
+) {
     const MAX_DIRECTORIES: usize = 25_000;
     const MAX_DEPTH: usize = 7;
-    let mut directories = Vec::new();
-    let mut queue: VecDeque<_> = roots.iter().cloned().map(|path| (path, 0)).collect();
+    let mut directories = Vec::with_capacity(INDEX_BATCH_SIZE);
+    let mut indexed = 0;
+    let mut queue: VecDeque<_> = roots
+        .iter()
+        .cloned()
+        .map(|path| {
+            let absolute_depth = path_depth(&path);
+            (path, 0, absolute_depth)
+        })
+        .collect();
     let mut seen = HashSet::new();
-    while let Some((directory, depth)) = queue.pop_front() {
-        if directories.len() >= MAX_DIRECTORIES || !seen.insert(directory.clone()) {
+    while let Some((directory, depth, absolute_depth)) = queue.pop_front() {
+        if cancelled() {
+            return;
+        }
+        if indexed >= MAX_DIRECTORIES {
+            break;
+        }
+        if !seen.insert(directory.clone()) {
             continue;
         }
+        let is_bare_repo = is_bare_repository_directory(&directory);
         directories.push(IndexedDirectory {
             name_lower: directory
                 .file_name()
                 .unwrap_or_else(|| directory.as_os_str())
                 .to_string_lossy()
                 .to_lowercase(),
-            depth: path_depth(&directory),
-            is_repo: is_repository_directory(&directory)
-                || is_bare_repository_directory(&directory),
+            depth: absolute_depth,
+            is_repo: is_repository_directory(&directory) || is_bare_repo,
             path: directory.clone(),
         });
-        if depth >= MAX_DEPTH || is_bare_repository_directory(&directory) {
+        indexed += 1;
+        if directories.len() == INDEX_BATCH_SIZE
+            && !publish(std::mem::take(&mut directories), false)
+        {
+            return;
+        }
+        if depth >= MAX_DEPTH || is_bare_repo {
             continue;
         }
         let Ok(entries) = fs::read_dir(&directory) else {
             continue;
         };
         for entry in entries.filter_map(Result::ok) {
+            if cancelled() {
+                return;
+            }
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
@@ -1306,10 +1544,10 @@ fn index_directories(roots: &[PathBuf]) -> Vec<IndexedDirectory> {
             if should_skip_index_directory(&name) {
                 continue;
             }
-            queue.push_back((entry.path(), depth + 1));
+            queue.push_back((entry.path(), depth + 1, absolute_depth + 1));
         }
     }
-    directories
+    let _ = publish(directories, true);
 }
 
 fn should_skip_index_directory(name: &str) -> bool {

@@ -462,12 +462,20 @@ pub(crate) fn draw_explorer(
         (
             "PATH MATCHES".to_owned(),
             if explorer.searching {
-                "indexing…".to_owned()
+                if explorer.index_loading {
+                    "indexing…".to_owned()
+                } else {
+                    "searching…".to_owned()
+                }
             } else {
                 format!("{} found", explorer.matches.len())
             },
             "LIVE PREVIEW".to_owned(),
-            format!("{} inside", explorer.preview_entries.len()),
+            if explorer.preview_loading {
+                "loading…".to_owned()
+            } else {
+                format!("{} inside", explorer.preview_entries.len())
+            },
         )
     } else {
         (
@@ -516,7 +524,11 @@ pub(crate) fn draw_explorer(
     if explorer.editing_path {
         if explorer.matches.is_empty() {
             let message = if explorer.searching {
-                "Indexing folders…"
+                if explorer.index_loading {
+                    "Indexing folders…"
+                } else {
+                    "Searching folders…"
+                }
             } else if explorer.path_input.trim().is_empty() {
                 "Type a folder or path"
             } else {
@@ -535,7 +547,9 @@ pub(crate) fn draw_explorer(
             );
         }
         if explorer.preview_entries.is_empty() {
-            let message = if explorer.matches.is_empty() {
+            let message = if explorer.preview_loading {
+                "Loading preview…"
+            } else if explorer.matches.is_empty() {
                 "Select a match to inspect it"
             } else {
                 "No child entries"

@@ -857,19 +857,9 @@ fn build_request_transcript(
     let mut document_height = 0;
     let request_count = message.requests.len();
     for (request_index, request) in message.requests.iter().enumerate() {
-        let (lines, content_height) = request_content(
-            Some(request),
-            width,
-            live && request_index + 1 == request_count,
-            spinner_frame,
-        );
-        let full_height = content_height.max(1).saturating_add(2);
-        let (mut summary, reasoning, hidden) = request_summary(
-            request,
-            width,
-            live && request_index + 1 == request_count,
-            spinner_frame,
-        );
+        let request_live = live && request_index + 1 == request_count;
+        let (mut summary, reasoning, hidden) =
+            request_summary(request, width, request_live, spinner_frame);
         let expandable = hidden > 0;
         let expanded = expanded_requests.contains(&request_index);
         let collapsed = expandable && !expanded;
@@ -886,7 +876,9 @@ fn build_request_transcript(
             let height = summary.len().saturating_add(2);
             (summary, height)
         } else {
-            (lines, full_height)
+            let (lines, content_height) =
+                request_content(Some(request), width, request_live, spinner_frame);
+            (lines, content_height.max(1).saturating_add(2))
         };
         blocks.push(TranscriptBlock {
             user: false,

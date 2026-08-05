@@ -31,7 +31,7 @@
 
 ## Installation
 
-- At the end of every task that changes Hunkle, run `cargo hunkle-install-local` from the current worktree root.
+- At the end of every task that changes Hunkle, run `cargo hunkle-install-local` from the current worktree root unless the user explicitly requests a global installation. When explicitly requested, run `cargo hunkle-install-global` instead.
 - The project-defined command installs to `target/hunkle-install` and builds in `target`, both inside the current worktree. Do not replace it with a direct `cargo install`; user-level Cargo configuration may otherwise share stale artifacts or replace another worktree's binary.
-- Never run `cargo hunkle-install-global` or otherwise replace the globally installed Hunkle binary as part of a development task.
-- Do not restart an open Hunkle process after installing. The user chooses when to load a worktree's build with the `↻` control in Hunkle's top-right corner.
+- Do not run `cargo hunkle-install-global` or otherwise replace the globally installed Hunkle binary unless the user explicitly requests it for the current task.
+- Do not restart an open Hunkle process after installing. Hunkle automatically detects and loads the worktree's local build.

@@ -649,7 +649,11 @@ impl HerdrSession {
         LinkedWorktreeObservation { candidates }
     }
 
-    pub(crate) fn poll(&mut self) -> HerdrSessionPoll {
+    pub(crate) fn poll(
+        &mut self,
+        agent_cards_presented: bool,
+        agent_surface_presented: bool,
+    ) -> HerdrSessionPoll {
         if !self.enabled {
             return HerdrSessionPoll::default();
         }
@@ -878,8 +882,10 @@ impl HerdrSession {
             self.start_snapshot();
             poll.changed = true;
         }
-        self.start_agent_change_stats_if_due(Instant::now());
-        poll.changed |= self.poll_spinner(Instant::now());
+        if agent_cards_presented {
+            self.start_agent_change_stats_if_due(Instant::now());
+        }
+        poll.changed |= self.poll_spinner(Instant::now(), agent_surface_presented);
         poll
     }
 
@@ -1567,7 +1573,11 @@ impl HerdrSession {
         self.spinner_frame
     }
 
-    fn poll_spinner(&mut self, now: Instant) -> bool {
+    fn poll_spinner(&mut self, now: Instant, presented: bool) -> bool {
+        if !presented {
+            self.next_spinner = now;
+            return false;
+        }
         let working = self.enabled
             && self
                 .agents
@@ -1938,6 +1948,65 @@ fn branch_from_head(path: &Path) -> Option<String> {
 }
 
 #[cfg(test)]
+mod presentation_interest_tests {
+    use super::*;
+
+    fn working_agent(destination: Option<PathBuf>) -> AgentPane {
+        AgentPane {
+            workspace_id: "w1".to_owned(),
+            tab_id: "w1:t1".to_owned(),
+            pane_id: "w1:p1".to_owned(),
+            terminal_id: None,
+            instance_name: None,
+            cwd: destination.clone(),
+            destination_cwd: destination,
+            focused: false,
+            runtime: AgentRuntime {
+                name: "opencode".to_owned(),
+                session_name: None,
+                status: AgentStatus::Working,
+                timing_key: AgentTimingKey::Pane("opencode@w1:p1".to_owned()),
+                session_timing_key: None,
+                state_change_seq: 1,
+            },
+        }
+    }
+
+    fn session_without_snapshot() -> HerdrSession {
+        let mut session = HerdrSession::new(true, None, None);
+        session.next_refresh = Instant::now() + Duration::from_secs(60);
+        session
+    }
+
+    #[test]
+    fn hidden_agent_cards_do_not_start_change_statistics() {
+        let mut session = session_without_snapshot();
+        session.agents = vec![working_agent(Some(PathBuf::from(
+            "/hunkle-test-missing-repository",
+        )))];
+        session.next_agent_change_stats = Instant::now();
+
+        session.poll(false, false);
+        assert!(!session.agent_change_stats_loading);
+
+        session.poll(true, true);
+        assert!(session.agent_change_stats_loading);
+    }
+
+    #[test]
+    fn hidden_agent_surfaces_do_not_animate_the_spinner() {
+        let mut session = session_without_snapshot();
+        session.agents = vec![working_agent(None)];
+        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
+
+        assert!(!session.poll(false, false).changed);
+        assert_eq!(session.spinner_frame, 0);
+        assert!(session.poll(false, true).changed);
+        assert_eq!(session.spinner_frame, 1);
+    }
+}
+
+#[cfg(test)]
 mod latest_user_message_cache_tests {
     use super::*;
 
@@ -2087,7 +2156,7 @@ mod latest_user_message_cache_tests {
             })
             .unwrap();
 
-        session.poll();
+        session.poll(false, false);
         session.apply_agent_snapshot_at(Vec::new(), unix_time_ms());
 
         assert_eq!(
@@ -2117,7 +2186,7 @@ mod latest_user_message_cache_tests {
             })
             .unwrap();
 
-        session.poll();
+        session.poll(false, false);
 
         assert_eq!(
             session.agent_user_messages(0).unwrap()[0].text,
@@ -2174,7 +2243,7 @@ mod latest_user_message_cache_tests {
                 result: Ok(message("completed")),
             })
             .unwrap();
-        session.poll();
+        session.poll(false, false);
 
         assert_eq!(session.agent_user_messages(0).unwrap()[0].text, "completed");
         assert!(
@@ -2253,7 +2322,7 @@ mod latest_user_message_cache_tests {
                 result: Ok(message("stale")),
             })
             .unwrap();
-        session.poll();
+        session.poll(false, false);
 
         assert!(
             !session
@@ -2330,7 +2399,7 @@ mod stash_flow_tests {
 
         release.send(()).unwrap();
         let notice = (0..100).find_map(|_| {
-            let poll = session.poll();
+            let poll = session.poll(false, false);
             if poll.notice.is_none() {
                 thread::sleep(Duration::from_millis(5));
             }

@@ -351,7 +351,6 @@ pub(crate) enum HitTarget {
     HeaderIssue,
     HeaderAgent,
     HeaderSchedule,
-    HeaderLocalBuild,
     HeaderFullscreen,
     AgentPanePickerOverlay,
     AgentPane(usize),
@@ -655,6 +654,8 @@ pub struct Regions {
     pub agents_list: Option<Rect>,
     pub agents_splitter: Option<Rect>,
     pub agents_bounds: Option<Rect>,
+    pub(crate) agent_cards_presented: bool,
+    pub(crate) agent_surface_presented: bool,
     pub diff: Option<Rect>,
     pub preview_body: Option<Rect>,
     pub preview_path: Option<RepoPath>,
@@ -697,6 +698,31 @@ pub struct Regions {
 }
 
 impl Regions {
+    pub(crate) fn begin_frame(&mut self, area: Rect) {
+        let mut editor_rows = std::mem::take(&mut self.editor_rows);
+        let mut diff_file_headers = std::mem::take(&mut self.diff_file_headers);
+        let mut graph_columns = std::mem::take(&mut self.graph_columns);
+        let mut diff_hunks = std::mem::take(&mut self.diff_hunks);
+        let mut hit_regions = std::mem::take(&mut self.hit_regions);
+        let mut scroll_regions = std::mem::take(&mut self.scroll_regions);
+        editor_rows.clear();
+        diff_file_headers.clear();
+        graph_columns.clear();
+        diff_hunks.clear();
+        hit_regions.clear();
+        scroll_regions.clear();
+        *self = Self {
+            screen: Some(area),
+            editor_rows,
+            diff_file_headers,
+            graph_columns,
+            diff_hunks,
+            hit_regions,
+            scroll_regions,
+            ..Self::default()
+        };
+    }
+
     pub(crate) fn register_hit_target(&mut self, target: HitTarget, rect: Rect) {
         self.hit_regions.push(HitRegion { target, rect });
     }

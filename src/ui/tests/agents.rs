@@ -94,6 +94,37 @@ fn shift_click_opens_the_live_agent_preview_modal() {
 }
 
 #[test]
+fn fullscreen_agent_first_click_replaces_footer_path_with_activation_hint() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.agents[0].destination_cwd = Some(root.to_path_buf());
+    app.herdr.set_fullscreen_for_test(true);
+    let key = agent_key(&app, 0);
+    let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let card = app.regions.hit_target_rect(HitTarget::Agent(key)).unwrap();
+    click(&mut app, card.right() - 2, card.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let footer_y = terminal.backend().buffer().area.height - 1;
+    let footer = (0..terminal.backend().buffer().area.width)
+        .map(|x| terminal.backend().buffer()[(x, footer_y)].symbol())
+        .collect::<String>();
+    let hint = "double click or press tab to show agent";
+    let hint_x = u16::try_from(footer.find(hint).unwrap()).unwrap();
+    assert!(!footer.contains(root.to_string_lossy().as_ref()));
+    assert!(footer.contains("Git Graph"));
+    assert!(
+        (hint_x..hint_x + hint.len() as u16)
+            .all(|x| terminal.backend().buffer()[(x, footer_y)].fg == super::palette().orange)
+    );
+}
+
+#[test]
 fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

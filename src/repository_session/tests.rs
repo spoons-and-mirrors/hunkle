@@ -105,6 +105,7 @@ fn ignores_superseded_repository_loads() {
         .send(LoadResult {
             generation: 1,
             kind: LoadKind::Open,
+            scope: RefreshScope::ALL,
             fetch_interval: Duration::ZERO,
             result: Ok((LoadPayload::Open(stale_data), Some(signature(99, 1)), None)),
         })
@@ -314,6 +315,7 @@ fn drains_queued_scopes_after_a_refresh_completion() {
 
     let completion = session.next_load_completion().unwrap();
     assert_eq!(completion.kind, LoadKind::Reload);
+    assert_eq!(completion.scope, RefreshScope::ALL);
     assert!(completion.result.is_err());
     assert_eq!(completion.follow_up_refresh, Some(RefreshRequest::Started));
     assert_eq!(session.active_refresh_scope, Some(RefreshScope::WORKTREE));
@@ -349,6 +351,7 @@ fn successful_open_automatically_starts_initial_hydration() {
         .send(LoadResult {
             generation: 1,
             kind: LoadKind::Open,
+            scope: RefreshScope::ALL,
             fetch_interval: Duration::ZERO,
             result: Ok((LoadPayload::Open(bootstrap), None, None)),
         })
@@ -460,6 +463,7 @@ fn send_failed_load(session: &RepositorySession, kind: LoadKind) {
         .send(LoadResult {
             generation: session.load_generation,
             kind,
+            scope: RefreshScope::ALL,
             fetch_interval: Duration::ZERO,
             result: Err("load failed".to_owned()),
         })

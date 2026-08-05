@@ -135,6 +135,7 @@ pub(crate) enum RefreshRequest {
 
 pub(crate) struct LoadCompletion {
     pub(crate) kind: LoadKind,
+    pub(crate) scope: RefreshScope,
     pub(crate) inventory_refresh: InventoryRefresh,
     pub(crate) result: Result<(), String>,
     pub(crate) prepared_file_tree: Option<PreparedFileTree>,
@@ -181,6 +182,7 @@ struct StatusResult {
 struct LoadResult {
     generation: u64,
     kind: LoadKind,
+    scope: RefreshScope,
     fetch_interval: Duration,
     result: Result<
         (
@@ -471,6 +473,7 @@ impl RepositorySession {
                 follow_up_scope.and_then(|scope| self.request_refresh(scope, done.fetch_interval));
             return Some(LoadCompletion {
                 kind: done.kind,
+                scope: done.scope,
                 inventory_refresh,
                 result,
                 prepared_file_tree,
@@ -1044,6 +1047,7 @@ impl RepositorySession {
             let _ = sender.send(LoadResult {
                 generation,
                 kind,
+                scope,
                 fetch_interval,
                 result,
             });

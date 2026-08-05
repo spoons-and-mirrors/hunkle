@@ -43,6 +43,8 @@ use header::*;
 use header_card::*;
 use location_picker::*;
 
+const FULLSCREEN_AGENT_HINT: &str = " double click or press tab to show agent";
+
 fn palette() -> &'static Palette {
     static THEME: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
     THEME.get_or_init(|| load_theme().palette)
@@ -379,7 +381,6 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
         HitTarget::HeaderDiff,
         HitTarget::HeaderIssue,
         HitTarget::HeaderAgent,
-        HitTarget::HeaderLocalBuild,
         HitTarget::HeaderFullscreen,
     ] {
         let Some(rect) = app.regions.hit_target_rect(target) else {
@@ -437,6 +438,18 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
         app.regions.explorer = None;
         app.regions.settings = None;
         app.regions.help = None;
+        if app.fullscreen_agent_activation_pending() {
+            app.clear_footer_marquee();
+            frame.render_widget(
+                Paragraph::new(truncate_width(
+                    FULLSCREEN_AGENT_HINT,
+                    usize::from(area.width),
+                ))
+                .style(Style::default().fg(palette().orange)),
+                area,
+            );
+            return;
+        }
         if let Some(path) = app.repository().map(|repository| {
             let path = display_path(&repository.root);
             if repository.is_local() || repository.branch.is_empty() {
@@ -509,22 +522,27 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
     });
     let mut spans = Vec::new();
     let start_x = area.right().saturating_sub(total_width).max(area.x);
-    if start_x > area.x
-        && let Some(path) = app.repository().map(|repository| {
-            let path = display_path(&repository.root);
-            if repository.is_local() || repository.branch.is_empty() {
-                path
-            } else {
-                format!("{path}:{}", repository.branch)
-            }
-        })
-    {
+    if start_x > area.x {
         let width = usize::from(start_x.saturating_sub(area.x));
-        frame.render_widget(
-            Paragraph::new(truncate_width(&format!(" {path}"), width))
-                .style(Style::default().fg(palette().soft)),
-            Rect::new(area.x, area.y, start_x.saturating_sub(area.x), 1),
-        );
+        let label = if app.fullscreen_agent_activation_pending() {
+            Some((FULLSCREEN_AGENT_HINT.to_owned(), palette().orange))
+        } else {
+            app.repository().map(|repository| {
+                let path = display_path(&repository.root);
+                let path = if repository.is_local() || repository.branch.is_empty() {
+                    path
+                } else {
+                    format!("{path}:{}", repository.branch)
+                };
+                (format!(" {path}"), palette().soft)
+            })
+        };
+        if let Some((label, color)) = label {
+            frame.render_widget(
+                Paragraph::new(truncate_width(&label, width)).style(Style::default().fg(color)),
+                Rect::new(area.x, area.y, start_x.saturating_sub(area.x), 1),
+            );
+        }
     }
     let mut x = start_x;
     let mut rects = Vec::new();
@@ -593,6 +611,9 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
 
 fn notice_is_error(notice: &str) -> bool {
     let notice = notice.to_ascii_lowercase();
+    if notice.starts_with("stashed agent ") {
+        return false;
+    }
     [
         "could not",
         "cannot",
