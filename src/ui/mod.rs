@@ -523,6 +523,9 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
 
 fn notice_is_error(notice: &str) -> bool {
     let notice = notice.to_ascii_lowercase();
+    if notice.starts_with("stashed agent ") {
+        return false;
+    }
     [
         "could not",
         "cannot",

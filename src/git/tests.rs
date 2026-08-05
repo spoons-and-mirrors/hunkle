@@ -485,7 +485,7 @@ fn parses_complete_multiline_commit_messages() {
         );
 
     assert_eq!(commits.len(), 1);
-    assert_eq!(commits[0].date, "07Aug 18:29");
+    assert_eq!(commits[0].date, "07 Aug 18:29");
     assert_eq!(commits[0].subject, "Subject");
     assert_eq!(
         commits[0].message,
@@ -531,9 +531,10 @@ fn loads_a_real_repository_with_a_merge_and_worktree_change() {
     );
     assert_eq!(repo.commits.len(), 4);
     assert_eq!(repo.history.len(), 4);
-    assert_eq!(repo.commits[0].date.len(), 11);
-    assert_eq!(repo.commits[0].date.as_bytes().get(5), Some(&b' '));
-    assert_eq!(repo.commits[0].date.as_bytes().get(8), Some(&b':'));
+    assert_eq!(repo.commits[0].date.len(), 12);
+    assert_eq!(repo.commits[0].date.as_bytes().get(2), Some(&b' '));
+    assert_eq!(repo.commits[0].date.as_bytes().get(6), Some(&b' '));
+    assert_eq!(repo.commits[0].date.as_bytes().get(9), Some(&b':'));
     assert!(
         repo.history[0]
             .refs

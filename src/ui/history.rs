@@ -78,12 +78,12 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
-    let search_area = Rect::new(table_area.x, table_area.y, table_area.width, 1);
+    let search_area = Rect::new(area.x, table_area.y, area.width, 1);
     let commit_table_area = Rect::new(
         table_area.x,
-        table_area.y.saturating_add(1),
+        table_area.y.saturating_add(2),
         table_area.width,
-        table_area.height.saturating_sub(1),
+        table_area.height.saturating_sub(2),
     );
     let graph_region = Rect::new(
         commit_table_area.x,
@@ -106,17 +106,26 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         .map(commit_graph_highlight);
     let mut offset = state.offset().min(visible.len().saturating_sub(1));
     if *scroll_to_selection && let Some(selected) = selected {
-        if selected < offset {
-            offset = selected;
-        } else if selected >= offset.saturating_add(viewport) {
-            offset = selected.saturating_add(1).saturating_sub(viewport);
-        }
+        offset = graph_scroll_offset(
+            offset,
+            selected,
+            visible.len(),
+            viewport,
+            search.current_match_position() == Some(selected),
+        );
     }
     *scroll_to_selection = false;
     *state.offset_mut() = offset;
+    let search_active = search.match_status().is_some();
+    let changes_width = column_widths[2];
     let rows = visible.iter().skip(offset).take(viewport).map(|index| {
         let commit = &repo.commits[*index];
-        graph_row(commit, summaries.get(&commit.oid))
+        graph_row(
+            commit,
+            summaries.get(&commit.oid),
+            changes_width,
+            search_active,
+        )
     });
     let author_label = if author_filter.active_count() == author_filter.entries().len() {
         "AUTHOR ▾".to_owned()
@@ -169,7 +178,7 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         .map(|index| {
             let left = graph_columns[index - 1];
             let right = graph_columns[index];
-            let splitter = Rect::new(
+            let splitter_line = Rect::new(
                 column_starts[index].saturating_sub(1),
                 commit_table_area.y,
                 1,
@@ -181,25 +190,21 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
                 } else {
                     palette().faint
                 })),
-                splitter,
+                splitter_line,
             );
             GraphColumnRegion {
                 left,
                 right,
                 left_width: column_widths[index - 1],
                 right_width: column_widths[index],
-                splitter,
+                splitter: Rect::new(splitter_line.x.saturating_sub(1), splitter_line.y, 2, 1),
             }
         })
         .collect::<Vec<_>>();
     if visible.is_empty() {
-        let message = if !search.input.is_empty() {
-            "No commits match the graph search"
-        } else {
-            "No commits match the author filter"
-        };
         frame.render_widget(
-            Paragraph::new(message).style(Style::default().fg(palette().faint)),
+            Paragraph::new("No commits match the author filter")
+                .style(Style::default().fg(palette().faint)),
             graph_region,
         );
     }
@@ -219,6 +224,27 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
     }
 }
 
+fn graph_scroll_offset(
+    offset: usize,
+    selected: usize,
+    len: usize,
+    viewport: usize,
+    center_selection: bool,
+) -> usize {
+    if center_selection {
+        return selected
+            .saturating_sub(viewport / 2)
+            .min(len.saturating_sub(viewport));
+    }
+    if selected < offset {
+        selected
+    } else if selected >= offset.saturating_add(viewport) {
+        selected.saturating_add(1).saturating_sub(viewport)
+    } else {
+        offset
+    }
+}
+
 fn draw_graph_search(frame: &mut Frame<'_>, area: Rect, search: &GraphSearch, focused: bool) {
     let input = &search.input;
     let mut text = input.text().to_owned();
@@ -229,7 +255,7 @@ fn draw_graph_search(frame: &mut Frame<'_>, area: Rect, search: &GraphSearch, fo
         Line::from(vec![
             Span::styled(" / ", Style::default().fg(palette().accent)),
             Span::styled(
-                "Search commits by description, date, or hash",
+                "Press Space and search by description, date, or hash",
                 Style::default().fg(palette().faint),
             ),
         ])
@@ -239,14 +265,45 @@ fn draw_graph_search(frame: &mut Frame<'_>, area: Rect, search: &GraphSearch, fo
             Span::styled(text, Style::default().fg(palette().ink)),
         ])
     };
+    let background = if focused {
+        palette().surface_alt
+    } else {
+        palette().panel
+    };
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(if focused {
-            palette().surface_alt
-        } else {
-            palette().panel
-        })),
+        Paragraph::new("").style(Style::default().bg(background)),
         area,
     );
+    let status = search
+        .match_status()
+        .map(|(current, total)| format!("{current}/{total}"));
+    let status_width = status
+        .as_ref()
+        .map_or(0, |status| status.len().min(usize::from(area.width)) as u16);
+    let status_right_padding = u16::from(status.is_some())
+        .saturating_mul(2)
+        .min(area.width.saturating_sub(status_width));
+    let input_width = area.width.saturating_sub(
+        status_width
+            .saturating_add(status_right_padding)
+            .saturating_add(u16::from(status.is_some())),
+    );
+    frame.render_widget(
+        Paragraph::new(line),
+        Rect::new(area.x, area.y, input_width, 1),
+    );
+    if let Some(status) = status {
+        frame.render_widget(
+            Paragraph::new(status).style(Style::default().fg(palette().muted)),
+            Rect::new(
+                area.right()
+                    .saturating_sub(status_width.saturating_add(status_right_padding)),
+                area.y,
+                status_width,
+                1,
+            ),
+        );
+    }
 }
 
 fn graph_column_widths(width: u16, graph_width: usize, settings: &Settings) -> [u16; 6] {
@@ -406,7 +463,12 @@ pub(super) fn draw_author_filter(
     targets
 }
 
-fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<'static> {
+fn graph_row(
+    commit: &Commit,
+    summary: Option<&crate::git::DiffSummary>,
+    changes_width: u16,
+    search_active: bool,
+) -> Row<'static> {
     let is_head = commit_is_head(commit);
     let graph = Line::from(
         commit
@@ -447,7 +509,7 @@ fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<
     ));
 
     let short_oid: String = commit.oid.chars().take(7).collect();
-    let changes = commit_changes(summary);
+    let changes = commit_changes(summary, changes_width);
     Row::new([
         Cell::from(graph),
         Cell::from(Line::from(description)),
@@ -456,7 +518,9 @@ fn graph_row(commit: &Commit, summary: Option<&crate::git::DiffSummary>) -> Row<
         Cell::from(commit.author.clone()).style(Style::default().fg(palette().muted)),
         Cell::from(short_oid).style(Style::default().fg(palette().muted)),
     ])
-    .style(if is_head {
+    .style(if search_active {
+        Style::default().bg(palette().surface_alt)
+    } else if is_head {
         Style::default().bg(commit_graph_highlight(commit))
     } else {
         Style::default()
@@ -498,21 +562,36 @@ fn blend_channel(background: u8, color: u8) -> u8 {
     ((u16::from(background) * 4 + u16::from(color)) / 5) as u8
 }
 
-fn commit_changes(summary: Option<&crate::git::DiffSummary>) -> Cell<'static> {
+fn commit_changes(summary: Option<&crate::git::DiffSummary>, width: u16) -> Cell<'static> {
     let Some(summary) = summary else {
         return Cell::from("…").style(Style::default().fg(palette().faint));
     };
+    let (additions, deletions) = commit_change_columns(summary, width);
     Cell::from(Line::from(vec![
-        Span::styled(
-            format!("+{}", summary.additions),
-            Style::default().fg(palette().green),
-        ),
+        Span::styled(additions, Style::default().fg(palette().green)),
         Span::raw(" "),
-        Span::styled(
-            format!("-{}", summary.deletions),
-            Style::default().fg(palette().red),
-        ),
+        Span::styled(deletions, Style::default().fg(palette().red)),
+        Span::raw(" "),
     ]))
+}
+
+fn commit_change_columns(summary: &crate::git::DiffSummary, width: u16) -> (String, String) {
+    const STAT_WIDTH: usize = 5;
+    let content_width = usize::from(width.saturating_sub(2));
+    let additions_width = (content_width / 2).min(STAT_WIDTH);
+    let deletions_width = content_width
+        .saturating_sub(additions_width)
+        .min(STAT_WIDTH);
+    let left_padding = content_width.saturating_sub(additions_width + deletions_width);
+    let additions = format!("+{}", summary.additions);
+    let deletions = format!("-{}", summary.deletions);
+    (
+        format!(
+            "{additions:>width$}",
+            width = left_padding + additions_width
+        ),
+        format!("{deletions:>deletions_width$}"),
+    )
 }
 
 fn ref_badge(label: &str, color: Color) -> Span<'static> {
@@ -580,13 +659,36 @@ mod tests {
         };
 
         assert_eq!(
-            Styled::style(&graph_row(&commit, None)).bg,
+            Styled::style(&graph_row(&commit, None, 11, false)).bg,
             Some(commit_graph_highlight(&commit))
         );
         assert_ne!(commit_graph_highlight(&commit), palette().add_bg);
 
         commit.refs = vec!["main".to_owned()];
-        assert_eq!(Styled::style(&graph_row(&commit, None)).bg, None);
+        assert_eq!(Styled::style(&graph_row(&commit, None, 11, false)).bg, None);
+        assert_eq!(
+            Styled::style(&graph_row(&commit, None, 11, true)).bg,
+            Some(palette().surface_alt)
+        );
+    }
+
+    #[test]
+    fn commit_changes_use_two_right_aligned_columns() {
+        let summary = crate::git::DiffSummary {
+            additions: 12,
+            deletions: 3,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            commit_change_columns(&summary, 12),
+            ("  +12".to_owned(), "   -3".to_owned())
+        );
+
+        let (additions, deletions) = commit_change_columns(&summary, 31);
+        let resized = format!("{additions} {deletions}");
+        assert_eq!(resized.len(), 30);
+        assert!(resized.ends_with("  +12    -3"));
     }
 
     #[test]
@@ -600,5 +702,16 @@ mod tests {
                 "columns overflowed width {width}: {widths:?}"
             );
         }
+    }
+
+    #[test]
+    fn search_navigation_keeps_the_selected_commit_centered_when_possible() {
+        assert_eq!(graph_scroll_offset(0, 50, 100, 11, true), 45);
+        assert_eq!(graph_scroll_offset(0, 50, 100, 10, true), 45);
+        assert_eq!(graph_scroll_offset(45, 2, 100, 11, true), 0);
+        assert_eq!(graph_scroll_offset(0, 98, 100, 11, true), 89);
+
+        assert_eq!(graph_scroll_offset(10, 12, 100, 11, false), 10);
+        assert_eq!(graph_scroll_offset(10, 25, 100, 11, false), 15);
     }
 }
