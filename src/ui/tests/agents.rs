@@ -41,7 +41,7 @@ fn agent_key(app: &App, index: usize) -> AgentKey {
 }
 
 #[test]
-fn shift_click_opens_the_live_agent_preview_modal() {
+fn control_click_opens_the_live_agent_preview_modal() {
     let directory = tempfile::tempdir().unwrap();
     run_git(directory.path(), &["init", "-b", "main"]);
     let mut app = App::new(directory.path().to_path_buf());
@@ -68,13 +68,13 @@ fn shift_click_opens_the_live_agent_preview_modal() {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: point.0,
         row: point.1,
-        modifiers: KeyModifiers::SHIFT,
+        modifiers: KeyModifiers::CONTROL,
     });
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Up(MouseButton::Left),
         column: point.0,
         row: point.1,
-        modifiers: KeyModifiers::SHIFT,
+        modifiers: KeyModifiers::CONTROL,
     });
     assert_eq!(app.mode, Mode::AgentPreview);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -83,13 +83,30 @@ fn shift_click_opens_the_live_agent_preview_modal() {
     assert!(screen.contains("AGENT PREVIEW"));
     assert!(screen.contains("Inspect the scheduler"));
     assert!(screen.contains("Conversation loaded"));
+    let overlay = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewModalOverlay)
+        .unwrap();
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentPreviewModalClose)
             .is_some()
     );
 
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: overlay.x,
+        row: overlay.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.mode, Mode::AgentPreview);
+
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
     assert_eq!(app.mode, Mode::Normal);
 }
 
@@ -793,7 +810,17 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
             request: 0,
         })
         .unwrap();
-    assert_eq!(request.height, 10);
+    assert_eq!(request.height, 12);
+    let request_row = |row: u16| {
+        let start = usize::from(row) * 49 + usize::from(request.x.saturating_add(1));
+        let end = usize::from(row) * 49 + usize::from(request.right());
+        terminal.backend().buffer().content[start..end]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    assert!(request_row(request.y + 2).trim().is_empty());
+    assert!(request_row(request.y + 6).trim().is_empty());
     let request_bottom =
         usize::from(request.bottom().saturating_sub(1)) * 49 + usize::from(request.x);
     assert_eq!(

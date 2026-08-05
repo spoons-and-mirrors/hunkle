@@ -619,6 +619,13 @@ impl App {
         if same_path(&current_executable, &executable) {
             return;
         }
+        if is_workspace_local_build(&current_executable) {
+            diagnostics::event(format!(
+                "local build handoff skipped; keeping executable={}",
+                current_executable.display()
+            ));
+            return;
+        }
         diagnostics::event(format!(
             "local build handoff queued executable={}",
             executable.display()
@@ -2597,6 +2604,15 @@ impl App {
             self.show_graph();
         }
     }
+}
+
+fn is_workspace_local_build(path: &Path) -> bool {
+    path.ends_with(
+        Path::new("target")
+            .join("hunkle-install")
+            .join("bin")
+            .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX)),
+    )
 }
 
 fn fetch_is_fresh(fetched_at: Option<&Instant>, now: Instant) -> bool {

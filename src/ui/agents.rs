@@ -846,6 +846,8 @@ fn draw_agent_preview_picker(
     }
 }
 
+const REQUEST_CARD_EXTRA_ROWS: usize = 2;
+
 fn build_request_transcript(
     message: &AgentUserMessage,
     width: usize,
@@ -866,6 +868,13 @@ fn build_request_transcript(
         let (lines, height) = if collapsed {
             if let Some(reasoning) = reasoning {
                 summary.insert(0, reasoning);
+                if request
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, AgentRequestPartPreview::Text(_)))
+                {
+                    summary.insert(1, Line::default());
+                }
             }
             summary.push(Line::styled(
                 format!("⌄ {hidden} more"),
@@ -873,12 +882,17 @@ fn build_request_transcript(
                     .fg(palette().cyan)
                     .add_modifier(Modifier::BOLD),
             ));
-            let height = summary.len().saturating_add(2);
+            let height = summary.len().saturating_add(REQUEST_CARD_EXTRA_ROWS);
             (summary, height)
         } else {
             let (lines, content_height) =
                 request_content(Some(request), width, request_live, spinner_frame);
-            (lines, content_height.max(1).saturating_add(2))
+            (
+                lines,
+                content_height
+                    .max(1)
+                    .saturating_add(REQUEST_CARD_EXTRA_ROWS),
+            )
         };
         blocks.push(TranscriptBlock {
             user: false,
@@ -898,13 +912,13 @@ fn build_request_transcript(
             user: false,
             lines,
             start: 0,
-            height: height.saturating_add(2),
+            height: height.saturating_add(REQUEST_CARD_EXTRA_ROWS),
             elapsed: None,
             request_count: 0,
             request: None,
             expandable: false,
         });
-        document_height = height.saturating_add(2);
+        document_height = height.saturating_add(REQUEST_CARD_EXTRA_ROWS);
     }
     (blocks, document_height)
 }
@@ -1021,7 +1035,7 @@ fn draw_transcript_card(
     }
     let content_offset = 1;
     let content_start = local_start.max(content_offset);
-    let content_end = local_end.min(block.height.saturating_sub(1));
+    let content_end = local_end.min(block.height.saturating_sub(content_offset));
     if content_start < content_end {
         let content = Rect::new(
             cards.x.saturating_add(2),
@@ -1071,14 +1085,31 @@ fn request_content(
     let mut lines = Vec::new();
     let mut height = 0;
     let mut reasoning_seen = false;
-    for part in &request.parts {
+    for (index, part) in request.parts.iter().enumerate() {
         let AgentRequestPartPreview::Activity(activity) = part else {
             let AgentRequestPartPreview::Text(text) = part else {
                 unreachable!();
             };
+            if index > 0
+                && request
+                    .parts
+                    .get(index - 1)
+                    .is_some_and(|part| matches!(part, AgentRequestPartPreview::Activity(_)))
+            {
+                lines.push(Line::default());
+                height += 1;
+            }
             let text_lines = styled_agent_text(text, width);
             height += text_lines.len().max(1);
             lines.extend(text_lines);
+            if request
+                .parts
+                .get(index + 1)
+                .is_some_and(|part| matches!(part, AgentRequestPartPreview::Activity(_)))
+            {
+                lines.push(Line::default());
+                height += 1;
+            }
             continue;
         };
         if matches!(activity, AgentActivityPreview::Reasoning) {
@@ -1144,11 +1175,13 @@ fn request_summary(
         .len()
         .saturating_sub(TEXT_ROWS)
         .saturating_add(tools.len().saturating_sub(TOOL_ROWS));
-    let lines = text
-        .into_iter()
-        .take(TEXT_ROWS)
-        .chain(tools.into_iter().take(TOOL_ROWS))
-        .collect();
+    let visible_text = text.into_iter().take(TEXT_ROWS).collect::<Vec<_>>();
+    let visible_tools = tools.into_iter().take(TOOL_ROWS).collect::<Vec<_>>();
+    let mut lines = visible_text;
+    if !lines.is_empty() && !visible_tools.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.extend(visible_tools);
     (lines, reasoning, hidden)
 }
 
@@ -1166,7 +1199,7 @@ fn reasoning_line(
     let mut spans = vec![
         Span::styled(prefix.to_owned(), Style::default().fg(palette().orange)),
         Span::styled(
-            "  reasoning",
+            " reasoning",
             Style::default()
                 .fg(palette().orange)
                 .add_modifier(Modifier::BOLD),
