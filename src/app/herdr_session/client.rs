@@ -274,6 +274,7 @@ pub(crate) struct SchedulerLaunchRequest {
 #[derive(Debug, Clone)]
 pub(crate) struct SchedulerLaunchResult {
     pub(crate) pane_id: Option<String>,
+    pub(crate) terminal_id: Option<String>,
     pub(crate) status: Result<AgentStatus, String>,
 }
 
@@ -317,8 +318,11 @@ pub(crate) fn scheduler_launch(request: SchedulerLaunchRequest) -> SchedulerLaun
     scheduler_launch_with(request, run_required_json)
 }
 
-pub(crate) fn scheduler_observe(pane_id: &str) -> SchedulerObserveResult {
-    scheduler_observe_with(pane_id, run_required_json)
+pub(crate) fn scheduler_observe(
+    pane_id: &str,
+    terminal_id: Option<&str>,
+) -> SchedulerObserveResult {
+    scheduler_observe_with(pane_id, terminal_id, run_required_json)
 }
 
 pub(crate) fn pane_visible_ansi(pane_id: &str) -> Result<String, String> {
@@ -348,6 +352,7 @@ fn scheduler_launch_with(
     mut runner: impl FnMut(&[OsString]) -> Result<Value, CommandError>,
 ) -> SchedulerLaunchResult {
     let mut pane_id = None;
+    let mut terminal_id = None;
     let status = (|| {
         let snapshot = runner(&["api".into(), "snapshot".into()])
             .map_err(|error| scheduler_command_error("workspace snapshot", error))?;
@@ -383,6 +388,9 @@ fn scheduler_launch_with(
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| "Herdr did not identify the created pane".to_owned())?;
+        let created_terminal = created
+            .pointer("/result/root_pane/terminal_id")
+            .and_then(Value::as_str);
         let start_args = [
             "agent".into(),
             "start".into(),
@@ -408,9 +416,18 @@ fn scheduler_launch_with(
                 Err(error) => return Err(scheduler_command_error("agent start", error)),
             }
         };
-        scheduler_agent_status(&started, &created_pane)
+        let started_agent = scheduler_agent(&started, &created_pane)
             .map_err(|error| format!("agent start: {error}"))?;
+        let started_terminal = started_agent.get("terminal_id").and_then(Value::as_str);
+        if let (Some(created), Some(started)) = (created_terminal, started_terminal)
+            && created != started
+        {
+            return Err(
+                "agent start: Herdr returned the agent in an unexpected terminal".to_owned(),
+            );
+        }
         pane_id = Some(created_pane.clone());
+        terminal_id = started_terminal.or(created_terminal).map(str::to_owned);
 
         // Herdr can report the agent ready just before its input loop accepts prompts.
         std::thread::sleep(Duration::from_millis(if cfg!(test) { 0 } else { 2_000 }));
@@ -447,7 +464,11 @@ fn scheduler_launch_with(
         scheduler_agent_status(&prompted, &created_pane)
             .map_err(|error| format!("agent prompt: {error}"))
     })();
-    SchedulerLaunchResult { pane_id, status }
+    SchedulerLaunchResult {
+        pane_id,
+        terminal_id,
+        status,
+    }
 }
 
 fn scheduler_command_error(stage: &str, error: CommandError) -> String {
@@ -508,7 +529,7 @@ fn scheduler_label(value: &str) -> String {
     label.chars().take(64).collect()
 }
 
-fn scheduler_agent_name(value: &str) -> String {
+pub(super) fn scheduler_agent_name(value: &str) -> String {
     let mut suffix = String::new();
     for character in value.chars() {
         let character = if character.is_ascii_alphanumeric() {
@@ -535,9 +556,31 @@ fn scheduler_agent_name(value: &str) -> String {
 
 fn scheduler_observe_with(
     pane_id: &str,
+    terminal_id: Option<&str>,
     mut json_runner: impl FnMut(&[OsString]) -> Result<Value, CommandError>,
 ) -> SchedulerObserveResult {
-    let get_args = ["agent".into(), "get".into(), pane_id.into()];
+    let current_pane = if let Some(terminal_id) = terminal_id {
+        let snapshot = match json_runner(&["api".into(), "snapshot".into()]) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return SchedulerObserveResult::Unavailable(error.message),
+        };
+        let (_, agents) = match parse_snapshot(&snapshot) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return SchedulerObserveResult::Unavailable(error),
+        };
+        let Some(agent) = agents
+            .into_iter()
+            .find(|agent| agent.terminal_id.as_deref() == Some(terminal_id))
+        else {
+            return SchedulerObserveResult::Missing(format!(
+                "agent terminal {terminal_id} not found"
+            ));
+        };
+        agent.pane_id
+    } else {
+        pane_id.to_owned()
+    };
+    let get_args = ["agent".into(), "get".into(), OsString::from(&current_pane)];
     let value = match json_runner(&get_args) {
         Ok(value) => value,
         Err(error) if error.code.as_deref() == Some("agent_not_found") => {
@@ -545,7 +588,7 @@ fn scheduler_observe_with(
         }
         Err(error) => return SchedulerObserveResult::Unavailable(error.message),
     };
-    match scheduler_agent_status(&value, pane_id) {
+    match scheduler_agent_status(&value, &current_pane) {
         Ok(status) => SchedulerObserveResult::Observed(status),
         Err(error) => return SchedulerObserveResult::Unavailable(error),
     }
@@ -2082,6 +2125,12 @@ fn parse_agent_pane(value: &Value, snapshot: &Value) -> Option<AgentPane> {
         workspace_id: pane.get("workspace_id")?.as_str()?.to_owned(),
         tab_id: pane.get("tab_id")?.as_str()?.to_owned(),
         pane_id: pane_id.clone(),
+        terminal_id: value
+            .get("terminal_id")
+            .and_then(Value::as_str)
+            .or_else(|| pane.get("terminal_id").and_then(Value::as_str))
+            .map(str::to_owned),
+        instance_name: value.get("name").and_then(Value::as_str).map(str::to_owned),
         cwd: pane
             .get("foreground_cwd")
             .and_then(Value::as_str)
@@ -3648,6 +3697,7 @@ mod tests {
         assert_eq!(agents[0].runtime.status, AgentStatus::Blocked);
         assert_eq!(agents[0].workspace_id, "pane-path");
         assert_eq!(agents[0].tab_id, "tab-3");
+        assert_eq!(agents[0].terminal_id.as_deref(), Some("term-3"));
         assert!(agents[0].focused);
         assert_eq!(agents[0].runtime.state_change_seq, 17);
         assert!(matches!(
@@ -3731,6 +3781,7 @@ mod tests {
                     4 | 6 => serde_json::json!({
                         "result": { "agent": {
                             "pane_id": "w7:p9",
+                            "terminal_id": "term_9",
                             "agent_status": if calls.len() == 4 { "idle" } else { "working" }
                         }}
                     }),
@@ -3745,6 +3796,7 @@ mod tests {
         );
 
         assert_eq!(result.pane_id.as_deref(), Some("w7:p9"));
+        assert_eq!(result.terminal_id.as_deref(), Some("term_9"));
         assert_eq!(result.status, Ok(AgentStatus::Working));
         assert_eq!(
             joined(&calls[1]),
@@ -3766,7 +3818,7 @@ mod tests {
     #[test]
     fn scheduler_observes_status_without_scraping_the_terminal() {
         let calls = RefCell::new(Vec::new());
-        let observed = scheduler_observe_with("w3:p4", |args| {
+        let observed = scheduler_observe_with("w3:p4", None, |args| {
             calls.borrow_mut().push(args.to_vec());
             Ok(serde_json::json!({
                 "result": { "agent": {
@@ -3783,7 +3835,39 @@ mod tests {
         assert_eq!(status, AgentStatus::Blocked);
         let calls = calls.into_inner();
         assert_eq!(calls, [["agent", "get", "w3:p4"].map(OsString::from)]);
-        let missing = scheduler_observe_with("w1:p2", |_| {
+        let calls = RefCell::new(Vec::new());
+        let moved = scheduler_observe_with("w3:p4", Some("term_4"), |args| {
+            calls.borrow_mut().push(args.to_vec());
+            Ok(if args[0] == "api" {
+                serde_json::json!({"result": {"snapshot": {
+                    "workspaces": [{"workspace_id": "w3", "label": "Scheduled"}],
+                    "agents": [{
+                        "agent": "opencode",
+                        "agent_status": "done",
+                        "pane_id": "w3:p9",
+                        "terminal_id": "term_4"
+                    }],
+                    "panes": [{
+                        "pane_id": "w3:p9",
+                        "tab_id": "w3:t2",
+                        "workspace_id": "w3"
+                    }],
+                    "layouts": []
+                }}})
+            } else {
+                serde_json::json!({"result": {"agent": {
+                    "pane_id": "w3:p9",
+                    "terminal_id": "term_4",
+                    "agent_status": "done"
+                }}})
+            })
+        });
+        assert!(matches!(
+            moved,
+            SchedulerObserveResult::Observed(AgentStatus::Done)
+        ));
+        assert_eq!(calls.into_inner()[1][2], OsString::from("w3:p9"));
+        let missing = scheduler_observe_with("w1:p2", None, |_| {
             Err(CommandError {
                 code: Some("agent_not_found".to_owned()),
                 message: "agent target not found".to_owned(),

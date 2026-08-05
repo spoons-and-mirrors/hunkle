@@ -688,10 +688,17 @@ impl App {
     }
 
     pub(crate) fn selected_scheduled_run_pane_id(&self) -> Option<String> {
-        self.scheduler
+        let run = self
+            .scheduler
             .selected_run_id
-            .and_then(|id| self.herdr.scheduled_runs().iter().find(|run| run.id == id))
-            .and_then(|run| run.pane_id.clone())
+            .and_then(|id| self.herdr.scheduled_runs().iter().find(|run| run.id == id))?;
+        let pane_id = run.pane_id.as_deref()?;
+        Some(
+            self.herdr
+                .scheduled_agent_pane_id(pane_id, run.terminal_id.as_deref())
+                .unwrap_or(pane_id)
+                .to_owned(),
+        )
     }
 
     fn open_selected_scheduled_run_pane(&mut self) {
@@ -706,12 +713,19 @@ impl App {
     }
 
     fn open_selected_scheduled_run_conversation(&mut self) {
-        let pane_id = self.selected_scheduled_run_pane_id();
-        let Some(pane_id) = pane_id else {
+        let target = self
+            .scheduler
+            .selected_run_id
+            .and_then(|id| self.herdr.scheduled_runs().iter().find(|run| run.id == id))
+            .and_then(|run| Some((run.pane_id.clone()?, run.terminal_id.clone())));
+        let Some((pane_id, terminal_id)) = target else {
             self.scheduler.error = Some("This run has no Herdr agent conversation".to_owned());
             return;
         };
-        let Some(index) = self.herdr.reveal_agent_index_for_pane(&pane_id) else {
+        let Some(index) = self
+            .herdr
+            .reveal_scheduled_agent_index(&pane_id, terminal_id.as_deref())
+        else {
             self.scheduler.error =
                 Some("This run's Herdr agent is no longer available in the Agents pane".to_owned());
             return;

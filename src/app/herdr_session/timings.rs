@@ -934,6 +934,8 @@ mod tests {
             workspace_id: "workspace".to_owned(),
             tab_id: "tab".to_owned(),
             pane_id: "pane".to_owned(),
+            terminal_id: Some("term-1".to_owned()),
+            instance_name: None,
             cwd: None,
             destination_cwd: None,
             focused: false,

@@ -133,6 +133,8 @@ pub(crate) struct AgentPane {
     pub(crate) workspace_id: String,
     pub(crate) tab_id: String,
     pub(crate) pane_id: String,
+    pub(crate) terminal_id: Option<String>,
+    pub(crate) instance_name: Option<String>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) destination_cwd: Option<PathBuf>,
     pub(crate) focused: bool,
@@ -147,6 +149,13 @@ pub(crate) struct AgentRuntime {
     timing_key: AgentTimingKey,
     session_timing_key: Option<AgentTimingKey>,
     state_change_seq: u64,
+}
+
+fn scheduled_agent_matches(agent: &AgentPane, pane_id: &str, terminal_id: Option<&str>) -> bool {
+    terminal_id.map_or_else(
+        || agent.pane_id == pane_id,
+        |terminal_id| agent.terminal_id.as_deref() == Some(terminal_id),
+    )
 }
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -371,7 +380,7 @@ pub(crate) struct HerdrSession {
     pub(crate) workspaces: Vec<HerdrWorkspace>,
     pub(crate) agents: Vec<AgentPane>,
     observed_agents: Vec<AgentPane>,
-    revealed_agent_pane_ids: HashSet<String>,
+    revealed_agent_keys: HashSet<AgentTimingKey>,
     pub(crate) agent_scroll: usize,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
@@ -461,7 +470,7 @@ impl HerdrSession {
             workspaces: Vec::new(),
             agents: Vec::new(),
             observed_agents: Vec::new(),
-            revealed_agent_pane_ids: HashSet::new(),
+            revealed_agent_keys: HashSet::new(),
             agent_scroll: 0,
             loading: false,
             error: None,
@@ -836,8 +845,12 @@ impl HerdrSession {
             .collect::<HashSet<_>>();
         self.stashed_pane_ids
             .retain(|pane_id| observed_panes.contains(pane_id.as_str()));
-        self.revealed_agent_pane_ids
-            .retain(|pane_id| observed_panes.contains(pane_id.as_str()));
+        let observed_keys = agents
+            .iter()
+            .map(|agent| &agent.runtime.timing_key)
+            .collect::<HashSet<_>>();
+        self.revealed_agent_keys
+            .retain(|key| observed_keys.contains(key));
         let pending_pane = self
             .pending_agent_stash
             .as_ref()
@@ -850,6 +863,7 @@ impl HerdrSession {
             })
             .collect::<Vec<_>>();
         self.observed_agents = agents.clone();
+        self.bind_legacy_scheduled_agents();
         let agents = if self.cross_workspace_agents || self.host_workspace_id.is_none() {
             agents
         } else {
@@ -857,7 +871,7 @@ impl HerdrSession {
                 .into_iter()
                 .filter(|agent| {
                     self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
-                        || self.revealed_agent_pane_ids.contains(&agent.pane_id)
+                        || self.revealed_agent_keys.contains(&agent.runtime.timing_key)
                 })
                 .collect()
         };
@@ -956,26 +970,85 @@ impl HerdrSession {
             .map(|agent| AgentKey(agent.runtime.timing_key.clone()))
     }
 
-    pub(crate) fn reveal_agent_index_for_pane(&mut self, pane_id: &str) -> Option<usize> {
+    pub(crate) fn scheduled_agent_pane_id(
+        &self,
+        pane_id: &str,
+        terminal_id: Option<&str>,
+    ) -> Option<&str> {
+        self.observed_agents
+            .iter()
+            .find(|agent| scheduled_agent_matches(agent, pane_id, terminal_id))
+            .map(|agent| agent.pane_id.as_str())
+    }
+
+    fn bind_legacy_scheduled_agents(&mut self) {
+        let Some(scheduler) = self.scheduler.as_ref() else {
+            return;
+        };
+        let bindings = scheduler
+            .runs
+            .iter()
+            .filter(|run| run.terminal_id.is_none())
+            .filter_map(|run| {
+                let pane_id = run.pane_id.as_deref()?;
+                let exact = self
+                    .observed_agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane_id);
+                let agent = exact.or_else(|| {
+                    let task = scheduler.tasks.iter().find(|task| task.id == run.task_id)?;
+                    let name = client::scheduler_agent_name(&format!(
+                        "Hunkle: {} #{}",
+                        task.title, task.id
+                    ));
+                    let mut candidates = self.observed_agents.iter().filter(|agent| {
+                        agent.instance_name.as_deref() == Some(&name)
+                            && agent
+                                .destination_cwd
+                                .as_deref()
+                                .or(agent.cwd.as_deref())
+                                .is_some_and(|path| {
+                                    crate::filesystem::same_path(path, &task.destination)
+                                })
+                    });
+                    let candidate = candidates.next()?;
+                    candidates.next().is_none().then_some(candidate)
+                })?;
+                Some((run.id, agent.pane_id.clone(), agent.terminal_id.clone()?))
+            })
+            .collect::<Vec<_>>();
+        let Some(scheduler) = self.scheduler.as_mut() else {
+            return;
+        };
+        for (run_id, pane_id, terminal_id) in bindings {
+            scheduler.bind_agent(run_id, pane_id, terminal_id);
+        }
+    }
+
+    pub(crate) fn reveal_scheduled_agent_index(
+        &mut self,
+        pane_id: &str,
+        terminal_id: Option<&str>,
+    ) -> Option<usize> {
         if let Some(index) = self
             .agents
             .iter()
-            .position(|agent| agent.pane_id == pane_id)
+            .position(|agent| scheduled_agent_matches(agent, pane_id, terminal_id))
         {
             return Some(index);
         }
-        if !self
+        let key = self
             .observed_agents
             .iter()
-            .any(|agent| agent.pane_id == pane_id)
-        {
-            return None;
-        }
-        self.revealed_agent_pane_ids.insert(pane_id.to_owned());
+            .find(|agent| scheduled_agent_matches(agent, pane_id, terminal_id))?
+            .runtime
+            .timing_key
+            .clone();
+        self.revealed_agent_keys.insert(key);
         self.apply_agent_snapshot_at(self.observed_agents.clone(), unix_time_ms());
         self.agents
             .iter()
-            .position(|agent| agent.pane_id == pane_id)
+            .position(|agent| scheduled_agent_matches(agent, pane_id, terminal_id))
     }
 
     pub(crate) fn agent_index(&self, key: &AgentKey) -> Option<usize> {
@@ -1373,7 +1446,7 @@ impl HerdrSession {
             host_pane_id,
             host_workspace_id: host_workspace_id.clone(),
             host_tab_id: host_tab_id.clone(),
-            allow_cross_workspace: self.cross_workspace_agents,
+            allow_cross_workspace: self.agent_is_allowed_cross_workspace(agent),
             saved_layout: self
                 .agent_layouts
                 .get(&agent.runtime.timing_key)
@@ -1406,6 +1479,10 @@ impl HerdrSession {
             });
         });
         Ok(())
+    }
+
+    fn agent_is_allowed_cross_workspace(&self, agent: &AgentPane) -> bool {
+        self.cross_workspace_agents || self.revealed_agent_keys.contains(&agent.runtime.timing_key)
     }
 
     fn prune_agent_layout_history(&mut self) {
@@ -1844,10 +1921,13 @@ mod latest_user_message_cache_tests {
     }
 
     fn agent(pane_id: &str, identity: AgentSessionIdentity) -> AgentPane {
+        let terminal_id = format!("term-{pane_id}");
         AgentPane {
             workspace_id: "w1".to_owned(),
             tab_id: "w1:t1".to_owned(),
             pane_id: pane_id.to_owned(),
+            terminal_id: Some(terminal_id.clone()),
+            instance_name: None,
             cwd: None,
             destination_cwd: None,
             focused: false,
@@ -1855,7 +1935,7 @@ mod latest_user_message_cache_tests {
                 name: "opencode".to_owned(),
                 session_name: None,
                 status: AgentStatus::Idle,
-                timing_key: AgentTimingKey::Pane(format!("opencode@{pane_id}")),
+                timing_key: AgentTimingKey::Terminal(format!("opencode@{terminal_id}")),
                 session_timing_key: Some(AgentTimingKey::Session(identity)),
                 state_change_seq: 1,
             },
@@ -1926,9 +2006,61 @@ mod latest_user_message_cache_tests {
         session.apply_agent_snapshot_at(vec![local, remote], unix_time_ms());
 
         assert_eq!(session.agents.len(), 1);
-        let index = session.reveal_agent_index_for_pane("w2:p1").unwrap();
+        let index = session
+            .reveal_scheduled_agent_index("w2:p1", Some("term-w2:p1"))
+            .unwrap();
         assert_eq!(session.agents[index].pane_id, "w2:p1");
+        assert!(session.agent_is_allowed_cross_workspace(&session.agents[index]));
         assert!(!session.cross_workspace_agents);
+
+        let mut moved = agent("w2:p9", identity("ses_remote"));
+        moved.workspace_id = "w2".to_owned();
+        moved.tab_id = "w2:t9".to_owned();
+        moved.terminal_id = Some("term-w2:p1".to_owned());
+        moved.runtime.timing_key = AgentTimingKey::Terminal("opencode@term-w2:p1".to_owned());
+        session.apply_agent_snapshot_at(vec![moved], unix_time_ms());
+
+        assert_eq!(
+            session.scheduled_agent_pane_id("w2:p1", Some("term-w2:p1")),
+            Some("w2:p9")
+        );
+        assert!(session.agent_is_allowed_cross_workspace(&session.agents[0]));
+    }
+
+    #[test]
+    fn binds_a_legacy_scheduled_run_to_its_stable_terminal() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.scheduler = Some(scheduler::SchedulerService::open(None).unwrap());
+        let scheduler = session.scheduler.as_mut().unwrap();
+        scheduler.tasks.push(scheduler::ScheduledTask {
+            id: 7,
+            title: "Nightly review".to_owned(),
+            description: String::new(),
+            prompt: "Review".to_owned(),
+            destination: PathBuf::from("/repo"),
+            repository: "repo".to_owned(),
+            branch: "main".to_owned(),
+            enabled: true,
+            interval_minutes: 60,
+        });
+        scheduler.runs.push(scheduler::ScheduledRun {
+            id: 9,
+            task_id: 7,
+            status: scheduler::ScheduledRunStatus::Completed,
+            pane_id: Some("departed:pane".to_owned()),
+            terminal_id: None,
+            error: None,
+        });
+        let mut remote = agent("w2:p9", identity("ses_remote"));
+        remote.workspace_id = "w2".to_owned();
+        remote.cwd = Some(PathBuf::from("/repo"));
+        remote.instance_name = Some(client::scheduler_agent_name("Hunkle: Nightly review #7"));
+
+        session.apply_agent_snapshot_at(vec![remote], unix_time_ms());
+
+        let run = &session.scheduler.as_ref().unwrap().runs[0];
+        assert_eq!(run.pane_id.as_deref(), Some("w2:p9"));
+        assert_eq!(run.terminal_id.as_deref(), Some("term-w2:p9"));
     }
 
     #[test]
@@ -1980,6 +2112,8 @@ mod stash_flow_tests {
             workspace_id: "w1".to_owned(),
             tab_id: "w1:t1".to_owned(),
             pane_id: "w1:p2".to_owned(),
+            terminal_id: Some("term-2".to_owned()),
+            instance_name: None,
             cwd: Some(PathBuf::from("/code/hunkle")),
             destination_cwd: Some(PathBuf::from("/code/hunkle")),
             focused: false,
@@ -2133,6 +2267,8 @@ mod layout_tests {
                 workspace_id: "w1".to_owned(),
                 tab_id: "w1:t2".to_owned(),
                 pane_id: "w1:p2".to_owned(),
+                terminal_id: Some("term-2".to_owned()),
+                instance_name: None,
                 cwd: None,
                 destination_cwd: None,
                 focused: false,
@@ -2170,6 +2306,8 @@ mod layout_tests {
             workspace_id: "w1".to_owned(),
             tab_id: "w1:t2".to_owned(),
             pane_id: "w1:p2".to_owned(),
+            terminal_id: Some("term-2".to_owned()),
+            instance_name: None,
             cwd: None,
             destination_cwd: None,
             focused: false,
@@ -2201,6 +2339,8 @@ mod layout_tests {
             workspace_id: "w1".to_owned(),
             tab_id: "w1:t1".to_owned(),
             pane_id: "w1:p2".to_owned(),
+            terminal_id: Some("term-2".to_owned()),
+            instance_name: None,
             cwd: Some(PathBuf::from("/code/hunkle")),
             destination_cwd: Some(PathBuf::from("/code/hunkle")),
             focused: false,
