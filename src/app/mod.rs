@@ -403,7 +403,7 @@ impl App {
     }
 
     pub(crate) fn workspace_loading_initial_state(&self) -> bool {
-        self.initial_pane_pending && self.mode == Mode::Normal
+        self.repository().is_none() && self.mode == Mode::Normal
     }
 
     pub(crate) fn visible_view(&self) -> View {

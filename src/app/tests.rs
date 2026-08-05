@@ -620,16 +620,18 @@ fn graph_can_be_hidden_after_returning_from_a_commit_diff() {
 }
 
 #[test]
-fn background_startup_selects_the_pane_after_repository_details_load() {
+fn background_startup_shows_the_bootstrap_before_selecting_the_final_pane() {
     let clean_directory = tempfile::tempdir().unwrap();
     initialize_repository(clean_directory.path());
     let mut clean_app = App::opening(clean_directory.path().to_path_buf());
     assert_eq!(clean_app.mode, Mode::Normal);
     assert!(clean_app.workspace_loading_initial_state());
+    wait_for_state(&mut clean_app, |app| app.repository().is_some());
+    assert!(!clean_app.workspace_loading_initial_state());
+    assert_eq!(clean_app.changes.pane, LeftPane::Files);
     wait_for_state(&mut clean_app, |app| {
         app.repository().is_some_and(|repo| repo.details_ready)
     });
-    assert!(!clean_app.workspace_loading_initial_state());
     assert_eq!(clean_app.changes.pane, LeftPane::Files);
 
     let dirty_directory = tempfile::tempdir().unwrap();
@@ -638,11 +640,24 @@ fn background_startup_selects_the_pane_after_repository_details_load() {
     let mut dirty_app = App::opening(dirty_directory.path().to_path_buf());
     assert_eq!(dirty_app.mode, Mode::Normal);
     assert!(dirty_app.workspace_loading_initial_state());
+    wait_for_state(&mut dirty_app, |app| app.repository().is_some());
+    assert!(!dirty_app.workspace_loading_initial_state());
+    assert_eq!(dirty_app.changes.pane, LeftPane::Files);
     wait_for_state(&mut dirty_app, |app| {
         app.repository().is_some_and(|repo| repo.details_ready)
     });
-    assert!(!dirty_app.workspace_loading_initial_state());
     assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
+}
+
+#[test]
+fn deferred_initial_pane_selection_does_not_hide_an_open_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+
+    app.initial_pane_pending = true;
+
+    assert!(!app.workspace_loading_initial_state());
 }
 
 #[test]
