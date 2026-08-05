@@ -87,16 +87,12 @@ pub(crate) struct ScheduledRun {
 
 type State = (Vec<ScheduledTask>, Vec<ScheduledRun>);
 type Update = Result<State, String>;
-type Launcher<'a> = dyn FnMut(SchedulerLaunchRequest) -> SchedulerLaunchResult + 'a;
-type Observer<'a> = dyn FnMut(&str) -> SchedulerObserveResult + 'a;
-
 pub(crate) struct SchedulerService {
     pub(crate) tasks: Vec<ScheduledTask>,
     pub(crate) runs: Vec<ScheduledRun>,
     commands: Sender<Command>,
     updates: Receiver<Update>,
     worker: Option<JoinHandle<()>>,
-    error: Option<String>,
 }
 
 impl SchedulerService {
@@ -120,7 +116,6 @@ impl SchedulerService {
             commands,
             updates,
             worker: Some(worker),
-            error: None,
         })
     }
 
@@ -157,8 +152,9 @@ impl SchedulerService {
         self.send(Command::Refresh(id))
     }
 
-    pub(crate) fn poll_completions(&mut self) -> bool {
+    pub(crate) fn poll_completions(&mut self) -> (bool, Option<String>) {
         let mut changed = false;
+        let mut error = None;
         while let Ok(update) = self.updates.try_recv() {
             match update {
                 Ok((tasks, runs)) => {
@@ -166,14 +162,10 @@ impl SchedulerService {
                     self.runs = runs;
                     changed = true;
                 }
-                Err(error) => self.error = Some(error),
+                Err(update_error) => error = Some(update_error),
             }
         }
-        changed
-    }
-
-    pub(crate) fn take_error(&mut self) -> Option<String> {
-        self.error.take()
+        (changed, error)
     }
 
     pub(crate) fn shutdown(&mut self) {
@@ -358,7 +350,11 @@ fn retain_history(db: &Connection, task_id: i64) -> Result<(), String> {
     Ok(())
 }
 
-fn execute_claim(db: &Connection, claim: Claim, launch: &mut Launcher) -> Result<(), String> {
+fn execute_claim(
+    db: &Connection,
+    claim: Claim,
+    launch: &mut impl FnMut(SchedulerLaunchRequest) -> SchedulerLaunchResult,
+) -> Result<(), String> {
     if let Err(error) = validate_destination(&claim.destination) {
         return fail_run(db, claim.run_id, &error);
     }
@@ -367,22 +363,24 @@ fn execute_claim(db: &Connection, claim: Claim, launch: &mut Launcher) -> Result
         label: format!("Hunkle: {} #{}", claim.title, claim.task_id),
         prompt: claim.prompt,
     });
-    let status = if result.error.is_some() && !result.agent_started {
-        ScheduledRunStatus::Failed
-    } else if result.error.is_some() {
-        ScheduledRunStatus::Unknown
-    } else {
-        agent_status(result.status)
+    let (status, error) = match result.status {
+        Ok(status) => (agent_status(status), None),
+        Err(error) if result.pane_id.is_some() => (ScheduledRunStatus::Unknown, Some(error)),
+        Err(error) => (ScheduledRunStatus::Failed, Some(error)),
     };
     db.execute(
         "UPDATE scheduled_runs SET status = ?2, pane_id = ?3, error = ?4 WHERE id = ?1",
-        params![claim.run_id, status.text(), result.pane_id, result.error],
+        params![claim.run_id, status.text(), result.pane_id, error],
     )
     .map_err(db_error)?;
     Ok(())
 }
 
-fn refresh(db: &Connection, requested: Option<i64>, observe: &mut Observer) -> Result<(), String> {
+fn refresh(
+    db: &Connection,
+    requested: Option<i64>,
+    observe: &mut impl FnMut(&str) -> SchedulerObserveResult,
+) -> Result<(), String> {
     let mut statement = db
         .prepare("SELECT id, pane_id FROM scheduled_runs WHERE (?1 IS NULL AND status IN ('working', 'blocked', 'unknown') AND pane_id IS NOT NULL) OR id = ?1")
         .map_err(db_error)?;
@@ -495,21 +493,29 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
     db.busy_timeout(Duration::from_secs(5)).map_err(db_error)?;
     db.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(db_error)?;
-    let version = db
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    let version = tx
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .map_err(db_error)?;
     let sql = match version {
         0 => "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0), next_run_ms INTEGER NOT NULL);
               CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
-              CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id); PRAGMA user_version = 2;",
+              CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id);",
         1 => "ALTER TABLE scheduled_runs RENAME TO scheduled_runs_v1;
               CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
               INSERT INTO scheduled_runs (id, task_id, scheduled_for_ms, status, created_at_ms, pane_id, output, error) SELECT id, task_id, scheduled_for_ms, status, created_at_ms, pane_id, output, error FROM scheduled_runs_v1 WHERE task_id IS NOT NULL;
-              DROP TABLE scheduled_runs_v1; CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id); PRAGMA user_version = 2;",
-        2 => return Ok(()),
+              DROP TABLE scheduled_runs_v1; CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id);",
+        2 => "",
         _ => return Err(format!("scheduler database version {version} is newer than supported")),
     };
-    db.execute_batch(sql).map_err(db_error)
+    tx.execute_batch(sql).map_err(db_error)?;
+    if version < 2 {
+        tx.execute_batch("PRAGMA user_version = 2;")
+            .map_err(db_error)?;
+    }
+    tx.commit().map_err(db_error)
 }
 
 fn recover_stale_launches(db: &Connection, now: i64) -> Result<(), String> {
@@ -557,9 +563,10 @@ fn decode_path(bytes: Vec<u8>) -> rusqlite::Result<PathBuf> {
 }
 
 fn load_state(db: &Connection) -> Result<State, String> {
-    let mut statement = db.prepare("SELECT id, title, destination, repository, branch, enabled, interval_minutes FROM scheduled_tasks ORDER BY id").map_err(db_error)?;
-    let tasks = statement
-        .query_map([], |row| {
+    let tasks = query_all(
+        db,
+        "SELECT id, title, destination, repository, branch, enabled, interval_minutes FROM scheduled_tasks ORDER BY id",
+        |row| {
             Ok(ScheduledTask {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -569,13 +576,12 @@ fn load_state(db: &Connection) -> Result<State, String> {
                 enabled: row.get(5)?,
                 interval_minutes: row.get(6)?,
             })
-        })
-        .map_err(db_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_error)?;
-    let mut statement = db.prepare("SELECT id, task_id, status, output, error FROM scheduled_runs ORDER BY created_at_ms DESC, id DESC").map_err(db_error)?;
-    let runs = statement
-        .query_map([], |row| {
+        },
+    )?;
+    let runs = query_all(
+        db,
+        "SELECT id, task_id, status, output, error FROM scheduled_runs ORDER BY created_at_ms DESC, id DESC",
+        |row| {
             Ok(ScheduledRun {
                 id: row.get(0)?,
                 task_id: row.get(1)?,
@@ -583,11 +589,22 @@ fn load_state(db: &Connection) -> Result<State, String> {
                 output: bounded_output(&row.get::<_, String>(3)?),
                 error: row.get(4)?,
             })
-        })
-        .map_err(db_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_error)?;
+        },
+    )?;
     Ok((tasks, runs))
+}
+
+fn query_all<T>(
+    db: &Connection,
+    sql: &str,
+    map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Vec<T>, String> {
+    let mut statement = db.prepare(sql).map_err(db_error)?;
+    statement
+        .query_map([], map)
+        .map_err(db_error)?
+        .collect::<Result<_, _>>()
+        .map_err(db_error)
 }
 
 #[cfg(test)]
@@ -608,9 +625,7 @@ mod tests {
         assert!(claim(&mut second, None, 250_000).unwrap().is_none());
         execute_claim(&first, run, &mut |_| SchedulerLaunchResult {
             pane_id: Some("w1:p1".into()),
-            agent_started: true,
-            status: AgentStatus::Working,
-            error: None,
+            status: Ok(AgentStatus::Working),
         })
         .unwrap();
         refresh(&first, None, &mut |_| {

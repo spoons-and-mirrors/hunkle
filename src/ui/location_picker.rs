@@ -119,16 +119,9 @@ pub(super) fn draw_location_picker(
             palette().surface_alt
         };
         match &item.kind {
-            LocationPickerRowKind::Location { branch } => draw_location_row(
-                frame,
-                rect,
-                &item.label,
-                &item.detail,
-                branch.as_deref(),
-                item.current,
-                item.stats,
-                background,
-            ),
+            LocationPickerRowKind::Location { branch } => {
+                draw_location_row(frame, rect, item, branch.as_deref(), background);
+            }
             LocationPickerRowKind::Choice => draw_choice_row(frame, rect, item, background),
         }
         targets.push((item.target.clone(), rect));
@@ -244,15 +237,11 @@ fn draw_choice_row(frame: &mut Frame<'_>, rect: Rect, item: &LocationPickerRow, 
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_location_row(
     frame: &mut Frame<'_>,
     area: Rect,
-    label: &str,
-    path: &str,
+    item: &LocationPickerRow,
     branch: Option<&str>,
-    current: bool,
-    stats_value: Option<(u64, u64)>,
     background: Color,
 ) {
     fill(frame, area, background);
@@ -280,15 +269,15 @@ fn draw_location_row(
     let path_area = Rect::new(branch_area.right(), area.y, path_width, 1);
     frame.render_widget(
         Paragraph::new(location_picker_label_line(
-            label,
-            current,
+            &item.label,
+            item.current,
             None,
             usize::from(name.width),
         ))
         .style(Style::default().bg(background)),
         name,
     );
-    if let Some((additions, deletions)) = stats_value {
+    if let Some((additions, deletions)) = item.stats {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
@@ -310,7 +299,7 @@ fn draw_location_row(
         );
     }
     frame.render_widget(
-        Paragraph::new(truncate_start_width(path, usize::from(path_width)))
+        Paragraph::new(truncate_start_width(&item.detail, usize::from(path_width)))
             .alignment(Alignment::Right)
             .style(Style::default().fg(palette().muted).bg(background)),
         path_area,

@@ -32,7 +32,7 @@ impl SchedulerDestinationCard {
         )
     }
 
-    pub(crate) fn value<'a>(self, destination: &'a SchedulerDestination) -> &'a str {
+    pub(crate) fn value(self, destination: &SchedulerDestination) -> &str {
         match self {
             Self::Repository => &destination.repository,
             Self::Worktree => &destination.worktree,
@@ -141,7 +141,6 @@ impl ScheduledTaskComposer {
         self.destination_card = card;
         self.destination_picker_open = true;
         self.picker.query.clear();
-        self.picker.query.focus();
         let candidates = self.destination_candidates();
         let selected = self.destinations.get(self.destination).and_then(|current| {
             candidates
@@ -154,7 +153,6 @@ impl ScheduledTaskComposer {
 
     fn close_destination_picker(&mut self) {
         self.destination_picker_open = false;
-        self.picker.query.clear();
     }
 
     fn update_destination_picker(&mut self, delta: Option<isize>) {
@@ -302,13 +300,17 @@ impl App {
     }
 
     fn select_default_scheduled_run(&mut self) {
-        let runs = self.scheduled_runs_for_selected_task();
-        if self
-            .scheduler
-            .selected_run_id
-            .is_none_or(|id| !runs.iter().any(|run| run.id == id))
+        let task_id = self.scheduler.selected_task_id;
+        let runs = self.herdr.scheduled_runs();
+        let selected = self.scheduler.selected_run_id;
+        if !runs
+            .iter()
+            .any(|run| Some(run.task_id) == task_id && Some(run.id) == selected)
         {
-            self.scheduler.selected_run_id = runs.first().map(|run| run.id);
+            self.scheduler.selected_run_id = runs
+                .iter()
+                .find(|run| Some(run.task_id) == task_id)
+                .map(|run| run.id);
         }
     }
 
@@ -334,9 +336,10 @@ impl App {
 
     pub(crate) fn select_scheduled_run(&mut self, id: i64) {
         if self
-            .scheduled_runs_for_selected_task()
+            .herdr
+            .scheduled_runs()
             .iter()
-            .any(|run| run.id == id)
+            .any(|run| Some(run.task_id) == self.scheduler.selected_task_id && run.id == id)
         {
             self.scheduler.selected_run_id = Some(id);
             self.scheduler.runs_focused = true;
@@ -347,10 +350,7 @@ impl App {
     pub(crate) fn activate_scheduler_target(&mut self, target: SchedulerHitTarget) {
         match target {
             SchedulerHitTarget::Close => self.close_scheduler(),
-            SchedulerHitTarget::Back => {
-                self.scheduler.composer = None;
-                self.scheduler.surface = SchedulerSurface::Tasks;
-            }
+            SchedulerHitTarget::Back => self.cancel_scheduled_task(),
             SchedulerHitTarget::New => self.begin_scheduled_task(),
             SchedulerHitTarget::Save => self.save_scheduled_task(),
             SchedulerHitTarget::Cancel => self.cancel_scheduled_task(),
@@ -366,7 +366,6 @@ impl App {
             SchedulerHitTarget::DestinationCard(card) => {
                 if let Some(composer) = self.scheduler.composer.as_mut() {
                     composer.field = SchedulerField::Destination;
-                    composer.destination_card = card;
                     if composer.destination_picker_open && composer.destination_card == card {
                         composer.close_destination_picker();
                     } else {
@@ -379,7 +378,6 @@ impl App {
                     && index < composer.destinations.len()
                 {
                     composer.destination = index;
-                    composer.field = SchedulerField::Destination;
                     composer.close_destination_picker();
                 }
             }
@@ -442,13 +440,10 @@ impl App {
             composer.focus(composer.field.next(key.code == KeyCode::BackTab));
             return;
         }
-        if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.save_scheduled_task();
-            return;
-        }
         let field = self.scheduler.composer.as_ref().unwrap().field;
-        if key.code == KeyCode::Enter
-            && !matches!(field, SchedulerField::Prompt | SchedulerField::Destination)
+        if (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
+            || (key.code == KeyCode::Enter
+                && !matches!(field, SchedulerField::Prompt | SchedulerField::Destination))
         {
             self.save_scheduled_task();
             return;
@@ -464,17 +459,16 @@ impl App {
         let prompt_width =
             (field == SchedulerField::Prompt).then(|| self.scheduler_prompt_size(5).0);
         let composer = self.scheduler.composer.as_mut().unwrap();
-        if field == SchedulerField::Prompt {
+        let handled = if field == SchedulerField::Prompt {
             match key.code {
                 KeyCode::Enter => composer.prompt.insert_char('\n'),
                 KeyCode::Up => composer.prompt.move_up(prompt_width.unwrap()),
                 KeyCode::Down => composer.prompt.move_down(prompt_width.unwrap()),
                 _ => _ = composer.prompt.handle_edit_key(key),
             }
-            self.scheduler.error = None;
-            self.sync_scheduler_prompt_scroll();
+            true
         } else if field == SchedulerField::Schedule {
-            let handled = match key.code {
+            match key.code {
                 KeyCode::Char(character)
                     if character.is_ascii_digit()
                         && !key
@@ -486,12 +480,15 @@ impl App {
                 }
                 KeyCode::Char(_) => false,
                 _ => composer.schedule.handle_edit_key(key) != EditOutcome::Unhandled,
-            };
-            if handled {
-                self.scheduler.error = None;
             }
-        } else if composer.input_mut(field).handle_edit_key(key) != EditOutcome::Unhandled {
+        } else {
+            composer.input_mut(field).handle_edit_key(key) != EditOutcome::Unhandled
+        };
+        if handled {
             self.scheduler.error = None;
+        }
+        if field == SchedulerField::Prompt {
+            self.sync_scheduler_prompt_scroll();
         }
     }
 
@@ -517,12 +514,9 @@ impl App {
             KeyCode::Enter => composer.close_destination_picker(),
             KeyCode::Down => composer.update_destination_picker(Some(1)),
             KeyCode::Up => composer.update_destination_picker(Some(-1)),
-            KeyCode::PageDown => {
-                composer.picker.move_selection_page(1);
-                composer.update_destination_picker(Some(0));
-            }
-            KeyCode::PageUp => {
-                composer.picker.move_selection_page(-1);
+            KeyCode::PageDown | KeyCode::PageUp => {
+                let delta = if key.code == KeyCode::PageDown { 1 } else { -1 };
+                composer.picker.move_selection_page(delta);
                 composer.update_destination_picker(Some(0));
             }
             _ => {
@@ -611,11 +605,11 @@ impl App {
     }
 
     pub(crate) fn selected_scheduled_task(&self) -> Option<&ScheduledTask> {
-        let selected = self.scheduler.selected_task_id;
+        let selected = self.scheduler.selected_task_id?;
         self.herdr
             .scheduled_tasks()
             .iter()
-            .find(|task| Some(task.id) == selected)
+            .find(|task| task.id == selected)
     }
 
     fn toggle_selected_scheduled_task(&mut self) {
@@ -625,16 +619,14 @@ impl App {
         else {
             return;
         };
-        let result = self.herdr.toggle_scheduled_task(id, enabled);
-        self.scheduler.error = result.err();
+        self.scheduler.error = self.herdr.toggle_scheduled_task(id, enabled).err();
     }
 
     fn run_selected_scheduled_task(&mut self) {
         let Some(id) = self.selected_scheduled_task().map(|task| task.id) else {
             return;
         };
-        let result = self.herdr.run_scheduled_task_now(id);
-        self.scheduler.error = result.err();
+        self.scheduler.error = self.herdr.run_scheduled_task_now(id).err();
     }
 
     fn delete_selected_scheduled_task(&mut self) {
@@ -655,46 +647,42 @@ impl App {
         let Some(id) = self.scheduler.selected_run_id else {
             return;
         };
-        let result = self.herdr.refresh_scheduled_run(id);
-        self.scheduler.error = result.err();
+        self.scheduler.error = self.herdr.refresh_scheduled_run(id).err();
     }
 
     fn move_scheduler_selection(&mut self, delta: isize) {
-        let runs = self.scheduler.runs_focused;
-        let ids = if runs {
-            self.scheduled_runs_for_selected_task()
-                .iter()
-                .map(|run| run.id)
-                .collect::<Vec<_>>()
-        } else {
-            self.herdr
-                .scheduled_tasks()
-                .iter()
-                .map(|task| task.id)
-                .collect()
+        let next = |current: usize, len: usize| {
+            current
+                .saturating_add_signed(delta)
+                .min(len.saturating_sub(1))
         };
-        let selected = if runs {
-            self.scheduler.selected_run_id
-        } else {
-            self.scheduler.selected_task_id
-        };
-        let current = selected
-            .and_then(|id| ids.iter().position(|item| *item == id))
-            .unwrap_or(0);
-        let next = current
-            .saturating_add_signed(delta)
-            .min(ids.len().saturating_sub(1));
-        if let Some(id) = ids.get(next).copied() {
-            if runs {
-                self.scheduler.selected_run_id = Some(id);
+        if self.scheduler.runs_focused {
+            let runs = self.scheduled_runs_for_selected_task();
+            let current = self
+                .scheduler
+                .selected_run_id
+                .and_then(|id| runs.iter().position(|run| run.id == id))
+                .unwrap_or(0);
+            let next = next(current, runs.len());
+            if let Some(run) = runs.get(next) {
+                self.scheduler.selected_run_id = Some(run.id);
                 self.scheduler.output_scroll = 0;
                 self.scheduler.run_scroll = next;
-            } else {
-                self.select_scheduled_task(id);
-                self.scheduler.task_scroll = next;
-                if !self.layout_profile().is_single() {
-                    self.scheduler.surface = SchedulerSurface::Tasks;
-                }
+            }
+            return;
+        }
+        let tasks = self.herdr.scheduled_tasks();
+        let current = self
+            .scheduler
+            .selected_task_id
+            .and_then(|id| tasks.iter().position(|task| task.id == id))
+            .unwrap_or(0);
+        let next = next(current, tasks.len());
+        if let Some(id) = tasks.get(next).map(|task| task.id) {
+            self.select_scheduled_task(id);
+            self.scheduler.task_scroll = next;
+            if !self.layout_profile().is_single() {
+                self.scheduler.surface = SchedulerSurface::Tasks;
             }
         }
     }

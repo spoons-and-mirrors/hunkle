@@ -10,6 +10,10 @@ fn destination(path: &str, repository: &str, branch: &str, worktree: &str) -> Sc
     }
 }
 
+fn scheduler_rect(app: &App, target: SchedulerHitTarget) -> Option<Rect> {
+    app.regions.hit_target_rect(HitTarget::Scheduler(target))
+}
+
 #[test]
 fn schedule_header_control_is_herdr_gated() {
     let directory = tempfile::tempdir().unwrap();
@@ -38,15 +42,12 @@ fn narrow_scheduler_uses_semantic_new_target_and_shared_composer() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
     enable_herdr(&mut app);
-    app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+    app.open_scheduler();
     let mut terminal = Terminal::new(TestBackend::new(50, 30)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let new_rect = app
-        .regions
-        .hit_target_rect(HitTarget::Scheduler(SchedulerHitTarget::New))
-        .unwrap();
-    click(&mut app, new_rect.x, new_rect.y);
+    assert!(scheduler_rect(&app, SchedulerHitTarget::New).is_some());
+    app.begin_scheduled_task();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let text = screen_text(&terminal);
@@ -65,27 +66,20 @@ fn scheduler_prompt_is_a_five_row_expandable_editor() {
     let mut terminal = Terminal::new(TestBackend::new(120, 50)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let prompt = app
-        .regions
-        .hit_target_rect(HitTarget::Scheduler(SchedulerHitTarget::Field(
-            SchedulerField::Prompt,
-        )))
-        .unwrap();
-    assert_eq!(prompt.height, 5);
-
-    let expand = app
-        .regions
-        .hit_target_rect(HitTarget::Scheduler(SchedulerHitTarget::PromptExpand))
-        .unwrap();
-    click(&mut app, expand.x, expand.y);
+    assert_eq!(
+        scheduler_rect(&app, SchedulerHitTarget::Field(SchedulerField::Prompt))
+            .unwrap()
+            .height,
+        5
+    );
+    app.activate_scheduler_target(SchedulerHitTarget::PromptExpand);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let prompt = app
-        .regions
-        .hit_target_rect(HitTarget::Scheduler(SchedulerHitTarget::Field(
-            SchedulerField::Prompt,
-        )))
-        .unwrap();
-    assert_eq!(prompt.height, 20);
+    assert_eq!(
+        scheduler_rect(&app, SchedulerHitTarget::Field(SchedulerField::Prompt))
+            .unwrap()
+            .height,
+        20
+    );
     assert!(screen_text(&terminal).contains("COLLAPSE Ctrl+E"));
 }
 
@@ -104,29 +98,23 @@ fn scheduler_destination_reuses_repository_worktree_and_branch_cards() {
     let mut terminal = Terminal::new(TestBackend::new(120, 50)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let repository = app
-        .regions
-        .hit_target_rect(HitTarget::Scheduler(SchedulerHitTarget::DestinationCard(
-            SchedulerDestinationCard::Repository,
-        )))
-        .unwrap();
-    click(&mut app, repository.x, repository.y + 1);
+    assert!(
+        scheduler_rect(
+            &app,
+            SchedulerHitTarget::DestinationCard(SchedulerDestinationCard::Repository)
+        )
+        .is_some()
+    );
+    app.activate_scheduler_target(SchedulerHitTarget::DestinationCard(
+        SchedulerDestinationCard::Repository,
+    ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(screen_text(&terminal).contains("Search repositories..."));
-    for character in "beta".chars() {
-        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
-    }
+    app.paste_scheduler("beta");
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::Scheduler(SchedulerHitTarget::Destination(0)))
-            .is_none()
-    );
-    let beta = app
-        .regions
-        .hit_target_rect(HitTarget::Scheduler(SchedulerHitTarget::Destination(2)))
-        .unwrap();
-    click(&mut app, beta.x, beta.y);
+    assert!(scheduler_rect(&app, SchedulerHitTarget::Destination(0)).is_none());
+    assert!(scheduler_rect(&app, SchedulerHitTarget::Destination(2)).is_some());
+    app.activate_scheduler_target(SchedulerHitTarget::Destination(2));
     assert_eq!(app.scheduler.composer.as_ref().unwrap().destination, 2);
     assert!(
         !app.scheduler
@@ -156,7 +144,7 @@ fn wide_scheduler_reserves_a_full_master_detail_surface() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
     enable_herdr(&mut app);
-    app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+    app.open_scheduler();
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

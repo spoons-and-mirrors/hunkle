@@ -888,7 +888,7 @@ fn scheduler_f4_is_herdr_gated_and_toggles_the_modal() {
 }
 
 #[test]
-fn scheduler_composer_uses_text_input_and_narrow_back_returns_to_tasks() {
+fn scheduler_composer_edits_fields_and_narrow_back_returns_to_tasks() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());
     let mut app = App::new(directory.path().to_path_buf());
@@ -952,9 +952,8 @@ fn scheduler_prompt_follows_the_cursor_and_accepts_wheel_scrolling() {
         .map(|line| format!("prompt line {line}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let composer = app.scheduler.composer.as_mut().unwrap();
-    composer.field = SchedulerField::Prompt;
-    composer.prompt.set(prompt);
+    app.activate_scheduler_target(SchedulerHitTarget::Field(SchedulerField::Prompt));
+    app.handle_paste(&prompt);
     app.regions.register_hit_target(
         HitTarget::Scheduler(SchedulerHitTarget::Field(SchedulerField::Prompt)),
         Rect::new(0, 0, 40, 5),

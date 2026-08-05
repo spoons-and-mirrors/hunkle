@@ -274,9 +274,7 @@ pub(crate) struct SchedulerLaunchRequest {
 #[derive(Debug, Clone)]
 pub(crate) struct SchedulerLaunchResult {
     pub(crate) pane_id: Option<String>,
-    pub(crate) agent_started: bool,
-    pub(crate) status: AgentStatus,
-    pub(crate) error: Option<String>,
+    pub(crate) status: Result<AgentStatus, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -327,181 +325,128 @@ fn scheduler_launch_with(
     request: SchedulerLaunchRequest,
     mut runner: impl FnMut(&[OsString]) -> Result<Value, CommandError>,
 ) -> SchedulerLaunchResult {
-    let mut result = SchedulerLaunchResult {
-        pane_id: None,
-        agent_started: false,
-        status: AgentStatus::Unknown,
-        error: None,
-    };
-    let snapshot = match runner(&["api".into(), "snapshot".into()]) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return scheduler_launch_failure(result, "workspace snapshot", error),
-    };
-    let workspace_id = match scheduler_matching_workspace(&snapshot, &request.destination) {
-        Ok(workspace_id) => workspace_id,
-        Err(error) => {
-            result.error = Some(error);
-            return result;
-        }
-    };
-    let label = scheduler_label(&request.label);
-    let destination = request.destination.into_os_string();
-    let created = if let Some(workspace_id) = workspace_id {
-        let args = [
-            "tab".into(),
-            "create".into(),
-            "--workspace".into(),
-            workspace_id.into(),
+    let mut pane_id = None;
+    let status = (|| {
+        let snapshot = runner(&["api".into(), "snapshot".into()])
+            .map_err(|error| scheduler_command_error("workspace snapshot", error))?;
+        let workspace_id = scheduler_matching_workspace(&snapshot, &request.destination)?;
+        let label = scheduler_label(&request.label);
+        let (mut create_args, stage) = if let Some(workspace_id) = workspace_id {
+            (
+                vec![
+                    "tab".into(),
+                    "create".into(),
+                    "--workspace".into(),
+                    workspace_id.into(),
+                ],
+                "tab creation",
+            )
+        } else {
+            (
+                vec!["workspace".into(), "create".into()],
+                "workspace creation",
+            )
+        };
+        create_args.extend([
             "--cwd".into(),
-            destination,
+            request.destination.into_os_string(),
             "--label".into(),
-            label.clone().into(),
+            label.into(),
             "--no-focus".into(),
+        ]);
+        let created =
+            runner(&create_args).map_err(|error| scheduler_command_error(stage, error))?;
+        let created_pane = created
+            .pointer("/result/root_pane/pane_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "Herdr did not identify the created pane".to_owned())?;
+        let start_args = [
+            "agent".into(),
+            "start".into(),
+            scheduler_agent_name(&request.label).into(),
+            "--kind".into(),
+            "opencode".into(),
+            "--pane".into(),
+            created_pane.clone().into(),
+            "--timeout".into(),
+            "30000".into(),
         ];
-        match runner(&args) {
-            Ok(value) => value,
-            Err(error) => return scheduler_launch_failure(result, "tab creation", error),
-        }
-    } else {
-        let args = [
-            "workspace".into(),
-            "create".into(),
-            "--cwd".into(),
-            destination,
-            "--label".into(),
-            label.clone().into(),
-            "--no-focus".into(),
+        let mut shell_retries = 0;
+        let started = loop {
+            match runner(&start_args) {
+                Ok(value) => break value,
+                Err(error)
+                    if error.message.contains("is not an available shell")
+                        && shell_retries < 50 =>
+                {
+                    shell_retries += 1;
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(scheduler_command_error("agent start", error)),
+            }
+        };
+        scheduler_agent_status(&started, &created_pane)
+            .map_err(|error| format!("agent start: {error}"))?;
+        pane_id = Some(created_pane.clone());
+
+        // Herdr can report the agent ready just before its input loop accepts prompts.
+        std::thread::sleep(Duration::from_millis(if cfg!(test) { 0 } else { 2_000 }));
+
+        let prompt_args = [
+            "agent".into(),
+            "prompt".into(),
+            created_pane.clone().into(),
+            request.prompt.into(),
+            "--wait".into(),
+            "--until".into(),
+            "working".into(),
+            "--until".into(),
+            "blocked".into(),
+            "--until".into(),
+            "idle".into(),
+            "--until".into(),
+            "done".into(),
+            "--timeout".into(),
+            "10000".into(),
         ];
-        match runner(&args) {
-            Ok(value) => value,
-            Err(error) => return scheduler_launch_failure(result, "workspace creation", error),
-        }
-    };
-    let pane_id = match created
-        .pointer("/result/root_pane/pane_id")
-        .and_then(Value::as_str)
-    {
-        Some(id) => id.to_owned(),
-        None => {
-            result.error = Some("Herdr did not identify the created pane".to_owned());
-            return result;
-        }
-    };
-    result.pane_id = Some(pane_id.clone());
-    let agent_name = scheduler_agent_name(&request.label);
-    let start_args = [
-        "agent".into(),
-        "start".into(),
-        agent_name.into(),
-        "--kind".into(),
-        "opencode".into(),
-        "--pane".into(),
-        pane_id.clone().into(),
-        "--timeout".into(),
-        "30000".into(),
-    ];
-    let mut shell_retries = 0;
-    let started = loop {
-        match runner(&start_args) {
-            Ok(value) => break value,
+        let prompted = match runner(&prompt_args) {
             Err(error)
-                if error.message.contains("is not an available shell") && shell_retries < 50 =>
+                if error.code.as_deref() == Some("agent_prompt_stalled")
+                    || error.message.contains("produced no observed state change") =>
             {
-                shell_retries += 1;
-                std::thread::sleep(Duration::from_millis(100));
+                // Retry only when Herdr confirms that the first prompt changed no state.
+                std::thread::sleep(Duration::from_millis(if cfg!(test) { 0 } else { 3_000 }));
+                runner(&prompt_args)
             }
-            Err(error) => return scheduler_launch_failure(result, "agent start", error),
+            result => result,
         }
-    };
-    result.status = match scheduler_agent_status(&started, &pane_id) {
-        Ok(status) => status,
-        Err(error) => {
-            result.error = Some(format!("agent start: {error}"));
-            return result;
-        }
-    };
-    result.agent_started = true;
-
-    // Herdr can report the agent ready just before its input loop accepts prompts.
-    std::thread::sleep(Duration::from_millis(if cfg!(test) { 0 } else { 2_000 }));
-
-    let prompt_args = [
-        "agent".into(),
-        "prompt".into(),
-        pane_id.clone().into(),
-        request.prompt.into(),
-        "--wait".into(),
-        "--until".into(),
-        "working".into(),
-        "--until".into(),
-        "blocked".into(),
-        "--until".into(),
-        "idle".into(),
-        "--until".into(),
-        "done".into(),
-        "--timeout".into(),
-        "10000".into(),
-    ];
-    let prompted = match runner(&prompt_args) {
-        Ok(value) => value,
-        Err(error)
-            if error.code.as_deref() == Some("agent_prompt_stalled")
-                || error.message.contains("produced no observed state change") =>
-        {
-            // A newly started OpenCode process can miss the first prompt even after Herdr
-            // reports it ready. Retry only when Herdr confirms that nothing changed.
-            std::thread::sleep(Duration::from_millis(if cfg!(test) { 0 } else { 3_000 }));
-            match runner(&prompt_args) {
-                Ok(value) => value,
-                Err(error) => return scheduler_launch_failure(result, "agent prompt", error),
-            }
-        }
-        Err(error) => return scheduler_launch_failure(result, "agent prompt", error),
-    };
-    match scheduler_agent_status(&prompted, &pane_id) {
-        Ok(status) => result.status = status,
-        Err(error) => result.error = Some(format!("agent prompt: {error}")),
-    }
-    result
+        .map_err(|error| scheduler_command_error("agent prompt", error))?;
+        scheduler_agent_status(&prompted, &created_pane)
+            .map_err(|error| format!("agent prompt: {error}"))
+    })();
+    SchedulerLaunchResult { pane_id, status }
 }
 
-fn scheduler_launch_failure(
-    mut result: SchedulerLaunchResult,
-    stage: &str,
-    error: CommandError,
-) -> SchedulerLaunchResult {
-    result.error = Some(format!("{stage}: {}", error.message));
-    result
+fn scheduler_command_error(stage: &str, error: CommandError) -> String {
+    format!("{stage}: {}", error.message)
 }
 
 fn scheduler_matching_workspace(
     value: &Value,
     destination: &Path,
 ) -> Result<Option<String>, String> {
-    let snapshot = value
-        .pointer("/result/snapshot")
-        .ok_or_else(|| "workspace snapshot: Herdr returned an invalid snapshot".to_owned())?;
-    let workspaces = snapshot
-        .get("workspaces")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "workspace snapshot: Herdr returned no workspaces".to_owned())?;
-    for workspace in workspaces {
-        let Some(workspace_id) = workspace.get("workspace_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let path = workspace
-            .pointer("/worktree/checkout_path")
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
-            .or_else(|| workspace_path(workspace, snapshot));
-        if path
-            .as_deref()
-            .is_some_and(|path| filesystem::same_path(path, destination))
-        {
-            return Ok(Some(workspace_id.to_owned()));
-        }
-    }
-    Ok(None)
+    let (workspaces, _) =
+        parse_snapshot(value).map_err(|error| format!("workspace snapshot: {error}"))?;
+    Ok(workspaces
+        .into_iter()
+        .find(|workspace| {
+            workspace
+                .path
+                .as_deref()
+                .is_some_and(|path| filesystem::same_path(path, destination))
+        })
+        .map(|workspace| workspace.id))
 }
 
 fn scheduler_agent_status(value: &Value, expected_pane_id: &str) -> Result<AgentStatus, String> {
@@ -3763,6 +3708,7 @@ mod tests {
                         "result": { "snapshot": {
                             "workspaces": [{
                                 "workspace_id": "w7",
+                                "label": "Existing workspace",
                                 "worktree": { "checkout_path": destination }
                             }],
                             "panes": [],
@@ -3801,9 +3747,7 @@ mod tests {
         );
 
         assert_eq!(result.pane_id.as_deref(), Some("w7:p9"));
-        assert!(result.agent_started);
-        assert_eq!(result.status, AgentStatus::Working);
-        assert_eq!(result.error, None);
+        assert_eq!(result.status, Ok(AgentStatus::Working));
         assert_eq!(
             joined(&calls[1]),
             "tab\0create\0--workspace\0w7\0--cwd\0/tmp/literal path;$(untouched)\0--label\0Nightly review\0--no-focus"
@@ -3853,10 +3797,6 @@ mod tests {
             calls[1][..3],
             ["agent", "read", "w3:p4"].map(OsString::from)
         );
-    }
-
-    #[test]
-    fn scheduler_only_calls_missing_agent_a_clear_loss() {
         let missing = scheduler_observe_with(
             "w1:p2",
             |_| {

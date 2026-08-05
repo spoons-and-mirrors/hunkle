@@ -555,8 +555,9 @@ impl HerdrSession {
         }
         let mut poll = HerdrSessionPoll::default();
         if let Some(scheduler) = self.scheduler.as_mut() {
-            poll.changed |= scheduler.poll_completions();
-            if let Some(error) = scheduler.take_error() {
+            let (changed, error) = scheduler.poll_completions();
+            poll.changed |= changed;
+            if let Some(error) = error {
                 poll.notice = Some(format!("Scheduler: {error}"));
             }
         }

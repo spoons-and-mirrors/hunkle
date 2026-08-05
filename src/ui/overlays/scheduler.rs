@@ -336,105 +336,127 @@ fn draw_composer(
         Rect::new(inner.x, inner.y, inner.width, 1),
         "NEW SCHEDULED TASK",
     );
-    if composer.prompt_expanded {
-        let y = inner.y + 2;
-        draw_prompt_label(frame, composer, inner, y, regions);
-        let prompt = Rect::new(
-            inner.x,
-            y + 1,
-            inner.width,
-            inner.bottom().saturating_sub(y + 3).min(20),
-        );
-        draw_prompt_input(frame, composer, prompt, regions);
-        draw_composer_actions(frame, inner, regions);
-        return;
-    }
-    let fields = [
-        ("Title", SchedulerField::Title),
-        ("Description", SchedulerField::Description),
-        ("Prompt", SchedulerField::Prompt),
-        ("Minutes", SchedulerField::Schedule),
-    ];
     let mut y = inner.y + 2;
-    for (label, field) in fields {
-        if field == SchedulerField::Prompt {
-            draw_prompt_label(frame, composer, inner, y, regions);
-            let prompt = Rect::new(inner.x, y + 1, inner.width, 5);
-            draw_prompt_input(frame, composer, prompt, regions);
-            y += 6;
-            continue;
+    if !composer.prompt_expanded {
+        for field in [
+            ("Title", SchedulerField::Title),
+            ("Description", SchedulerField::Description),
+        ] {
+            draw_field(frame, composer, inner, &mut y, field, regions);
         }
-        draw_text(
-            frame,
-            Rect::new(inner.x, y, 12, 1),
-            label,
-            Style::default().fg(palette().faint),
-        );
-        let rect = Rect::new(inner.x + 12, y, inner.width.saturating_sub(12), 1);
-        let input = composer.input(field);
-        let active = composer.field == field;
-        frame.render_widget(
-            Paragraph::new(text_input_lines(input, active, palette().ink)).style(
-                Style::default().bg(if active {
-                    palette().selected
-                } else {
-                    palette().surface_alt
-                }),
-            ),
-            rect,
-        );
-        regions.target(Target::Field(field), rect);
-        y += 1;
     }
-    draw_text(
-        frame,
-        Rect::new(inner.x, y, inner.width, 1),
-        "DESTINATION  Scheduler only; active workspace stays unchanged.",
-        Style::default().fg(palette().faint),
-    );
-    y += 1;
-    let destination_cards = draw_destination_cards(
-        frame,
-        composer,
-        Rect::new(inner.x, y, inner.width, 3),
-        regions,
-    );
-    y += 4;
-    if composer.destinations.is_empty() {
-        draw_text(
+
+    draw_prompt_label(frame, composer, inner, y, regions);
+    let prompt_height = if composer.prompt_expanded {
+        inner.bottom().saturating_sub(y + 3).min(20)
+    } else {
+        5
+    };
+    let prompt = Rect::new(inner.x, y + 1, inner.width, prompt_height);
+    draw_prompt_input(frame, composer, prompt, regions);
+
+    if !composer.prompt_expanded {
+        y = prompt.bottom();
+        draw_field(
             frame,
-            Rect::new(inner.x, y, inner.width, 2),
-            "No linked worktree destinations are available.",
-            Style::default().fg(palette().red),
+            composer,
+            inner,
+            &mut y,
+            ("Minutes", SchedulerField::Schedule),
+            regions,
         );
-    } else if !composer.destination_picker_open
-        && let Some(destination) = composer.destinations.get(composer.destination)
-    {
         draw_text(
             frame,
             Rect::new(inner.x, y, inner.width, 1),
-            truncate_width(
-                &format!("Target: {}", destination.path.display()),
-                usize::from(inner.width),
-            ),
-            Style::default().fg(palette().muted),
+            "DESTINATION  Scheduler only; active workspace stays unchanged.",
+            Style::default().fg(palette().faint),
         );
-    }
-    let cancel = draw_composer_actions(frame, inner, regions);
-    if composer.destination_picker_open {
-        draw_destination_picker(
+        y += 1;
+        let destination_cards = draw_destination_cards(
             frame,
             composer,
-            destination_cards,
-            Rect::new(
-                inner.x,
-                inner.y,
-                inner.width,
-                cancel.y.saturating_sub(inner.y),
-            ),
+            Rect::new(inner.x, y, inner.width, 3),
             regions,
         );
+        y += 4;
+        if composer.destinations.is_empty() {
+            draw_text(
+                frame,
+                Rect::new(inner.x, y, inner.width, 2),
+                "No linked worktree destinations are available.",
+                Style::default().fg(palette().red),
+            );
+        } else if !composer.destination_picker_open
+            && let Some(destination) = composer.destinations.get(composer.destination)
+        {
+            draw_text(
+                frame,
+                Rect::new(inner.x, y, inner.width, 1),
+                truncate_width(
+                    &format!("Target: {}", destination.path.display()),
+                    usize::from(inner.width),
+                ),
+                Style::default().fg(palette().muted),
+            );
+        }
+        if composer.destination_picker_open {
+            draw_destination_picker(
+                frame,
+                composer,
+                destination_cards,
+                Rect::new(
+                    inner.x,
+                    inner.y,
+                    inner.width,
+                    inner.height.saturating_sub(1),
+                ),
+                regions,
+            );
+        }
     }
+    let mut x = inner.x;
+    for (label, width, target, color) in [
+        (" CANCEL ", 9, Target::Cancel, palette().faint),
+        (" SAVE ", 8, Target::Save, palette().accent),
+    ] {
+        let rect = Rect::new(x, inner.bottom().saturating_sub(1), width, 1);
+        button(frame, regions, rect, label, target, color);
+        x = rect.right().saturating_add(1);
+    }
+}
+
+fn draw_field(
+    frame: &mut Frame<'_>,
+    composer: &crate::app::ScheduledTaskComposer,
+    area: Rect,
+    y: &mut u16,
+    field: (&'static str, SchedulerField),
+    regions: &mut SchedulerRegions,
+) {
+    let (label, field) = field;
+    draw_text(
+        frame,
+        Rect::new(area.x, *y, 12, 1),
+        label,
+        Style::default().fg(palette().faint),
+    );
+    let rect = Rect::new(area.x + 12, *y, area.width.saturating_sub(12), 1);
+    let active = composer.field == field;
+    frame.render_widget(
+        Paragraph::new(text_input_lines(
+            composer.input(field),
+            active,
+            palette().ink,
+        ))
+        .style(Style::default().bg(if active {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        rect,
+    );
+    regions.target(Target::Field(field), rect);
+    *y += 1;
 }
 
 fn draw_destination_cards(
@@ -493,23 +515,10 @@ fn draw_destination_picker(
     let candidates = composer.destination_candidates();
     let card = composer.destination_card;
     let selected = composer.destinations.get(composer.destination);
-    let selected_index = candidates
-        .get(composer.picker.selected)
-        .copied()
-        .unwrap_or(composer.destination);
     let rows = candidates
         .iter()
         .map(|index| {
             let destination = &composer.destinations[*index];
-            let kind = match card {
-                SchedulerDestinationCard::Repository => LocationPickerRowKind::Location {
-                    branch: Some(destination.branch.clone()),
-                },
-                SchedulerDestinationCard::Worktree => {
-                    LocationPickerRowKind::Location { branch: None }
-                }
-                SchedulerDestinationCard::Branch => LocationPickerRowKind::Choice,
-            };
             LocationPickerRow {
                 target: HitTarget::Scheduler(Target::Destination(*index)),
                 label: card.value(destination).to_owned(),
@@ -520,8 +529,20 @@ fn draw_destination_picker(
                 current: selected
                     .is_some_and(|selected| card.value(selected) == card.value(destination)),
                 stats: None,
-                kind,
-                selected: selected_index == *index,
+                kind: match card {
+                    SchedulerDestinationCard::Repository => LocationPickerRowKind::Location {
+                        branch: Some(destination.branch.clone()),
+                    },
+                    SchedulerDestinationCard::Worktree => {
+                        LocationPickerRowKind::Location { branch: None }
+                    }
+                    SchedulerDestinationCard::Branch => LocationPickerRowKind::Choice,
+                },
+                selected: candidates
+                    .get(composer.picker.selected)
+                    .copied()
+                    .unwrap_or(composer.destination)
+                    == *index,
                 hovered: false,
                 delete_target: None,
             }
@@ -609,28 +630,6 @@ fn draw_prompt_input(
     );
     regions.target(Target::Field(SchedulerField::Prompt), rect);
     regions.scroll(ScrollTarget::SchedulerPrompt, rect);
-}
-
-fn draw_composer_actions(frame: &mut Frame, area: Rect, regions: &mut SchedulerRegions) -> Rect {
-    let cancel = Rect::new(area.x, area.bottom().saturating_sub(1), 9, 1);
-    let save = Rect::new(cancel.right().saturating_add(1), cancel.y, 8, 1);
-    button(
-        frame,
-        regions,
-        cancel,
-        " CANCEL ",
-        Target::Cancel,
-        palette().faint,
-    );
-    button(
-        frame,
-        regions,
-        save,
-        " SAVE ",
-        Target::Save,
-        palette().accent,
-    );
-    cancel
 }
 
 fn button(
