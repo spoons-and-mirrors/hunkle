@@ -3,6 +3,10 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[cfg(unix)]
@@ -19,9 +23,25 @@ pub(super) const MAX_RECENT_REPOSITORIES: usize = 64;
 
 pub(super) struct KnownRepositoryStore {
     path: Option<PathBuf>,
+    persistence: Arc<PersistenceState>,
     pub(super) repositories: Vec<PathBuf>,
     pub(super) recent: Vec<RecentRepository>,
     pub(super) load_error: Option<String>,
+}
+
+pub(super) struct PersistenceRequest {
+    path: PathBuf,
+    repositories: Vec<PathBuf>,
+    recent: Vec<RecentRepository>,
+    generation: u64,
+    state: Arc<PersistenceState>,
+}
+
+#[derive(Default)]
+struct PersistenceState {
+    generation: AtomicU64,
+    latest_requested: AtomicU64,
+    write_lock: Mutex<()>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +77,7 @@ impl KnownRepositoryStore {
         };
         let mut store = Self {
             path,
+            persistence: Arc::new(PersistenceState::default()),
             repositories: stored.repositories,
             recent: stored.recent,
             load_error,
@@ -71,6 +92,7 @@ impl KnownRepositoryStore {
         root: PathBuf,
         relevant: &[PathBuf],
     ) -> Result<(), String> {
+        self.ensure_writable()?;
         let previous_repositories = self.repositories.clone();
         let previous_recent = self.recent.clone();
         let stats = self
@@ -125,6 +147,7 @@ impl KnownRepositoryStore {
         pruned: &[PathBuf],
         relevant: &[PathBuf],
     ) -> Result<(), String> {
+        self.ensure_writable()?;
         let previous_repositories = self.repositories.clone();
         let previous_recent = self.recent.clone();
         self.extend(discovered);
@@ -193,10 +216,8 @@ impl KnownRepositoryStore {
             .retain(|repository| !removed.contains(repository));
     }
 
-    pub(super) fn update_stats_and_save(
-        &mut self,
-        stats: &[(PathBuf, (u64, u64))],
-    ) -> Result<bool, String> {
+    pub(super) fn update_stats(&mut self, stats: &[(PathBuf, (u64, u64))]) -> Result<bool, String> {
+        self.ensure_writable()?;
         let previous = self.recent.clone();
         let stats = stats
             .iter()
@@ -207,57 +228,92 @@ impl KnownRepositoryStore {
                 recent.stats = Some(*stats);
             }
         }
-        if self.recent == previous {
-            return Ok(false);
-        }
-        if let Err(error) = self.save() {
-            self.recent = previous;
-            return Err(error);
-        }
-        Ok(true)
+        Ok(self.recent != previous)
+    }
+
+    pub(super) fn persistence_request(&self) -> Result<Option<PersistenceRequest>, String> {
+        self.ensure_writable()?;
+        let Some(path) = self.path.clone() else {
+            return Ok(None);
+        };
+        let generation = self
+            .persistence
+            .generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        self.persistence
+            .latest_requested
+            .store(generation, Ordering::Release);
+        Ok(Some(PersistenceRequest {
+            path,
+            repositories: self.repositories.clone(),
+            recent: self.recent.clone(),
+            generation,
+            state: Arc::clone(&self.persistence),
+        }))
     }
 
     fn save(&self) -> Result<(), String> {
+        if let Some(request) = self.persistence_request()? {
+            persist(request)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_writable(&self) -> Result<(), String> {
         if let Some(error) = self.load_error.as_deref() {
             return Err(format!(
                 "{error}; refusing to overwrite the unreadable repository inventory"
             ));
         }
-        let Some(path) = self.path.as_deref() else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("Could not create Hunkle config directory: {error}"))?;
-        }
-        let repositories = self
-            .repositories
-            .iter()
-            .map(|common_dir| repository_value(common_dir))
-            .collect::<Vec<_>>();
-        let recent = self
-            .recent
-            .iter()
-            .map(|recent| {
-                serde_json::json!({
-                    "common_dir": recent.common_dir.as_deref().map(stored_path_value),
-                    "root": stored_path_value(&recent.root),
-                    "stats": recent.stats.map(|(additions, deletions)| serde_json::json!({
-                        "additions": additions,
-                        "deletions": deletions,
-                    })),
-                })
-            })
-            .collect::<Vec<_>>();
-        let content = serde_json::to_string_pretty(&serde_json::json!({
-            "version": 1,
-            "repositories": repositories,
-            "recent": recent,
-        }))
-        .map_err(|error| format!("Could not serialize known repositories: {error}"))?;
-        atomic_write(path, format!("{content}\n").as_bytes())
-            .map_err(|error| format!("Could not save known repositories: {error}"))
+        Ok(())
     }
+}
+
+fn serialized(
+    repositories: &[PathBuf],
+    recent_repositories: &[RecentRepository],
+) -> Result<Vec<u8>, String> {
+    let repositories = repositories
+        .iter()
+        .map(|common_dir| repository_value(common_dir))
+        .collect::<Vec<_>>();
+    let recent = recent_repositories
+        .iter()
+        .map(|recent| {
+            serde_json::json!({
+                "common_dir": recent.common_dir.as_deref().map(stored_path_value),
+                "root": stored_path_value(&recent.root),
+                "stats": recent.stats.map(|(additions, deletions)| serde_json::json!({
+                    "additions": additions,
+                    "deletions": deletions,
+                })),
+            })
+        })
+        .collect::<Vec<_>>();
+    let content = serde_json::to_string_pretty(&serde_json::json!({
+        "version": 1,
+        "repositories": repositories,
+        "recent": recent,
+    }))
+    .map_err(|error| format!("Could not serialize known repositories: {error}"))?;
+    Ok(format!("{content}\n").into_bytes())
+}
+
+pub(super) fn persist(request: PersistenceRequest) -> Result<(), String> {
+    let content = serialized(&request.repositories, &request.recent)?;
+    let _guard = request.state.write_lock.lock().map_err(|_| {
+        "Could not save known repositories: persistence lock was poisoned".to_owned()
+    })?;
+    if request.generation < request.state.latest_requested.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    if let Some(parent) = request.path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create Hunkle config directory: {error}"))?;
+    }
+    atomic_write(&request.path, &content)
+        .map_err(|error| format!("Could not save known repositories: {error}"))
 }
 
 fn load(path: &Path) -> Result<StoredRepositories, String> {

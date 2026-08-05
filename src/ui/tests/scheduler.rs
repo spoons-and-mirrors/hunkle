@@ -2,7 +2,7 @@ use super::*;
 use crate::app::{
     SchedulerDestination, SchedulerDestinationCard, SchedulerField, SchedulerSurface,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn destination(path: &str, repository: &str, branch: &str, worktree: &str) -> SchedulerDestination {
     SchedulerDestination {
@@ -106,6 +106,10 @@ fn scheduler_destination_reuses_repository_and_full_branch_cards() {
         destination("/tmp/alpha-feature", "alpha", "feature", "feature"),
         destination("/tmp/beta-main", "beta", "main", "basetree"),
     ];
+    app.linked_worktrees
+        .set_change_stats_for_test(PathBuf::from("/tmp/alpha-main"), (11, 3));
+    app.linked_worktrees
+        .set_change_stats_for_test(PathBuf::from("/tmp/beta-main"), (22, 4));
     let mut terminal = Terminal::new(TestBackend::new(120, 50)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -126,6 +130,21 @@ fn scheduler_destination_reuses_repository_and_full_branch_cards() {
     app.activate_scheduler_target(SchedulerHitTarget::DestinationCard(
         SchedulerDestinationCard::Repository,
     ));
+    app.poll_worker();
+    assert!(
+        app.scheduler
+            .composer
+            .as_ref()
+            .unwrap()
+            .destination_picker
+            .items
+            .iter()
+            .any(|item| matches!(
+                item,
+                HeaderPickerItem::Repository { path, stats: Some((22, 4)), .. }
+                    if path == Path::new("/tmp/beta-main")
+            ))
+    );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(screen_text(&terminal).contains("Search repositories..."));
     app.paste_scheduler("beta");

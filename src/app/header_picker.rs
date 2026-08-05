@@ -133,13 +133,6 @@ pub(crate) enum HeaderPickerItem {
     },
 }
 
-#[derive(Debug)]
-struct ChangeDetailsCompletion {
-    index: usize,
-    path: PathBuf,
-    stats: Option<(u64, u64)>,
-}
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BranchPickerStep {
     #[default]
@@ -196,7 +189,6 @@ pub(crate) struct HeaderPicker {
     clone_rx: Option<Receiver<Result<PathBuf, String>>>,
     worktree_rx: Option<Receiver<Result<PathBuf, String>>>,
     worktree_delete_rx: Option<Receiver<Result<PathBuf, String>>>,
-    change_details_rx: Option<Receiver<ChangeDetailsCompletion>>,
 }
 
 impl Deref for HeaderPicker {
@@ -220,7 +212,6 @@ impl HeaderPicker {
         items: Vec<HeaderPickerItem>,
         selected: usize,
     ) {
-        self.change_details_rx = None;
         self.kind = Some(kind);
         self.set_items(items, selected);
         self.message = None;
@@ -230,7 +221,6 @@ impl HeaderPicker {
     }
 
     pub(crate) fn open_message(&mut self, kind: HeaderPickerKind, message: String) {
-        self.change_details_rx = None;
         self.kind = Some(kind);
         self.clear_items();
         self.message = Some(message);
@@ -240,7 +230,6 @@ impl HeaderPicker {
     }
 
     pub(crate) fn open_branch_bases(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
-        self.change_details_rx = None;
         self.kind = Some(HeaderPickerKind::Branches);
         self.set_items(items, selected);
         self.message = None;
@@ -253,7 +242,6 @@ impl HeaderPicker {
     }
 
     pub(crate) fn open_branch_name(&mut self, base: Branch) {
-        self.change_details_rx = None;
         self.kind = Some(HeaderPickerKind::Branches);
         self.clear_items();
         self.message = None;
@@ -265,7 +253,6 @@ impl HeaderPicker {
     }
 
     pub(crate) fn close(&mut self) {
-        self.change_details_rx = None;
         self.kind = None;
         self.clear_items();
         self.message = None;
@@ -308,87 +295,25 @@ impl HeaderPicker {
         self.worktree_delete = None;
     }
 
-    pub(crate) fn start_change_details(&mut self) {
-        self.change_details_rx = None;
-        if self.kind != Some(HeaderPickerKind::Worktrees) {
-            return;
-        }
-        let paths = self
-            .all_items
+    pub(crate) fn change_stats_roots(&self) -> Vec<PathBuf> {
+        self.all_items
             .iter()
-            .enumerate()
-            .filter_map(|(index, item)| match item {
-                HeaderPickerItem::Worktree { worktree, stats } if stats.is_none() => {
-                    Some((index, worktree.path.clone()))
-                }
+            .filter_map(|item| match item {
+                HeaderPickerItem::Repository { path, .. } => Some(path.clone()),
+                HeaderPickerItem::Worktree { worktree, .. } => Some(worktree.path.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        if paths.is_empty() {
-            return;
-        }
-
-        let (sender, receiver) = mpsc::channel();
-        self.change_details_rx = Some(receiver);
-        let _ = thread::Builder::new()
-            .name("header-picker-change-details".to_owned())
-            .spawn(move || {
-                for (index, path) in paths {
-                    let stats = git::load_change_line_counts(&path).ok();
-                    if sender
-                        .send(ChangeDetailsCompletion { index, path, stats })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
+            .collect()
     }
 
-    pub(crate) fn poll_change_details(&mut self) -> bool {
-        let Some(receiver) = self.change_details_rx.as_ref() else {
-            return false;
-        };
-        let mut completions = Vec::new();
-        let mut disconnected = false;
-        loop {
-            match receiver.try_recv() {
-                Ok(completion) => completions.push(completion),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
-            }
-        }
-
-        let mut changed = false;
-        for completion in completions {
-            Self::update_worktree_stats_at(
-                &mut self.all_items,
-                completion.index,
-                &completion.path,
-                completion.stats,
-            );
-            let visible_changed = if self.query.is_empty() {
-                Self::update_worktree_stats_at(
-                    &mut self.items,
-                    completion.index,
-                    &completion.path,
-                    completion.stats,
-                )
-            } else {
-                Self::update_worktree_stats(&mut self.items, &completion.path, completion.stats)
-            };
-            let completion_is_visible = !self.query.is_empty()
-                || (completion.index >= self.scroll
-                    && completion.index < self.scroll.saturating_add(self.viewport_rows));
-            changed |= visible_changed && completion_is_visible;
-        }
-        if disconnected {
-            self.change_details_rx = None;
-        }
-        changed
+    pub(crate) fn sync_change_stats(&mut self, stats: &[(PathBuf, (u64, u64))]) -> bool {
+        let stats = stats
+            .iter()
+            .map(|(path, stats)| (path.as_path(), *stats))
+            .collect::<std::collections::HashMap<_, _>>();
+        let all_changed = Self::update_change_stats(&mut self.all_items, &stats);
+        let visible_changed = Self::update_change_stats(&mut self.items, &stats);
+        all_changed || visible_changed
     }
 
     pub(crate) fn sync_repository_details(&mut self, details: &[RepositoryPickerItem]) -> bool {
@@ -454,38 +379,25 @@ impl HeaderPicker {
         (changed, searchable_changed)
     }
 
-    fn update_worktree_stats(
+    fn update_change_stats(
         items: &mut [HeaderPickerItem],
-        path: &Path,
-        stats: Option<(u64, u64)>,
+        stats: &std::collections::HashMap<&Path, (u64, u64)>,
     ) -> bool {
         let mut changed = false;
         for item in items {
-            if let HeaderPickerItem::Worktree {
-                worktree,
-                stats: item_stats,
-            } = item
-                && worktree.path == path
-                && let Some(stats) = stats
-                && *item_stats != Some(stats)
+            let (path, item_stats) = match item {
+                HeaderPickerItem::Repository { path, stats, .. } => (path.as_path(), stats),
+                HeaderPickerItem::Worktree { worktree, stats } => (worktree.path.as_path(), stats),
+                _ => continue,
+            };
+            if let Some(stats) = stats.get(path)
+                && *item_stats != Some(*stats)
             {
-                *item_stats = Some(stats);
+                *item_stats = Some(*stats);
                 changed = true;
             }
         }
         changed
-    }
-
-    fn update_worktree_stats_at(
-        items: &mut [HeaderPickerItem],
-        index: usize,
-        path: &Path,
-        stats: Option<(u64, u64)>,
-    ) -> bool {
-        let Some(item) = items.get_mut(index) else {
-            return false;
-        };
-        Self::update_worktree_stats(std::slice::from_mut(item), path, stats)
     }
 
     pub(crate) fn is_open(&self) -> bool {

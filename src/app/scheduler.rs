@@ -266,7 +266,6 @@ impl ScheduledTaskComposer {
             SchedulerDestinationCard::Branch => HeaderPickerKind::Branches,
         };
         self.destination_picker.open(kind, items, selected);
-        self.destination_picker.start_change_details();
     }
 
     fn close_destination_picker(&mut self) {
@@ -845,6 +844,22 @@ impl App {
 
     pub(crate) fn poll_scheduler_inputs(&mut self) -> bool {
         let scheduler_active = self.mode == Mode::Scheduler;
+        let picker_roots = self
+            .scheduler
+            .composer
+            .as_ref()
+            .filter(|composer| composer.destination_picker_open())
+            .map(|composer| composer.destination_picker.change_stats_roots())
+            .unwrap_or_default();
+        self.linked_worktrees.request_stats(picker_roots.clone());
+        let picker_stats = picker_roots
+            .into_iter()
+            .filter_map(|root| {
+                self.linked_worktrees
+                    .change_stats(&root)
+                    .map(|stats| (root, stats))
+            })
+            .collect::<Vec<_>>();
         let Some(composer) = self.scheduler.composer.as_mut() else {
             return false;
         };
@@ -854,7 +869,7 @@ impl App {
             .destination_picker
             .query
             .poll_blink(scheduler_active && destination_picker_open);
-        changed |= composer.destination_picker.poll_change_details();
+        changed |= composer.destination_picker.sync_change_stats(&picker_stats);
         for input_field in [
             SchedulerField::Title,
             SchedulerField::Description,

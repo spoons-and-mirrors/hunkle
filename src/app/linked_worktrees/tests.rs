@@ -36,6 +36,25 @@ fn repository() -> LinkedWorktreeRepository {
     }
 }
 
+fn wait_for_stats(catalog: &mut LinkedWorktreeCatalog) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while (catalog.active_stats_generation.is_some() || !catalog.pending_stats.is_empty())
+        && Instant::now() < deadline
+    {
+        catalog.poll();
+        thread::sleep(Duration::from_millis(5));
+    }
+    catalog.poll();
+    assert!(catalog.active_stats_generation.is_none());
+    assert!(catalog.pending_stats.is_empty());
+}
+
+fn persist_store(catalog: &LinkedWorktreeCatalog) {
+    if let Some(request) = catalog.store.persistence_request().unwrap() {
+        known_repositories::persist(request).unwrap();
+    }
+}
+
 #[test]
 fn resolves_agent_destination_metadata_from_its_worktree() {
     let snapshot = LinkedWorktreeCatalogSnapshot::for_test(vec![repository()]);
@@ -49,6 +68,224 @@ fn resolves_agent_destination_metadata_from_its_worktree() {
         .unwrap();
     assert_eq!(linked.repository(), "repo");
     assert_eq!(linked.branch(), "feature");
+}
+
+#[test]
+fn repeated_presented_card_requests_stay_inside_the_backoff_window() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let loader_calls = Arc::clone(&calls);
+    let loader: TestStatsLoader = Arc::new(move |_root, _previous| {
+        loader_calls.fetch_add(1, Ordering::SeqCst);
+        Ok((WorktreeSignature::for_test(1, 1), Some((12, 4))))
+    });
+    let mut catalog = LinkedWorktreeCatalog::new_with_stats_loader(None, loader);
+    let root = PathBuf::from("/agent-destination");
+
+    catalog.request_stats([root.clone()]);
+    wait_for_stats(&mut catalog);
+    for _ in 0..10 {
+        catalog.request_stats([root.clone()]);
+    }
+    catalog.poll();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(catalog.change_stats(&root), Some((12, 4)));
+}
+
+#[test]
+fn duplicate_in_flight_roots_coalesce_to_one_load() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let loader_calls = Arc::clone(&calls);
+    let (started_sender, started_receiver) = mpsc::channel();
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let loader_gate = Arc::clone(&gate);
+    let loader: TestStatsLoader = Arc::new(move |_root, _previous| {
+        loader_calls.fetch_add(1, Ordering::SeqCst);
+        started_sender.send(()).unwrap();
+        let (lock, wake) = &*loader_gate;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+        Ok((WorktreeSignature::for_test(1, 1), Some((7, 3))))
+    });
+    let mut catalog = LinkedWorktreeCatalog::new_with_stats_loader(None, loader);
+    let root = PathBuf::from("/shared-destination");
+
+    catalog.request_stats([root.clone(), root.clone()]);
+    started_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap();
+    catalog.request_stats([root.clone(), root.clone()]);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let (lock, wake) = &*gate;
+    *lock.lock().unwrap() = true;
+    wake.notify_all();
+    wait_for_stats(&mut catalog);
+    assert_eq!(catalog.change_stats(&root), Some((7, 3)));
+}
+
+#[test]
+fn active_repository_observation_avoids_a_git_load() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let loader_calls = Arc::clone(&calls);
+    let loader: TestStatsLoader = Arc::new(move |_root, _previous| {
+        loader_calls.fetch_add(1, Ordering::SeqCst);
+        Ok((WorktreeSignature::for_test(1, 1), Some((1, 1))))
+    });
+    let mut catalog = LinkedWorktreeCatalog::new_with_stats_loader(None, loader);
+    let root = PathBuf::from("/active-repository");
+
+    catalog.observe_active_repository(Some((
+        root.clone(),
+        (31, 9),
+        WorktreeSignature::for_test(3, 1),
+    )));
+    catalog.request_stats([root.clone()]);
+    catalog.poll();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(catalog.change_stats(&root), Some((31, 9)));
+    assert!(catalog.active_repository_stats_are_current(&root, WorktreeSignature::for_test(3, 1)));
+}
+
+#[test]
+fn changed_root_refreshes_after_the_minimum_recheck() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let loader_calls = Arc::clone(&calls);
+    let loader: TestStatsLoader = Arc::new(move |_root, _previous| {
+        let call = loader_calls.fetch_add(1, Ordering::SeqCst);
+        Ok((
+            WorktreeSignature::for_test(call as u64 + 1, 1),
+            Some(if call == 0 { (2, 1) } else { (8, 5) }),
+        ))
+    });
+    let mut catalog = LinkedWorktreeCatalog::new_with_stats_loader(None, loader);
+    let root = PathBuf::from("/changed-repository");
+
+    catalog.request_stats([root.clone()]);
+    wait_for_stats(&mut catalog);
+    catalog.request_stats([root.clone()]);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    catalog.request_stats_at([root.clone()], Instant::now() + MIN_STATS_INTERVAL);
+    wait_for_stats(&mut catalog);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(catalog.change_stats(&root), Some((8, 5)));
+}
+
+#[test]
+fn unchanged_status_probes_do_not_repeat_numstat_hydration() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hydrated = Arc::new(AtomicUsize::new(0));
+    let loader_calls = Arc::clone(&calls);
+    let loader_hydrated = Arc::clone(&hydrated);
+    let signature = WorktreeSignature::for_test(4, 1);
+    let loader: TestStatsLoader = Arc::new(move |_root, previous| {
+        loader_calls.fetch_add(1, Ordering::SeqCst);
+        if previous == Some(signature) {
+            Ok((signature, None))
+        } else {
+            loader_hydrated.fetch_add(1, Ordering::SeqCst);
+            Ok((signature, Some((20, 6))))
+        }
+    });
+    let mut catalog = LinkedWorktreeCatalog::new_with_stats_loader(None, loader);
+    let root = PathBuf::from("/unchanged-repository");
+
+    catalog.request_stats_at([root.clone()], Instant::now());
+    wait_for_stats(&mut catalog);
+    catalog.request_stats_at([root.clone()], Instant::now() + MIN_STATS_INTERVAL);
+    wait_for_stats(&mut catalog);
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(hydrated.load(Ordering::SeqCst), 1);
+    assert_eq!(catalog.change_stats(&root), Some((20, 6)));
+    assert_eq!(
+        catalog.stats.get(&root).unwrap().recheck_interval,
+        MIN_STATS_INTERVAL * 2
+    );
+}
+
+#[test]
+fn active_observation_rejects_an_older_in_flight_completion() {
+    let (started_sender, started_receiver) = mpsc::channel();
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let loader_gate = Arc::clone(&gate);
+    let loader: TestStatsLoader = Arc::new(move |_root, _previous| {
+        started_sender.send(()).unwrap();
+        let (lock, wake) = &*loader_gate;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+        Ok((WorktreeSignature::for_test(1, 1), Some((1, 1))))
+    });
+    let mut catalog = LinkedWorktreeCatalog::new_with_stats_loader(None, loader);
+    let root = PathBuf::from("/active-overrides-flight");
+
+    catalog.request_stats([root.clone()]);
+    started_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap();
+    catalog.observe_active_repository(Some((
+        root.clone(),
+        (55, 13),
+        WorktreeSignature::for_test(2, 1),
+    )));
+    let (lock, wake) = &*gate;
+    *lock.lock().unwrap() = true;
+    wake.notify_all();
+    wait_for_stats(&mut catalog);
+
+    assert_eq!(catalog.change_stats(&root), Some((55, 13)));
+}
+
+#[test]
+fn repository_picker_items_use_live_catalog_counts() {
+    let mut catalog = LinkedWorktreeCatalog::new(None);
+    let root = PathBuf::from("/picker-repository");
+    catalog.store.recent = vec![known_repositories::RecentRepository {
+        common_dir: Some(PathBuf::from("/picker-repository/.git")),
+        root: root.clone(),
+        stats: Some((1, 1)),
+    }];
+
+    catalog.set_change_stats_for_test(root, (90, 12));
+
+    assert_eq!(
+        catalog.recent_repository_picker_items()[0].stats,
+        Some((90, 12))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stats_cache_preserves_non_utf8_root_identity() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let loader_observed = Arc::clone(&observed);
+    let loader: TestStatsLoader = Arc::new(move |root, _previous| {
+        loader_observed.lock().unwrap().push(root.to_path_buf());
+        Ok((WorktreeSignature::for_test(1, 1), Some((4, 2))))
+    });
+    let mut catalog = LinkedWorktreeCatalog::new_with_stats_loader(None, loader);
+    let root = PathBuf::from(std::ffi::OsString::from_vec(b"/repository/\xff".to_vec()));
+
+    catalog.request_stats([root.clone()]);
+    wait_for_stats(&mut catalog);
+
+    assert_eq!(
+        observed.lock().unwrap().as_slice(),
+        std::slice::from_ref(&root)
+    );
+    assert_eq!(catalog.change_stats(&root), Some((4, 2)));
+    assert_eq!(
+        observed.lock().unwrap()[0].as_os_str().as_bytes(),
+        root.as_os_str().as_bytes()
+    );
 }
 
 #[test]
@@ -172,7 +409,7 @@ fn reverted_intent_still_follows_a_superseded_flight() {
 }
 
 #[test]
-fn superseded_completions_cannot_publish_topology_or_stats() {
+fn superseded_topology_and_stale_stats_completions_cannot_publish() {
     let mut catalog = LinkedWorktreeCatalog::new(None);
     catalog.snapshot.repositories = vec![repository()];
     catalog.store.recent = vec![known_repositories::RecentRepository {
@@ -180,6 +417,16 @@ fn superseded_completions_cannot_publish_topology_or_stats() {
         root: PathBuf::from("/repo"),
         stats: Some((3, 2)),
     }];
+    catalog.stats.insert(
+        PathBuf::from("/repo"),
+        RepositoryStatsEntry {
+            counts: Some((3, 2)),
+            signature: Some(WorktreeSignature::for_test(2, 1)),
+            checked_at: Some(Instant::now()),
+            recheck_interval: MAX_STATS_INTERVAL,
+            revision: 0,
+        },
+    );
     let active_key = catalog.refresh_request().key;
     catalog.topology_epoch = 1;
     let pending_request = catalog.refresh_request();
@@ -192,6 +439,15 @@ fn superseded_completions_cannot_publish_topology_or_stats() {
         stats_pending: true,
     });
     catalog.pending_refresh = Some(pending_request);
+    catalog.active_stats_generation = Some(7);
+    catalog.stats_in_flight.insert(
+        PathBuf::from("/repo"),
+        RepositoryStatsInterest {
+            revision: 0,
+            standalone: false,
+            refresh_generation: Some(7),
+        },
+    );
     catalog
         .sender
         .send(InventoryCompletion {
@@ -206,7 +462,11 @@ fn superseded_completions_cannot_publish_topology_or_stats() {
         .stats_sender
         .send(RepositoryStatsCompletion {
             generation: 7,
-            stats: vec![(PathBuf::from("/repo"), (99, 88))],
+            results: vec![RepositoryStatsResult {
+                root: PathBuf::from("/repo"),
+                revision: 0,
+                result: Ok((WorktreeSignature::for_test(1, 1), Some((99, 88)))),
+            }],
         })
         .unwrap();
 
@@ -214,6 +474,7 @@ fn superseded_completions_cannot_publish_topology_or_stats() {
 
     assert!(!poll.changed);
     assert_eq!(catalog.snapshot.repositories.len(), 1);
+    assert_eq!(catalog.change_stats(Path::new("/repo")), Some((3, 2)));
     assert_eq!(catalog.store.recent[0].stats, Some((3, 2)));
     assert_eq!(catalog.generation, 8);
     assert_eq!(catalog.active_refresh.as_ref().unwrap().generation, 8);
@@ -247,6 +508,33 @@ fn persists_repository_identity_and_recent_order() {
         restored.store.recent[1].common_dir.as_deref(),
         Some(Path::new("/repo-11/.git"))
     );
+}
+
+#[test]
+fn stale_stats_persistence_cannot_overwrite_newer_topology() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("repositories.json");
+    let mut catalog = LinkedWorktreeCatalog::new(Some(path.clone()));
+    catalog
+        .remember_workspace(Some(Path::new("/first/.git")), Path::new("/first"))
+        .unwrap();
+    assert!(
+        catalog
+            .store
+            .update_stats(&[(PathBuf::from("/first"), (14, 3))])
+            .unwrap()
+    );
+    let stale_stats = catalog.store.persistence_request().unwrap().unwrap();
+
+    catalog
+        .remember_workspace(Some(Path::new("/second/.git")), Path::new("/second"))
+        .unwrap();
+    known_repositories::persist(stale_stats).unwrap();
+
+    let restored = LinkedWorktreeCatalog::new(Some(path));
+    assert_eq!(restored.store.recent[0].root, PathBuf::from("/second"));
+    assert_eq!(restored.store.recent[1].root, PathBuf::from("/first"));
+    assert_eq!(restored.store.recent[1].stats, Some((14, 3)));
 }
 
 #[test]
@@ -483,9 +771,10 @@ fn persists_repository_stats_for_an_instant_picker_open() {
     assert!(
         catalog
             .store
-            .update_stats_and_save(&[(PathBuf::from("/repo"), (21, 8))])
+            .update_stats(&[(PathBuf::from("/repo"), (21, 8))])
             .unwrap()
     );
+    persist_store(&catalog);
 
     let restored = LinkedWorktreeCatalog::new(Some(path));
     assert_eq!(

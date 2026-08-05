@@ -29,6 +29,7 @@ impl App {
             self.header_picker
                 .open(HeaderPickerKind::Repositories, items, selected);
         }
+        self.linked_worktrees.request_recent_stats();
     }
 
     pub(crate) fn repository_picker_details(&self) -> Vec<RepositoryPickerItem> {
@@ -42,11 +43,9 @@ impl App {
         if let Some(current) = details
             .iter_mut()
             .find(|detail| same_path(&detail.root, &repository.root))
+            && !repository.is_local()
         {
-            if !repository.is_local() {
-                current.stats = Some(git::change_line_counts(&repository.changes));
-                current.branch = Some(repository.branch.clone());
-            }
+            current.branch = Some(repository.branch.clone());
         }
         details
     }
@@ -67,9 +66,6 @@ impl App {
             return;
         };
         let current = repository.root.clone();
-        let current_stats = repository
-            .details_ready
-            .then(|| git::change_line_counts(&repository.changes));
         match self.linked_worktrees.repository(common_dir) {
             Some(repository) if repository.error.is_none() => {
                 let worktrees = repository
@@ -87,17 +83,14 @@ impl App {
                     worktrees
                         .into_iter()
                         .map(|worktree| HeaderPickerItem::Worktree {
-                            stats: if same_path(&worktree.path, &current) {
-                                current_stats
-                            } else {
-                                None
-                            },
+                            stats: self.linked_worktrees.change_stats(&worktree.path),
                             worktree,
                         })
                         .collect(),
                     selected,
                 );
-                self.header_picker.start_change_details();
+                let roots = self.header_picker.change_stats_roots();
+                self.linked_worktrees.request_stats(roots);
             }
             Some(repository) => self.header_picker.open_message(
                 HeaderPickerKind::Worktrees,

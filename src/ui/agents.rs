@@ -234,7 +234,10 @@ pub(super) fn draw(
         let elapsed = herdr
             .agent_elapsed(index, settings.agent_time_display)
             .map(format_duration);
-        let change_stats = herdr.agent_change_stats(index);
+        let change_stats = agent
+            .destination_cwd
+            .as_deref()
+            .and_then(|path| linked_worktrees.change_stats(path));
         let is_hovered = hovered_card == Some(group_index);
         let pane_id_hovered =
             hovered.as_ref() == Some(&HitTarget::AgentPaneId(agent.pane_id.clone()));

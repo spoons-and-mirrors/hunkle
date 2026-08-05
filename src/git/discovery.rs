@@ -261,9 +261,17 @@ fn load_worktree(root: &Path, status: Option<WorktreeStatus>) -> Result<Worktree
     })
 }
 
-pub(crate) fn load_change_line_counts(root: &Path) -> Result<(u64, u64)> {
-    let worktree = load_worktree(root, None)?;
-    Ok(change_line_counts(&worktree.changes))
+pub(crate) fn load_change_line_counts(
+    root: &Path,
+    previous: Option<WorktreeSignature>,
+) -> Result<(WorktreeSignature, Option<(u64, u64)>)> {
+    let status = worktree_status(root)?;
+    let signature = status.signature();
+    if previous == Some(signature) {
+        return Ok((signature, None));
+    }
+    let worktree = load_worktree(root, Some(status))?;
+    Ok((signature, Some(change_line_counts(&worktree.changes))))
 }
 
 fn load_git_inventory(root: &Path) -> Result<InventoryData> {

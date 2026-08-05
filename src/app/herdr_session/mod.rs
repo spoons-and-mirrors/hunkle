@@ -17,7 +17,6 @@ use super::{
     settings::AgentTimeDisplay,
 };
 use crate::filesystem::atomic_write;
-use crate::git;
 
 mod client;
 mod latest_message;
@@ -36,7 +35,6 @@ pub(crate) use scheduler::{
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const AGENT_CHANGE_STATS_INTERVAL: Duration = Duration::from_secs(5);
 const AGENT_MESSAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
@@ -332,7 +330,6 @@ enum Completion {
     Fullscreen {
         result: Result<bool, String>,
     },
-    AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     LatestUserMessage {
         identity: OpenCodeConversationIdentity,
         result: Result<latest_message::TranscriptFetch, String>,
@@ -406,9 +403,6 @@ pub(crate) struct HerdrSession {
     agent_display_running: bool,
     fullscreen_running: bool,
     fullscreen: bool,
-    agent_change_stats: HashMap<PathBuf, (u64, u64)>,
-    agent_change_stats_loading: bool,
-    next_agent_change_stats: Instant,
     latest_user_messages: HashMap<OpenCodeConversationIdentity, Vec<AgentUserMessage>>,
     latest_user_message_requests: HashSet<OpenCodeConversationIdentity>,
     latest_user_message_refreshes: HashMap<OpenCodeConversationIdentity, Instant>,
@@ -495,9 +489,6 @@ impl HerdrSession {
             agent_display_running: false,
             fullscreen_running: false,
             fullscreen: false,
-            agent_change_stats: HashMap::new(),
-            agent_change_stats_loading: false,
-            next_agent_change_stats: Instant::now(),
             latest_user_messages: HashMap::new(),
             latest_user_message_requests: HashSet::new(),
             latest_user_message_refreshes: HashMap::new(),
@@ -671,11 +662,7 @@ impl HerdrSession {
         LinkedWorktreeObservation { candidates }
     }
 
-    pub(crate) fn poll(
-        &mut self,
-        agent_cards_presented: bool,
-        agent_animation_presented: bool,
-    ) -> HerdrSessionPoll {
+    pub(crate) fn poll(&mut self, agent_animation_presented: bool) -> HerdrSessionPoll {
         if !self.enabled {
             return HerdrSessionPoll::default();
         }
@@ -849,14 +836,6 @@ impl HerdrSession {
                     });
                     poll.fullscreen_result = Some(result);
                 }
-                Completion::AgentChangeStats(stats) => {
-                    self.agent_change_stats_loading = false;
-                    self.next_agent_change_stats = Instant::now() + AGENT_CHANGE_STATS_INTERVAL;
-                    self.agent_change_stats = stats
-                        .into_iter()
-                        .filter_map(|(path, stats)| stats.map(|stats| (path, stats)))
-                        .collect();
-                }
                 Completion::LatestUserMessage { identity, result } => {
                     completion_changed = false;
                     self.latest_user_message_requests.remove(&identity);
@@ -927,9 +906,6 @@ impl HerdrSession {
         if !self.loading && Instant::now() >= self.next_refresh {
             self.start_snapshot();
             poll.changed = true;
-        }
-        if agent_cards_presented {
-            self.start_agent_change_stats_if_due(Instant::now());
         }
         poll.changed |= self.poll_spinner(Instant::now(), agent_animation_presented);
         poll
@@ -1402,51 +1378,15 @@ impl HerdrSession {
         Ok(())
     }
 
-    pub(crate) fn agent_change_stats(&self, index: usize) -> Option<(u64, u64)> {
+    pub(crate) fn agent_stats_destinations(&self) -> impl Iterator<Item = &Path> {
         self.agents
-            .get(index)
-            .and_then(|agent| agent.destination_cwd.as_ref())
-            .and_then(|path| self.agent_change_stats.get(path))
-            .copied()
+            .iter()
+            .filter_map(|agent| agent.destination_cwd.as_deref())
     }
 
     pub(crate) fn agent_destination(&self, index: usize) -> Option<&Path> {
         let agent = self.agents.get(index)?;
         agent.destination_cwd.as_deref().or(agent.cwd.as_deref())
-    }
-
-    fn start_agent_change_stats_if_due(&mut self, now: Instant) {
-        if self.agent_change_stats_loading || now < self.next_agent_change_stats {
-            return;
-        }
-        let paths = self
-            .agents
-            .iter()
-            .filter_map(|agent| agent.destination_cwd.clone())
-            .collect::<HashSet<_>>();
-        if paths.is_empty() {
-            self.next_agent_change_stats = now + AGENT_CHANGE_STATS_INTERVAL;
-            return;
-        }
-        self.agent_change_stats_loading = true;
-        let sender = self.sender.clone();
-        if thread::Builder::new()
-            .name("agent-change-stats".to_owned())
-            .spawn(move || {
-                let stats = paths
-                    .into_iter()
-                    .map(|path| {
-                        let stats = git::load_change_line_counts(&path).ok();
-                        (path, stats)
-                    })
-                    .collect();
-                let _ = sender.send(Completion::AgentChangeStats(stats));
-            })
-            .is_err()
-        {
-            self.agent_change_stats_loading = false;
-            self.next_agent_change_stats = now + AGENT_CHANGE_STATS_INTERVAL;
-        }
     }
 
     pub(crate) fn agent_entry_state(&self, index: usize) -> AgentEntryState {
@@ -1750,11 +1690,6 @@ impl HerdrSession {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_agent_change_stats_for_test(&mut self, path: PathBuf, stats: (u64, u64)) {
-        self.agent_change_stats.insert(path, stats);
-    }
-
-    #[cfg(test)]
     pub(crate) fn set_stashed_agents_for_test(&mut self, agents: Vec<StashedAgent>) {
         self.stash.agents = agents;
     }
@@ -2033,29 +1968,12 @@ mod presentation_interest_tests {
     }
 
     #[test]
-    fn hidden_agent_cards_do_not_start_change_statistics() {
-        let mut session = session_without_snapshot();
-        session.agents = vec![working_agent(Some(PathBuf::from(
-            "/hunkle-test-missing-repository",
-        )))];
-        session.next_agent_change_stats = Instant::now();
-
-        session.poll(false, false);
-        assert!(!session.agent_change_stats_loading);
-
-        session.poll(true, true);
-        assert!(session.agent_change_stats_loading);
-    }
-
-    #[test]
     fn spinner_advances_only_when_an_animation_was_presented() {
         let mut session = session_without_snapshot();
         session.agents = vec![working_agent(None)];
-        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
-
-        assert!(!session.poll(false, false).changed);
+        assert!(!session.poll(false).changed);
         assert_eq!(session.spinner_frame, 0);
-        assert!(session.poll(false, true).changed);
+        assert!(session.poll(true).changed);
         assert_eq!(session.spinner_frame, 1);
     }
 }
@@ -2197,7 +2115,6 @@ mod latest_user_message_cache_tests {
     fn retains_a_scheduled_conversation_without_a_live_agent() {
         let mut session = HerdrSession::new(true, None, None);
         session.next_refresh = Instant::now() + Duration::from_secs(60);
-        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
         let identity = scheduled_conversation_identity("ses_scheduled");
         session.scheduled_preview_identity = Some(identity.clone());
         session
@@ -2213,7 +2130,7 @@ mod latest_user_message_cache_tests {
             })
             .unwrap();
 
-        session.poll(false, false);
+        session.poll(false);
         session.apply_agent_snapshot_at(Vec::new(), unix_time_ms());
 
         assert_eq!(
@@ -2228,7 +2145,6 @@ mod latest_user_message_cache_tests {
         let mut session = HerdrSession::new(true, None, None);
         session.cross_workspace_agents = true;
         session.next_refresh = Instant::now() + Duration::from_secs(60);
-        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
         let live_identity = identity("ses_shared");
         session.apply_agent_snapshot_at(vec![agent("w1:p1", live_identity)], unix_time_ms());
         let scheduled_identity = scheduled_conversation_identity("ses_shared");
@@ -2245,7 +2161,7 @@ mod latest_user_message_cache_tests {
             })
             .unwrap();
 
-        session.poll(false, false);
+        session.poll(false);
 
         assert_eq!(
             session.agent_user_messages(0).unwrap()[0].text,
@@ -2262,7 +2178,6 @@ mod latest_user_message_cache_tests {
         let mut session = HerdrSession::new(true, None, None);
         session.cross_workspace_agents = true;
         session.next_refresh = Instant::now() + Duration::from_secs(60);
-        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
         let first_identity = identity("ses_stable");
         let replacement_identity = AgentSessionIdentity {
             source: "opencode".to_owned(),
@@ -2304,7 +2219,7 @@ mod latest_user_message_cache_tests {
                 ))),
             })
             .unwrap();
-        session.poll(false, false);
+        session.poll(false);
 
         assert_eq!(session.agent_user_messages(0).unwrap()[0].text, "completed");
         assert!(
@@ -2360,7 +2275,6 @@ mod latest_user_message_cache_tests {
         let mut session = HerdrSession::new(true, None, None);
         session.cross_workspace_agents = true;
         session.next_refresh = Instant::now() + Duration::from_secs(60);
-        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
         let departed = identity("ses_departed");
         session.apply_agent_snapshot_at(vec![agent("w1:p1", departed.clone())], unix_time_ms());
         let departed_conversation = conversation_identity(&departed.value);
@@ -2383,7 +2297,7 @@ mod latest_user_message_cache_tests {
                 result: Ok(latest_message::TranscriptFetch::Changed(message("stale"))),
             })
             .unwrap();
-        session.poll(false, false);
+        session.poll(false);
 
         assert!(
             !session
@@ -2411,7 +2325,6 @@ mod latest_user_message_cache_tests {
     fn unchanged_and_equal_completions_preserve_cached_transcript_without_redraw() {
         let mut session = HerdrSession::new(true, None, None);
         session.next_refresh = Instant::now() + Duration::from_secs(60);
-        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
         let identity = conversation_identity("ses_cached");
         session
             .latest_user_messages
@@ -2432,7 +2345,7 @@ mod latest_user_message_cache_tests {
                 result: Ok(latest_message::TranscriptFetch::Unchanged),
             })
             .unwrap();
-        assert!(!session.poll(false, false).changed);
+        assert!(!session.poll(false).changed);
         assert_eq!(session.latest_user_messages[&identity].as_ptr(), original);
 
         session
@@ -2445,7 +2358,7 @@ mod latest_user_message_cache_tests {
                 result: Ok(latest_message::TranscriptFetch::Changed(message("cached"))),
             })
             .unwrap();
-        assert!(!session.poll(false, false).changed);
+        assert!(!session.poll(false).changed);
         assert_eq!(session.latest_user_messages[&identity].as_ptr(), original);
 
         session
@@ -2458,7 +2371,7 @@ mod latest_user_message_cache_tests {
                 result: Ok(latest_message::TranscriptFetch::Changed(message("updated"))),
             })
             .unwrap();
-        assert!(session.poll(false, false).changed);
+        assert!(session.poll(false).changed);
         assert_eq!(session.latest_user_messages[&identity][0].text, "updated");
     }
 }
@@ -2515,7 +2428,7 @@ mod stash_flow_tests {
 
         release.send(()).unwrap();
         let notice = (0..100).find_map(|_| {
-            let poll = session.poll(false, false);
+            let poll = session.poll(false);
             if poll.notice.is_none() {
                 thread::sleep(Duration::from_millis(5));
             }

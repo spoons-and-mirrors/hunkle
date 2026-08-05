@@ -358,8 +358,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
     app.herdr.workspaces[0].branch = Some("feature/agents".to_owned());
     let stats_path = PathBuf::from("/agent/stats");
     app.herdr.agents[0].destination_cwd = Some(stats_path.clone());
-    app.herdr
-        .set_agent_change_stats_for_test(stats_path, (128, 34));
+    app.linked_worktrees
+        .set_change_stats_for_test(stats_path, (128, 34));
     app.herdr.set_agent_user_messages_for_test(
         0,
         &[

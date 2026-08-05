@@ -918,10 +918,7 @@ impl App {
             }
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
-                self.herdr.poll(
-                    self.regions.agent_cards_presented,
-                    self.regions.agent_animation_presented,
-                )
+                self.herdr.poll(self.regions.agent_animation_presented)
             };
             changed |= herdr_poll.changed;
             if herdr_poll.changed {
@@ -950,6 +947,42 @@ impl App {
         {
             self.linked_worktrees.refresh();
         }
+        let active_repository = self.git_repository().and_then(|repository| {
+            repository
+                .details_ready
+                .then_some(repository.worktree_signature)
+                .flatten()
+                .map(|signature| (repository.root.clone(), signature))
+        });
+        let active_stats_changed = match active_repository {
+            Some((root, signature))
+                if self
+                    .linked_worktrees
+                    .active_repository_stats_are_current(&root, signature) =>
+            {
+                false
+            }
+            Some((root, signature)) => {
+                let counts = self
+                    .git_repository()
+                    .map(|repository| git::change_line_counts(&repository.changes))
+                    .unwrap_or_default();
+                self.linked_worktrees
+                    .observe_active_repository(Some((root, counts, signature)))
+            }
+            None => self.linked_worktrees.observe_active_repository(None),
+        };
+        changed |= active_stats_changed;
+        if self.regions.agent_cards_presented {
+            let roots = self
+                .herdr
+                .agent_stats_destinations()
+                .map(Path::to_owned)
+                .collect::<Vec<_>>();
+            self.linked_worktrees.request_stats(roots);
+        }
+        let picker_roots = self.header_picker.change_stats_roots();
+        self.linked_worktrees.request_stats(picker_roots.clone());
         let catalog_poll = {
             let _activity = diagnostics::activity("poll-worktree-catalog", "");
             self.linked_worktrees.poll()
@@ -958,6 +991,15 @@ impl App {
             let details = self.repository_picker_details();
             self.header_picker.sync_repository_details(&details);
         }
+        let picker_stats = picker_roots
+            .into_iter()
+            .filter_map(|root| {
+                self.linked_worktrees
+                    .change_stats(&root)
+                    .map(|stats| (root, stats))
+            })
+            .collect::<Vec<_>>();
+        changed |= self.header_picker.sync_change_stats(&picker_stats);
         changed |= catalog_poll.changed;
         if let Some(result) = catalog_poll.worktree_creation {
             changed = true;
@@ -997,7 +1039,6 @@ impl App {
             .poll_blink(creating_worktree);
         let filtering_header_picker = self.header_picker.filtering();
         changed |= self.header_picker.query.poll_blink(filtering_header_picker);
-        changed |= self.header_picker.poll_change_details();
         if let Some(result) = self.header_picker.poll_clone() {
             changed = true;
             match result {
