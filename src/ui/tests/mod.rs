@@ -1479,8 +1479,15 @@ fn renders_every_primary_surface() {
             .any(|column| column.right == GraphColumn::Changes)
     );
     assert!(app.regions.graph_columns.iter().all(|column| {
-        terminal.backend().buffer()[(column.splitter.x, column.splitter.y)].symbol() == "│"
+        terminal.backend().buffer()[(column.splitter.right() - 1, column.splitter.y)].symbol()
+            == "│"
     }));
+    assert!(
+        app.regions
+            .graph_columns
+            .iter()
+            .all(|column| column.splitter.width == 2)
+    );
 
     let date_column = app
         .regions
@@ -1489,6 +1496,20 @@ fn renders_every_primary_surface() {
         .find(|column| column.right == GraphColumn::Date)
         .copied()
         .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        date_column.splitter.x,
+        date_column.splitter.y,
+    ));
+    assert!(app.dragging_graph_column.is_some());
+    assert_eq!(app.settings.graph_changes_width, date_column.left_width);
+    assert_eq!(app.settings.graph_date_width, date_column.right_width);
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        date_column.splitter.x,
+        date_column.splitter.y,
+    ));
+    assert!(app.dragging_graph_column.is_none());
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
         date_column.splitter.x,

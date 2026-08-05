@@ -178,7 +178,7 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         .map(|index| {
             let left = graph_columns[index - 1];
             let right = graph_columns[index];
-            let splitter = Rect::new(
+            let splitter_line = Rect::new(
                 column_starts[index].saturating_sub(1),
                 commit_table_area.y,
                 1,
@@ -190,14 +190,14 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
                 } else {
                     palette().faint
                 })),
-                splitter,
+                splitter_line,
             );
             GraphColumnRegion {
                 left,
                 right,
                 left_width: column_widths[index - 1],
                 right_width: column_widths[index],
-                splitter,
+                splitter: Rect::new(splitter_line.x.saturating_sub(1), splitter_line.y, 2, 1),
             }
         })
         .collect::<Vec<_>>();
