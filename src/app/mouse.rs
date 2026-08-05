@@ -1358,7 +1358,7 @@ impl App {
                     if self.author_filter.toggle(index) {
                         self.graph_search
                             .apply(self.author_filter.visible_indices());
-                        self.reconcile_graph_selection();
+                        self.select_current_graph_search_match();
                     }
                 }
                 Some(HitTarget::Graph(GraphHitTarget::FilterOverlay)) => {}

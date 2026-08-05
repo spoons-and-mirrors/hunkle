@@ -779,7 +779,7 @@ impl App {
             self.graph_search.input.insert_single_line(text);
             self.graph_search
                 .apply(self.author_filter.visible_indices());
-            self.reconcile_graph_selection();
+            self.select_current_graph_search_match();
             return;
         }
         if self.mode == Mode::Normal && self.paste_clipboard_files(text) {
@@ -1282,11 +1282,14 @@ impl App {
                             self.author_filter.visible_indices(),
                         );
                         let visible = self.graph_search.visible_indices();
-                        let commit_index = selected_oid.and_then(|oid| {
-                            visible
-                                .iter()
-                                .position(|index| repo.commits[*index].oid == oid)
-                        });
+                        let commit_index =
+                            self.graph_search.current_match_position().or_else(|| {
+                                selected_oid.and_then(|oid| {
+                                    visible
+                                        .iter()
+                                        .position(|index| repo.commits[*index].oid == oid)
+                                })
+                            });
                         self.graph_state
                             .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
                         self.graph_scroll_to_selection = true;
@@ -1444,6 +1447,14 @@ impl App {
             && matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc)
         {
             self.show_previous_panel();
+            return;
+        }
+        if self.visible_view() == View::Graph
+            && !self.graph_commit_open()
+            && key.code == KeyCode::Char(' ')
+            && key.modifiers.is_empty()
+        {
+            self.focus_graph_search();
             return;
         }
         if self
