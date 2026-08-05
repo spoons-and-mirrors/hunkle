@@ -346,7 +346,7 @@ impl App {
                         return;
                     };
                     self.selection.clear();
-                    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
                         self.open_agent_preview_modal(index);
                     } else {
                         self.activate_agent_card(key, index);
@@ -1385,6 +1385,14 @@ impl App {
     }
 
     fn handle_agent_preview_modal_click(&mut self, point: Position) {
+        if !self
+            .regions
+            .hit_target_rect(HitTarget::AgentPreviewModalOverlay)
+            .is_some_and(|overlay| overlay.contains(point))
+        {
+            self.close_agent_preview_modal();
+            return;
+        }
         match self.regions.hit_target_at(point) {
             Some(HitTarget::AgentPreviewModalClose) => self.close_agent_preview_modal(),
             Some(HitTarget::AgentPreviewRequest {

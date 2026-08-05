@@ -1682,6 +1682,18 @@ fn opening_a_workspace_queues_its_local_hunkle_build() {
 }
 
 #[test]
+fn workspace_local_builds_stay_on_their_own_update_channel() {
+    let executable = Path::new("worktree")
+        .join("target")
+        .join("hunkle-install")
+        .join("bin")
+        .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX));
+
+    assert!(is_workspace_local_build(&executable));
+    assert!(!is_workspace_local_build(Path::new("target/debug/hunkle")));
+}
+
+#[test]
 fn undersized_inline_editor_rejects_text_input() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
