@@ -15,7 +15,7 @@ fn enable_herdr(app: &mut App) {
 }
 
 #[test]
-fn clearing_hit_targets_removes_overlaps_but_keeps_adjacent_targets() {
+fn clearing_targets_removes_overlaps_but_keeps_adjacent_targets() {
     let mut regions = Regions::default();
     regions.register_hit_target(HitTarget::CommitMessageGenerate, Rect::new(0, 0, 4, 1));
     regions.register_hit_target(HitTarget::MarkdownPreviewToggle, Rect::new(3, 0, 4, 1));
@@ -23,8 +23,10 @@ fn clearing_hit_targets_removes_overlaps_but_keeps_adjacent_targets() {
         HitTarget::Graph(GraphHitTarget::AuthorHeader),
         Rect::new(7, 0, 2, 1),
     );
+    regions.register_scroll_target(ScrollTarget::Preview, Rect::new(3, 0, 4, 1));
+    regions.register_scroll_target(ScrollTarget::Graph, Rect::new(7, 0, 2, 1));
 
-    regions.clear_hit_targets_in(Rect::new(4, 0, 3, 1));
+    regions.clear_targets_in(Rect::new(4, 0, 3, 1));
 
     assert!(
         regions
@@ -40,6 +42,11 @@ fn clearing_hit_targets_removes_overlaps_but_keeps_adjacent_targets() {
         regions
             .hit_target_rect(HitTarget::Graph(GraphHitTarget::AuthorHeader))
             .is_some()
+    );
+    assert_eq!(regions.scroll_target_at(Position::new(5, 0)), None);
+    assert_eq!(
+        regions.scroll_target_at(Position::new(7, 0)),
+        Some(ScrollTarget::Graph)
     );
 }
 
@@ -93,7 +100,7 @@ fn opening_a_file_from_the_explorer_selects_it_in_the_new_workspace() {
     let repo = app.repository().unwrap().clone();
     assert_eq!(repo.root, fs::canonicalize(&nested).unwrap());
     assert!(repo.is_local());
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
     assert_eq!(app.changes.pane, LeftPane::Files);
     assert_eq!(
         app.changes.selected_explorer_file_path(&repo),
@@ -347,7 +354,7 @@ fn creates_renames_drags_and_deletes_files_from_the_files_pane() {
     fs::write(root.join("old.txt"), "content\n").unwrap();
     fs::create_dir(root.join("destination")).unwrap();
     let mut app = App::new(root.to_path_buf());
-    app.view = View::Changes;
+    app.set_view_for_test(View::Changes);
     app.changes.pane = LeftPane::Files;
 
     app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT));
@@ -565,20 +572,20 @@ fn graph_visibility_is_explicit_and_survives_reload() {
     initialize_repository(root);
 
     let mut app = App::new(root.to_path_buf());
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
     assert_eq!(app.changes.pane, LeftPane::Files);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
     wait_for_state(&mut app, |app| app.notice.as_deref() != Some("Refreshing…"));
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
     app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
 
     fs::write(root.join("tracked.txt"), "edited\n").unwrap();
     let mut dirty_app = App::new(root.to_path_buf());
-    assert_eq!(dirty_app.view, View::Changes);
+    assert_eq!(dirty_app.view(), View::Changes);
     assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
 
     fs::write(root.join("tracked.txt"), "base\n").unwrap();
@@ -586,7 +593,7 @@ fn graph_visibility_is_explicit_and_survives_reload() {
     wait_for_state(&mut dirty_app, |app| {
         app.repository().is_some_and(|repo| repo.changes.is_empty())
     });
-    assert_eq!(dirty_app.view, View::Changes);
+    assert_eq!(dirty_app.view(), View::Changes);
     assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
 }
 
@@ -601,12 +608,12 @@ fn graph_can_be_hidden_after_returning_from_a_commit_diff() {
 
     app.show_graph();
     app.open_selected_graph_commit();
-    assert!(app.graph_commit_open);
+    assert!(app.graph_commit_open());
     app.show_previous_panel();
     assert_eq!(app.visible_view(), View::Graph);
 
     app.toggle_graph();
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
     assert_eq!(app.visible_view(), View::Changes);
 }
 
@@ -644,20 +651,20 @@ fn worktree_actions_preserve_the_visible_graph() {
     fs::write(root.join("tracked.txt"), "edited\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
-    app.view = View::Graph;
+    app.set_view_for_test(View::Graph);
     app.stage_all();
     wait_for_state(&mut app, |app| {
         app.repository()
             .is_some_and(|repo| repo.changes.iter().all(|change| change.staged))
     });
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
     wait_for_state(&mut app, |app| {
         app.repository()
             .is_some_and(|repo| repo.changes.iter().all(|change| !change.staged))
     });
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
 
     let selected = app.changes.worktree_state.selected().unwrap() as u16;
     app.regions.worktree_list = Some(Rect::new(0, 0, 20, selected + 1));
@@ -670,7 +677,7 @@ fn worktree_actions_preserve_the_visible_graph() {
         app.repository()
             .is_some_and(|repo| repo.changes.iter().all(|change| change.staged))
     });
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
 }
 
 #[test]
@@ -717,7 +724,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     assert!(!app.herdr.showing_stash);
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
     assert_eq!(app.changes.pane, LeftPane::Worktree);
     assert!(
         app.notice
@@ -726,22 +733,22 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     );
 
     app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    assert_eq!(app.view, View::Graph);
-    app.graph_commit_open = true;
+    assert_eq!(app.view(), View::Graph);
+    app.set_graph_commit_open_for_test(true);
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert!(!app.agents_pane_visible());
     assert_eq!(app.changes.pane, LeftPane::Worktree);
-    assert_eq!(app.view, View::Graph);
-    assert!(app.graph_commit_open);
+    assert_eq!(app.view(), View::Graph);
+    assert!(app.graph_commit_open());
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.changes.pane, LeftPane::Worktree);
-    assert_eq!(app.view, View::Graph);
-    assert!(app.graph_commit_open);
+    assert_eq!(app.view(), View::Graph);
+    assert!(app.graph_commit_open());
 
     app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
     app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
     assert_eq!(app.changes.pane, LeftPane::Worktree);
     app.mode = Mode::Commit;
     app.commit_input.clear();
@@ -752,7 +759,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     assert_eq!(app.mode, Mode::Commit);
     assert_eq!(app.commit_input.text(), "g");
     assert_eq!(app.changes.pane, LeftPane::Worktree);
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
 
@@ -828,7 +835,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     assert_eq!(app.settings_store.load(), app.settings);
 
     app.mode = Mode::Normal;
-    app.view = View::Changes;
+    app.set_view_for_test(View::Changes);
     app.changes.diff_scroll = 37;
     assert!(app.changes.diff_wrap);
     app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
@@ -1513,6 +1520,17 @@ fn undersized_inline_editor_rejects_text_input() {
 }
 
 #[test]
+fn input_uses_the_profile_computed_for_the_rendered_frame() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+
+    app.begin_render_frame(Rect::new(0, 0, 49, 48));
+    app.regions.screen = Some(Rect::new(0, 0, 120, 48));
+
+    assert_eq!(app.layout_profile(), LayoutProfile::Single);
+}
+
+#[test]
 fn workspace_open_is_blocked_while_inline_editor_exists() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -1538,7 +1556,7 @@ fn runs_a_custom_git_command_and_keeps_its_output() {
     app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Commit);
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
     assert_eq!(app.changes.pane, LeftPane::Worktree);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 

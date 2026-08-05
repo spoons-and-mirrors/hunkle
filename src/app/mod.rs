@@ -115,11 +115,9 @@ mod tests;
 
 pub struct App {
     pub(crate) session: RepositorySession,
-    pub view: View,
-    search_return_view: View,
-    pub(crate) graph_commit_open: bool,
     graph_hidden: bool,
-    single_panel_detail_open: bool,
+    navigation: WorkspaceNavigation,
+    layout_profile: LayoutProfile,
     pub mode: Mode,
     pub changes: ChangesState,
     pub graph_state: TableState,
@@ -150,7 +148,6 @@ pub struct App {
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) herdr: HerdrSession,
     pub(crate) agents_visible: bool,
-    pub(crate) agents_pane_pinned: bool,
     agent_preview_selection: Option<AgentKey>,
     agent_preview_transcript_scroll: Option<AgentPreviewTranscriptScroll>,
     agent_preview_message_selection: Option<AgentPreviewMessageSelection>,
@@ -280,11 +277,9 @@ impl App {
         workspace_explorer.left_pane_width = settings.explorer_left_pane_width;
         let mut app = Self {
             session,
-            view: View::Changes,
-            search_return_view: View::Changes,
-            graph_commit_open: false,
             graph_hidden: false,
-            single_panel_detail_open: false,
+            navigation: WorkspaceNavigation::default(),
+            layout_profile: LayoutProfile::default(),
             mode,
             changes,
             graph_state,
@@ -315,7 +310,6 @@ impl App {
             linked_worktrees,
             herdr,
             agents_visible: true,
-            agents_pane_pinned: false,
             agent_preview_selection: None,
             agent_preview_transcript_scroll: None,
             agent_preview_message_selection: None,
@@ -402,12 +396,11 @@ impl App {
     }
 
     pub(crate) fn visible_view(&self) -> View {
-        if self.view == View::RepositorySearch {
+        if self.navigation.showing(View::RepositorySearch) {
             View::RepositorySearch
-        } else if self.view == View::Graph
-            || self.graph_commit_open
+        } else if self.navigation.showing(View::Graph)
             || (!self.graph_hidden
-                && self.view == View::Changes
+                && self.navigation.showing(View::Changes)
                 && self.changes.preview.pane() == LeftPane::Worktree
                 && self.changes.branch_comparison().is_none()
                 && self.repository().is_some_and(|repo| {
@@ -420,8 +413,45 @@ impl App {
         }
     }
 
+    pub(crate) fn view(&self) -> View {
+        self.navigation.view()
+    }
+
+    pub(crate) fn sidebar_pane(&self) -> LeftPane {
+        self.changes.pane
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_sidebar_pane_for_test(&mut self, pane: LeftPane) {
+        self.changes.pane = pane;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_view_for_test(&mut self, view: View) {
+        match view {
+            View::Changes => self.navigation.show_changes(),
+            View::Graph => self.navigation.show_graph(),
+            View::RepositorySearch => self.navigation.open_search(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agents_pane_selected(&self) -> bool {
+        self.navigation.agents_selected()
+    }
+
+    pub(crate) fn workspace_detail_open(&self) -> bool {
+        if self.agents_pane_visible() {
+            self.navigation.agent_detail_open()
+        } else if self.graph_commit_open() {
+            true
+        } else {
+            self.visible_view() == View::Changes && self.navigation.changes_detail_open()
+        }
+    }
+
     pub(crate) fn agents_pane_visible(&self) -> bool {
-        self.herdr_available() && self.agents_pane_pinned
+        self.herdr_available() && self.navigation.agents_selected()
     }
 
     pub(crate) fn herdr_available(&self) -> bool {
@@ -437,7 +467,7 @@ impl App {
     }
 
     pub(crate) fn agents_pane_index(&self) -> Option<usize> {
-        if !self.agents_pane_pinned {
+        if !self.navigation.agents_selected() {
             return None;
         }
         self.agent_preview_selection
@@ -499,8 +529,8 @@ impl App {
             .select((len > 0).then_some(selected.unwrap_or(0)));
         *self.graph_state.offset_mut() = self.graph_state.offset().min(len.saturating_sub(1));
         self.graph_scroll_to_selection = true;
-        if len == 0 {
-            self.graph_commit_open = false;
+        if len == 0 && self.graph_commit_open() {
+            self.navigation.close_graph_commit();
         }
     }
 
@@ -650,7 +680,7 @@ impl App {
             self.should_quit = true;
             return;
         }
-        if self.mode == Mode::Normal && self.view == View::RepositorySearch {
+        if self.mode == Mode::Normal && self.view() == View::RepositorySearch {
             self.handle_file_search(key);
             return;
         }
@@ -736,7 +766,7 @@ impl App {
             self.header_picker.apply_filter();
             return;
         }
-        if self.mode == Mode::Normal && self.view == View::RepositorySearch {
+        if self.mode == Mode::Normal && self.view() == View::RepositorySearch {
             if let Some(repo) = self.session.data() {
                 self.file_search.paste(text, repo);
             }
@@ -872,7 +902,7 @@ impl App {
         changed |= self
             .file_search
             .query
-            .poll_blink(self.mode == Mode::Normal && self.view == View::RepositorySearch);
+            .poll_blink(self.mode == Mode::Normal && self.view() == View::RepositorySearch);
         let naming_branch = self.header_picker.naming_branch();
         changed |= self.header_picker.branch_name.poll_blink(naming_branch);
         let cloning_repository = self.header_picker.cloning_repository();
@@ -1276,7 +1306,7 @@ impl App {
                             self.changes.set_pane(pane, Some(repo));
                             self.initial_pane_pending = false;
                         }
-                        if self.view == View::RepositorySearch {
+                        if self.view() == View::RepositorySearch {
                             self.file_search.repository_refreshed(repo);
                         } else {
                             self.file_search.invalidate();
@@ -1410,7 +1440,7 @@ impl App {
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {
-        if self.graph_commit_open
+        if self.graph_commit_open()
             && matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc)
         {
             self.show_previous_panel();
@@ -1469,9 +1499,9 @@ impl App {
                 _ => {}
             }
         }
-        if self.single_panel_layout()
+        if self.layout_profile().is_single()
             && self.agents_pane_visible()
-            && !self.single_panel_detail_open
+            && !self.navigation.agent_detail_open()
         {
             match key.code {
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -1491,7 +1521,7 @@ impl App {
                 _ => {}
             }
         }
-        if self.view == View::Changes
+        if self.view() == View::Changes
             && self.changes.pane == LeftPane::Files
             && self.changes.sqlite_active()
         {
@@ -1512,18 +1542,18 @@ impl App {
             }
         }
         match key.code {
-            KeyCode::Enter if self.visible_view() == View::Graph && !self.graph_commit_open => {
+            KeyCode::Enter if self.visible_view() == View::Graph && !self.graph_commit_open() => {
                 self.open_selected_graph_commit();
             }
             KeyCode::Enter
-                if self.view == View::Changes
+                if self.view() == View::Changes
                     && self.changes.pane == LeftPane::Files
                     && self.changes.activate_sqlite() =>
             {
                 self.show_detail_panel();
             }
             KeyCode::Enter
-                if self.view == View::Changes && self.changes.pane == LeftPane::Files =>
+                if self.view() == View::Changes && self.changes.pane == LeftPane::Files =>
             {
                 if self.changes.selected_explorer_directory_path().is_some() {
                     let repo = self.session.data();
@@ -1533,7 +1563,7 @@ impl App {
                 }
             }
             KeyCode::Enter
-                if self.view == View::Changes && self.changes.pane == LeftPane::Worktree =>
+                if self.view() == View::Changes && self.changes.pane == LeftPane::Worktree =>
             {
                 let directory_selected = self
                     .session
@@ -1547,13 +1577,13 @@ impl App {
                 }
             }
             KeyCode::Right | KeyCode::Char('l')
-                if self.view == View::Changes && self.changes.pane == LeftPane::Files =>
+                if self.view() == View::Changes && self.changes.pane == LeftPane::Files =>
             {
                 let repo = self.session.data();
                 self.changes.expand_or_descend_explorer(repo);
             }
             KeyCode::Right | KeyCode::Char('l')
-                if self.view == View::Changes && self.changes.pane == LeftPane::Worktree =>
+                if self.view() == View::Changes && self.changes.pane == LeftPane::Worktree =>
             {
                 let invalid_path = self.session.data().and_then(|repo| {
                     let index = self.changes.selected_change_index(repo)?;
@@ -1572,25 +1602,29 @@ impl App {
                 }
             }
             KeyCode::Left | KeyCode::Char('h')
-                if self.view == View::Changes && self.changes.pane == LeftPane::Files =>
+                if self.view() == View::Changes && self.changes.pane == LeftPane::Files =>
             {
                 let repo = self.session.data();
                 self.changes.collapse_or_ascend_explorer(repo);
             }
             KeyCode::Left | KeyCode::Char('h')
-                if self.view == View::Changes && self.changes.pane == LeftPane::Worktree =>
+                if self.view() == View::Changes && self.changes.pane == LeftPane::Worktree =>
             {
                 let repo = self.session.data();
                 self.changes.collapse_or_ascend_worktree(repo);
             }
-            KeyCode::PageDown if self.visible_view() == View::Changes || self.graph_commit_open => {
+            KeyCode::PageDown
+                if self.visible_view() == View::Changes || self.graph_commit_open() =>
+            {
                 self.scroll_diff_by(10)
             }
-            KeyCode::PageUp if self.visible_view() == View::Changes || self.graph_commit_open => {
+            KeyCode::PageUp if self.visible_view() == View::Changes || self.graph_commit_open() => {
                 self.scroll_diff_by(-10)
             }
-            KeyCode::Down | KeyCode::Char('j') if self.graph_commit_open => self.scroll_diff_by(1),
-            KeyCode::Up | KeyCode::Char('k') if self.graph_commit_open => self.scroll_diff_by(-1),
+            KeyCode::Down | KeyCode::Char('j') if self.graph_commit_open() => {
+                self.scroll_diff_by(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.graph_commit_open() => self.scroll_diff_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Home => self.select_first(),
@@ -1632,16 +1666,16 @@ impl App {
             ShortcutAction::OpenGitCommand => self.open_git_command(),
             ShortcutAction::OpenHelp => self.mode = Mode::Help,
             ShortcutAction::ToggleWrap
-                if (self.visible_view() == View::Changes || self.graph_commit_open)
+                if (self.visible_view() == View::Changes || self.graph_commit_open())
                     && self.changes.preview.wrappable() =>
             {
                 let wrapped = self.changes.toggle_wrap();
-                let subject = if self.view == View::Changes && self.changes.pane == LeftPane::Files
-                {
-                    "Preview"
-                } else {
-                    "Diff"
-                };
+                let subject =
+                    if self.view() == View::Changes && self.changes.pane == LeftPane::Files {
+                        "Preview"
+                    } else {
+                        "Diff"
+                    };
                 self.notice = Some(if wrapped {
                     format!("{subject} wrap enabled")
                 } else {
@@ -1890,7 +1924,7 @@ impl App {
             return;
         };
         self.changes.preview_commit(repo, &commit);
-        self.graph_commit_open = true;
+        self.navigation.show_graph_commit();
     }
 
     fn queue_editor(&mut self) {
@@ -2129,7 +2163,7 @@ impl App {
     }
 
     pub(crate) fn markdown_preview_available(&self) -> bool {
-        self.view == View::Changes && self.changes.preview.markdown_available()
+        self.view() == View::Changes && self.changes.preview.markdown_available()
     }
 
     pub(crate) fn markdown_preview_rendered(&self) -> bool {
@@ -2165,35 +2199,56 @@ impl App {
     }
 
     pub(super) fn show_main_pane(&mut self) {
-        self.view = View::Changes;
-        self.graph_commit_open = false;
-        self.single_panel_detail_open = false;
+        self.navigation.show_changes();
     }
 
-    pub(crate) fn single_panel_layout(&self) -> bool {
-        self.regions
-            .screen
-            .is_some_and(|area| area.width < SPLIT_VIEW_MIN_WIDTH)
+    pub(crate) fn layout_profile(&self) -> LayoutProfile {
+        self.layout_profile
+    }
+
+    pub(crate) fn begin_render_frame(&mut self, area: Rect) -> LayoutProfile {
+        self.layout_profile = LayoutProfile::for_area(area);
+        self.regions = Regions::default();
+        self.regions.screen = Some(area);
+        self.layout_profile
+    }
+
+    pub(crate) fn graph_commit_open(&self) -> bool {
+        self.navigation.graph_commit_open()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_graph_commit_open_for_test(&mut self, open: bool) {
+        if open {
+            self.navigation.show_graph_commit();
+        } else {
+            self.navigation.close_graph_commit();
+        }
     }
 
     pub(crate) fn single_panel_detail_visible(&self) -> bool {
-        self.single_panel_layout() && self.single_panel_detail_open
+        self.layout_profile().is_single()
+            && if self.agents_pane_visible() {
+                self.navigation.agent_detail_open()
+            } else {
+                self.visible_view() == View::Changes && self.navigation.changes_detail_open()
+            }
     }
 
     pub(super) fn show_detail_panel(&mut self) {
-        self.show_main_pane();
-        self.single_panel_detail_open = true;
+        self.navigation.show_changes_detail();
     }
 
     pub(super) fn show_previous_panel(&mut self) {
-        if self.graph_commit_open {
-            self.graph_commit_open = false;
-        } else {
-            self.changes.deactivate_sqlite();
-            self.single_panel_detail_open = false;
-            self.agent_preview_transcript_scroll = None;
-            self.agent_preview_message_selection = None;
-            self.agent_preview_expanded_requests = None;
+        if let WorkspaceBack::Detail { changes, agent } = self.navigation.back() {
+            if changes {
+                self.changes.deactivate_sqlite();
+            }
+            if agent {
+                self.agent_preview_transcript_scroll = None;
+                self.agent_preview_message_selection = None;
+                self.agent_preview_expanded_requests = None;
+            }
         }
     }
 
@@ -2214,7 +2269,7 @@ impl App {
 
     fn open_agent_detail(&mut self, index: usize) {
         self.select_agent_preview(index);
-        self.single_panel_detail_open = true;
+        self.navigation.show_agent_detail();
     }
 
     fn show_left_pane(&mut self, pane: LeftPane) {
@@ -2228,11 +2283,11 @@ impl App {
         self.initial_pane_pending = false;
         self.dismiss_agent_preview();
         self.changes.set_pane_preserving_preview(pane);
-        self.single_panel_detail_open = false;
+        self.navigation.close_changes_detail();
     }
 
     fn dismiss_agent_preview(&mut self) {
-        self.agents_pane_pinned = false;
+        self.navigation.select_sidebar();
         self.agent_preview_selection = None;
         self.agent_preview_transcript_scroll = None;
         self.agent_preview_message_selection = None;
@@ -2386,20 +2441,17 @@ impl App {
             .and_then(|index| self.herdr.agent_key(index));
         self.initial_pane_pending = false;
         self.agents_visible = true;
-        self.agents_pane_pinned = true;
+        self.navigation.select_agents();
         self.agent_preview_selection = selection;
-        self.single_panel_detail_open = false;
     }
 
     fn show_graph(&mut self) {
-        self.view = View::Graph;
-        self.graph_commit_open = false;
+        self.navigation.show_graph();
         self.graph_hidden = false;
-        self.single_panel_detail_open = false;
     }
 
     fn toggle_left_pane(&mut self) {
-        if self.agents_pane_pinned {
+        if self.navigation.agents_selected() {
             self.show_sidebar_pane(LeftPane::Worktree);
             return;
         }

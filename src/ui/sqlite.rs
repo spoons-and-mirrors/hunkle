@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, HitTarget, SqliteFocus, SqlitePage},
+    app::{App, HitTarget, ScrollTarget, SqliteFocus, SqlitePage},
     ui::{palette, truncate_width},
 };
 
@@ -134,6 +134,8 @@ fn draw_objects(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         parts[0],
     );
     app.regions.sqlite_objects = Some(parts[1]);
+    app.regions
+        .register_scroll_target(ScrollTarget::SqliteObjects, parts[1]);
     if let Some(target) = app.changes.sqlite_objects_target() {
         app.regions
             .register_hit_target(HitTarget::Changes(target), parts[1]);
@@ -263,6 +265,8 @@ fn draw_rows(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         parts[0],
     );
     app.regions.sqlite_rows = Some(parts[1]);
+    app.regions
+        .register_scroll_target(ScrollTarget::SqliteRows, parts[1]);
     if let Some(target) = app.changes.sqlite_rows_target() {
         app.regions
             .register_hit_target(HitTarget::Changes(target), parts[1]);
@@ -322,6 +326,8 @@ fn draw_rows(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         data_height,
     );
     app.regions.sqlite_rows = Some(data_area);
+    app.regions
+        .register_scroll_target(ScrollTarget::SqliteRows, data_area);
     let visible_columns = visible_columns(page, browser.column_scroll, parts[1].width);
     let widths = std::iter::once(Constraint::Length(5))
         .chain(

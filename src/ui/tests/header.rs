@@ -163,6 +163,9 @@ fn issue_picker_uses_readable_stacked_rows_on_mobile() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
+    for index in 0..30 {
+        fs::write(root.join(format!("mobile-picker-{index}.txt")), "capture\n").unwrap();
+    }
     let mut app = App::new(root.to_path_buf());
     app.header_picker.open(
         HeaderPickerKind::Issues,
@@ -212,6 +215,30 @@ fn issue_picker_uses_readable_stacked_rows_on_mobile() {
     assert_eq!(overlay.width, 49);
     assert_eq!(first.height, 3);
     assert_eq!(second.y, first.bottom());
+    let worktree = app.regions.worktree_list.unwrap();
+    let outside_picker = Position::new(worktree.x, worktree.bottom() - 1);
+    assert!(!overlay.contains(outside_picker));
+    assert_eq!(
+        app.regions.scroll_target_at(outside_picker),
+        Some(ScrollTarget::HeaderPicker)
+    );
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        outside_picker.x,
+        outside_picker.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        outside_picker.x,
+        outside_picker.y - 6,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        outside_picker.x,
+        outside_picker.y - 6,
+    ));
+    assert_eq!(app.changes.worktree_scroll, 0);
+    assert!(app.header_picker.is_open());
     let mut first_text = String::new();
     for y in first.y..first.bottom() {
         for x in first.x..first.right() {

@@ -7,6 +7,16 @@
 - Do not build, install, replace, patch, or live-handoff a custom Herdr binary to make Hunkle behavior work.
 - Fix compatibility and behavior inside Hunkle. If the official Herdr API cannot support a requirement, explain the limitation and ask before proposing a cross-repository change.
 
+## Responsive Workspace
+
+- Read `docs/adr/0009-responsive-workspace-composition.md` before changing responsive layout or navigation.
+- `src/ui/workspace.rs` exclusively owns structural composition. Add single, column, or future row arrangements there instead of branching inside feature renderers.
+- Compute `LayoutProfile` once per frame and pass presentation choices to renderers explicitly. Do not add device detection, `is_mobile`, or feature-owned viewport queries.
+- Keep navigation and Back behavior in `WorkspaceNavigation`. Worktree and Files remain hierarchical subnavigation owned by `ChangesState`.
+- Share application, repository, selection, loading, and preview state across compositions. Do not create parallel mobile feature state or UI trees.
+- Renderers own geometry and register semantic hit and scroll targets. Input routing must consume those targets instead of reconstructing row or pane meaning from coordinates.
+- Keep component-local visual adaptations local. Changes to which surfaces exist or how they are arranged belong to the workspace shell.
+
 ## Installation
 
 - At the end of every task that changes Hunkle, run `cargo hunkle-install-local` from the current worktree root.

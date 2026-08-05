@@ -1,17 +1,22 @@
 use super::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(super) fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+pub(super) fn draw_header(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    profile: LayoutProfile,
+) {
     let herdr_available = app.herdr_available();
     let row = area;
     let content_y = area.bottom().saturating_sub(1);
-    let card_gap = if app.single_panel_layout() { " " } else { "  " };
+    let card_gap = if profile.is_single() { " " } else { "  " };
     let card_gap_width = UnicodeWidthStr::width(card_gap) as u16;
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().canvas)),
         row,
     );
-    let fullscreen_rect = (herdr_available && !app.single_panel_layout()).then(|| {
+    let fullscreen_rect = (herdr_available && !profile.is_single()).then(|| {
         let label = " ⛶ ";
         let width = UnicodeWidthStr::width(label) as u16;
         let rect = Rect::new(area.right().saturating_sub(width), content_y, width, 1);
@@ -421,9 +426,22 @@ fn branch_badge(branch: &str, dirty: bool, ahead: u64, behind: u64, width: usize
     format!(" {branch}{suffix}")
 }
 
-pub(super) fn draw_main_top_padding(frame: &mut Frame<'_>, area: Rect) {
+pub(super) fn draw_main_top_padding(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    profile: LayoutProfile,
+) {
     let transition = Rect::new(area.x, area.y, area.width, 1);
-    fill(frame, transition, palette().canvas);
+    if profile.is_single() && app.regions.worktree.is_some() {
+        frame.render_widget(
+            Paragraph::new("▄".repeat(usize::from(transition.width)))
+                .style(Style::default().fg(palette().panel).bg(palette().canvas)),
+            transition,
+        );
+    } else {
+        fill(frame, transition, palette().canvas);
+    }
 }
 
 pub(super) fn repository_label(repo: &crate::git::RepositoryData) -> String {
@@ -527,7 +545,7 @@ fn header_card_active(app: &App, target: &HitTarget) -> bool {
             && app.header_picker.kind == Some(HeaderPickerKind::Issues))
 }
 
-pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App, profile: LayoutProfile) {
     let Some(kind) = app.header_picker.kind else {
         return;
     };
@@ -548,7 +566,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App) {
     let filtering = app.header_picker.filtering();
     let picker_chrome = if filtering { 4 } else { 1 };
     let item_offset = if filtering { 3 } else { 1 };
-    let mobile_issue_picker = kind == HeaderPickerKind::Issues && app.single_panel_layout();
+    let mobile_issue_picker = kind == HeaderPickerKind::Issues && profile.is_single();
     let item_height = if mobile_issue_picker { 3 } else { 1 };
     let visible_item_rows = if mobile_issue_picker {
         usize::from(

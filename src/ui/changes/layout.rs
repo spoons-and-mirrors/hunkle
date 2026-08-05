@@ -1,12 +1,17 @@
 use super::*;
 
-pub(super) fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> Rect {
+pub(super) fn layout_agents_pane(
+    app: &mut App,
+    content: Rect,
+    list_y: u16,
+    show_agents: bool,
+) -> Rect {
     app.regions.agents_list = None;
     app.regions.agents_splitter = None;
     app.regions.agents_bounds = None;
 
     let available = content.bottom().saturating_sub(list_y);
-    if !app.herdr_available() || app.single_panel_layout() || !app.agents_visible || available < 5 {
+    if !show_agents || available < 5 {
         return Rect::new(content.x, list_y, content.width, available);
     }
 
@@ -48,6 +53,10 @@ pub(super) fn layout_agents_pane(app: &mut App, content: Rect, list_y: u16) -> R
         agents_area.width.saturating_add(2),
         agents_area.height.saturating_sub(1),
     ));
+    if let Some(list) = app.regions.agents_list {
+        app.regions
+            .register_scroll_target(ScrollTarget::Agents, list);
+    }
     Rect::new(
         content.x,
         list_y,

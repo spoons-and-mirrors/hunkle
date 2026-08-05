@@ -68,6 +68,22 @@ fn narrow_layout_drills_from_changes_into_a_full_width_detail_panel() {
     assert!(app.regions.worktree.is_none());
     assert_eq!(app.regions.diff.unwrap().width, 49);
 
+    let preview_origin = app.changes.preview.origin().clone();
+    terminal.backend_mut().resize(100, 48);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.worktree.is_some());
+    assert!(app.regions.diff.is_some());
+    assert!(app.regions.splitter.is_some());
+    assert_eq!(app.changes.worktree_state.selected(), selected);
+    assert_eq!(app.changes.preview.origin(), &preview_origin);
+
+    terminal.backend_mut().resize(49, 48);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.worktree.is_none());
+    assert_eq!(app.regions.diff.unwrap().width, 49);
+    assert_eq!(app.changes.worktree_state.selected(), selected);
+    assert_eq!(app.changes.preview.origin(), &preview_origin);
+
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.worktree_list.is_some());
@@ -214,8 +230,8 @@ fn graph_replacement_clears_hidden_diff_targets() {
         .hit_target_rect(HitTarget::Changes(target))
         .unwrap();
 
-    app.view = View::Graph;
-    app.graph_commit_open = false;
+    app.set_view_for_test(View::Graph);
+    app.set_graph_commit_open_for_test(false);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
@@ -253,8 +269,9 @@ fn decoupled_sidebar_passes_clear_inactive_content_and_targets() {
     app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     assert_eq!(app.changes.preview.pane(), LeftPane::Worktree);
+    assert!(app.regions.diff.is_some());
     assert!(
         app.regions
             .hit_target_rect(HitTarget::Changes(ChangesHitTarget::StageAll))
@@ -281,8 +298,9 @@ fn decoupled_sidebar_passes_clear_inactive_content_and_targets() {
     app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    assert_eq!(app.sidebar_pane(), LeftPane::Worktree);
     assert_eq!(app.changes.preview.pane(), LeftPane::Files);
+    assert!(app.regions.diff.is_some());
     assert!(app.regions.files_add.is_none());
     assert!(app.regions.files_root.is_none());
     let mut sidebar_text = String::new();
@@ -462,7 +480,7 @@ fn colors_changed_files_in_the_files_view() {
     fs::write(root.join("deleted.txt"), "replacement\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
-    app.changes.pane = LeftPane::Files;
+    app.set_sidebar_pane_for_test(LeftPane::Files);
     app.agents_visible = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -505,7 +523,7 @@ fn refreshes_file_and_folder_colors_after_the_worktree_changes() {
     run_git(root, &["commit", "-m", "initial commit"]);
 
     let mut app = App::new(root.to_path_buf());
-    app.changes.pane = LeftPane::Files;
+    app.set_sidebar_pane_for_test(LeftPane::Files);
     app.agents_visible = false;
     fs::write(
         root.join("src/main.rs"),
@@ -639,7 +657,7 @@ fn colors_collapsed_folders_for_the_changes_they_contain() {
     run_git(root, &["rm", "deleted/file.txt"]);
 
     let mut app = App::new(root.to_path_buf());
-    app.changes.pane = LeftPane::Files;
+    app.set_sidebar_pane_for_test(LeftPane::Files);
     app.agents_visible = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -722,7 +740,7 @@ fn opens_plain_directories_as_file_workspaces() {
     let mut app = App::new(root.to_path_buf());
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.repository().unwrap().is_local());
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     wait_for_preview(&mut app);
     assert_eq!(app.changes.preview.text(), Some("local workspace\n"));
 
@@ -775,7 +793,7 @@ fn opens_plain_directories_as_file_workspaces() {
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
         .unwrap();
     click(&mut app, worktree_tab.x, worktree_tab.y);
-    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    assert_eq!(app.sidebar_pane(), LeftPane::Worktree);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen: String = terminal
         .backend()
@@ -811,7 +829,7 @@ fn fuzzy_searches_and_opens_repository_files() {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-    assert_eq!(app.view, View::RepositorySearch);
+    assert_eq!(app.view(), View::RepositorySearch);
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     assert_eq!(app.file_search.query.text(), "/");
     for character in "ab".chars() {
@@ -820,26 +838,26 @@ fn fuzzy_searches_and_opens_repository_files() {
     app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
     assert_eq!(app.file_search.query.text(), "/aXb");
-    assert_eq!(app.view, View::RepositorySearch);
+    assert_eq!(app.view(), View::RepositorySearch);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
 
-    app.view = View::Graph;
+    app.set_view_for_test(View::Graph);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let graph = app.regions.graph.unwrap();
     click(&mut app, graph.x, graph.y);
-    assert_eq!(app.view, View::Changes);
-    app.view = View::Graph;
+    assert_eq!(app.view(), View::Changes);
+    app.set_view_for_test(View::Graph);
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     for character in "profile card".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
-    assert_eq!(app.view, View::RepositorySearch);
+    assert_eq!(app.view(), View::RepositorySearch);
     assert_eq!(app.file_search.match_count, 1);
     let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
     narrow.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -898,12 +916,12 @@ fn fuzzy_searches_and_opens_repository_files() {
         ))
         .unwrap();
     click(&mut app, result.x, result.y);
-    assert_eq!(app.view, View::RepositorySearch);
+    assert_eq!(app.view(), View::RepositorySearch);
     click(&mut app, result.x, result.y);
     wait_for_preview(&mut app);
     assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.view, View::Changes);
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.view(), View::Changes);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     assert_eq!(
         app.selected_explorer_file_path().map(RepoPath::display),
         Some("src/components/profile_card.rs".to_owned())
@@ -991,7 +1009,7 @@ fn left_pane_files_take_over_the_preview_from_graph() {
 
     let mut app = App::new(root.to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    app.view = View::Graph;
+    app.set_view_for_test(View::Graph);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let worktree = app.regions.worktree_list.unwrap();
@@ -1008,16 +1026,16 @@ fn left_pane_files_take_over_the_preview_from_graph() {
         .unwrap();
     let file_y = worktree.y + (file_row - app.changes.worktree_scroll) as u16;
     click(&mut app, status.x, file_y);
-    assert_eq!(app.view, View::Graph, "staging should not close Graph");
+    assert_eq!(app.view(), View::Graph, "staging should not close Graph");
 
     click(&mut app, worktree.x + 3, file_y);
-    assert_eq!(app.view, View::Changes);
-    assert!(!app.graph_commit_open);
+    assert_eq!(app.view(), View::Changes);
+    assert!(!app.graph_commit_open());
 
     app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-    assert_eq!(app.changes.pane, LeftPane::Files);
-    app.view = View::Graph;
-    app.graph_commit_open = true;
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
+    app.set_view_for_test(View::Graph);
+    app.set_graph_commit_open_for_test(true);
     app.mode = Mode::Normal;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let explorer = app.regions.explorer_list.unwrap();
@@ -1030,8 +1048,8 @@ fn left_pane_files_take_over_the_preview_from_graph() {
     click(&mut app, explorer.x + 3, explorer.y + file_row as u16);
     wait_for_preview(&mut app);
     assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.view, View::Changes);
-    assert!(!app.graph_commit_open);
+    assert_eq!(app.view(), View::Changes);
+    assert!(!app.graph_commit_open());
     assert_eq!(app.changes.preview.text(), Some("changed\n"));
 }
 
@@ -1075,12 +1093,12 @@ fn double_clicking_worktree_files_opens_them_in_files() {
         assert!(worktree.contains(Position::new(worktree.x + 4, y)));
 
         click(&mut app, worktree.x + 4, y);
-        assert_eq!(app.changes.pane, LeftPane::Worktree);
+        assert_eq!(app.sidebar_pane(), LeftPane::Worktree);
         click(&mut app, worktree.x + 4, y);
         wait_for_preview(&mut app);
 
-        assert_eq!(app.changes.pane, LeftPane::Files);
-        assert_eq!(app.view, View::Changes);
+        assert_eq!(app.sidebar_pane(), LeftPane::Files);
+        assert_eq!(app.view(), View::Changes);
         assert_eq!(
             app.selected_explorer_file_path().map(RepoPath::display),
             Some(path.to_owned())
@@ -1088,7 +1106,7 @@ fn double_clicking_worktree_files_opens_them_in_files() {
         assert_eq!(app.changes.preview.text(), Some(content));
 
         app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-        assert_eq!(app.changes.pane, LeftPane::Worktree);
+        assert_eq!(app.sidebar_pane(), LeftPane::Worktree);
     }
 }
 
@@ -1113,7 +1131,7 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     let explorer = app.regions.explorer_list.unwrap();
     click(&mut app, explorer.x + 1, explorer.y);
     wait_for_preview(&mut app);
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     assert_eq!(
         app.selected_explorer_file_path().map(RepoPath::display),
         Some("README.md".to_owned())
@@ -1174,7 +1192,7 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     );
 
     terminal.backend_mut().resize(100, 30);
-    app.view = View::Graph;
+    app.set_view_for_test(View::Graph);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions

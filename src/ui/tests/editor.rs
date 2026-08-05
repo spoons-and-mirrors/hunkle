@@ -116,7 +116,7 @@ fn selects_visible_text_and_suppresses_clicks_after_dragging() {
         graph.x + 4,
         graph.y,
     ));
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
     assert!(app.take_copy_request().is_some());
 }
 
@@ -467,7 +467,7 @@ fn preview_click_uses_the_scroll_state_from_the_rendered_frame() {
         ],
     );
     let mut app = App::new(root.to_path_buf());
-    app.changes.pane = LeftPane::Files;
+    app.set_sidebar_pane_for_test(LeftPane::Files);
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let list = app.regions.explorer_list.unwrap();

@@ -6,7 +6,7 @@ pub(super) use crossterm::event::{
 pub(super) use ratatui::{
     Terminal,
     backend::TestBackend,
-    layout::Position,
+    layout::{Position, Rect},
     style::{Color, Modifier},
 };
 pub(super) use unicode_width::UnicodeWidthStr;
@@ -15,14 +15,14 @@ pub(super) use crate::app::{
     AgentActivityPreview, AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator,
     ExplorerHitTarget, FOOTER_MARQUEE_PAUSE, FOOTER_MARQUEE_STEP, GraphColumn, GraphHitTarget,
     HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget,
-    LeftPane, Mode, Settings, SettingsHitTarget, SettingsPage, SettingsStore, ShortcutAction,
-    SqliteFocus, StashedAgent, View,
+    LeftPane, Mode, ScrollTarget, Settings, SettingsHitTarget, SettingsPage, SettingsStore,
+    ShortcutAction, SqliteFocus, StashedAgent, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    BranchPickerStep, display_path, draw, marquee_window, palette, selected_display_range, text,
-    wrapped_editor_cursor,
+    BranchPickerStep, changes, display_path, draw, marquee_window, palette, selected_display_range,
+    text, wrapped_editor_cursor,
 };
 
 mod agents;
@@ -56,6 +56,35 @@ fn screen_text(terminal: &Terminal<TestBackend>) -> String {
         .iter()
         .map(|cell| cell.symbol())
         .collect()
+}
+
+#[test]
+fn columns_render_one_empty_workspace_without_a_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().join("missing"));
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            changes::draw(
+                frame,
+                &mut app,
+                changes::ChangesPlan::Columns {
+                    areas: [Rect::new(0, 0, 38, 30), Rect::new(39, 0, 61, 30)],
+                    sidebar_pane: LeftPane::Worktree,
+                    preview_pane: Some(LeftPane::Worktree),
+                    agents: changes::ColumnAgents::Hidden,
+                },
+            );
+        })
+        .unwrap();
+
+    assert_eq!(
+        screen_text(&terminal)
+            .matches("Open a repository to inspect its changes")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -149,9 +178,9 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
     run_git(root, &["commit", "-m", "initial"]);
 
     let mut app = App::new(root.to_path_buf());
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
     assert_eq!(app.visible_view(), View::Graph);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -160,7 +189,7 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
     assert!(app.regions.diff.is_none());
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.graph_commit_open);
+    assert!(app.graph_commit_open());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen: String = terminal
         .backend()
@@ -177,18 +206,58 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
     assert!(app.regions.worktree.is_none());
     assert_eq!(app.regions.diff.unwrap().width, 49);
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-    assert!(!app.graph_commit_open);
+    assert!(!app.graph_commit_open());
     narrow_terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.graph_table.is_some());
     assert!(app.regions.diff.is_none());
 
     fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
     let mut dirty_app = App::new(root.to_path_buf());
-    assert_eq!(dirty_app.changes.pane, LeftPane::Worktree);
+    assert_eq!(dirty_app.sidebar_pane(), LeftPane::Worktree);
     assert_eq!(dirty_app.visible_view(), View::Changes);
     terminal.draw(|frame| draw(frame, &mut dirty_app)).unwrap();
     assert!(dirty_app.regions.graph_table.is_none());
     assert!(dirty_app.regions.diff.is_some());
+}
+
+#[test]
+fn narrow_explorer_splitter_drag_stays_owned_by_the_modal() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    fs::write(root.join("file.txt"), "content\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    wait_for(&mut app, |app| !app.workspace_loading_initial_state());
+    app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Explorer);
+
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let splitter = app
+        .regions
+        .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Splitter))
+        .unwrap();
+    let initial_width = app.workspace_explorer.left_pane_width;
+
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        splitter.x,
+        splitter.y,
+    ));
+    assert!(app.workspace_explorer.dragging_splitter);
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        splitter.x + 4,
+        splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        splitter.x + 4,
+        splitter.y,
+    ));
+
+    assert!(!app.workspace_explorer.dragging_splitter);
+    assert!(app.workspace_explorer.left_pane_width > initial_width);
 }
 
 #[test]
@@ -400,7 +469,7 @@ fn renders_every_primary_surface() {
 
     let graph_toggle = app.regions.graph.unwrap();
     click(&mut app, graph_toggle.x, graph_toggle.y);
-    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.view(), View::Graph);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let commit = app.regions.commit.unwrap();
     assert_eq!(
@@ -422,7 +491,7 @@ fn renders_every_primary_surface() {
             .is_some()
     );
     click(&mut app, graph_toggle.x, graph_toggle.y);
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
 
     let generate = app
         .regions
@@ -446,7 +515,7 @@ fn renders_every_primary_surface() {
 
     let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let footer: String = terminal.backend().buffer().content[36 * 120..]
         .iter()
@@ -465,7 +534,7 @@ fn renders_every_primary_surface() {
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::FilesTab))
         .unwrap();
     click(&mut app, files_tab.x, files_tab.y);
-    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.commit.is_none());
     assert!(app.regions.agents_list.is_some());
@@ -571,7 +640,7 @@ fn renders_every_primary_surface() {
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
         .unwrap();
     click(&mut app, worktree_tab.x, worktree_tab.y);
-    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    assert_eq!(app.sidebar_pane(), LeftPane::Worktree);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let stage_all = app
@@ -1111,6 +1180,22 @@ fn renders_every_primary_surface() {
     assert!(action_screen.contains("Commit"));
     assert!(action_screen.contains("Run Git command"));
     let action_list = app.regions.action_list.unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(action_list.x, action_list.y)),
+        Some(ScrollTarget::ActionMenu)
+    );
+    let diff = app.regions.diff.unwrap();
+    let workspace_point = Position::new(diff.right() - 1, diff.bottom() - 1);
+    assert!(!action_list.contains(workspace_point));
+    assert_eq!(app.regions.scroll_target_at(workspace_point), None);
+    app.changes.diff_scroll = 0;
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        workspace_point.x,
+        workspace_point.y,
+    ));
+    assert_eq!(app.changes.diff_scroll, 0);
     app.handle_mouse(mouse(
         MouseEventKind::Moved,
         action_list.x + 2,
@@ -1133,6 +1218,23 @@ fn renders_every_primary_surface() {
     assert!(app.regions.command_output.is_some());
     let command_overlay = app.regions.command_overlay.unwrap();
     let command_output = app.regions.command_output.unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(command_output.x, command_output.y)),
+        Some(ScrollTarget::CommandOutput)
+    );
+    let workspace_point = (diff.y..diff.bottom())
+        .flat_map(|y| (diff.x..diff.right()).map(move |x| Position::new(x, y)))
+        .find(|point| !command_output.contains(*point))
+        .unwrap();
+    assert_eq!(app.regions.scroll_target_at(workspace_point), None);
+    app.changes.diff_scroll = 0;
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        workspace_point.x,
+        workspace_point.y,
+    ));
+    assert_eq!(app.changes.diff_scroll, 0);
     assert_eq!(
         command_output.bottom().saturating_add(1),
         command_overlay.bottom().saturating_sub(5)
@@ -1258,7 +1360,7 @@ fn renders_every_primary_surface() {
         Some("Commit message cannot be empty")
     );
 
-    app.view = View::Graph;
+    app.set_view_for_test(View::Graph);
     app.mode = Mode::Normal;
     let visible_oid = app.repository().unwrap().commits[0].oid.clone();
     wait_for(&mut app, |app| {
@@ -1427,6 +1529,11 @@ fn renders_every_primary_surface() {
         .regions
         .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterItem(second_author)))
         .unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(second_author_row.x, second_author_row.y)),
+        Some(ScrollTarget::AuthorFilter)
+    );
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Moved,
         column: second_author_row.x + 1,
@@ -1450,10 +1557,10 @@ fn renders_every_primary_surface() {
     });
     assert_eq!(app.graph_state.selected(), Some(1));
     assert_eq!(app.graph_state.offset(), graph_offset);
-    assert!(!app.graph_commit_open);
+    assert!(!app.graph_commit_open());
     click(&mut app, graph.x + 1, graph.y + 1);
     assert_eq!(app.graph_state.selected(), Some(1));
-    assert!(app.graph_commit_open);
+    assert!(app.graph_commit_open());
     wait_for_preview(&mut app);
     assert!(app.changes.preview.text().unwrap().contains("tracked.txt"));
     let commit_oid = app.repository().unwrap().commits[1].oid.clone();
@@ -1577,15 +1684,15 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.view, View::Graph);
-    assert!(!app.graph_commit_open);
+    assert_eq!(app.view(), View::Graph);
+    assert!(!app.graph_commit_open());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.graph_table.is_some());
     assert!(app.regions.diff_hunks.is_empty());
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.graph_state.selected(), Some(0));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.graph_commit_open);
+    assert!(app.graph_commit_open());
     wait_for_preview(&mut app);
     assert!(app.changes.preview.text().unwrap().contains("second.txt"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1640,6 +1747,15 @@ fn renders_every_primary_surface() {
         .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane))
         .unwrap()
         .width;
+    let surroundings = app
+        .regions
+        .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane))
+        .unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(surroundings.x, surroundings.y)),
+        Some(ScrollTarget::WorkspaceExplorerSurroundings)
+    );
     let splitter = app
         .regions
         .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Splitter))
@@ -1676,6 +1792,10 @@ fn renders_every_primary_surface() {
         .regions
         .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Path))
         .unwrap();
+    assert_eq!(
+        app.regions.scroll_target_at(Position::new(path.x, path.y)),
+        Some(ScrollTarget::WorkspaceExplorer)
+    );
     click(&mut app, path.x + 2, path.y + 1);
     assert!(app.workspace_explorer.editing_path);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1803,6 +1923,11 @@ fn renders_every_primary_surface() {
             ShortcutAction::OpenExplorer,
         )))
         .unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(explorer_row.x, explorer_row.y)),
+        Some(ScrollTarget::SettingsShortcuts)
+    );
     click(&mut app, explorer_row.x + 1, explorer_row.y);
     assert!(app.shortcut_capture);
     app.shortcut_capture = false;

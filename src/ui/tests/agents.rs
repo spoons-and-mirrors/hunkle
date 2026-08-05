@@ -262,15 +262,15 @@ fn renders_and_targets_agents_in_the_normal_view() {
             .is_none()
     );
     let viewer_before_sidebar_cycle = app.changes.preview.text().unwrap().to_owned();
-    let view_before_sidebar_cycle = app.view;
+    let view_before_sidebar_cycle = app.view();
     open_agents_pane(&mut app);
-    assert!(app.agents_pane_pinned);
+    assert!(app.agents_pane_selected());
     assert!(app.agents_pane_visible());
     assert_eq!(
         app.changes.preview.text(),
         Some(viewer_before_sidebar_cycle.as_str())
     );
-    assert_eq!(app.view, view_before_sidebar_cycle);
+    assert_eq!(app.view(), view_before_sidebar_cycle);
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
@@ -566,9 +566,9 @@ fn renders_and_targets_agents_in_the_normal_view() {
         })
         .unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, preview.x + 4, preview.y + 4));
-    let pane_before_switch = app.changes.pane;
+    let pane_before_switch = app.sidebar_pane();
     app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-    assert_ne!(app.changes.pane, pane_before_switch);
+    assert_ne!(app.sidebar_pane(), pane_before_switch);
     assert_eq!(app.hovered_hit_target, None);
     assert!(!app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -582,7 +582,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     );
     open_agents_pane(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.agents_pane_pinned);
+    assert!(app.agents_pane_selected());
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentTooltip {
@@ -604,7 +604,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
         .unwrap();
     click(&mut app, changes_tab.x, changes_tab.y);
-    assert!(!app.agents_pane_pinned);
+    assert!(!app.agents_pane_selected());
     assert_eq!(app.hovered_hit_target, None);
     assert!(!app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -613,7 +613,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::AgentsTab))
         .unwrap();
     click(&mut app, agents_tab.x, agents_tab.y);
-    assert!(app.agents_pane_pinned);
+    assert!(app.agents_pane_selected());
     assert!(app.agents_pane_visible());
 }
 
@@ -1030,6 +1030,10 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
         .regions
         .hit_target_rect(HitTarget::Agent(key.clone()))
         .unwrap();
+    let pane_id = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPaneId("w1:p1".to_owned()))
+        .unwrap();
     assert!(app.regions.worktree_list.is_none());
     assert!(app.regions.diff.is_none());
     assert!(
@@ -1038,7 +1042,7 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
             .is_none()
     );
 
-    click(&mut app, agent.x, agent.y);
+    click(&mut app, pane_id.right().saturating_add(2), agent.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agents_list.is_none());
     assert!(app.regions.changes.is_none());
@@ -1166,7 +1170,7 @@ fn agent_preview_picker_switches_without_activating_agent_layouts() {
         "⛶"
     );
     assert!(!header_text.contains("1/2"));
-    assert!(app.agents_pane_pinned);
+    assert!(app.agents_pane_selected());
     let picker = app
         .regions
         .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
@@ -1219,7 +1223,7 @@ fn agent_preview_picker_switches_without_activating_agent_layouts() {
             message: 0,
         })
     );
-    assert!(app.agents_pane_pinned);
+    assert!(app.agents_pane_selected());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         terminal

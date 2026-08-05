@@ -68,7 +68,7 @@ pub(super) struct ExplorerEntry {
 }
 
 pub struct ChangesState {
-    pub(crate) pane: LeftPane,
+    pub(super) pane: LeftPane,
     pub(crate) preview: PreviewState,
     pub(crate) worktree_state: ListState,
     pub(crate) explorer_state: ListState,

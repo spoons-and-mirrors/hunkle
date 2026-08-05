@@ -1,14 +1,15 @@
 use super::*;
 
-pub(super) fn draw_explorer_changes(
+pub(super) fn draw_explorer_master(
     frame: &mut Frame<'_>,
     app: &mut App,
-    columns: [Rect; 2],
-    draw_details: bool,
+    area: Rect,
+    single_panel: bool,
+    agents: ColumnAgents,
 ) {
     app.regions.worktree_list = None;
     app.regions.commit = None;
-    let content = columns[0].inner(Margin::new(1, 0));
+    let content = area.inner(Margin::new(1, 0));
     let header = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);
     let controls = Rect::new(
         content.x,
@@ -16,7 +17,7 @@ pub(super) fn draw_explorer_changes(
         content.width,
         1,
     );
-    let list_area = layout_agents_pane(app, content, controls.bottom());
+    let list_area = layout_agents_pane(app, content, controls.bottom(), agents.master_visible());
     let add_width = 7.min(controls.width);
     let add_button = Rect::new(
         controls.right().saturating_sub(add_width),
@@ -31,7 +32,7 @@ pub(super) fn draw_explorer_changes(
         1,
     );
     let drop_target = app.file_drop_target().cloned();
-    draw_sidebar_tabs(frame, app, header);
+    draw_sidebar_tabs(frame, app, header, LeftPane::Files);
     frame.render_widget(
         Paragraph::new(format!("{} FILES", app.changes.explorer_rows().len()))
             .style(Style::default().fg(palette().faint)),
@@ -54,6 +55,8 @@ pub(super) fn draw_explorer_changes(
         );
     }
     app.regions.explorer_list = Some(list_area);
+    app.regions
+        .register_scroll_target(ScrollTarget::Explorer, list_area);
     app.regions.files_add = Some(add_button);
     app.regions.files_root = Some(root_target);
 
@@ -94,18 +97,15 @@ pub(super) fn draw_explorer_changes(
             .collect()
     };
     frame.render_widget(List::new(items), list_area);
-    draw_agents_section(frame, app);
-    draw_agent_history_pane(frame, app, content);
-    if !draw_details {
-        return;
+    if agents.master_visible() {
+        draw_agents_section(frame, app);
     }
-    if app.single_panel_layout() {
-        clear_sidebar_regions(app);
-        app.regions.clear_hit_targets_in(columns[1]);
-        frame.render_widget(Clear, columns[1]);
-        fill(frame, columns[1], palette().panel);
+    if agents.detail_visible() {
+        draw_agent_history_pane(frame, app, content, single_panel);
     }
+}
 
+pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let issue_preview = app.changes.preview.issue().cloned();
     let selected_path = issue_preview.as_ref().map_or_else(
         || {
@@ -115,17 +115,16 @@ pub(super) fn draw_explorer_changes(
         |issue| issue.title.clone(),
     );
     let preview_header = Rect::new(
-        columns[1].x.saturating_add(1),
-        columns[1].y.saturating_add(1),
-        columns[1].width.saturating_sub(2),
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
         1,
     );
     let preview_body = Rect::new(
         preview_header.x,
         preview_header.y.saturating_add(2),
         preview_header.width,
-        columns[1]
-            .bottom()
+        area.bottom()
             .saturating_sub(preview_header.y.saturating_add(3)),
     );
     let media_loaded = app.changes.preview.image().is_some();
@@ -243,7 +242,7 @@ pub(super) fn draw_explorer_changes(
             button,
         );
     }
-    let media_visible = media_loaded && app.view == View::Changes && app.mode == Mode::Normal;
+    let media_visible = media_loaded && app.view() == View::Changes && app.mode == Mode::Normal;
     if media_visible {
         app.regions.diff_scroll_max = 0;
         app.regions.diff_scrollbar = None;
@@ -324,7 +323,7 @@ pub(super) fn draw_explorer_changes(
             |issue| format!("issue-{}.md", issue.number),
         );
         let mut layout =
-            prepare_preview_layout(app, columns[1], preview_body, &path, markdown_rendered, 0);
+            prepare_preview_layout(app, area, preview_body, &path, markdown_rendered, 0);
         if let Some(editable_path) = editable_path.as_ref()
             && let Some(line) = app.changes.take_preview_line(editable_path)
             && let Some(row) = app
@@ -333,7 +332,7 @@ pub(super) fn draw_explorer_changes(
                 .rendered_row_for_source_line(line)
         {
             app.changes.diff_scroll = row;
-            layout = prepare_preview_layout(app, columns[1], preview_body, &path, false, 0);
+            layout = prepare_preview_layout(app, area, preview_body, &path, false, 0);
         }
         if !markdown_rendered && editable_path.is_some() && !layout.preview_body.is_empty() {
             app.regions.preview_body = Some(layout.preview_body);

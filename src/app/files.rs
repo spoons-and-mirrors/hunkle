@@ -52,7 +52,7 @@ pub(crate) struct FileDrag {
 
 impl App {
     pub(super) fn paste_clipboard_files(&mut self, text: &str) -> bool {
-        if self.view != View::Changes || self.changes.pane != LeftPane::Files {
+        if self.view() != View::Changes || self.changes.pane != LeftPane::Files {
             return false;
         }
         let destination = self
@@ -390,7 +390,7 @@ impl App {
 
     pub(super) fn begin_file_drag(&mut self, point: Position) -> bool {
         if self.mode != Mode::Normal
-            || self.view != View::Changes
+            || self.view() != View::Changes
             || self.changes.pane != LeftPane::Files
         {
             return false;
@@ -442,7 +442,7 @@ impl App {
                 .regions
                 .explorer_list
                 .map_or(0, |rect| usize::from(rect.height));
-            let already_selected = self.single_panel_layout()
+            let already_selected = self.layout_profile().is_single()
                 && self.changes.preview.pane() == LeftPane::Files
                 && !drag.source.is_directory
                 && self.changes.selected_explorer_file_path(repo) == Some(&drag.source.path);
@@ -454,7 +454,7 @@ impl App {
                 if drag.source.is_directory {
                     self.last_explorer_file_click = None;
                     self.changes.toggle_selected_explorer_directory(Some(repo));
-                } else if self.single_panel_layout()
+                } else if self.layout_profile().is_single()
                     && self.register_explorer_file_click(&drag.source.path)
                 {
                     self.changes.activate_sqlite();

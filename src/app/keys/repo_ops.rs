@@ -30,7 +30,7 @@ impl App {
     }
 
     pub(crate) fn focus_graph_search(&mut self) {
-        if self.visible_view() == View::Graph && !self.graph_commit_open {
+        if self.visible_view() == View::Graph && !self.graph_commit_open() {
             self.graph_search_focused = true;
             self.graph_search.input.focus();
         }
