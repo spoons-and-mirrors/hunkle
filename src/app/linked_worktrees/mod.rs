@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     filesystem::same_path,
-    git::{self, LinkedWorktree},
+    git::{self, Branch, LinkedWorktree},
 };
 
 mod known_repositories;
@@ -22,6 +22,8 @@ pub(crate) struct LinkedWorktreeRepository {
     pub(crate) common_dir: PathBuf,
     pub(crate) label: String,
     pub(crate) worktrees: Vec<LinkedWorktree>,
+    pub(crate) branches: Vec<Branch>,
+    pub(crate) branch_error: Option<String>,
     pub(crate) error: Option<String>,
 }
 
@@ -139,6 +141,7 @@ struct RepositoryStatsCompletion {
 pub(crate) struct LinkedWorktreeCatalogPoll {
     pub(crate) changed: bool,
     pub(crate) notice: Option<String>,
+    pub(crate) worktree_creation: Option<Result<PathBuf, String>>,
 }
 
 pub(crate) struct LinkedWorktreeCatalog {
@@ -151,12 +154,16 @@ pub(crate) struct LinkedWorktreeCatalog {
     receiver: Receiver<InventoryCompletion>,
     stats_sender: Sender<RepositoryStatsCompletion>,
     stats_receiver: Receiver<RepositoryStatsCompletion>,
+    worktree_sender: Sender<Result<PathBuf, String>>,
+    worktree_receiver: Receiver<Result<PathBuf, String>>,
+    creating_worktree: bool,
 }
 
 impl LinkedWorktreeCatalog {
     pub(crate) fn new(store_path: Option<PathBuf>) -> Self {
         let (sender, receiver) = mpsc::channel();
         let (stats_sender, stats_receiver) = mpsc::channel();
+        let (worktree_sender, worktree_receiver) = mpsc::channel();
         Self {
             snapshot: LinkedWorktreeCatalogSnapshot::default(),
             candidates: Vec::new(),
@@ -167,6 +174,9 @@ impl LinkedWorktreeCatalog {
             receiver,
             stats_sender,
             stats_receiver,
+            worktree_sender,
+            worktree_receiver,
+            creating_worktree: false,
         }
     }
 
@@ -246,6 +256,25 @@ impl LinkedWorktreeCatalog {
         candidates_changed
     }
 
+    pub(crate) fn create_worktree_for_branch(
+        &mut self,
+        repository: PathBuf,
+        branch: String,
+        remote: bool,
+    ) -> Result<(), String> {
+        if self.creating_worktree {
+            return Err("A linked worktree is already being created".to_owned());
+        }
+        self.creating_worktree = true;
+        let sender = self.worktree_sender.clone();
+        thread::spawn(move || {
+            let result = git::create_worktree_for_branch(&repository, &branch, remote)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        Ok(())
+    }
+
     pub(crate) fn refresh(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
@@ -287,12 +316,27 @@ impl LinkedWorktreeCatalog {
                 .filter_map(|common_dir| {
                     let is_candidate = candidate_ranks.contains_key(&common_dir);
                     match git::list_worktrees(&common_dir) {
-                        Ok(worktrees) => Some(LinkedWorktreeRepository {
-                            label: repository_label(&common_dir, &worktrees),
-                            common_dir,
-                            worktrees,
-                            error: None,
-                        }),
+                        Ok(worktrees) => {
+                            let branch_root = worktrees
+                                .iter()
+                                .find(|worktree| worktree.is_main && !worktree.is_bare)
+                                .or_else(|| worktrees.iter().find(|worktree| !worktree.is_bare));
+                            let (branches, branch_error) = branch_root.map_or_else(
+                                || (Vec::new(), Some("No usable worktree".to_owned())),
+                                |worktree| match git::repository_branches(&worktree.path) {
+                                    Ok(branches) => (branches, None),
+                                    Err(error) => (Vec::new(), Some(error.to_string())),
+                                },
+                            );
+                            Some(LinkedWorktreeRepository {
+                                label: repository_label(&common_dir, &worktrees),
+                                common_dir,
+                                worktrees,
+                                branches,
+                                branch_error,
+                                error: None,
+                            })
+                        }
                         Err(_) if !is_candidate && !common_dir.exists() => {
                             pruned.push(common_dir);
                             None
@@ -301,6 +345,8 @@ impl LinkedWorktreeCatalog {
                             label: repository_label(&common_dir, &[]),
                             common_dir,
                             worktrees: Vec::new(),
+                            branches: Vec::new(),
+                            branch_error: None,
                             error: Some(error.to_string()),
                         }),
                     }
@@ -351,6 +397,10 @@ impl LinkedWorktreeCatalog {
                 Ok(false) => {}
                 Err(error) => result.notice = Some(error),
             }
+        }
+        if let Ok(completion) = self.worktree_receiver.try_recv() {
+            self.creating_worktree = false;
+            result.worktree_creation = Some(completion);
         }
         result
     }

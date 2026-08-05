@@ -30,6 +30,8 @@ fn repository() -> LinkedWorktreeRepository {
         common_dir: PathBuf::from("/repo/.git"),
         label: "repo".to_owned(),
         worktrees: vec![linked("/repo", true), linked("/repo-feature", false)],
+        branches: Vec::new(),
+        branch_error: None,
         error: None,
     }
 }

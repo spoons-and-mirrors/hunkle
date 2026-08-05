@@ -33,14 +33,14 @@ pub(crate) use file_search::{FileSearch, FileSearchRow, SearchDestination, Searc
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use graph_search::GraphSearch;
 pub(crate) use header_picker::{
-    BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem, HeaderPickerKind, PickerState,
+    BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
     RepositoryPickerStep, WorktreePickerStep,
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
     AgentActivityPreview, AgentEntryState, AgentKey, AgentRequestPartPreview, AgentRequestPreview,
     AgentStatus, AgentUserMessage, HerdrPaneLayout, HerdrSession, ScheduledRun, ScheduledRunStatus,
-    ScheduledTask, ScheduledTaskEdit,
+    ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit, ScheduledTaskSource,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -953,6 +953,10 @@ impl App {
             self.header_picker.sync_repository_details(&details);
         }
         changed |= catalog_poll.changed;
+        if let Some(result) = catalog_poll.worktree_creation {
+            changed = true;
+            self.finish_scheduler_worktree_creation(result);
+        }
         if let Some(notice) = catalog_poll.notice {
             self.notice = Some(notice);
         }

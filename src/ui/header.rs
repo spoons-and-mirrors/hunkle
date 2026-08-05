@@ -1,6 +1,4 @@
 use super::*;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 pub(super) fn draw_header(
     frame: &mut Frame<'_>,
     app: &mut App,
@@ -909,77 +907,26 @@ fn draw_header_location_picker(
                     | Some(HitTarget::HeaderPickerDeleteWorktree(hovered_index))
                     if hovered_index == index
             );
-            match item {
-                HeaderPickerItem::Repository {
-                    path,
-                    label,
-                    stats,
-                    branch,
-                } => Some(LocationPickerRow {
-                    target: HitTarget::HeaderPickerItem(index),
-                    label: label.clone(),
-                    detail: path.display().to_string(),
-                    current: current_root.is_some_and(|current| current == path),
-                    stats: *stats,
-                    kind: LocationPickerRowKind::Location {
-                        branch: branch.clone(),
-                    },
-                    selected: app.header_picker.selected == index,
-                    hovered,
-                    delete_target: None,
-                }),
-                HeaderPickerItem::Worktree { worktree, stats } => {
-                    let current = current_root.is_some_and(|root| root == worktree.path);
-                    Some(LocationPickerRow {
-                        target: HitTarget::HeaderPickerItem(index),
-                        label: worktree
-                            .path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("worktree")
-                            .to_owned(),
-                        detail: worktree.path.display().to_string(),
-                        current,
-                        stats: *stats,
-                        kind: LocationPickerRowKind::Location { branch: None },
-                        selected: app.header_picker.selected == index,
-                        hovered,
-                        delete_target: (!worktree.is_main && !current)
-                            .then_some(HitTarget::HeaderPickerDeleteWorktree(index)),
-                    })
+            let delete_target = match item {
+                HeaderPickerItem::Worktree { worktree, .. }
+                    if !worktree.is_main
+                        && !current_root.is_some_and(|root| root == worktree.path) =>
+                {
+                    Some(HitTarget::HeaderPickerDeleteWorktree(index))
                 }
-                HeaderPickerItem::Branch(branch) | HeaderPickerItem::BranchBase(branch) => {
-                    Some(LocationPickerRow {
-                        target: HitTarget::HeaderPickerItem(index),
-                        label: branch.name.clone(),
-                        detail: branch_picker_detail(branch),
-                        current: branch.current,
-                        stats: None,
-                        kind: LocationPickerRowKind::Choice,
-                        selected: app.header_picker.selected == index,
-                        hovered,
-                        delete_target: matches!(item, HeaderPickerItem::Branch(branch) if !branch.remote && !branch.current)
-                            .then_some(HitTarget::HeaderPickerDeleteBranch(index)),
-                    })
+                HeaderPickerItem::Branch(branch) if !branch.remote && !branch.current => {
+                    Some(HitTarget::HeaderPickerDeleteBranch(index))
                 }
-                HeaderPickerItem::DiffTarget {
-                    label,
-                    detail,
-                    default,
-                    ..
-                } => Some(LocationPickerRow {
-                    target: HitTarget::HeaderPickerItem(index),
-                    label: label.clone(),
-                    detail: detail.clone(),
-                    current: *default,
-                    stats: None,
-                    kind: LocationPickerRowKind::Choice,
-                    selected: app.header_picker.selected == index,
-                    hovered,
-                    delete_target: None,
-                }),
                 _ => None,
-            }
+            };
+            location_picker_row(
+                item,
+                HitTarget::HeaderPickerItem(index),
+                current_root,
+                app.header_picker.selected == index,
+                hovered,
+                delete_target,
+            )
         })
         .collect::<Vec<_>>();
     let actions = match kind {
@@ -1053,52 +1000,6 @@ fn draw_header_location_picker(
     for (target, rect) in targets {
         app.regions.register_hit_target(target, rect);
     }
-}
-
-fn branch_picker_detail(branch: &crate::git::Branch) -> String {
-    let location = branch_picker_location(branch);
-    let age = branch.last_touched_at.map(branch_age).unwrap_or_default();
-    let age = truncate_start_width(&age, 8);
-    let separator = if age.is_empty() { "   " } else { " · " };
-    format!("{location:<7}{separator}{age:>8}")
-}
-
-fn branch_picker_location(branch: &crate::git::Branch) -> &'static str {
-    if branch.remote {
-        "remote"
-    } else if branch.current {
-        "current"
-    } else {
-        "local"
-    }
-}
-
-fn branch_age(timestamp: i64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-        .unwrap_or(timestamp);
-    let seconds = now.saturating_sub(timestamp).max(0) as u64;
-    if seconds < 60 {
-        return "just now".to_owned();
-    }
-    if seconds < 3_600 {
-        return format!("{}m ago", seconds / 60);
-    }
-    if seconds < 86_400 {
-        return format!("{}h ago", seconds / 3_600);
-    }
-    if seconds < 604_800 {
-        return format!("{}d ago", seconds / 86_400);
-    }
-    if seconds < 2_592_000 {
-        return format!("{}w ago", seconds / 604_800);
-    }
-    if seconds < 31_536_000 {
-        return format!("{}mo ago", seconds / 2_592_000);
-    }
-    format!("{}y ago", seconds / 31_536_000)
 }
 
 fn draw_issue_picker_row(

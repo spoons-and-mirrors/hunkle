@@ -355,12 +355,12 @@ fn canonical_workspace_root(path: &Path) -> Result<PathBuf> {
     Ok(root)
 }
 
-pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
+pub(crate) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
     let output = run(
         root,
         &[
             "for-each-ref",
-            "--format=%(HEAD)%00%(refname)%00%(refname:short)%00%(symref:short)%00%(committerdate:unix)%00",
+            "--format=%(HEAD)%00%(refname)%00%(refname:short)%00%(symref:short)%00%(upstream:short)%00%(committerdate:unix)%00",
             "refs/heads",
             "refs/remotes",
         ],
@@ -373,7 +373,7 @@ pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
     let fields = output.stdout.split(|byte| *byte == 0);
     let mut branches = fields
         .collect::<Vec<_>>()
-        .chunks_exact(5)
+        .chunks_exact(6)
         .filter_map(|fields| {
             let text = |field: &[u8]| String::from_utf8_lossy(field).into_owned();
             let refname = text(trim_ascii(fields[1]));
@@ -394,10 +394,11 @@ pub(super) fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
             }
             Some(Branch {
                 name,
+                upstream: (!fields[4].is_empty()).then(|| text(fields[4])),
                 remote: refname.starts_with("refs/remotes/"),
                 current: trim_ascii(fields[0]) == b"*",
                 default: false,
-                last_touched_at: String::from_utf8_lossy(trim_ascii(fields[4])).parse().ok(),
+                last_touched_at: String::from_utf8_lossy(trim_ascii(fields[5])).parse().ok(),
             })
         })
         .collect::<Vec<_>>();

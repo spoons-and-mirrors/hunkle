@@ -16,6 +16,8 @@
   any vertical header separator to resize the adjacent columns.
 - Herdr-aware agent launching from any known repository or linked worktree into
   a selected pane in the active tab.
+- Repository-local scheduled tasks that can be created as Markdown files or
+  edited through Hunkle's scheduler.
 - Source-aware diffs with changed-file and line-count summaries, line numbers,
   syntax color, and tinted additions, deletions, and hunk headers.
 - Nonblocking worktree refresh when files, the index, branches, or HEAD change
@@ -68,6 +70,35 @@ returns to the diff as soon as changes appear. Any other directory opens as a
 local file workspace with recursive file browsing, fuzzy search, and previews;
 it never climbs into an enclosing repository.
 
+## Scheduled tasks
+
+Scheduled task definitions live in `.hunkle/scheduled/*.md` in their destination
+repository or worktree. Open the scheduler with `F4` to discover files in known
+repositories and linked worktrees. Existing database-backed task definitions are
+migrated to this directory; run history remains in Hunkle's scheduler database.
+Tasks can also be created, edited, enabled, disabled, or deleted in the scheduler,
+which updates the corresponding Markdown file.
+Changing the destination while editing moves the Markdown definition to the selected
+repository or worktree while preserving the task's run history.
+The branch picker includes the repository's local and remote branches. Saving a
+task reuses an existing checkout or creates a managed linked worktree for a branch
+that is not checked out yet.
+
+```markdown
+---
+status: enabled
+frequency: 2h
+title: "Review open changes"
+description: "Inspect the worktree and report risks"
+---
+
+Review the current diff. Summarize correctness risks and missing tests.
+```
+
+The four frontmatter fields are required. `status` is `enabled` or `disabled`.
+`frequency` accepts a positive number of minutes, or a number followed by `m`,
+`h`, or `d`. The Markdown body is the task prompt.
+
 ## Keys
 
 These are the default bindings. Open Settings and select **Shortcuts** to
@@ -88,6 +119,7 @@ emergency quit command elsewhere.
 | `F1`                              | Send a command or prompt to the Herdr pane directly below Hunkle, creating it when needed                                                                                            |
 | `F2`                              | Rename the selected file or folder in Files                                                                                                                                          |
 | `F3`                              | Select the Agents pane                                                                                                                                                               |
+| `F4`                              | Open or close the scheduled-task manager                                                                                                                                             |
 | `/`                               | Open repository search; use Tab/Shift+Tab for scope and Alt+C/W/R/I for search options                                                                                              |
 | `Ctrl+Delete`                     | Permanently delete the selected file or folder from Files after confirmation                                                                                                         |
 | `Ctrl+S`                          | Save and stay in the inline editor, optionally formatting; otherwise format the selected Files entry                                                                                |

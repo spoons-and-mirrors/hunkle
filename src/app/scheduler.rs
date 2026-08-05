@@ -36,8 +36,8 @@ impl SchedulerDestinationCard {
     pub(crate) fn value(self, destination: &SchedulerDestination) -> &str {
         match self {
             Self::Repository => &destination.repository,
-            Self::Worktree => &destination.worktree,
-            Self::Branch => &destination.branch,
+            Self::Worktree => destination.worktree.as_deref().unwrap_or("new worktree"),
+            Self::Branch => &destination.branch.name,
         }
     }
 }
@@ -65,14 +65,19 @@ fn cycle<T: Copy + PartialEq, const N: usize>(value: T, values: [T; N], backward
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchedulerDestination {
-    pub(crate) path: PathBuf,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) repository_root: PathBuf,
     pub(crate) repository: String,
-    pub(crate) branch: String,
-    pub(crate) worktree: String,
+    pub(crate) branch: Branch,
+    pub(crate) checkout_branch: String,
+    pub(crate) worktree: Option<String>,
 }
 
 #[derive(Debug)]
 pub(crate) struct ScheduledTaskComposer {
+    pub(crate) task_id: Option<i64>,
+    pub(crate) enabled: bool,
+    pub(crate) source: Option<ScheduledTaskSource>,
     pub(crate) title: TextInput,
     pub(crate) description: TextInput,
     pub(crate) prompt: TextInput,
@@ -82,8 +87,7 @@ pub(crate) struct ScheduledTaskComposer {
     pub(crate) destinations: Vec<SchedulerDestination>,
     pub(crate) destination: usize,
     pub(crate) destination_card: SchedulerDestinationCard,
-    pub(crate) destination_picker_open: bool,
-    pub(crate) picker: PickerState,
+    pub(crate) destination_picker: HeaderPicker,
     pub(crate) field: SchedulerField,
 }
 
@@ -92,6 +96,9 @@ impl ScheduledTaskComposer {
         let mut schedule = TextInput::default();
         schedule.set("15");
         Self {
+            task_id: None,
+            enabled: true,
+            source: None,
             title: TextInput::default(),
             description: TextInput::default(),
             prompt: TextInput::default(),
@@ -101,35 +108,81 @@ impl ScheduledTaskComposer {
             destinations,
             destination: 0,
             destination_card: SchedulerDestinationCard::Repository,
-            destination_picker_open: false,
-            picker: PickerState::default(),
+            destination_picker: HeaderPicker::default(),
             field: SchedulerField::Title,
         }
     }
 
-    pub(crate) fn destination_candidates(&self) -> Vec<usize> {
+    fn edit(
+        task: &ScheduledTask,
+        mut destinations: Vec<SchedulerDestination>,
+        source: Option<ScheduledTaskSource>,
+    ) -> Self {
+        let destination = destinations
+            .iter()
+            .position(|destination| {
+                destination
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| same_path(path, &task.destination))
+            })
+            .unwrap_or_else(|| {
+                destinations.push(SchedulerDestination {
+                    path: Some(task.destination.clone()),
+                    repository_root: task.destination.clone(),
+                    repository: task.repository.clone(),
+                    branch: Branch {
+                        name: task.branch.clone(),
+                        upstream: None,
+                        remote: false,
+                        current: false,
+                        default: false,
+                        last_touched_at: None,
+                    },
+                    checkout_branch: task.branch.clone(),
+                    worktree: Some(
+                        task.destination
+                            .file_name()
+                            .unwrap_or(task.destination.as_os_str())
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                });
+                destinations.len() - 1
+            });
+        let mut composer = Self::new(destinations);
+        composer.task_id = Some(task.id);
+        composer.enabled = task.enabled;
+        composer.source = source;
+        composer.destination = destination;
+        composer.title.set(&task.title);
+        composer.description.set(&task.description);
+        composer.prompt.set(&task.prompt);
+        composer.schedule.set(&task.interval_minutes.to_string());
+        composer
+    }
+
+    fn destination_indices(&self, card: SchedulerDestinationCard) -> Vec<usize> {
         let Some(selected) = self.destinations.get(self.destination) else {
             return Vec::new();
         };
-        let card = self.destination_card;
-        let query = self.picker.query.text().to_lowercase();
-        let mut candidates = Vec::new();
+        let mut candidates: Vec<usize> = Vec::new();
         for (index, destination) in self.destinations.iter().enumerate() {
-            let searchable = format!(
-                "{} {} {} {}",
-                destination.repository,
-                destination.worktree,
-                destination.branch,
-                destination.path.display()
-            )
-            .to_lowercase();
+            if card == SchedulerDestinationCard::Worktree && destination.path.is_none() {
+                continue;
+            }
             if (card == SchedulerDestinationCard::Repository
-                || destination.repository == selected.repository)
-                && query
-                    .split_whitespace()
-                    .all(|term| searchable.contains(term))
-                && !candidates.iter().any(|candidate| {
-                    card.value(&self.destinations[*candidate]) == card.value(destination)
+                || destination.repository_root == selected.repository_root)
+                && !candidates.iter().any(|candidate| match card {
+                    SchedulerDestinationCard::Repository => {
+                        self.destinations[*candidate].repository_root == destination.repository_root
+                    }
+                    SchedulerDestinationCard::Worktree => {
+                        self.destinations[*candidate].path == destination.path
+                    }
+                    SchedulerDestinationCard::Branch => {
+                        self.destinations[*candidate].branch.name == destination.branch.name
+                    }
                 })
             {
                 candidates.push(index);
@@ -138,38 +191,102 @@ impl ScheduledTaskComposer {
         candidates
     }
 
+    fn destination_item(
+        &self,
+        card: SchedulerDestinationCard,
+        index: usize,
+    ) -> Option<HeaderPickerItem> {
+        let destination = self.destinations.get(index)?;
+        Some(match card {
+            SchedulerDestinationCard::Repository => HeaderPickerItem::Repository {
+                path: destination
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| destination.repository_root.clone()),
+                label: destination.repository.clone(),
+                stats: None,
+                branch: Some(destination.checkout_branch.clone()),
+            },
+            SchedulerDestinationCard::Worktree => {
+                let path = destination.path.clone()?;
+                HeaderPickerItem::Worktree {
+                    worktree: crate::git::LinkedWorktree {
+                        path,
+                        head: None,
+                        branch: Some(format!("refs/heads/{}", destination.checkout_branch)),
+                        is_main: destination.worktree.as_deref() == Some("basetree"),
+                        is_detached: destination.checkout_branch == "detached HEAD",
+                        is_bare: false,
+                        locked: false,
+                        locked_reason: None,
+                        prunable: false,
+                        prunable_reason: None,
+                    },
+                    stats: None,
+                }
+            }
+            SchedulerDestinationCard::Branch => {
+                HeaderPickerItem::Branch(destination.branch.clone())
+            }
+        })
+    }
+
+    pub(crate) fn destination_index_for_item(&self, item: &HeaderPickerItem) -> Option<usize> {
+        let selected = self.destinations.get(self.destination)?;
+        match item {
+            HeaderPickerItem::Repository { path, .. } => self
+                .destinations
+                .iter()
+                .position(|item| item.path.as_deref().unwrap_or(&item.repository_root) == path),
+            HeaderPickerItem::Worktree { worktree, .. } => self
+                .destinations
+                .iter()
+                .position(|item| item.path.as_deref() == Some(worktree.path.as_path())),
+            HeaderPickerItem::Branch(branch) => self.destinations.iter().position(|item| {
+                item.repository_root == selected.repository_root && item.branch.name == branch.name
+            }),
+            _ => None,
+        }
+    }
+
     fn open_destination_picker(&mut self, card: SchedulerDestinationCard) {
         self.destination_card = card;
-        self.destination_picker_open = true;
-        self.picker.query.clear();
-        let candidates = self.destination_candidates();
-        let selected = self.destinations.get(self.destination).and_then(|current| {
-            candidates
-                .iter()
-                .position(|index| card.value(&self.destinations[*index]) == card.value(current))
-        });
-        self.picker
-            .reset_items(candidates.len(), selected.unwrap_or(0));
+        let indices = self.destination_indices(card);
+        let selected = indices
+            .iter()
+            .position(|index| *index == self.destination)
+            .unwrap_or(0);
+        let items = indices
+            .into_iter()
+            .filter_map(|index| self.destination_item(card, index))
+            .collect();
+        let kind = match card {
+            SchedulerDestinationCard::Repository => HeaderPickerKind::Repositories,
+            SchedulerDestinationCard::Worktree => HeaderPickerKind::Worktrees,
+            SchedulerDestinationCard::Branch => HeaderPickerKind::Branches,
+        };
+        self.destination_picker.open(kind, items, selected);
+        self.destination_picker.start_change_details();
     }
 
     fn close_destination_picker(&mut self) {
-        self.destination_picker_open = false;
+        self.destination_picker.close();
     }
 
-    fn update_destination_picker(&mut self, delta: Option<isize>) {
-        let candidates = self.destination_candidates();
-        if let Some(delta) = delta {
-            self.picker.move_selection(delta);
-        } else {
-            let selected = candidates
-                .iter()
-                .position(|index| *index == self.destination)
-                .unwrap_or(0);
-            self.picker.reset_items(candidates.len(), selected);
+    pub(crate) fn destination_picker_open(&self) -> bool {
+        self.destination_picker.is_open()
+    }
+
+    fn select_destination_picker_item(&mut self) {
+        if let Some(item) = self
+            .destination_picker
+            .items
+            .get(self.destination_picker.selected)
+            && let Some(destination) = self.destination_index_for_item(item)
+        {
+            self.destination = destination;
         }
-        if let Some(destination) = candidates.get(self.picker.selected) {
-            self.destination = *destination;
-        }
+        self.close_destination_picker();
     }
 
     pub(crate) fn input(&self, field: SchedulerField) -> &TextInput {
@@ -214,6 +331,20 @@ pub(crate) struct SchedulerState {
     pub(crate) conversation_expanded_requests: Vec<usize>,
     pub(crate) runs_focused: bool,
     pub(crate) error: Option<String>,
+    pub(crate) pending_worktree: Option<usize>,
+}
+
+fn worktree_label(worktree: &crate::git::LinkedWorktree) -> String {
+    if worktree.is_main {
+        "basetree".to_owned()
+    } else {
+        worktree
+            .path
+            .file_name()
+            .unwrap_or(worktree.path.as_os_str())
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 impl App {
@@ -223,28 +354,89 @@ impl App {
             .repositories
             .iter()
             .flat_map(|repository| {
-                repository.worktrees.iter().filter_map(|worktree| {
-                    (!worktree.is_bare && !worktree.prunable).then(|| SchedulerDestination {
-                        worktree: if worktree.is_main {
-                            "basetree".to_owned()
+                let worktrees = repository
+                    .worktrees
+                    .iter()
+                    .filter(|worktree| !worktree.is_bare && !worktree.prunable)
+                    .collect::<Vec<_>>();
+                let Some(repository_root) = worktrees
+                    .iter()
+                    .find(|worktree| worktree.is_main)
+                    .or_else(|| worktrees.first())
+                    .map(|worktree| worktree.path.clone())
+                else {
+                    return Vec::new();
+                };
+                let mut destinations = repository
+                    .branches
+                    .iter()
+                    .map(|branch| {
+                        let checkout_branch = if branch.remote {
+                            branch
+                                .name
+                                .split_once('/')
+                                .map_or(branch.name.as_str(), |(_, branch)| branch)
                         } else {
-                            worktree
-                                .path
-                                .file_name()
-                                .unwrap_or(worktree.path.as_os_str())
-                                .to_string_lossy()
-                                .into_owned()
-                        },
-                        path: worktree.path.clone(),
-                        repository: repository.label.clone(),
-                        branch: worktree
-                            .branch
-                            .as_deref()
-                            .map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch))
-                            .unwrap_or("detached HEAD")
-                            .to_owned(),
+                            &branch.name
+                        };
+                        let local_tracks_remote = !branch.remote
+                            || repository.branches.iter().any(|local| {
+                                !local.remote
+                                    && local.name == checkout_branch
+                                    && local.upstream.as_deref() == Some(branch.name.as_str())
+                            });
+                        let worktree = local_tracks_remote
+                            .then(|| {
+                                worktrees.iter().find(|worktree| {
+                                    worktree
+                                        .branch
+                                        .as_deref()
+                                        .and_then(|branch| branch.strip_prefix("refs/heads/"))
+                                        == Some(checkout_branch)
+                                })
+                            })
+                            .flatten();
+                        SchedulerDestination {
+                            path: worktree.map(|worktree| worktree.path.clone()),
+                            repository_root: repository_root.clone(),
+                            repository: repository.label.clone(),
+                            branch: branch.clone(),
+                            checkout_branch: checkout_branch.to_owned(),
+                            worktree: worktree.map(|worktree| worktree_label(worktree)),
+                        }
                     })
-                })
+                    .collect::<Vec<_>>();
+                for worktree in worktrees {
+                    if destinations.iter().any(|destination| {
+                        destination
+                            .path
+                            .as_deref()
+                            .is_some_and(|path| same_path(path, &worktree.path))
+                    }) {
+                        continue;
+                    }
+                    let branch = worktree
+                        .branch
+                        .as_deref()
+                        .and_then(|branch| branch.strip_prefix("refs/heads/"))
+                        .unwrap_or("detached HEAD");
+                    destinations.push(SchedulerDestination {
+                        path: Some(worktree.path.clone()),
+                        repository_root: repository_root.clone(),
+                        repository: repository.label.clone(),
+                        branch: Branch {
+                            name: branch.to_owned(),
+                            upstream: None,
+                            remote: false,
+                            current: false,
+                            default: false,
+                            last_touched_at: None,
+                        },
+                        checkout_branch: branch.to_owned(),
+                        worktree: Some(worktree_label(worktree)),
+                    });
+                }
+                destinations
             })
             .collect()
     }
@@ -257,7 +449,30 @@ impl App {
         self.mode = Mode::Scheduler;
         self.scheduler.surface = SchedulerSurface::Tasks;
         self.scheduler.composer = None;
-        self.scheduler.error = None;
+        self.scheduler.error = self
+            .linked_worktrees
+            .snapshot()
+            .repositories
+            .iter()
+            .find_map(|repository| {
+                repository.branch_error.as_ref().map(|error| {
+                    format!("Could not load branches for {}: {error}", repository.label)
+                })
+            });
+        let destinations = self
+            .scheduler_destinations()
+            .into_iter()
+            .filter_map(|destination| {
+                Some(ScheduledTaskDestination {
+                    path: destination.path?,
+                    repository: destination.repository,
+                    branch: destination.checkout_branch,
+                })
+            })
+            .collect();
+        if let Err(error) = self.herdr.sync_scheduled_task_files(destinations) {
+            self.scheduler.error = Some(error);
+        }
         self.sync_scheduler_selection();
     }
 
@@ -273,6 +488,10 @@ impl App {
     }
 
     pub(crate) fn close_scheduler(&mut self) {
+        if self.scheduler.pending_worktree.is_some() {
+            self.scheduler.error = Some("Wait for the linked worktree to be created".to_owned());
+            return;
+        }
         self.scheduler.composer = None;
         self.scheduler.error = None;
         self.mode = Mode::Normal;
@@ -285,7 +504,31 @@ impl App {
         self.scheduler.error = None;
     }
 
+    pub(crate) fn edit_selected_scheduled_task(&mut self) {
+        let Some(task) = self.selected_scheduled_task().cloned() else {
+            return;
+        };
+        let source = match self.herdr.scheduled_task_source(&task) {
+            Ok(source) => source,
+            Err(error) => {
+                self.scheduler.error = Some(error);
+                return;
+            }
+        };
+        self.scheduler.composer = Some(ScheduledTaskComposer::edit(
+            &task,
+            self.scheduler_destinations(),
+            source,
+        ));
+        self.scheduler.surface = SchedulerSurface::Detail;
+        self.scheduler.error = None;
+    }
+
     pub(crate) fn cancel_scheduled_task(&mut self) {
+        if self.scheduler.pending_worktree.is_some() {
+            self.scheduler.error = Some("Wait for the linked worktree to be created".to_owned());
+            return;
+        }
         self.scheduler.composer = None;
         self.scheduler.error = None;
         if self.layout_profile().is_single() {
@@ -355,6 +598,7 @@ impl App {
             SchedulerHitTarget::Close => self.close_scheduler(),
             SchedulerHitTarget::Back => self.cancel_scheduled_task(),
             SchedulerHitTarget::New => self.begin_scheduled_task(),
+            SchedulerHitTarget::Edit => self.edit_selected_scheduled_task(),
             SchedulerHitTarget::Save => self.save_scheduled_task(),
             SchedulerHitTarget::Cancel => self.cancel_scheduled_task(),
             SchedulerHitTarget::Task(id) => self.select_scheduled_task(id),
@@ -369,7 +613,7 @@ impl App {
             SchedulerHitTarget::DestinationCard(card) => {
                 if let Some(composer) = self.scheduler.composer.as_mut() {
                     composer.field = SchedulerField::Destination;
-                    if composer.destination_picker_open && composer.destination_card == card {
+                    if composer.destination_picker_open() && composer.destination_card == card {
                         composer.close_destination_picker();
                     } else {
                         composer.open_destination_picker(card);
@@ -443,6 +687,7 @@ impl App {
             }
             KeyCode::Esc | KeyCode::F(4) => self.close_scheduler(),
             KeyCode::Char('n') => self.begin_scheduled_task(),
+            KeyCode::Char('e') => self.edit_selected_scheduled_task(),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.scheduler.runs_focused = !self.scheduler.runs_focused;
             }
@@ -468,7 +713,7 @@ impl App {
     fn handle_scheduler_composer(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             let composer = self.scheduler.composer.as_mut().unwrap();
-            if composer.destination_picker_open {
+            if composer.destination_picker_open() {
                 composer.close_destination_picker();
                 return;
             }
@@ -540,7 +785,7 @@ impl App {
     fn handle_scheduler_destination(&mut self, key: KeyEvent) {
         let viewport = self.scheduler_destination_viewport();
         let composer = self.scheduler.composer.as_mut().unwrap();
-        if !composer.destination_picker_open {
+        if !composer.destination_picker_open() {
             match key.code {
                 KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
                     composer.destination_card = composer
@@ -554,19 +799,19 @@ impl App {
             }
             return;
         }
-        composer.picker.set_viewport_rows(viewport);
+        composer.destination_picker.set_viewport_rows(viewport);
         match key.code {
-            KeyCode::Enter => composer.close_destination_picker(),
-            KeyCode::Down => composer.update_destination_picker(Some(1)),
-            KeyCode::Up => composer.update_destination_picker(Some(-1)),
+            KeyCode::Enter => composer.select_destination_picker_item(),
+            KeyCode::Down => composer.destination_picker.move_selection(1),
+            KeyCode::Up => composer.destination_picker.move_selection(-1),
             KeyCode::PageDown | KeyCode::PageUp => {
                 let delta = if key.code == KeyCode::PageDown { 1 } else { -1 };
-                composer.picker.move_selection_page(delta);
-                composer.update_destination_picker(Some(0));
+                composer.destination_picker.move_selection_page(delta);
             }
             _ => {
-                if composer.picker.query.handle_edit_key(key) != EditOutcome::Unhandled {
-                    composer.update_destination_picker(None);
+                if composer.destination_picker.query.handle_edit_key(key) != EditOutcome::Unhandled
+                {
+                    composer.destination_picker.apply_filter();
                 }
             }
         }
@@ -585,9 +830,9 @@ impl App {
                     .filter(char::is_ascii_digit)
                     .collect::<String>(),
             ),
-            SchedulerField::Destination if composer.destination_picker_open => {
-                composer.picker.query.insert_single_line(text);
-                composer.update_destination_picker(None);
+            SchedulerField::Destination if composer.destination_picker_open() => {
+                composer.destination_picker.query.insert_single_line(text);
+                composer.destination_picker.apply_filter();
             }
             SchedulerField::Destination => return,
             _ => composer.input_mut(field).insert_single_line(text),
@@ -604,10 +849,12 @@ impl App {
             return false;
         };
         let field = composer.field;
+        let destination_picker_open = composer.destination_picker_open();
         let mut changed = composer
-            .picker
+            .destination_picker
             .query
-            .poll_blink(scheduler_active && composer.destination_picker_open);
+            .poll_blink(scheduler_active && destination_picker_open);
+        changed |= composer.destination_picker.poll_change_details();
         for input_field in [
             SchedulerField::Title,
             SchedulerField::Description,
@@ -621,31 +868,97 @@ impl App {
     }
 
     fn save_scheduled_task(&mut self) {
+        if self.scheduler.pending_worktree.is_some() {
+            return;
+        }
         let Some(composer) = self.scheduler.composer.as_ref() else {
             return;
         };
-        let Some(destination) = composer.destinations.get(composer.destination) else {
-            self.scheduler.error = Some("Select a linked worktree destination".to_owned());
+        let destination_index = composer.destination;
+        let Some(destination) = composer.destinations.get(destination_index).cloned() else {
+            self.scheduler.error = Some("Select a branch destination".to_owned());
+            return;
+        };
+        let Some(destination_path) = destination.path.clone() else {
+            match self.linked_worktrees.create_worktree_for_branch(
+                destination.repository_root,
+                destination.branch.name.clone(),
+                destination.branch.remote,
+            ) {
+                Ok(()) => {
+                    self.scheduler.pending_worktree = Some(destination_index);
+                    self.scheduler.error = None;
+                    self.notice = Some(format!(
+                        "Creating a worktree for {}…",
+                        destination.branch.name
+                    ));
+                }
+                Err(error) => self.scheduler.error = Some(error),
+            }
             return;
         };
         let edit = ScheduledTaskEdit {
             title: composer.title.text().to_owned(),
             description: composer.description.text().to_owned(),
             prompt: composer.prompt.text().to_owned(),
-            destination: destination.path.clone(),
+            destination: destination_path.clone(),
             repository: destination.repository.clone(),
-            branch: destination.branch.clone(),
-            enabled: true,
+            branch: destination.checkout_branch.clone(),
+            enabled: composer.enabled,
             interval_minutes: composer.schedule.text().parse().unwrap_or(0),
+            source: composer.source.as_ref().map(|source| source.path.clone()),
         };
-        match self.herdr.save_scheduled_task(edit) {
+        let task_id = composer.task_id;
+        let source = composer.source.clone();
+        let refresh_open_workspace = self.repository().is_some_and(|repository| {
+            same_path(&repository.root, &destination_path)
+                || source
+                    .as_ref()
+                    .is_some_and(|source| same_path(&repository.root, &source.destination))
+        });
+        match self.herdr.save_scheduled_task(task_id, edit, source) {
             Ok(()) => {
                 self.scheduler.composer = None;
                 self.scheduler.error = None;
-                self.scheduler.surface = SchedulerSurface::Tasks;
+                self.scheduler.surface = if task_id.is_some() {
+                    SchedulerSurface::Detail
+                } else {
+                    SchedulerSurface::Tasks
+                };
                 self.notice = Some("Scheduled task saved".to_owned());
+                if refresh_open_workspace {
+                    self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
+                }
             }
             Err(error) => self.scheduler.error = Some(error),
+        }
+    }
+
+    pub(crate) fn finish_scheduler_worktree_creation(&mut self, result: Result<PathBuf, String>) {
+        let Some(destination_index) = self.scheduler.pending_worktree.take() else {
+            return;
+        };
+        match result {
+            Ok(path) => {
+                let Some(composer) = self.scheduler.composer.as_mut() else {
+                    return;
+                };
+                let Some(destination) = composer.destinations.get_mut(destination_index) else {
+                    return;
+                };
+                destination.worktree = Some(
+                    path.file_name()
+                        .unwrap_or(path.as_os_str())
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                destination.path = Some(path);
+                self.linked_worktrees.refresh();
+                self.save_scheduled_task();
+            }
+            Err(error) => {
+                self.scheduler.error = Some(format!("Could not create worktree: {error}"));
+            }
         }
     }
 
@@ -658,13 +971,24 @@ impl App {
     }
 
     fn toggle_selected_scheduled_task(&mut self) {
-        let Some((id, enabled)) = self
-            .selected_scheduled_task()
-            .map(|task| (task.id, !task.enabled))
+        let Some((id, enabled, refresh_open_workspace)) =
+            self.selected_scheduled_task().map(|task| {
+                (
+                    task.id,
+                    !task.enabled,
+                    task.source.is_some()
+                        && self.repository().is_some_and(|repository| {
+                            same_path(&repository.root, &task.destination)
+                        }),
+                )
+            })
         else {
             return;
         };
         self.scheduler.error = self.herdr.toggle_scheduled_task(id, enabled).err();
+        if self.scheduler.error.is_none() && refresh_open_workspace {
+            self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
+        }
     }
 
     fn run_selected_scheduled_task(&mut self) {
@@ -675,7 +999,15 @@ impl App {
     }
 
     fn delete_selected_scheduled_task(&mut self) {
-        let Some(id) = self.selected_scheduled_task().map(|task| task.id) else {
+        let Some((id, refresh_open_workspace)) = self.selected_scheduled_task().map(|task| {
+            (
+                task.id,
+                task.source.is_some()
+                    && self
+                        .repository()
+                        .is_some_and(|repository| same_path(&repository.root, &task.destination)),
+            )
+        }) else {
             return;
         };
         if let Err(error) = self.herdr.delete_scheduled_task(id) {
@@ -686,6 +1018,9 @@ impl App {
         self.scheduler.selected_run_id = None;
         self.scheduler.surface = SchedulerSurface::Tasks;
         self.scheduler.error = None;
+        if refresh_open_workspace {
+            self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
+        }
     }
 
     fn refresh_selected_scheduled_run(&mut self) {
@@ -782,11 +1117,11 @@ impl App {
                 return;
             };
             composer.field = SchedulerField::Destination;
-            if !composer.destination_picker_open {
+            if !composer.destination_picker_open() {
                 composer.open_destination_picker(composer.destination_card);
             }
-            composer.picker.set_viewport_rows(viewport);
-            composer.picker.scroll_by(delta);
+            composer.destination_picker.set_viewport_rows(viewport);
+            composer.destination_picker.scroll_by(delta);
             return;
         }
         if target == ScrollTarget::SchedulerConversation {

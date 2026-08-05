@@ -2,13 +2,23 @@ use super::*;
 use crate::app::{
     SchedulerDestination, SchedulerDestinationCard, SchedulerField, SchedulerSurface,
 };
+use std::path::PathBuf;
 
 fn destination(path: &str, repository: &str, branch: &str, worktree: &str) -> SchedulerDestination {
     SchedulerDestination {
-        path: path.into(),
+        path: Some(path.into()),
+        repository_root: PathBuf::from(format!("/tmp/{repository}")),
         repository: repository.to_owned(),
-        branch: branch.to_owned(),
-        worktree: worktree.to_owned(),
+        branch: crate::git::Branch {
+            name: branch.to_owned(),
+            upstream: None,
+            remote: false,
+            current: branch == "main",
+            default: branch == "main",
+            last_touched_at: None,
+        },
+        checkout_branch: branch.to_owned(),
+        worktree: Some(worktree.to_owned()),
     }
 }
 
@@ -28,7 +38,6 @@ fn schedule_header_control_is_herdr_gated() {
             .hit_target_rect(HitTarget::HeaderSchedule)
             .is_none()
     );
-
     enable_herdr(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
@@ -86,7 +95,7 @@ fn scheduler_prompt_is_a_five_row_expandable_editor() {
 }
 
 #[test]
-fn scheduler_destination_reuses_repository_worktree_and_branch_cards() {
+fn scheduler_destination_reuses_repository_and_full_branch_cards() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
     enable_herdr(&mut app);
@@ -107,6 +116,13 @@ fn scheduler_destination_reuses_repository_worktree_and_branch_cards() {
         )
         .is_some()
     );
+    assert!(
+        scheduler_rect(
+            &app,
+            SchedulerHitTarget::DestinationCard(SchedulerDestinationCard::Worktree)
+        )
+        .is_some()
+    );
     app.activate_scheduler_target(SchedulerHitTarget::DestinationCard(
         SchedulerDestinationCard::Repository,
     ));
@@ -123,22 +139,27 @@ fn scheduler_destination_reuses_repository_worktree_and_branch_cards() {
             .composer
             .as_ref()
             .unwrap()
-            .destination_picker_open
+            .destination_picker_open()
     );
 
-    for (card, destination) in [
-        (SchedulerDestinationCard::Repository, 0),
-        (SchedulerDestinationCard::Worktree, 1),
-    ] {
-        app.activate_scheduler_target(SchedulerHitTarget::DestinationCard(card));
-        app.activate_scheduler_target(SchedulerHitTarget::Destination(destination));
-    }
-    assert_eq!(app.scheduler.composer.as_ref().unwrap().destination, 1);
+    app.activate_scheduler_target(SchedulerHitTarget::DestinationCard(
+        SchedulerDestinationCard::Repository,
+    ));
+    app.activate_scheduler_target(SchedulerHitTarget::Destination(0));
     app.activate_scheduler_target(SchedulerHitTarget::DestinationCard(
         SchedulerDestinationCard::Branch,
     ));
-    app.activate_scheduler_target(SchedulerHitTarget::Destination(0));
-    assert_eq!(app.scheduler.composer.as_ref().unwrap().destination, 0);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(screen_text(&terminal).contains("Search branch..."));
+    assert!(screen_text(&terminal).contains("feature"));
+
+    app.activate_scheduler_target(SchedulerHitTarget::DestinationCard(
+        SchedulerDestinationCard::Worktree,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(screen_text(&terminal).contains("Search worktrees..."));
+    assert!(screen_text(&terminal).contains("alpha-main"));
+    assert!(screen_text(&terminal).contains("alpha-feature"));
 }
 
 #[test]

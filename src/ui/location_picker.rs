@@ -1,4 +1,6 @@
 use super::*;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) struct LocationPickerAction<'a> {
     pub(super) target: HitTarget,
@@ -38,6 +40,124 @@ pub(super) fn location_picker_capacity(screen: Rect, bounds: Rect, anchor: Rect)
     let available = bounds.bottom().saturating_sub(anchor.bottom());
     let maximum_height = screen.height.saturating_mul(4) / 5;
     usize::from(available.min(maximum_height).saturating_sub(4)).max(1)
+}
+
+pub(super) fn branch_picker_detail(branch: &crate::git::Branch) -> String {
+    let location = if branch.remote {
+        "remote"
+    } else if branch.current {
+        "current"
+    } else {
+        "local"
+    };
+    let age = branch.last_touched_at.map(branch_age).unwrap_or_default();
+    let age = truncate_start_width(&age, 8);
+    let separator = if age.is_empty() { "   " } else { " · " };
+    format!("{location:<7}{separator}{age:>8}")
+}
+
+pub(super) fn location_picker_row(
+    item: &HeaderPickerItem,
+    target: HitTarget,
+    current_root: Option<&Path>,
+    selected: bool,
+    hovered: bool,
+    delete_target: Option<HitTarget>,
+) -> Option<LocationPickerRow> {
+    match item {
+        HeaderPickerItem::Repository {
+            path,
+            label,
+            stats,
+            branch,
+        } => Some(LocationPickerRow {
+            target,
+            label: label.clone(),
+            detail: path.display().to_string(),
+            current: current_root.is_some_and(|current| current == path),
+            stats: *stats,
+            kind: LocationPickerRowKind::Location {
+                branch: branch.clone(),
+            },
+            selected,
+            hovered,
+            delete_target,
+        }),
+        HeaderPickerItem::Worktree { worktree, stats } => Some(LocationPickerRow {
+            target,
+            label: worktree
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("worktree")
+                .to_owned(),
+            detail: worktree.path.display().to_string(),
+            current: current_root.is_some_and(|root| root == worktree.path),
+            stats: *stats,
+            kind: LocationPickerRowKind::Location { branch: None },
+            selected,
+            hovered,
+            delete_target,
+        }),
+        HeaderPickerItem::Branch(branch) | HeaderPickerItem::BranchBase(branch) => {
+            Some(LocationPickerRow {
+                target,
+                label: branch.name.clone(),
+                detail: branch_picker_detail(branch),
+                current: branch.current,
+                stats: None,
+                kind: LocationPickerRowKind::Choice,
+                selected,
+                hovered,
+                delete_target,
+            })
+        }
+        HeaderPickerItem::DiffTarget {
+            label,
+            detail,
+            default,
+            ..
+        } => Some(LocationPickerRow {
+            target,
+            label: label.clone(),
+            detail: detail.clone(),
+            current: *default,
+            stats: None,
+            kind: LocationPickerRowKind::Choice,
+            selected,
+            hovered,
+            delete_target,
+        }),
+        _ => None,
+    }
+}
+
+fn branch_age(timestamp: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .unwrap_or(timestamp);
+    let seconds = now.saturating_sub(timestamp).max(0) as u64;
+    if seconds < 60 {
+        return "just now".to_owned();
+    }
+    if seconds < 3_600 {
+        return format!("{}m ago", seconds / 60);
+    }
+    if seconds < 86_400 {
+        return format!("{}h ago", seconds / 3_600);
+    }
+    if seconds < 604_800 {
+        return format!("{}d ago", seconds / 86_400);
+    }
+    if seconds < 2_592_000 {
+        return format!("{}w ago", seconds / 604_800);
+    }
+    if seconds < 31_536_000 {
+        return format!("{}mo ago", seconds / 2_592_000);
+    }
+    format!("{}y ago", seconds / 31_536_000)
 }
 
 pub(super) fn draw_location_picker(

@@ -1,8 +1,6 @@
 use super::super::agents::draw_scheduled_history;
 use super::super::header_card::draw_header_card;
-use super::super::location_picker::{
-    LocationPickerRow, LocationPickerRowKind, LocationPickerView, draw_location_picker,
-};
+use super::super::location_picker::{LocationPickerView, draw_location_picker};
 use super::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -152,6 +150,7 @@ pub(crate) fn draw_scheduler(
         } else {
             &[
                 ("N", "new"),
+                ("E", "edit"),
                 ("Tab", "tasks/runs"),
                 ("R", "run"),
                 ("V", "conversation"),
@@ -417,6 +416,7 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
     let action_y = inner.y + 2;
     let actions = [
         (" RUN NOW ", Target::RunNow, palette().accent),
+        (" EDIT ", Target::Edit, palette().yellow),
         (
             if task.enabled { " PAUSE " } else { " ENABLE " },
             Target::Toggle,
@@ -703,7 +703,11 @@ fn draw_composer(
     bold_text(
         frame,
         Rect::new(inner.x, inner.y, inner.width, 1),
-        "NEW SCHEDULED TASK",
+        if composer.task_id.is_some() {
+            "EDIT SCHEDULED TASK"
+        } else {
+            "NEW SCHEDULED TASK"
+        },
     );
     let mut y = inner.y + 2;
     if !composer.prompt_expanded {
@@ -752,23 +756,26 @@ fn draw_composer(
             draw_text(
                 frame,
                 Rect::new(inner.x, y, inner.width, 2),
-                "No linked worktree destinations are available.",
+                "No repository branches are available.",
                 Style::default().fg(palette().red),
             );
-        } else if !composer.destination_picker_open
+        } else if !composer.destination_picker_open()
             && let Some(destination) = composer.destinations.get(composer.destination)
         {
             draw_text(
                 frame,
                 Rect::new(inner.x, y, inner.width, 1),
                 truncate_width(
-                    &format!("Target: {}", destination.path.display()),
+                    &destination.path.as_ref().map_or_else(
+                        || "A linked worktree will be created when this task is saved".to_owned(),
+                        |path| format!("Target: {}", path.display()),
+                    ),
                     usize::from(inner.width),
                 ),
                 Style::default().fg(palette().muted),
             );
         }
-        if composer.destination_picker_open {
+        if composer.destination_picker_open() {
             draw_destination_picker(
                 frame,
                 composer,
@@ -881,40 +888,23 @@ fn draw_destination_picker(
     bounds: Rect,
     regions: &mut SchedulerRegions,
 ) {
-    let candidates = composer.destination_candidates();
     let card = composer.destination_card;
     let selected = composer.destinations.get(composer.destination);
-    let rows = candidates
+    let rows = composer
+        .destination_picker
+        .items
         .iter()
-        .map(|index| {
-            let destination = &composer.destinations[*index];
-            LocationPickerRow {
-                target: HitTarget::Scheduler(Target::Destination(*index)),
-                label: card.value(destination).to_owned(),
-                detail: match card {
-                    SchedulerDestinationCard::Branch => destination.worktree.clone(),
-                    _ => destination.path.display().to_string(),
-                },
-                current: selected
-                    .is_some_and(|selected| card.value(selected) == card.value(destination)),
-                stats: None,
-                kind: match card {
-                    SchedulerDestinationCard::Repository => LocationPickerRowKind::Location {
-                        branch: Some(destination.branch.clone()),
-                    },
-                    SchedulerDestinationCard::Worktree => {
-                        LocationPickerRowKind::Location { branch: None }
-                    }
-                    SchedulerDestinationCard::Branch => LocationPickerRowKind::Choice,
-                },
-                selected: candidates
-                    .get(composer.picker.selected)
-                    .copied()
-                    .unwrap_or(composer.destination)
-                    == *index,
-                hovered: false,
-                delete_target: None,
-            }
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let destination = composer.destination_index_for_item(item)?;
+            location_picker_row(
+                item,
+                HitTarget::Scheduler(Target::Destination(destination)),
+                selected.and_then(|destination| destination.path.as_deref()),
+                composer.destination_picker.selected == index,
+                false,
+                None,
+            )
         })
         .collect::<Vec<_>>();
     let (placeholder, maximum_width) = match card {
@@ -927,10 +917,10 @@ fn draw_destination_picker(
         bounds,
         anchor,
         LocationPickerView {
-            query: &composer.picker.query,
+            query: &composer.destination_picker.query,
             placeholder,
             rows: &rows,
-            visible_start: composer.picker.visible_start(),
+            visible_start: composer.destination_picker.visible_start(),
             actions: &[],
             maximum_width,
             overlay_target: HitTarget::Scheduler(Target::DestinationPickerOverlay),

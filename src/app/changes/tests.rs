@@ -177,6 +177,7 @@ fn repository_refresh_preserves_an_active_branch_comparison() {
     let mut repo = repository_data();
     repo.branches = vec![
         Branch {
+            upstream: None,
             name: "main".to_owned(),
             remote: false,
             current: true,
@@ -184,6 +185,7 @@ fn repository_refresh_preserves_an_active_branch_comparison() {
             last_touched_at: None,
         },
         Branch {
+            upstream: None,
             name: "topic".to_owned(),
             remote: false,
             current: false,

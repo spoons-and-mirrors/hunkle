@@ -981,6 +981,40 @@ fn scheduler_composer_edits_fields_and_narrow_back_returns_to_tasks() {
 }
 
 #[test]
+fn scheduler_edits_an_existing_task_in_the_shared_composer() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+        id: 7,
+        title: "Nightly review".to_owned(),
+        description: "Check open changes".to_owned(),
+        prompt: "Review the diff and summarize it.".to_owned(),
+        destination: directory.path().to_path_buf(),
+        repository: "repo".to_owned(),
+        branch: "main".to_owned(),
+        enabled: false,
+        interval_minutes: 90,
+        next_run_ms: 1,
+        source: None,
+    }]);
+    app.mode = Mode::Scheduler;
+    app.scheduler.surface = SchedulerSurface::Detail;
+    app.scheduler.selected_task_id = Some(7);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+    let composer = app.scheduler.composer.as_ref().unwrap();
+    assert_eq!(composer.task_id, Some(7));
+    assert_eq!(composer.title.text(), "Nightly review");
+    assert_eq!(composer.description.text(), "Check open changes");
+    assert_eq!(composer.prompt.text(), "Review the diff and summarize it.");
+    assert_eq!(composer.schedule.text(), "90");
+    assert!(!composer.enabled);
+}
+
+#[test]
 fn scheduler_prompt_follows_the_cursor_and_accepts_wheel_scrolling() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());

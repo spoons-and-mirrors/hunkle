@@ -30,7 +30,10 @@ pub(crate) use stash::StashedAgent;
 pub(crate) use client::HerdrPaneLayout;
 #[cfg(test)]
 pub(crate) use client::HerdrPaneRect;
-pub(crate) use scheduler::{ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskEdit};
+pub(crate) use scheduler::{
+    ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit,
+    ScheduledTaskSource,
+};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const AGENT_CHANGE_STATS_INTERVAL: Duration = Duration::from_secs(5);
@@ -545,8 +548,27 @@ impl HerdrSession {
             .map_or(&[], |scheduler| scheduler.runs.as_slice())
     }
 
-    pub(crate) fn save_scheduled_task(&self, edit: ScheduledTaskEdit) -> Result<(), String> {
-        self.scheduler_service()?.save_task(edit)
+    pub(crate) fn save_scheduled_task(
+        &self,
+        id: Option<i64>,
+        edit: ScheduledTaskEdit,
+        source: Option<ScheduledTaskSource>,
+    ) -> Result<(), String> {
+        self.scheduler_service()?.save_task(id, edit, source)
+    }
+
+    pub(crate) fn scheduled_task_source(
+        &self,
+        task: &ScheduledTask,
+    ) -> Result<Option<ScheduledTaskSource>, String> {
+        self.scheduler_service()?.task_source(task)
+    }
+
+    pub(crate) fn sync_scheduled_task_files(
+        &self,
+        destinations: Vec<ScheduledTaskDestination>,
+    ) -> Result<(), String> {
+        self.scheduler_service()?.sync_task_files(destinations)
     }
 
     pub(crate) fn toggle_scheduled_task(&self, id: i64, enabled: bool) -> Result<(), String> {
@@ -1676,6 +1698,13 @@ impl HerdrSession {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_scheduled_tasks_for_test(&mut self, tasks: Vec<ScheduledTask>) {
+        let mut scheduler = scheduler::SchedulerService::open(None).unwrap();
+        scheduler.tasks = tasks;
+        self.scheduler = Some(scheduler);
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_snapshot_for_test(&mut self, value: &Value) {
         let (mut workspaces, agents) = client::parse_snapshot(value).unwrap();
         populate_workspace_branches(&mut workspaces);
@@ -2116,6 +2145,7 @@ mod latest_user_message_cache_tests {
             enabled: true,
             interval_minutes: 60,
             next_run_ms: 3_600_000,
+            source: None,
         });
         scheduler.runs.push(scheduler::ScheduledRun {
             id: 9,

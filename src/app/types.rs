@@ -435,6 +435,7 @@ pub(crate) enum SchedulerHitTarget {
     Close,
     Back,
     New,
+    Edit,
     Save,
     Cancel,
     Task(i64),

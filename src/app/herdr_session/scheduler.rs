@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread::{self, JoinHandle},
@@ -6,6 +7,15 @@ use std::{
 };
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+
+use crate::{
+    filesystem::{
+        atomic_write_if_unchanged, atomic_write_workspace, ensure_workspace_directory,
+        read_optional_workspace_directory, read_workspace_file, remove_workspace_file,
+        remove_workspace_file_if_unchanged,
+    },
+    repo_path::RepoPath,
+};
 
 use super::{
     AgentStatus,
@@ -29,6 +39,7 @@ pub(crate) struct ScheduledTask {
     pub(crate) enabled: bool,
     pub(crate) interval_minutes: u64,
     pub(crate) next_run_ms: i64,
+    pub(crate) source: Option<RepoPath>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +52,21 @@ pub(crate) struct ScheduledTaskEdit {
     pub(crate) branch: String,
     pub(crate) enabled: bool,
     pub(crate) interval_minutes: u64,
+    pub(crate) source: Option<RepoPath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScheduledTaskSource {
+    pub(crate) destination: PathBuf,
+    pub(crate) path: RepoPath,
+    pub(crate) original: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScheduledTaskDestination {
+    pub(crate) path: PathBuf,
+    pub(crate) repository: String,
+    pub(crate) branch: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,30 +149,122 @@ impl SchedulerService {
         })
     }
 
-    pub(crate) fn save_task(&self, mut task: ScheduledTaskEdit) -> Result<(), String> {
+    pub(crate) fn save_task(
+        &self,
+        id: Option<i64>,
+        mut task: ScheduledTaskEdit,
+        original: Option<ScheduledTaskSource>,
+    ) -> Result<(), String> {
         let interval = interval_ms(task.interval_minutes)?;
         task.destination = validate_destination(&task.destination)?;
         task.title = task.title.trim().to_owned();
-        if task.title.is_empty() || task.prompt.trim().is_empty() {
-            return Err(format!(
-                "scheduled task {} is required",
-                if task.title.is_empty() {
-                    "title"
-                } else {
-                    "prompt"
-                }
-            ));
-        }
+        validate_task(&task)?;
         let next = now_ms()
             .checked_add(interval)
             .ok_or_else(|| "schedule is too large".to_owned())?;
-        self.send(Command::Save(task, next))
+        if let Some(source) = original {
+            if task.source.as_ref() != Some(&source.path) {
+                return Err("scheduled task source changed while editing".to_owned());
+            }
+            if task.destination == source.destination {
+                let content = render_task_file(&task);
+                atomic_write_if_unchanged(
+                    &task.destination,
+                    &source.path,
+                    &source.original,
+                    content.as_bytes(),
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                let current = read_workspace_file(&source.destination, &source.path)
+                    .map_err(|error| error.to_string())?;
+                if current != source.original {
+                    return Err(format!(
+                        "{} changed on disk; your edits were not saved",
+                        source.path.display()
+                    ));
+                }
+                ensure_workspace_directory(&task.destination, &RepoPath::from(".hunkle/scheduled"))
+                    .map_err(|error| error.to_string())?;
+                let target = available_task_path(&task.destination, &task.title, id)?;
+                task.source = Some(target.clone());
+                atomic_write_workspace(
+                    &task.destination,
+                    &target,
+                    render_task_file(&task).as_bytes(),
+                )
+                .map_err(|error| error.to_string())?;
+                if let Err(error) = remove_workspace_file_if_unchanged(
+                    &source.destination,
+                    &source.path,
+                    &source.original,
+                ) {
+                    let rollback = remove_workspace_file(&task.destination, &target);
+                    return Err(match rollback {
+                        Ok(()) => error.to_string(),
+                        Err(rollback) => format!(
+                            "{error}; could not remove the new task file during rollback: {rollback}"
+                        ),
+                    });
+                }
+            }
+        } else if id.is_none() {
+            ensure_workspace_directory(&task.destination, &RepoPath::from(".hunkle/scheduled"))
+                .map_err(|error| error.to_string())?;
+            let source = available_task_path(&task.destination, &task.title, None)?;
+            task.source = Some(source.clone());
+            atomic_write_workspace(
+                &task.destination,
+                &source,
+                render_task_file(&task).as_bytes(),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        self.send(Command::Save(id, task, next))
+    }
+
+    pub(crate) fn task_source(
+        &self,
+        task: &ScheduledTask,
+    ) -> Result<Option<ScheduledTaskSource>, String> {
+        let Some(path) = task.source.clone() else {
+            return Ok(None);
+        };
+        let original = read_workspace_file(&task.destination, &path)
+            .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+        Ok(Some(ScheduledTaskSource {
+            destination: task.destination.clone(),
+            path,
+            original,
+        }))
+    }
+
+    pub(crate) fn sync_task_files(
+        &self,
+        destinations: Vec<ScheduledTaskDestination>,
+    ) -> Result<(), String> {
+        self.send(Command::Sync(destinations))
     }
 
     pub(crate) fn toggle_task(&self, id: i64, enabled: bool) -> Result<(), String> {
-        self.send(Command::Toggle(id, enabled))
+        let Some(task) = self.tasks.iter().find(|task| task.id == id) else {
+            return Err("scheduled task not found".to_owned());
+        };
+        if task.source.is_none() {
+            return self.send(Command::Toggle(id, enabled));
+        }
+        let source = self.task_source(task)?.expect("source was checked");
+        let mut edit = task.edit();
+        edit.enabled = enabled;
+        self.save_task(Some(id), edit, Some(source))
     }
     pub(crate) fn delete_task(&self, id: i64) -> Result<(), String> {
+        let Some(task) = self.tasks.iter().find(|task| task.id == id) else {
+            return Err("scheduled task not found".to_owned());
+        };
+        if let Some(source) = task.source.as_ref() {
+            remove_workspace_file(&task.destination, source).map_err(|error| error.to_string())?;
+        }
         self.send(Command::Delete(id))
     }
     pub(crate) fn run_now(&self, id: i64) -> Result<(), String> {
@@ -218,7 +336,8 @@ impl Drop for SchedulerService {
 }
 
 enum Command {
-    Save(ScheduledTaskEdit, i64),
+    Save(Option<i64>, ScheduledTaskEdit, i64),
+    Sync(Vec<ScheduledTaskDestination>),
     Toggle(i64, bool),
     Delete(i64),
     RunNow(i64),
@@ -242,7 +361,8 @@ fn worker(mut db: Connection, commands: Receiver<Command>, updates: Sender<Updat
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(command) => {
                 let result = match command {
-                    Command::Save(task, next) => insert_task(&db, task, next),
+                    Command::Save(id, task, next) => save_task(&db, id, task, next),
+                    Command::Sync(destinations) => sync_task_files(&db, &destinations),
                     Command::Toggle(id, enabled) => changed(
                         db.execute(
                             "UPDATE scheduled_tasks SET enabled = ?2 WHERE id = ?1",
@@ -298,13 +418,342 @@ fn publish(db: &Connection, updates: &Sender<Update>, result: Result<(), String>
     let _ = updates.send(load_state(db));
 }
 
-fn insert_task(db: &Connection, task: ScheduledTaskEdit, next: i64) -> Result<(), String> {
+fn save_task(
+    db: &Connection,
+    id: Option<i64>,
+    task: ScheduledTaskEdit,
+    next: i64,
+) -> Result<(), String> {
+    let source = task.source.as_ref().map(|path| encode_path(path.as_path()));
+    let minutes = i64::try_from(task.interval_minutes).map_err(|_| "schedule is too large")?;
+    if let Some(id) = id {
+        return changed(
+            db.execute(
+                "UPDATE scheduled_tasks SET title = ?2, description = ?3, prompt = ?4, destination = ?5, repository = ?6, branch = ?7, enabled = ?8, interval_minutes = ?9, next_run_ms = ?10, source_path = ?11 WHERE id = ?1",
+                params![id, task.title, task.description, task.prompt, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next, source],
+            ),
+            "scheduled task not found",
+        );
+    }
     db.execute(
-        "INSERT INTO scheduled_tasks (title, description, prompt, destination, repository, branch, enabled, interval_minutes, next_run_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![task.title, task.description, task.prompt, encode_path(&task.destination), task.repository, task.branch, task.enabled, i64::try_from(task.interval_minutes).map_err(|_| "schedule is too large")?, next],
+        "INSERT INTO scheduled_tasks (title, description, prompt, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![task.title, task.description, task.prompt, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next, source],
     )
     .map_err(db_error)?;
     Ok(())
+}
+
+fn sync_task_files(
+    db: &Connection,
+    destinations: &[ScheduledTaskDestination],
+) -> Result<(), String> {
+    let destinations = destinations
+        .iter()
+        .map(|destination| {
+            Ok(ScheduledTaskDestination {
+                path: validate_destination(&destination.path)?,
+                repository: destination.repository.clone(),
+                branch: destination.branch.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    for task in load_state(db)?
+        .0
+        .into_iter()
+        .filter(|task| task.source.is_none())
+    {
+        let Some(destination) = destinations
+            .iter()
+            .find(|destination| destination.path == task.destination)
+        else {
+            continue;
+        };
+        ensure_workspace_directory(&destination.path, &RepoPath::from(".hunkle/scheduled"))
+            .map_err(|error| error.to_string())?;
+        let source = available_task_path(&destination.path, &task.title, Some(task.id))?;
+        let mut edit = task.edit();
+        edit.source = Some(source.clone());
+        atomic_write_workspace(
+            &destination.path,
+            &source,
+            render_task_file(&edit).as_bytes(),
+        )
+        .map_err(|error| error.to_string())?;
+        db.execute(
+            "UPDATE scheduled_tasks SET source_path = ?2 WHERE id = ?1",
+            params![task.id, encode_path(source.as_path())],
+        )
+        .map_err(db_error)?;
+    }
+
+    let mut errors = Vec::new();
+    for destination in destinations {
+        db.execute(
+            "UPDATE scheduled_tasks SET enabled = 0 WHERE destination = ?1 AND source_path IS NOT NULL",
+            params![encode_path(&destination.path)],
+        )
+        .map_err(db_error)?;
+        let entries = read_optional_workspace_directory(
+            &destination.path,
+            &RepoPath::from(".hunkle/scheduled"),
+        )
+        .map_err(|error| error.to_string())?;
+        for entry in entries {
+            if entry.is_directory
+                || entry
+                    .path
+                    .as_path()
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    != Some("md")
+            {
+                continue;
+            }
+            let content = match read_workspace_file(&destination.path, &entry.path) {
+                Ok(content) => content,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", entry.path.display()));
+                    continue;
+                }
+            };
+            let mut edit = match parse_task_file(
+                &content,
+                &destination.path,
+                &destination.repository,
+                &destination.branch,
+                entry.path.clone(),
+            ) {
+                Ok(edit) => edit,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", entry.path.display()));
+                    continue;
+                }
+            };
+            let source = encode_path(entry.path.as_path());
+            let destination_path = encode_path(&destination.path);
+            let existing = db
+                .query_row(
+                    "SELECT id, interval_minutes, next_run_ms FROM scheduled_tasks WHERE destination = ?1 AND source_path = ?2",
+                    params![destination_path, source],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, i64>(2)?)),
+                )
+                .optional()
+                .map_err(db_error)?;
+            let next = if let Some((_, interval, next)) = existing
+                && interval == edit.interval_minutes
+            {
+                next
+            } else {
+                now_ms()
+                    .checked_add(interval_ms(edit.interval_minutes)?)
+                    .ok_or_else(|| "schedule is too large".to_owned())?
+            };
+            edit.source = Some(entry.path);
+            save_task(db, existing.map(|(id, _, _)| id), edit, next)?;
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not load scheduled task files: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
+fn available_task_path(root: &Path, title: &str, id: Option<i64>) -> Result<RepoPath, String> {
+    let existing = read_optional_workspace_directory(root, &RepoPath::from(".hunkle/scheduled"))
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter_map(|entry| entry.path.file_name().map(|name| name.to_owned()))
+        .collect::<HashSet<_>>();
+    let slug = task_slug(title);
+    let preferred = id.map_or_else(|| slug.clone(), |id| format!("{slug}-{id}"));
+    for suffix in 1.. {
+        let name = if suffix == 1 {
+            format!("{preferred}.md")
+        } else {
+            format!("{preferred}-{suffix}.md")
+        };
+        if !existing.contains(std::ffi::OsStr::new(&name)) {
+            return Ok(RepoPath::from(format!(".hunkle/scheduled/{name}")));
+        }
+    }
+    unreachable!()
+}
+
+fn task_slug(title: &str) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    for character in title.chars() {
+        if character.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(character.to_ascii_lowercase());
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    if slug.is_empty() {
+        "task".to_owned()
+    } else {
+        slug
+    }
+}
+
+fn parse_task_file(
+    content: &[u8],
+    destination: &Path,
+    repository: &str,
+    branch: &str,
+    source: RepoPath,
+) -> Result<ScheduledTaskEdit, String> {
+    let content = std::str::from_utf8(content).map_err(|_| "task file must be UTF-8".to_owned())?;
+    let mut offset = 0;
+    let mut lines = content.split_inclusive('\n');
+    let first = lines
+        .next()
+        .ok_or_else(|| "missing YAML frontmatter".to_owned())?;
+    offset += first.len();
+    if first.trim_end_matches(['\r', '\n']) != "---" {
+        return Err("task file must start with YAML frontmatter".to_owned());
+    }
+    let mut fields = std::collections::HashMap::new();
+    let mut closed = false;
+    for line in lines {
+        offset += line.len();
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (key, value) = trimmed
+            .split_once(':')
+            .ok_or_else(|| format!("invalid frontmatter line `{trimmed}`"))?;
+        let key = key.trim();
+        if !matches!(key, "status" | "frequency" | "title" | "description") {
+            return Err(format!("unknown frontmatter field `{key}`"));
+        }
+        if fields
+            .insert(key, parse_yaml_scalar(value.trim())?)
+            .is_some()
+        {
+            return Err(format!("duplicate frontmatter field `{key}`"));
+        }
+    }
+    if !closed {
+        return Err("YAML frontmatter is not closed with `---`".to_owned());
+    }
+    let mut required = |key| {
+        fields
+            .remove(key)
+            .ok_or_else(|| format!("missing frontmatter field `{key}`"))
+    };
+    let enabled = match required("status")?.as_str() {
+        "enabled" => true,
+        "disabled" => false,
+        _ => return Err("status must be `enabled` or `disabled`".to_owned()),
+    };
+    let interval_minutes = parse_frequency(&required("frequency")?)?;
+    let title = required("title")?;
+    let description = required("description")?;
+    let prompt = content[offset..].trim_matches(['\r', '\n']).to_owned();
+    let edit = ScheduledTaskEdit {
+        title,
+        description,
+        prompt,
+        destination: destination.to_owned(),
+        repository: repository.to_owned(),
+        branch: branch.to_owned(),
+        enabled,
+        interval_minutes,
+        source: Some(source),
+    };
+    validate_task(&edit)?;
+    Ok(edit)
+}
+
+fn parse_yaml_scalar(value: &str) -> Result<String, String> {
+    if value.starts_with('"') {
+        return serde_json::from_str(value)
+            .map_err(|error| format!("invalid quoted value: {error}"));
+    }
+    if let Some(value) = value.strip_prefix('\'') {
+        let value = value
+            .strip_suffix('\'')
+            .ok_or_else(|| "unterminated quoted value".to_owned())?;
+        return Ok(value.replace("''", "'"));
+    }
+    Ok(value.trim().to_owned())
+}
+
+fn parse_frequency(value: &str) -> Result<u64, String> {
+    let (number, multiplier) = match value.chars().last() {
+        Some('m') => (&value[..value.len() - 1], 1),
+        Some('h') => (&value[..value.len() - 1], 60),
+        Some('d') => (&value[..value.len() - 1], 24 * 60),
+        _ => (value, 1),
+    };
+    number
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|number| number.checked_mul(multiplier))
+        .filter(|minutes| *minutes > 0)
+        .ok_or_else(|| {
+            "frequency must be a positive number of minutes, or use m, h, or d".to_owned()
+        })
+}
+
+fn render_task_file(task: &ScheduledTaskEdit) -> String {
+    let title = serde_json::to_string(&task.title).expect("strings serialize as JSON");
+    let description = serde_json::to_string(&task.description).expect("strings serialize as JSON");
+    format!(
+        "---\nstatus: {}\nfrequency: {}m\ntitle: {}\ndescription: {}\n---\n\n{}\n",
+        if task.enabled { "enabled" } else { "disabled" },
+        task.interval_minutes,
+        title,
+        description,
+        task.prompt.trim_end()
+    )
+}
+
+fn validate_task(task: &ScheduledTaskEdit) -> Result<(), String> {
+    if task.title.trim().is_empty() || task.prompt.trim().is_empty() {
+        return Err(format!(
+            "scheduled task {} is required",
+            if task.title.trim().is_empty() {
+                "title"
+            } else {
+                "prompt"
+            }
+        ));
+    }
+    interval_ms(task.interval_minutes).map(|_| ())
+}
+
+impl ScheduledTask {
+    pub(crate) fn edit(&self) -> ScheduledTaskEdit {
+        ScheduledTaskEdit {
+            title: self.title.clone(),
+            description: self.description.clone(),
+            prompt: self.prompt.clone(),
+            destination: self.destination.clone(),
+            repository: self.repository.clone(),
+            branch: self.branch.clone(),
+            enabled: self.enabled,
+            interval_minutes: self.interval_minutes,
+            source: self.source.clone(),
+        }
+    }
 }
 
 fn delete_task(db: &Connection, id: i64) -> Result<(), String> {
@@ -545,21 +994,35 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .map_err(db_error)?;
     let sql = match version {
-        0 => "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0), next_run_ms INTEGER NOT NULL);
+        0 => "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0), next_run_ms INTEGER NOT NULL, source_path BLOB);
               CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
-              CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id);",
+              CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id); CREATE UNIQUE INDEX scheduled_tasks_source ON scheduled_tasks(destination, source_path) WHERE source_path IS NOT NULL;",
         1 => "ALTER TABLE scheduled_runs RENAME TO scheduled_runs_v1;
               CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
               INSERT INTO scheduled_runs (id, task_id, scheduled_for_ms, status, created_at_ms, pane_id, terminal_id, output, error) SELECT id, task_id, scheduled_for_ms, status, created_at_ms, pane_id, terminal_id, output, error FROM scheduled_runs_v1 WHERE task_id IS NOT NULL;
               DROP TABLE scheduled_runs_v1; CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id);",
         2 => "ALTER TABLE scheduled_runs ADD COLUMN terminal_id TEXT; ALTER TABLE scheduled_runs ADD COLUMN session_id TEXT;",
         3 => "ALTER TABLE scheduled_runs ADD COLUMN session_id TEXT;",
-        4 => "",
+        4 => "ALTER TABLE scheduled_tasks ADD COLUMN source_path BLOB; CREATE UNIQUE INDEX scheduled_tasks_source ON scheduled_tasks(destination, source_path) WHERE source_path IS NOT NULL;",
+        5 => "",
         _ => return Err(format!("scheduler database version {version} is newer than supported")),
     };
     tx.execute_batch(sql).map_err(db_error)?;
-    if version < 4 {
-        tx.execute_batch("PRAGMA user_version = 4;")
+    if version > 0 && version < 4 {
+        let has_tasks = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_tasks')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_error)?;
+        if has_tasks {
+            tx.execute_batch("ALTER TABLE scheduled_tasks ADD COLUMN source_path BLOB; CREATE UNIQUE INDEX scheduled_tasks_source ON scheduled_tasks(destination, source_path) WHERE source_path IS NOT NULL;")
+                .map_err(db_error)?;
+        }
+    }
+    if version < 5 {
+        tx.execute_batch("PRAGMA user_version = 5;")
             .map_err(db_error)?;
     }
     tx.commit().map_err(db_error)
@@ -612,7 +1075,7 @@ fn decode_path(bytes: Vec<u8>) -> rusqlite::Result<PathBuf> {
 fn load_state(db: &Connection) -> Result<State, String> {
     let tasks = query_all(
         db,
-        "SELECT id, title, description, prompt, destination, repository, branch, enabled, interval_minutes, next_run_ms FROM scheduled_tasks ORDER BY id",
+        "SELECT id, title, description, prompt, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path FROM scheduled_tasks ORDER BY id",
         |row| {
             Ok(ScheduledTask {
                 id: row.get(0)?,
@@ -625,6 +1088,11 @@ fn load_state(db: &Connection) -> Result<State, String> {
                 enabled: row.get(7)?,
                 interval_minutes: row.get(8)?,
                 next_run_ms: row.get(9)?,
+                source: row
+                    .get::<_, Option<Vec<u8>>>(10)?
+                    .map(decode_path)
+                    .transpose()?
+                    .map(RepoPath::from),
             })
         },
     )?;
@@ -662,6 +1130,194 @@ fn query_all<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn destination(path: &Path) -> ScheduledTaskDestination {
+        ScheduledTaskDestination {
+            path: path.to_owned(),
+            repository: "repo".to_owned(),
+            branch: "main".to_owned(),
+        }
+    }
+
+    #[test]
+    fn markdown_task_frontmatter_round_trips_supported_yaml_scalars() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = RepoPath::from(".hunkle/scheduled/nightly.md");
+        let content = br#"---
+status: disabled
+frequency: 2h
+title: 'Nightly: review'
+description: "Review \"open\" changes"
+---
+
+Inspect the diff.
+Summarize risks.
+"#;
+
+        let task = parse_task_file(content, directory.path(), "repo", "main", source).unwrap();
+
+        assert_eq!(task.title, "Nightly: review");
+        assert_eq!(task.description, "Review \"open\" changes");
+        assert_eq!(task.prompt, "Inspect the diff.\nSummarize risks.");
+        assert_eq!(task.interval_minutes, 120);
+        assert!(!task.enabled);
+        let reparsed = parse_task_file(
+            render_task_file(&task).as_bytes(),
+            directory.path(),
+            "repo",
+            "main",
+            task.source.clone().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reparsed, task);
+    }
+
+    #[test]
+    fn sync_imports_markdown_without_postponing_unchanged_tasks() {
+        let directory = tempfile::tempdir().unwrap();
+        let scheduled = directory.path().join(".hunkle/scheduled");
+        std::fs::create_dir_all(&scheduled).unwrap();
+        std::fs::write(
+            scheduled.join("review.md"),
+            "---\nstatus: enabled\nfrequency: 1d\ntitle: Review\ndescription: Check changes\n---\n\nReview the repository.\n",
+        )
+        .unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
+        prepare_database(&mut db).unwrap();
+
+        sync_task_files(&db, &[destination(directory.path())]).unwrap();
+        let task = load_state(&db).unwrap().0.pop().unwrap();
+        assert_eq!(task.interval_minutes, 24 * 60);
+        assert_eq!(
+            task.source,
+            Some(RepoPath::from(".hunkle/scheduled/review.md"))
+        );
+        db.execute(
+            "UPDATE scheduled_tasks SET next_run_ms = 123456 WHERE id = ?1",
+            [task.id],
+        )
+        .unwrap();
+
+        sync_task_files(&db, &[destination(directory.path())]).unwrap();
+
+        let task = load_state(&db).unwrap().0.pop().unwrap();
+        assert_eq!(task.next_run_ms, 123456);
+
+        std::fs::remove_file(scheduled.join("review.md")).unwrap();
+        sync_task_files(&db, &[destination(directory.path())]).unwrap();
+        let task = load_state(&db).unwrap().0.pop().unwrap();
+        assert!(!task.enabled);
+    }
+
+    #[test]
+    fn sync_migrates_database_tasks_to_repository_markdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
+        prepare_database(&mut db).unwrap();
+        save_task(
+            &db,
+            None,
+            ScheduledTaskEdit {
+                title: "Legacy Review".to_owned(),
+                description: "Check changes".to_owned(),
+                prompt: "Review the repository.".to_owned(),
+                destination: directory.path().to_owned(),
+                repository: "repo".to_owned(),
+                branch: "main".to_owned(),
+                enabled: true,
+                interval_minutes: 60,
+                source: None,
+            },
+            123456,
+        )
+        .unwrap();
+
+        sync_task_files(&db, &[destination(directory.path())]).unwrap();
+
+        let task = load_state(&db).unwrap().0.pop().unwrap();
+        let source = task.source.unwrap();
+        assert_eq!(
+            source,
+            RepoPath::from(".hunkle/scheduled/legacy-review-1.md")
+        );
+        let content = std::fs::read_to_string(directory.path().join(source.as_path())).unwrap();
+        assert!(content.contains("status: enabled\nfrequency: 60m"));
+        assert!(content.ends_with("Review the repository.\n"));
+    }
+
+    #[test]
+    fn editing_moves_a_file_backed_task_between_repositories() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_root = directory.path().join("source");
+        let destination_root = directory.path().join("destination");
+        std::fs::create_dir_all(source_root.join(".hunkle/scheduled")).unwrap();
+        std::fs::create_dir(&destination_root).unwrap();
+        let source_path = RepoPath::from(".hunkle/scheduled/review.md");
+        std::fs::write(
+            source_root.join(source_path.as_path()),
+            "---\nstatus: enabled\nfrequency: 1h\ntitle: Review\ndescription: Check changes\n---\n\nReview the repository.\n",
+        )
+        .unwrap();
+        let mut scheduler = SchedulerService::open(None).unwrap();
+        scheduler
+            .sync_task_files(vec![
+                ScheduledTaskDestination {
+                    path: source_root.clone(),
+                    repository: "source".to_owned(),
+                    branch: "main".to_owned(),
+                },
+                ScheduledTaskDestination {
+                    path: destination_root.clone(),
+                    repository: "destination".to_owned(),
+                    branch: "feature".to_owned(),
+                },
+            ])
+            .unwrap();
+        for _ in 0..100 {
+            scheduler.poll_completions();
+            if !scheduler.tasks.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let task = scheduler.tasks.first().unwrap().clone();
+        let source = scheduler.task_source(&task).unwrap().unwrap();
+        let mut edit = task.edit();
+        edit.destination = destination_root.clone();
+        edit.repository = "destination".to_owned();
+        edit.branch = "feature".to_owned();
+
+        scheduler
+            .save_task(Some(task.id), edit, Some(source))
+            .unwrap();
+
+        assert!(!source_root.join(source_path.as_path()).exists());
+        let moved_path = destination_root.join(".hunkle/scheduled/review-1.md");
+        assert!(moved_path.exists());
+        for _ in 0..100 {
+            scheduler.poll_completions();
+            if scheduler
+                .tasks
+                .iter()
+                .any(|moved| moved.id == task.id && moved.destination == destination_root)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let moved = scheduler
+            .tasks
+            .iter()
+            .find(|moved| moved.id == task.id)
+            .unwrap();
+        assert_eq!(moved.destination, destination_root);
+        assert_eq!(
+            moved.source,
+            Some(RepoPath::from(".hunkle/scheduled/review-1.md"))
+        );
+        assert_eq!(moved.repository, "destination");
+        assert_eq!(moved.branch, "feature");
+    }
 
     #[test]
     fn scheduler_behaviors() {
@@ -734,7 +1390,7 @@ mod tests {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         assert!(db.prepare("SELECT terminal_id FROM scheduled_runs").is_ok());
         assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
@@ -753,7 +1409,7 @@ mod tests {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
     }

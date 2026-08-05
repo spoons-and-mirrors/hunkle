@@ -37,6 +37,79 @@ pub(crate) fn create_worktree(repository: &Path, branch: &str, base: &str) -> Re
     create_worktree_in(repository, branch, base, &worktree_storage_root()?)
 }
 
+pub(crate) fn create_worktree_for_branch(
+    repository: &Path,
+    branch: &str,
+    remote: bool,
+) -> Result<PathBuf> {
+    create_worktree_for_branch_in(repository, branch, remote, &worktree_storage_root()?)
+}
+
+pub(super) fn create_worktree_for_branch_in(
+    repository: &Path,
+    branch: &str,
+    remote: bool,
+    storage_root: &Path,
+) -> Result<PathBuf> {
+    let local_branch = if remote {
+        branch
+            .split_once('/')
+            .map(|(_, branch)| branch)
+            .context("the remote branch has no branch name")?
+    } else {
+        branch
+    };
+    let path = managed_worktree_path(repository, local_branch, storage_root)?;
+    let local_revision = format!("refs/heads/{local_branch}");
+    let local_exists = if remote {
+        let output = run(
+            repository,
+            &["show-ref", "--verify", "--quiet", &local_revision],
+        )?;
+        output.status.success()
+    } else {
+        true
+    };
+    if remote && local_exists {
+        let output = run(
+            repository,
+            &[
+                "for-each-ref",
+                "--format=%(upstream:short)",
+                &local_revision,
+            ],
+        )?;
+        ensure_complete(&output, "git for-each-ref")?;
+        if !output.status.success() {
+            bail!("{}", clean_stderr(&output));
+        }
+        let upstream = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if upstream != branch {
+            bail!(
+                "local branch {local_branch} already exists and does not track {branch}; select {local_branch} instead"
+            );
+        }
+    }
+    let mut command = base_command(repository);
+    command.args(["worktree", "add"]);
+    if remote && !local_exists {
+        command.args(["--track", "-b", local_branch]);
+    }
+    command.arg("--").arg(&path).arg(if local_exists {
+        local_branch.to_owned()
+    } else {
+        format!("refs/remotes/{branch}")
+    });
+    let output = process::run(&mut command, git_limits())
+        .with_context(|| format!("could not create worktree {}", path.display()))?;
+    ensure_complete(&output, "git worktree add")?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    fs::canonicalize(&path)
+        .with_context(|| format!("could not resolve created worktree {}", path.display()))
+}
+
 fn worktree_storage_root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("XDG_DATA_HOME").filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path).join("hunkle").join("worktrees"));
@@ -71,21 +144,7 @@ pub(super) fn create_worktree_in(
     base: &str,
     storage_root: &Path,
 ) -> Result<PathBuf> {
-    let main = list_worktrees(repository)?
-        .into_iter()
-        .find(|worktree| worktree.is_main && !worktree.is_bare)
-        .context("Git did not identify the main worktree")?;
-    let repository_name = main
-        .path
-        .file_name()
-        .context("the main worktree has no directory name")?;
-    let common_dir = common_git_dir(&main.path)?;
-    let mut repository_directory = repository_name.to_os_string();
-    let repository_id = path_hash(&common_dir) >> (u64::BITS - WORKTREE_REPOSITORY_ID_BITS);
-    repository_directory.push(format!("-{:05x}", repository_id));
-    let path = storage_root
-        .join(repository_directory)
-        .join(branch.replace('/', "-"));
+    let path = managed_worktree_path(repository, branch, storage_root)?;
     let path_parent = path
         .parent()
         .context("the worktree path has no parent directory")?;
@@ -112,6 +171,34 @@ pub(super) fn create_worktree_in(
     }
     fs::canonicalize(&path)
         .with_context(|| format!("could not resolve created worktree {}", path.display()))
+}
+
+fn managed_worktree_path(repository: &Path, branch: &str, storage_root: &Path) -> Result<PathBuf> {
+    let main = list_worktrees(repository)?
+        .into_iter()
+        .find(|worktree| worktree.is_main && !worktree.is_bare)
+        .context("Git did not identify the main worktree")?;
+    let repository_name = main
+        .path
+        .file_name()
+        .context("the main worktree has no directory name")?;
+    let common_dir = common_git_dir(&main.path)?;
+    let mut repository_directory = repository_name.to_os_string();
+    let repository_id = path_hash(&common_dir) >> (u64::BITS - WORKTREE_REPOSITORY_ID_BITS);
+    repository_directory.push(format!("-{:05x}", repository_id));
+    let path = storage_root
+        .join(repository_directory)
+        .join(branch.replace('/', "-"));
+    let path_parent = path
+        .parent()
+        .context("the worktree path has no parent directory")?;
+    fs::create_dir_all(path_parent).with_context(|| {
+        format!(
+            "could not create worktree directory {}",
+            path_parent.display()
+        )
+    })?;
+    Ok(path)
 }
 
 fn path_hash(path: &Path) -> u64 {

@@ -18,8 +18,8 @@ pub(super) use crate::app::{
 };
 
 pub(super) use super::{
-    fill, palette, text::word_wrapped_height, text_input_lines, truncate_start_width,
-    truncate_width,
+    fill, location_picker_row, palette, text::word_wrapped_height, text_input_lines,
+    truncate_start_width, truncate_width,
 };
 
 mod actions;

@@ -221,9 +221,10 @@ pub struct RepositoryUpdate {
     refs: Option<RefsData>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Branch {
     pub name: String,
+    pub upstream: Option<String>,
     pub remote: bool,
     pub current: bool,
     pub default: bool,

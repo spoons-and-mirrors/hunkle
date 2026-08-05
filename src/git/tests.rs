@@ -181,6 +181,81 @@ fn creates_a_linked_worktree_without_a_runtime_workspace() {
 }
 
 #[test]
+fn creates_a_linked_worktree_for_an_existing_branch() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("main repository");
+    fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-b", "main"]);
+    git(&root, &["config", "user.name", "Test Author"]);
+    git(&root, &["config", "user.email", "test@example.com"]);
+    fs::write(root.join("tracked.txt"), "base\n").unwrap();
+    git(&root, &["add", "tracked.txt"]);
+    git(&root, &["commit", "-m", "base"]);
+    git(&root, &["branch", "feature/existing"]);
+
+    let storage = directory.path().join("data/hunkle/worktrees");
+    let created =
+        create_worktree_for_branch_in(&root, "feature/existing", false, &storage).unwrap();
+
+    assert_eq!(created.file_name().unwrap(), "feature-existing");
+    assert_eq!(
+        list_worktrees(&root).unwrap()[1].branch.as_deref(),
+        Some("refs/heads/feature/existing")
+    );
+}
+
+#[test]
+fn creates_a_tracking_worktree_for_a_remote_branch() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("main repository");
+    let remote = directory.path().join("remote.git");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&remote).unwrap();
+    git(&remote, &["init", "--bare"]);
+    git(&root, &["init", "-b", "main"]);
+    git(&root, &["config", "user.name", "Test Author"]);
+    git(&root, &["config", "user.email", "test@example.com"]);
+    fs::write(root.join("tracked.txt"), "base\n").unwrap();
+    git(&root, &["add", "tracked.txt"]);
+    git(&root, &["commit", "-m", "base"]);
+    git(
+        &root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&root, &["push", "-u", "origin", "main"]);
+    git(&root, &["switch", "-c", "feature/remote"]);
+    git(&root, &["push", "-u", "origin", "feature/remote"]);
+    git(&root, &["switch", "main"]);
+    git(&root, &["branch", "-D", "feature/remote"]);
+
+    let storage = directory.path().join("data/hunkle/worktrees");
+    let created =
+        create_worktree_for_branch_in(&root, "origin/feature/remote", true, &storage).unwrap();
+
+    assert_eq!(created.file_name().unwrap(), "feature-remote");
+    assert_eq!(
+        list_worktrees(&root).unwrap()[1].branch.as_deref(),
+        Some("refs/heads/feature/remote")
+    );
+    let upstream = std::process::Command::new("git")
+        .args(["-C", created.to_str().unwrap(), "rev-parse", "--abbrev-ref"])
+        .arg("@{upstream}")
+        .output()
+        .unwrap();
+    assert!(upstream.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&upstream.stdout).trim(),
+        "origin/feature/remote"
+    );
+    let branch = repository_branches(&root)
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.name == "feature/remote")
+        .unwrap();
+    assert_eq!(branch.upstream.as_deref(), Some("origin/feature/remote"));
+}
+
+#[test]
 fn worktree_removal_refuses_uncommitted_changes_and_never_forces_deletion() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("main repository");
