@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{
     AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey,
     AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentUserMessage, HerdrSession,
-    HitTarget, LinkedWorktreeCatalog, Settings,
+    HitTarget, LinkedWorktreeCatalog, SchedulerHitTarget, Settings,
 };
 
 use super::{
@@ -548,7 +548,7 @@ pub(super) fn draw_history(
     draw_message_timeline(
         frame,
         message_selector,
-        agent_key.clone(),
+        Some(agent_key.clone()),
         selected_message,
         messages.len(),
         &mut targets,
@@ -611,6 +611,112 @@ pub(super) fn draw_history(
         picker_open,
         hovered,
         &mut targets,
+    );
+    (targets, scroll_max, scroll)
+}
+
+pub(super) fn draw_scheduled_history(
+    frame: &mut Frame<'_>,
+    messages: &[AgentUserMessage],
+    selected_message: Option<usize>,
+    transcript_scroll: Option<usize>,
+    expanded_requests: &[usize],
+    spinner_frame: usize,
+    area: Rect,
+) -> (Vec<(HitTarget, Rect)>, usize, usize) {
+    fill(frame, area, palette().panel);
+    if messages.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Loading conversation history…")
+                .style(Style::default().fg(palette().faint).bg(palette().panel)),
+            area,
+        );
+        return (Vec::new(), 0, 0);
+    }
+    let selected_message = selected_message
+        .unwrap_or_else(|| messages.len().saturating_sub(1))
+        .min(messages.len().saturating_sub(1));
+    let message = &messages[selected_message];
+    let selector = Rect::new(area.x, area.y, area.width, 2.min(area.height));
+    let content_width = usize::from(area.width.saturating_sub(4).max(1));
+    let user_lines = styled_agent_text(&message.text, content_width);
+    let user_height = u16::try_from(user_lines.len().saturating_add(2).min(8).max(3))
+        .unwrap_or(u16::MAX)
+        .min(area.bottom().saturating_sub(selector.bottom()));
+    let user_viewport = Rect::new(
+        area.x.saturating_sub(1),
+        selector.bottom(),
+        area.width,
+        user_height,
+    );
+    let viewport = Rect::new(
+        area.x.saturating_sub(1),
+        user_viewport.bottom(),
+        area.width,
+        area.bottom().saturating_sub(user_viewport.bottom()),
+    );
+    let user_cards = Rect::new(
+        area.x.saturating_add(1),
+        user_viewport.y,
+        area.width.saturating_sub(1),
+        user_viewport.height,
+    );
+    let cards = Rect::new(
+        area.x.saturating_add(1),
+        viewport.y,
+        area.width.saturating_sub(1),
+        viewport.height,
+    );
+    let (blocks, request_height) = build_request_transcript(
+        message,
+        content_width,
+        false,
+        spinner_frame,
+        expanded_requests,
+    );
+    let scroll_max = request_height.saturating_sub(usize::from(viewport.height));
+    let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
+    let mut targets = Vec::new();
+    draw_message_timeline(
+        frame,
+        selector,
+        None,
+        selected_message,
+        messages.len(),
+        &mut targets,
+    );
+    let user_block = TranscriptBlock {
+        user: true,
+        lines: user_lines,
+        start: 0,
+        height: usize::from(user_viewport.height),
+        elapsed: message_total_duration(message).map(format_preview_duration),
+        request_count: message.requests.len(),
+        request: None,
+        expandable: false,
+    };
+    draw_transcript_card(frame, &user_block, user_cards, user_viewport, 0);
+    for block in &blocks {
+        if let Some(rect) = draw_transcript_card(frame, block, cards, viewport, scroll)
+            && block.expandable
+            && let Some(request) = block.request
+        {
+            targets.push((
+                HitTarget::Scheduler(SchedulerHitTarget::ConversationRequest(request)),
+                rect,
+            ));
+        }
+    }
+    draw_transcript_progress(
+        frame,
+        Rect::new(
+            area.x.saturating_sub(1),
+            user_viewport.y,
+            area.width,
+            area.bottom().saturating_sub(user_viewport.y),
+        ),
+        scroll,
+        scroll_max,
     );
     (targets, scroll_max, scroll)
 }
@@ -1155,7 +1261,7 @@ fn push_truncated_span(
 fn draw_message_timeline(
     frame: &mut Frame<'_>,
     area: Rect,
-    agent: AgentKey,
+    agent: Option<AgentKey>,
     message: usize,
     message_count: usize,
     targets: &mut Vec<(HitTarget, Rect)>,
@@ -1203,7 +1309,9 @@ fn draw_message_timeline(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().panel)),
         timeline,
     );
-    targets.push((HitTarget::AgentPreviewMessageTimeline(agent), area));
+    if let Some(agent) = agent {
+        targets.push((HitTarget::AgentPreviewMessageTimeline(agent), area));
+    }
 }
 
 fn draw_transcript_progress(frame: &mut Frame<'_>, area: Rect, scroll: usize, scroll_max: usize) {

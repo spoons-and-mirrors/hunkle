@@ -138,6 +138,27 @@ fn repeated_open_keeps_the_first_workspace_request_active() {
 }
 
 #[test]
+fn local_build_restart_stays_anchored_after_opening_another_workspace() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    fs::write(first.path().join("first.txt"), "first\n").unwrap();
+    fs::write(second.path().join("second.txt"), "second\n").unwrap();
+    let expected = first
+        .path()
+        .join("target/hunkle-install/bin")
+        .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX));
+    let mut app = App::new(first.path().to_path_buf());
+
+    app.open_repository(second.path().to_path_buf());
+    wait_for_state(&mut app, |app| !app.session.open_running());
+
+    assert_eq!(
+        app.local_build_executable().as_deref(),
+        Some(expected.as_path())
+    );
+}
+
+#[test]
 fn successful_agent_creation_opens_its_destination() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();

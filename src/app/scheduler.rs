@@ -6,6 +6,7 @@ pub(crate) enum SchedulerSurface {
     Tasks,
     Detail,
     Pane,
+    Conversation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +211,10 @@ pub(crate) struct SchedulerState {
     pub(crate) run_scroll: usize,
     pub(crate) pane_scroll_x: usize,
     pub(crate) pane_scroll_bottom: usize,
+    pub(crate) conversation_scroll: Option<usize>,
+    pub(crate) conversation_scroll_max: usize,
+    pub(crate) conversation_message: Option<usize>,
+    pub(crate) conversation_expanded_requests: Vec<usize>,
     pub(crate) runs_focused: bool,
     pub(crate) error: Option<String>,
 }
@@ -274,6 +279,7 @@ impl App {
         self.scheduler.composer = None;
         self.scheduler.error = None;
         self.mode = Mode::Normal;
+        self.herdr.clear_scheduled_conversation();
     }
 
     pub(crate) fn begin_scheduled_task(&mut self) {
@@ -390,6 +396,22 @@ impl App {
             SchedulerHitTarget::OpenConversation => {
                 self.open_selected_scheduled_run_conversation();
             }
+            SchedulerHitTarget::ConversationRequest(request) => {
+                if let Some(index) = self
+                    .scheduler
+                    .conversation_expanded_requests
+                    .iter()
+                    .position(|value| *value == request)
+                {
+                    self.scheduler.conversation_expanded_requests.remove(index);
+                } else {
+                    self.scheduler.conversation_expanded_requests.push(request);
+                }
+            }
+            SchedulerHitTarget::CloseConversation => {
+                self.scheduler.surface = SchedulerSurface::Detail;
+                self.herdr.clear_scheduled_conversation();
+            }
         }
     }
 
@@ -408,18 +430,36 @@ impl App {
                     self.scheduler.pane_scroll_x = self.scheduler.pane_scroll_x.saturating_sub(3);
                 }
                 KeyCode::Right | KeyCode::Char('l') => self.scheduler.pane_scroll_x += 3,
-                KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp => {
-                    self.scheduler.pane_scroll_bottom +=
-                        if key.code == KeyCode::PageUp { 12 } else { 3 };
+                KeyCode::PageUp => self.scroll_scheduled_run_pane(true, true),
+                KeyCode::PageDown => self.scroll_scheduled_run_pane(false, true),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.scheduler.pane_scroll_bottom += 3;
                 }
-                KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown => {
-                    self.scheduler.pane_scroll_bottom = self
-                        .scheduler
-                        .pane_scroll_bottom
-                        .saturating_sub(if key.code == KeyCode::PageDown { 12 } else { 3 });
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.scheduler.pane_scroll_bottom =
+                        self.scheduler.pane_scroll_bottom.saturating_sub(3);
                 }
                 KeyCode::Home => self.scheduler.pane_scroll_x = 0,
                 KeyCode::End => self.scheduler.pane_scroll_bottom = 0,
+                KeyCode::F(4) => self.close_scheduler(),
+                _ => {}
+            }
+            return;
+        }
+        if self.scheduler.surface == SchedulerSurface::Conversation {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('v') | KeyCode::Left | KeyCode::Char('h') => {
+                    self.scheduler.surface = SchedulerSurface::Detail;
+                    self.herdr.clear_scheduled_conversation();
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_scheduler_conversation(-3),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_scheduler_conversation(3),
+                KeyCode::PageUp => self.scroll_scheduler_conversation(-12),
+                KeyCode::PageDown => self.scroll_scheduler_conversation(12),
+                KeyCode::Home => self.scheduler.conversation_scroll = Some(0),
+                KeyCode::End => self.scheduler.conversation_scroll = None,
+                KeyCode::Char('[') => self.move_scheduler_conversation_message(-1),
+                KeyCode::Char(']') => self.move_scheduler_conversation_message(1),
                 KeyCode::F(4) => self.close_scheduler(),
                 _ => {}
             }
@@ -713,26 +753,34 @@ impl App {
     }
 
     fn open_selected_scheduled_run_conversation(&mut self) {
-        let target = self
+        let Some(run) = self
             .scheduler
             .selected_run_id
             .and_then(|id| self.herdr.scheduled_runs().iter().find(|run| run.id == id))
-            .and_then(|run| Some((run.pane_id.clone()?, run.terminal_id.clone())));
-        let Some((pane_id, terminal_id)) = target else {
-            self.scheduler.error = Some("This run has no Herdr agent conversation".to_owned());
-            return;
-        };
-        let Some(index) = self
-            .herdr
-            .reveal_scheduled_agent_index(&pane_id, terminal_id.as_deref())
+            .cloned()
         else {
-            self.scheduler.error =
-                Some("This run's Herdr agent is no longer available in the Agents pane".to_owned());
+            self.scheduler.error = Some("Select a run to open its conversation".to_owned());
             return;
         };
-        self.close_scheduler();
-        self.show_agents_pane();
-        self.open_agent_detail(index);
+        if let Some(session_id) = run.session_id.as_deref() {
+            self.herdr.request_scheduled_conversation(session_id);
+        } else if let Some(task) = self
+            .herdr
+            .scheduled_tasks()
+            .iter()
+            .find(|task| task.id == run.task_id)
+        {
+            self.herdr.resolve_scheduled_run_session(
+                run.id,
+                task.destination.clone(),
+                task.prompt.clone(),
+            );
+        }
+        self.scheduler.surface = SchedulerSurface::Conversation;
+        self.scheduler.conversation_scroll = None;
+        self.scheduler.conversation_message = None;
+        self.scheduler.conversation_expanded_requests.clear();
+        self.scheduler.error = None;
     }
 
     fn move_scheduler_selection(&mut self, delta: isize) {
@@ -799,10 +847,13 @@ impl App {
             return;
         }
         if target == ScrollTarget::SchedulerPane {
-            self.scheduler.pane_scroll_bottom = self
-                .scheduler
-                .pane_scroll_bottom
-                .saturating_add_signed(delta.saturating_mul(-3));
+            if delta != 0 {
+                self.scroll_scheduled_run_pane(delta < 0, false);
+            }
+            return;
+        }
+        if target == ScrollTarget::SchedulerConversation {
+            self.scroll_scheduler_conversation(delta.saturating_mul(3));
             return;
         }
         let scroll = match target {
@@ -811,6 +862,49 @@ impl App {
             _ => return,
         };
         *scroll = scroll.saturating_add_signed(delta.saturating_mul(3));
+    }
+
+    fn scroll_scheduler_conversation(&mut self, delta: isize) {
+        let current = self
+            .scheduler
+            .conversation_scroll
+            .unwrap_or(self.scheduler.conversation_scroll_max);
+        self.scheduler.conversation_scroll = Some(
+            current
+                .saturating_add_signed(delta)
+                .min(self.scheduler.conversation_scroll_max),
+        );
+    }
+
+    fn move_scheduler_conversation_message(&mut self, delta: isize) {
+        let count = self
+            .scheduler
+            .selected_run_id
+            .and_then(|id| self.herdr.scheduled_runs().iter().find(|run| run.id == id))
+            .and_then(|run| run.session_id.as_deref())
+            .and_then(|session| self.herdr.scheduled_conversation(session))
+            .map(<[_]>::len)
+            .unwrap_or(0);
+        if count == 0 {
+            return;
+        }
+        let current = self.scheduler.conversation_message.unwrap_or(count - 1);
+        self.scheduler.conversation_message = Some(
+            current
+                .saturating_add_signed(delta)
+                .min(count.saturating_sub(1)),
+        );
+        self.scheduler.conversation_scroll = None;
+        self.scheduler.conversation_expanded_requests.clear();
+    }
+
+    fn scroll_scheduled_run_pane(&mut self, up: bool, page: bool) {
+        let Some(pane_id) = self.selected_scheduled_run_pane_id() else {
+            self.scheduler.error = Some("This run has no available Herdr pane".to_owned());
+            return;
+        };
+        self.scheduler.error = None;
+        self.herdr.scroll_pane_preview(pane_id, up, page);
     }
 
     fn toggle_scheduler_prompt_expansion(&mut self) {

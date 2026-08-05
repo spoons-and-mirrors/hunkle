@@ -84,6 +84,7 @@ pub(crate) struct ScheduledRun {
     pub(crate) status: ScheduledRunStatus,
     pub(crate) pane_id: Option<String>,
     pub(crate) terminal_id: Option<String>,
+    pub(crate) session_id: Option<String>,
     pub(crate) error: Option<String>,
 }
 
@@ -167,6 +168,18 @@ impl SchedulerService {
         let _ = self.send(Command::BindAgent(id, pane_id, terminal_id));
     }
 
+    pub(crate) fn bind_session(&mut self, id: i64, session_id: String) {
+        let Some(run) = self
+            .runs
+            .iter_mut()
+            .find(|run| run.id == id && run.session_id.is_none())
+        else {
+            return;
+        };
+        run.session_id = Some(session_id.clone());
+        let _ = self.send(Command::BindSession(id, session_id));
+    }
+
     pub(crate) fn poll_completions(&mut self) -> (bool, Option<String>) {
         let mut changed = false;
         let mut error = None;
@@ -210,6 +223,7 @@ enum Command {
     RunNow(i64),
     Refresh(i64),
     BindAgent(i64, String, String),
+    BindSession(i64, String),
     Shutdown,
 }
 
@@ -247,6 +261,13 @@ fn worker(mut db: Connection, commands: Receiver<Command>, updates: Sender<Updat
                         .execute(
                             "UPDATE scheduled_runs SET pane_id = ?2, terminal_id = ?3 WHERE id = ?1 AND terminal_id IS NULL",
                             params![id, pane_id, terminal_id],
+                        )
+                        .map(|_| ())
+                        .map_err(db_error),
+                    Command::BindSession(id, session_id) => db
+                        .execute(
+                            "UPDATE scheduled_runs SET session_id = ?2 WHERE id = ?1 AND session_id IS NULL",
+                            params![id, session_id],
                         )
                         .map(|_| ())
                         .map_err(db_error),
@@ -392,12 +413,13 @@ fn execute_claim(
         Err(error) => (ScheduledRunStatus::Failed, Some(error)),
     };
     db.execute(
-        "UPDATE scheduled_runs SET status = ?2, pane_id = ?3, terminal_id = ?4, error = ?5 WHERE id = ?1",
+        "UPDATE scheduled_runs SET status = ?2, pane_id = ?3, terminal_id = ?4, session_id = ?5, error = ?6 WHERE id = ?1",
         params![
             claim.run_id,
             status.text(),
             result.pane_id,
             result.terminal_id,
+            result.session_id,
             error
         ],
     )
@@ -523,19 +545,20 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
         .map_err(db_error)?;
     let sql = match version {
         0 => "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0), next_run_ms INTEGER NOT NULL);
-              CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
+              CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
               CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id);",
         1 => "ALTER TABLE scheduled_runs RENAME TO scheduled_runs_v1;
-              CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
+              CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
               INSERT INTO scheduled_runs (id, task_id, scheduled_for_ms, status, created_at_ms, pane_id, terminal_id, output, error) SELECT id, task_id, scheduled_for_ms, status, created_at_ms, pane_id, terminal_id, output, error FROM scheduled_runs_v1 WHERE task_id IS NOT NULL;
               DROP TABLE scheduled_runs_v1; CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id);",
-        2 => "ALTER TABLE scheduled_runs ADD COLUMN terminal_id TEXT;",
-        3 => "",
+        2 => "ALTER TABLE scheduled_runs ADD COLUMN terminal_id TEXT; ALTER TABLE scheduled_runs ADD COLUMN session_id TEXT;",
+        3 => "ALTER TABLE scheduled_runs ADD COLUMN session_id TEXT;",
+        4 => "",
         _ => return Err(format!("scheduler database version {version} is newer than supported")),
     };
     tx.execute_batch(sql).map_err(db_error)?;
-    if version < 3 {
-        tx.execute_batch("PRAGMA user_version = 3;")
+    if version < 4 {
+        tx.execute_batch("PRAGMA user_version = 4;")
             .map_err(db_error)?;
     }
     tx.commit().map_err(db_error)
@@ -605,7 +628,7 @@ fn load_state(db: &Connection) -> Result<State, String> {
     )?;
     let runs = query_all(
         db,
-        "SELECT id, task_id, status, pane_id, terminal_id, error FROM scheduled_runs ORDER BY created_at_ms DESC, id DESC",
+        "SELECT id, task_id, status, pane_id, terminal_id, session_id, error FROM scheduled_runs ORDER BY created_at_ms DESC, id DESC",
         |row| {
             Ok(ScheduledRun {
                 id: row.get(0)?,
@@ -613,7 +636,8 @@ fn load_state(db: &Connection) -> Result<State, String> {
                 status: ScheduledRunStatus::parse(&row.get::<_, String>(2)?)?,
                 pane_id: row.get(3)?,
                 terminal_id: row.get(4)?,
-                error: row.get(5)?,
+                session_id: row.get(5)?,
+                error: row.get(6)?,
             })
         },
     )?;
@@ -652,6 +676,7 @@ mod tests {
         execute_claim(&first, run, &mut |_| SchedulerLaunchResult {
             pane_id: Some("w1:p1".into()),
             terminal_id: Some("term-1".into()),
+            session_id: Some("ses-1".into()),
             status: Ok(AgentStatus::Working),
         })
         .unwrap();
@@ -662,12 +687,10 @@ mod tests {
         first.execute("INSERT OR REPLACE INTO scheduled_runs (task_id, scheduled_for_ms, status, created_at_ms) VALUES (1, 99, 'launching', 1)", []).unwrap();
         recover_stale_launches(&first, 500_000).unwrap();
         let state = load_state(&first).unwrap();
-        assert!(
-            state
-                .1
-                .iter()
-                .any(|run| run.terminal_id.as_deref() == Some("term-1"))
-        );
+        assert!(state.1.iter().any(|run| {
+            run.terminal_id.as_deref() == Some("term-1")
+                && run.session_id.as_deref() == Some("ses-1")
+        }));
         let failed = state
             .1
             .iter()
@@ -696,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v2_terminal_identity() {
+    fn migrates_v2_run_identities() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY, pane_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT); PRAGMA user_version = 2;",
@@ -708,8 +731,27 @@ mod tests {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
         assert!(db.prepare("SELECT terminal_id FROM scheduled_runs").is_ok());
+        assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
+    }
+
+    #[test]
+    fn migrates_v3_session_identity() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY, pane_id TEXT, terminal_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT); PRAGMA user_version = 3;",
+        )
+        .unwrap();
+
+        prepare_database(&mut db).unwrap();
+
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
     }
 }

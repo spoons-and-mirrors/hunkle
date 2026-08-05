@@ -327,6 +327,18 @@ enum Completion {
         pane_id: String,
         result: Result<String, String>,
     },
+    PaneScroll {
+        pane_id: String,
+        result: Result<(), String>,
+    },
+    ScheduledSession {
+        run_id: i64,
+        result: Result<String, String>,
+    },
+    ScheduledConversation {
+        identity: AgentSessionIdentity,
+        result: Result<Vec<AgentUserMessage>, String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -369,6 +381,15 @@ pub(crate) struct AgentRequestPreview {
     pub(crate) tool_call_count: u64,
 }
 
+fn scheduled_session_identity(session_id: &str) -> AgentSessionIdentity {
+    AgentSessionIdentity {
+        source: "opencode".to_owned(),
+        agent: "opencode".to_owned(),
+        kind: "session_id".to_owned(),
+        value: session_id.to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentRequestPartPreview {
     Text(String),
@@ -380,7 +401,6 @@ pub(crate) struct HerdrSession {
     pub(crate) workspaces: Vec<HerdrWorkspace>,
     pub(crate) agents: Vec<AgentPane>,
     observed_agents: Vec<AgentPane>,
-    revealed_agent_keys: HashSet<AgentTimingKey>,
     pub(crate) agent_scroll: usize,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
@@ -398,6 +418,10 @@ pub(crate) struct HerdrSession {
     latest_user_message_requests: HashSet<AgentSessionIdentity>,
     latest_user_message_refreshes: HashMap<AgentSessionIdentity, Instant>,
     latest_user_message_statuses: HashMap<AgentSessionIdentity, AgentStatus>,
+    scheduled_preview_identity: Option<AgentSessionIdentity>,
+    scheduled_session_requests: HashSet<i64>,
+    scheduled_session_errors: HashMap<i64, String>,
+    scheduled_conversation_errors: HashMap<AgentSessionIdentity, String>,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
     next_refresh: Instant,
@@ -470,7 +494,6 @@ impl HerdrSession {
             workspaces: Vec::new(),
             agents: Vec::new(),
             observed_agents: Vec::new(),
-            revealed_agent_keys: HashSet::new(),
             agent_scroll: 0,
             loading: false,
             error: None,
@@ -488,6 +511,10 @@ impl HerdrSession {
             latest_user_message_requests: HashSet::new(),
             latest_user_message_refreshes: HashMap::new(),
             latest_user_message_statuses: HashMap::new(),
+            scheduled_preview_identity: None,
+            scheduled_session_requests: HashSet::new(),
+            scheduled_session_errors: HashMap::new(),
+            scheduled_conversation_errors: HashMap::new(),
             sender,
             receiver,
             next_refresh: Instant::now(),
@@ -554,6 +581,61 @@ impl HerdrSession {
         self.scheduler_service()?.refresh_run(id)
     }
 
+    pub(crate) fn resolve_scheduled_run_session(
+        &mut self,
+        run_id: i64,
+        directory: PathBuf,
+        prompt: String,
+    ) {
+        if !self.scheduled_session_requests.insert(run_id) {
+            return;
+        }
+        self.scheduled_session_errors.remove(&run_id);
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = latest_message::resolve_scheduled_session_id(&directory, &prompt);
+            let _ = sender.send(Completion::ScheduledSession { run_id, result });
+        });
+    }
+
+    pub(crate) fn scheduled_session_error(&self, run_id: i64) -> Option<&str> {
+        self.scheduled_session_errors
+            .get(&run_id)
+            .map(String::as_str)
+    }
+
+    pub(crate) fn request_scheduled_conversation(&mut self, session_id: &str) {
+        let identity = scheduled_session_identity(session_id);
+        self.scheduled_preview_identity = Some(identity.clone());
+        if self.latest_user_messages.contains_key(&identity)
+            || !self.latest_user_message_requests.insert(identity.clone())
+        {
+            return;
+        }
+        let session_id = session_id.to_owned();
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = latest_message::fetch(&session_id);
+            let _ = sender.send(Completion::ScheduledConversation { identity, result });
+        });
+    }
+
+    pub(crate) fn scheduled_conversation(&self, session_id: &str) -> Option<&[AgentUserMessage]> {
+        self.latest_user_messages
+            .get(&scheduled_session_identity(session_id))
+            .map(Vec::as_slice)
+    }
+
+    pub(crate) fn scheduled_conversation_error(&self, session_id: &str) -> Option<&str> {
+        self.scheduled_conversation_errors
+            .get(&scheduled_session_identity(session_id))
+            .map(String::as_str)
+    }
+
+    pub(crate) fn clear_scheduled_conversation(&mut self) {
+        self.scheduled_preview_identity = None;
+    }
+
     pub(crate) fn set_pane_preview(&mut self, pane_id: Option<String>) {
         if self.pane_preview_wanted != pane_id {
             self.pane_preview = None;
@@ -574,6 +656,14 @@ impl HerdrSession {
             .as_ref()
             .filter(|(id, _)| id == pane_id)
             .map(|(_, error)| error.as_str())
+    }
+
+    pub(crate) fn scroll_pane_preview(&mut self, pane_id: String, up: bool, page: bool) {
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = client::scroll_pane(pane_id.clone(), up, page);
+            let _ = sender.send(Completion::PaneScroll { pane_id, result });
+        });
     }
 
     fn scheduler_service(&self) -> Result<&scheduler::SchedulerService, String> {
@@ -811,6 +901,43 @@ impl HerdrSession {
                         self.next_pane_preview = Instant::now() + PANE_PREVIEW_REFRESH_INTERVAL;
                     }
                 }
+                Completion::PaneScroll { pane_id, result } => {
+                    if self.pane_preview_wanted.as_deref() == Some(&pane_id) {
+                        match result {
+                            Ok(()) => {
+                                self.pane_preview_error = None;
+                                self.next_pane_preview = Instant::now();
+                            }
+                            Err(error) => self.pane_preview_error = Some((pane_id, error)),
+                        }
+                    }
+                }
+                Completion::ScheduledSession { run_id, result } => {
+                    self.scheduled_session_requests.remove(&run_id);
+                    match result {
+                        Ok(session_id) => {
+                            self.scheduled_session_errors.remove(&run_id);
+                            if let Some(scheduler) = self.scheduler.as_mut() {
+                                scheduler.bind_session(run_id, session_id);
+                            }
+                        }
+                        Err(error) => {
+                            self.scheduled_session_errors.insert(run_id, error);
+                        }
+                    }
+                }
+                Completion::ScheduledConversation { identity, result } => {
+                    self.latest_user_message_requests.remove(&identity);
+                    match result {
+                        Ok(messages) => {
+                            self.scheduled_conversation_errors.remove(&identity);
+                            self.latest_user_messages.insert(identity, messages);
+                        }
+                        Err(error) => {
+                            self.scheduled_conversation_errors.insert(identity, error);
+                        }
+                    }
+                }
             }
         }
         self.start_pane_preview_if_due();
@@ -845,12 +972,6 @@ impl HerdrSession {
             .collect::<HashSet<_>>();
         self.stashed_pane_ids
             .retain(|pane_id| observed_panes.contains(pane_id.as_str()));
-        let observed_keys = agents
-            .iter()
-            .map(|agent| &agent.runtime.timing_key)
-            .collect::<HashSet<_>>();
-        self.revealed_agent_keys
-            .retain(|key| observed_keys.contains(key));
         let pending_pane = self
             .pending_agent_stash
             .as_ref()
@@ -869,10 +990,7 @@ impl HerdrSession {
         } else {
             agents
                 .into_iter()
-                .filter(|agent| {
-                    self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
-                        || self.revealed_agent_keys.contains(&agent.runtime.timing_key)
-                })
+                .filter(|agent| self.host_workspace_id.as_deref() == Some(&agent.workspace_id))
                 .collect()
         };
         let active_identities = agents
@@ -881,6 +999,7 @@ impl HerdrSession {
                 Some(AgentTimingKey::Session(identity)) => Some(identity.clone()),
                 _ => None,
             })
+            .chain(self.scheduled_preview_identity.iter().cloned())
             .collect::<HashSet<_>>();
         self.latest_user_messages
             .retain(|identity, _| active_identities.contains(identity));
@@ -1023,32 +1142,6 @@ impl HerdrSession {
         for (run_id, pane_id, terminal_id) in bindings {
             scheduler.bind_agent(run_id, pane_id, terminal_id);
         }
-    }
-
-    pub(crate) fn reveal_scheduled_agent_index(
-        &mut self,
-        pane_id: &str,
-        terminal_id: Option<&str>,
-    ) -> Option<usize> {
-        if let Some(index) = self
-            .agents
-            .iter()
-            .position(|agent| scheduled_agent_matches(agent, pane_id, terminal_id))
-        {
-            return Some(index);
-        }
-        let key = self
-            .observed_agents
-            .iter()
-            .find(|agent| scheduled_agent_matches(agent, pane_id, terminal_id))?
-            .runtime
-            .timing_key
-            .clone();
-        self.revealed_agent_keys.insert(key);
-        self.apply_agent_snapshot_at(self.observed_agents.clone(), unix_time_ms());
-        self.agents
-            .iter()
-            .position(|agent| scheduled_agent_matches(agent, pane_id, terminal_id))
     }
 
     pub(crate) fn agent_index(&self, key: &AgentKey) -> Option<usize> {
@@ -1446,7 +1539,7 @@ impl HerdrSession {
             host_pane_id,
             host_workspace_id: host_workspace_id.clone(),
             host_tab_id: host_tab_id.clone(),
-            allow_cross_workspace: self.agent_is_allowed_cross_workspace(agent),
+            allow_cross_workspace: self.cross_workspace_agents,
             saved_layout: self
                 .agent_layouts
                 .get(&agent.runtime.timing_key)
@@ -1479,10 +1572,6 @@ impl HerdrSession {
             });
         });
         Ok(())
-    }
-
-    fn agent_is_allowed_cross_workspace(&self, agent: &AgentPane) -> bool {
-        self.cross_workspace_agents || self.revealed_agent_keys.contains(&agent.runtime.timing_key)
     }
 
     fn prune_agent_layout_history(&mut self) {
@@ -1995,39 +2084,6 @@ mod latest_user_message_cache_tests {
     }
 
     #[test]
-    fn explicitly_reveals_one_cross_workspace_agent() {
-        let mut session = HerdrSession::new(true, None, None);
-        session.host_workspace_id = Some("w1".to_owned());
-        let local = agent("w1:p1", identity("ses_local"));
-        let mut remote = agent("w2:p1", identity("ses_remote"));
-        remote.workspace_id = "w2".to_owned();
-        remote.tab_id = "w2:t1".to_owned();
-
-        session.apply_agent_snapshot_at(vec![local, remote], unix_time_ms());
-
-        assert_eq!(session.agents.len(), 1);
-        let index = session
-            .reveal_scheduled_agent_index("w2:p1", Some("term-w2:p1"))
-            .unwrap();
-        assert_eq!(session.agents[index].pane_id, "w2:p1");
-        assert!(session.agent_is_allowed_cross_workspace(&session.agents[index]));
-        assert!(!session.cross_workspace_agents);
-
-        let mut moved = agent("w2:p9", identity("ses_remote"));
-        moved.workspace_id = "w2".to_owned();
-        moved.tab_id = "w2:t9".to_owned();
-        moved.terminal_id = Some("term-w2:p1".to_owned());
-        moved.runtime.timing_key = AgentTimingKey::Terminal("opencode@term-w2:p1".to_owned());
-        session.apply_agent_snapshot_at(vec![moved], unix_time_ms());
-
-        assert_eq!(
-            session.scheduled_agent_pane_id("w2:p1", Some("term-w2:p1")),
-            Some("w2:p9")
-        );
-        assert!(session.agent_is_allowed_cross_workspace(&session.agents[0]));
-    }
-
-    #[test]
     fn binds_a_legacy_scheduled_run_to_its_stable_terminal() {
         let mut session = HerdrSession::new(true, None, None);
         session.scheduler = Some(scheduler::SchedulerService::open(None).unwrap());
@@ -2049,6 +2105,7 @@ mod latest_user_message_cache_tests {
             status: scheduler::ScheduledRunStatus::Completed,
             pane_id: Some("departed:pane".to_owned()),
             terminal_id: None,
+            session_id: None,
             error: None,
         });
         let mut remote = agent("w2:p9", identity("ses_remote"));
@@ -2061,6 +2118,34 @@ mod latest_user_message_cache_tests {
         let run = &session.scheduler.as_ref().unwrap().runs[0];
         assert_eq!(run.pane_id.as_deref(), Some("w2:p9"));
         assert_eq!(run.terminal_id.as_deref(), Some("term-w2:p9"));
+    }
+
+    #[test]
+    fn retains_a_scheduled_conversation_without_a_live_agent() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.next_refresh = Instant::now() + Duration::from_secs(60);
+        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
+        let identity = scheduled_session_identity("ses_scheduled");
+        session.scheduled_preview_identity = Some(identity.clone());
+        session
+            .latest_user_message_requests
+            .insert(identity.clone());
+        session
+            .sender
+            .send(Completion::ScheduledConversation {
+                identity: identity.clone(),
+                result: Ok(message("durable history")),
+            })
+            .unwrap();
+
+        session.poll();
+        session.apply_agent_snapshot_at(Vec::new(), unix_time_ms());
+
+        assert_eq!(
+            session.scheduled_conversation("ses_scheduled").unwrap()[0].text,
+            "durable history"
+        );
+        assert!(session.agents.is_empty());
     }
 
     #[test]

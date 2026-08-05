@@ -101,6 +101,39 @@ pub(super) fn resolve_session_id(directory: &Path, title: &str) -> Result<String
     parse_session_id(&output.stdout)
 }
 
+pub(super) fn resolve_scheduled_session_id(
+    directory: &Path,
+    prompt: &str,
+) -> Result<String, String> {
+    let directory = sql_string(&directory.to_string_lossy());
+    let prompt = sql_string(prompt);
+    let query = format!(
+        "SELECT DISTINCT session.id FROM session \
+         JOIN message ON message.session_id = session.id \
+         JOIN part ON part.message_id = message.id \
+         WHERE session.directory = {directory} \
+           AND session.parent_id IS NULL \
+           AND json_extract(message.data, '$.role') = 'user' \
+           AND json_extract(part.data, '$.type') = 'text' \
+            AND trim(json_extract(part.data, '$.text')) = trim({prompt})"
+    );
+    let output = process::run(
+        Command::new("opencode").args(["db", &query, "--format", "json", "--pure"]),
+        QUERY_LIMITS,
+    )
+    .map_err(|error| format!("Could not query OpenCode sessions: {error}"))?;
+    if output.timed_out {
+        return Err("OpenCode session lookup timed out".to_owned());
+    }
+    if !output.status.success() {
+        return Err(format!(
+            "OpenCode session lookup failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_session_id(&output.stdout)
+}
+
 fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }

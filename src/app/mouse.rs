@@ -25,6 +25,7 @@ impl App {
                         target @ (ScrollTarget::SchedulerTasks
                         | ScrollTarget::SchedulerRuns
                         | ScrollTarget::SchedulerPane
+                        | ScrollTarget::SchedulerConversation
                         | ScrollTarget::SchedulerPrompt
                         | ScrollTarget::SchedulerDestinations),
                     ) = self.regions.scroll_target_at(point)
@@ -635,6 +636,7 @@ impl App {
             ScrollTarget::SchedulerTasks
             | ScrollTarget::SchedulerRuns
             | ScrollTarget::SchedulerPane
+            | ScrollTarget::SchedulerConversation
             | ScrollTarget::SchedulerPrompt
             | ScrollTarget::SchedulerDestinations => self.scroll_scheduler(target, delta),
             ScrollTarget::Commit => self.scroll_commit(delta, wheel),

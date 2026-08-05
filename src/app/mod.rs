@@ -178,6 +178,7 @@ pub struct App {
     pub(crate) selection: SelectionState,
     copy_request: Option<String>,
     restart_request: Option<PathBuf>,
+    local_build_path: Option<PathBuf>,
     pub should_quit: bool,
     pub(crate) settings_store: SettingsStore,
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
@@ -246,6 +247,14 @@ impl App {
         } else {
             Mode::Explorer
         };
+        let local_build_path = session.data().map(|repository| {
+            repository
+                .root
+                .join("target")
+                .join("hunkle-install")
+                .join("bin")
+                .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX))
+        });
         let start = session
             .data()
             .and_then(|repo| repo.root.parent().map(Path::to_path_buf))
@@ -341,6 +350,7 @@ impl App {
             selection: SelectionState::default(),
             copy_request: None,
             restart_request: None,
+            local_build_path,
             should_quit: false,
             settings_store,
             pending_reload: None,
@@ -616,14 +626,7 @@ impl App {
     }
 
     fn local_build_executable(&self) -> Option<PathBuf> {
-        Some(
-            self.repository()?
-                .root
-                .join("target")
-                .join("hunkle-install")
-                .join("bin")
-                .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX)),
-        )
+        self.local_build_path.clone()
     }
 
     pub(crate) fn dirty_file_edit(&self) -> bool {
@@ -875,6 +878,21 @@ impl App {
                 .then(|| self.selected_scheduled_run_pane_id())
                 .flatten();
             self.herdr.set_pane_preview(pane_preview);
+            let scheduled_session = (self.mode == Mode::Scheduler
+                && self.scheduler.surface == SchedulerSurface::Conversation)
+                .then(|| {
+                    self.scheduler.selected_run_id.and_then(|id| {
+                        self.herdr
+                            .scheduled_runs()
+                            .iter()
+                            .find(|run| run.id == id)
+                            .and_then(|run| run.session_id.clone())
+                    })
+                })
+                .flatten();
+            if let Some(session_id) = scheduled_session {
+                self.herdr.request_scheduled_conversation(&session_id);
+            }
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
                 self.herdr.poll()

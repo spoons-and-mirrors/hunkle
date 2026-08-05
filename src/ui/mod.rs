@@ -302,6 +302,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::Scheduler => {
             dim(frame);
             let regions = overlays::draw_scheduler(frame, app, profile);
+            app.scheduler.conversation_scroll_max = regions.conversation_scroll_max;
             for (target, rect) in regions.targets {
                 app.regions.register_hit_target(target, rect);
             }

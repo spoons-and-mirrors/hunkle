@@ -275,6 +275,7 @@ pub(crate) struct SchedulerLaunchRequest {
 pub(crate) struct SchedulerLaunchResult {
     pub(crate) pane_id: Option<String>,
     pub(crate) terminal_id: Option<String>,
+    pub(crate) session_id: Option<String>,
     pub(crate) status: Result<AgentStatus, String>,
 }
 
@@ -347,12 +348,38 @@ pub(crate) fn pane_visible_ansi(pane_id: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+pub(crate) fn scroll_pane(pane_id: String, up: bool, page: bool) -> Result<(), String> {
+    scroll_pane_with(pane_id, up, page, run)
+}
+
+fn scroll_pane_with(
+    pane_id: String,
+    up: bool,
+    page: bool,
+    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<(), String> {
+    let input = match (up, page) {
+        (true, true) => "\u{1b}[5~",
+        (false, true) => "\u{1b}[6~",
+        (true, false) => "\u{1b}\u{19}",
+        (false, false) => "\u{1b}\u{5}",
+    };
+    runner(&[
+        "pane".to_owned(),
+        "send-text".to_owned(),
+        pane_id,
+        input.to_owned(),
+    ])
+    .map(|_| ())
+}
+
 fn scheduler_launch_with(
     request: SchedulerLaunchRequest,
     mut runner: impl FnMut(&[OsString]) -> Result<Value, CommandError>,
 ) -> SchedulerLaunchResult {
     let mut pane_id = None;
     let mut terminal_id = None;
+    let mut session_id = None;
     let status = (|| {
         let snapshot = runner(&["api".into(), "snapshot".into()])
             .map_err(|error| scheduler_command_error("workspace snapshot", error))?;
@@ -461,12 +488,17 @@ fn scheduler_launch_with(
             result => result,
         }
         .map_err(|error| scheduler_command_error("agent prompt", error))?;
-        scheduler_agent_status(&prompted, &created_pane)
-            .map_err(|error| format!("agent prompt: {error}"))
+        let prompted_agent = scheduler_agent(&prompted, &created_pane)
+            .map_err(|error| format!("agent prompt: {error}"))?;
+        session_id = parse_agent_session_identity(prompted_agent).map(|identity| identity.value);
+        Ok(parse_agent_status(
+            prompted_agent.get("agent_status").and_then(Value::as_str),
+        ))
     })();
     SchedulerLaunchResult {
         pane_id,
         terminal_id,
+        session_id,
         status,
     }
 }
@@ -3437,6 +3469,26 @@ mod tests {
     }
 
     #[test]
+    fn scrolls_an_agent_pane_by_line_or_page() {
+        let mut calls = Vec::new();
+        for (up, page) in [(true, false), (false, false), (true, true), (false, true)] {
+            scroll_pane_with("w1:p4".to_owned(), up, page, |args| {
+                calls.push(args.to_vec());
+                Ok(Value::Null)
+            })
+            .unwrap();
+        }
+
+        assert_eq!(
+            calls
+                .iter()
+                .map(|args| args[3].as_str())
+                .collect::<Vec<_>>(),
+            ["\u{1b}\u{19}", "\u{1b}\u{5}", "\u{1b}[5~", "\u{1b}[6~"]
+        );
+    }
+
+    #[test]
     fn names_each_displaced_layout_from_its_pane_directory() {
         let mut calls = Vec::new();
         replace_pane_with_agent_with(
@@ -3778,11 +3830,24 @@ mod tests {
                             "agent target pane w7:p9 is not an available shell",
                         ));
                     }
-                    4 | 6 => serde_json::json!({
+                    4 => serde_json::json!({
                         "result": { "agent": {
                             "pane_id": "w7:p9",
                             "terminal_id": "term_9",
-                            "agent_status": if calls.len() == 4 { "idle" } else { "working" }
+                            "agent_status": "idle"
+                        }}
+                    }),
+                    6 => serde_json::json!({
+                        "result": { "agent": {
+                            "pane_id": "w7:p9",
+                            "terminal_id": "term_9",
+                            "agent_status": "working",
+                            "agent_session": {
+                                "source": "opencode",
+                                "agent": "opencode",
+                                "kind": "session_id",
+                                "value": "ses_scheduler"
+                            }
                         }}
                     }),
                     5 => {
@@ -3797,6 +3862,7 @@ mod tests {
 
         assert_eq!(result.pane_id.as_deref(), Some("w7:p9"));
         assert_eq!(result.terminal_id.as_deref(), Some("term_9"));
+        assert_eq!(result.session_id.as_deref(), Some("ses_scheduler"));
         assert_eq!(result.status, Ok(AgentStatus::Working));
         assert_eq!(
             joined(&calls[1]),

@@ -443,6 +443,8 @@ pub(crate) enum SchedulerHitTarget {
     OpenPane,
     ClosePane,
     OpenConversation,
+    ConversationRequest(usize),
+    CloseConversation,
 }
 
 impl SettingsHitTarget {
@@ -588,6 +590,7 @@ pub(crate) enum ScrollTarget {
     SchedulerTasks,
     SchedulerRuns,
     SchedulerPane,
+    SchedulerConversation,
     SchedulerPrompt,
     SchedulerDestinations,
     Commit,
