@@ -1,8 +1,12 @@
 [alias]
-hunkle-install-local = "install --debug --path . --root target/hunkle-install --target-dir target --force --locked"
+hunkle-install-local = "install --debug --path . --root target/hunkle-install --target-dir target --force --locked --offline"
+hunkle-install-local-online = "install --debug --path . --root target/hunkle-install --target-dir target --force --locked"
 hunkle-clean-local-cache = "clean --profile dev --target-dir target"
 hunkle-install-global = "install --path . --target-dir target --force --locked"
 
 [profile.dev]
 debug = 0
 incremental = true
+
+[profile.dev.package.hunkle]
+codegen-units = 128
