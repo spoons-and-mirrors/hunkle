@@ -23,8 +23,10 @@ impl App {
                     self.handle_agent_preview_modal_click(point)
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    if let Some(target @ ScrollTarget::AgentTranscript(_)) =
-                        self.regions.scroll_target_at(point)
+                    if let Some(
+                        target
+                        @ (ScrollTarget::AgentTimeline(_) | ScrollTarget::AgentTranscript(_)),
+                    ) = self.regions.scroll_target_at(point)
                     {
                         let delta = if mouse.kind == MouseEventKind::ScrollUp {
                             -1
@@ -32,6 +34,14 @@ impl App {
                             1
                         };
                         self.scroll_target(target, delta, true);
+                    }
+                }
+                MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                    if let Some(
+                        ScrollTarget::AgentTimeline(agent) | ScrollTarget::AgentTranscript(agent),
+                    ) = self.regions.scroll_target_at(point)
+                    {
+                        self.cycle_agent_preview(&agent, mouse.kind == MouseEventKind::ScrollRight);
                     }
                 }
                 _ => {}

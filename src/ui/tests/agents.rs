@@ -111,6 +111,114 @@ fn control_click_opens_the_live_agent_preview_modal() {
 }
 
 #[test]
+fn agent_preview_modal_routes_message_and_agent_scroll_gestures() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let mut snapshot = agent_snapshot();
+    snapshot["result"]["snapshot"]["agents"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "agent": "opencode",
+            "agent_session": {
+                "source": "env",
+                "agent": "opencode",
+                "kind": "session_id",
+                "value": "ses_second"
+            },
+            "agent_status": "idle",
+            "focused": false,
+            "pane_id": "w1:p2",
+            "tab_id": "w1:t1",
+            "terminal_title_stripped": "OC | Second agent",
+            "workspace_id": "w1"
+        }));
+    snapshot["result"]["snapshot"]["panes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "pane_id": "w1:p2",
+            "tab_id": "w1:t1",
+            "workspace_id": "w1",
+            "focused": false
+        }));
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&snapshot);
+    app.herdr.set_agent_user_messages_for_test(
+        0,
+        &[
+            ("First request", Some("First response"), 1, 0),
+            ("Second request", Some("Second response"), 1, 0),
+            ("Third request", Some("Third response"), 1, 0),
+        ],
+    );
+    app.herdr
+        .set_agent_user_messages_for_test(1, &[("Other agent", Some("Other response"), 1, 0)]);
+    let first_key = agent_key(&app, 0);
+    let second_key = agent_key(&app, 1);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(first_key.clone()))
+        .unwrap();
+    let point = (card.y..card.bottom())
+        .flat_map(|y| (card.x..card.right()).map(move |x| (x, y)))
+        .find(|(x, y)| {
+            app.regions.hit_target_at(Position::new(*x, *y))
+                == Some(HitTarget::Agent(first_key.clone()))
+        })
+        .unwrap();
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::CONTROL,
+    });
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let timeline = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewMessageTimeline(first_key.clone()))
+        .unwrap();
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, timeline.x + 1, timeline.y));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let user_message = app
+        .regions
+        .hit_target_rect(HitTarget::AgentMessage {
+            agent: first_key.clone(),
+            message: 1,
+        })
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollUp,
+        user_message.x + 2,
+        user_message.y + 1,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let first_message = app
+        .regions
+        .hit_target_rect(HitTarget::AgentMessage {
+            agent: first_key,
+            message: 0,
+        })
+        .unwrap();
+
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollRight,
+        first_message.x + 2,
+        first_message.y + 1,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(second_key))
+            .is_some()
+    );
+    assert!(screen_text(&terminal).contains("Other response"));
+}
+
+#[test]
 fn fullscreen_agent_first_click_replaces_footer_path_with_activation_hint() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -542,8 +650,16 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .unwrap();
     assert_eq!(app.regions.agent_preview_scroll, 0);
     assert_eq!(user_message.x, tooltip.x + 1);
-    assert_eq!(user_message.y, message_timeline.y + 2);
+    assert_eq!(user_message.y, message_timeline.y + 3);
     assert_eq!(
+        terminal.backend().buffer()[(user_message.x, user_message.y - 1)].symbol(),
+        " "
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(user_message.x, user_message.y - 1)].bg,
+        super::palette().panel
+    );
+    assert_ne!(
         terminal.backend().buffer()[(tooltip.x.saturating_sub(1), user_message.y)].symbol(),
         "●"
     );
@@ -608,9 +724,10 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .collect::<String>();
     assert!(latest_screen.contains("Please refine the agent timers"));
     assert!(
-        (user_message.bottom() + 1..tooltip.bottom().saturating_sub(1)).any(|y| {
+        (user_message.bottom()..tooltip.bottom().saturating_sub(2)).any(|y| {
             terminal.backend().buffer()[(user_message.x, y)].symbol() == "▀"
-                && terminal.backend().buffer()[(user_message.x, y + 1)].symbol() == "▄"
+                && terminal.backend().buffer()[(user_message.x, y + 1)].symbol() == " "
+                && terminal.backend().buffer()[(user_message.x, y + 2)].symbol() == "▄"
         })
     );
     let top_screen = terminal

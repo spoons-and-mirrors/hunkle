@@ -268,14 +268,20 @@ mod workspace_tests {
     }
 
     #[test]
-    fn modal_scroll_boundary_hides_workspace_targets() {
+    fn modal_scroll_boundary_hides_workspace_targets_and_keeps_modal_semantics() {
         let mut regions = Regions::default();
         regions.register_scroll_target(ScrollTarget::Preview, Rect::new(0, 0, 20, 20));
+        regions.register_hit_target(HitTarget::HeaderPickerOverlay, Rect::new(0, 0, 20, 20));
         regions.capture_scroll_boundary();
         regions.register_scroll_target(ScrollTarget::ActionMenu, Rect::new(5, 5, 5, 5));
+        regions.register_hit_target(HitTarget::HeaderPickerOverlay, Rect::new(6, 6, 2, 2));
 
         assert_eq!(
             regions.scroll_target_at(Position::new(7, 7)),
+            Some(ScrollTarget::HeaderPicker)
+        );
+        assert_eq!(
+            regions.scroll_target_at(Position::new(9, 9)),
             Some(ScrollTarget::ActionMenu)
         );
         assert_eq!(regions.scroll_target_at(Position::new(2, 2)), None);
@@ -614,7 +620,10 @@ struct ScrollRegion {
 #[derive(Clone, Debug)]
 enum ScrollCapture {
     Target(ScrollTarget),
-    Boundary(usize),
+    Boundary {
+        hit_region: usize,
+        scroll_region: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -744,7 +753,10 @@ impl Regions {
     }
 
     pub(crate) fn capture_scroll_boundary(&mut self) {
-        self.scroll_capture = Some(ScrollCapture::Boundary(self.scroll_regions.len()));
+        self.scroll_capture = Some(ScrollCapture::Boundary {
+            hit_region: self.hit_regions.len(),
+            scroll_region: self.scroll_regions.len(),
+        });
     }
 
     pub(crate) fn has_scroll_capture(&self) -> bool {
@@ -758,35 +770,29 @@ impl Regions {
     pub(crate) fn scroll_target_at(&self, point: Position) -> Option<ScrollTarget> {
         match self.scroll_capture.as_ref() {
             Some(ScrollCapture::Target(target)) => return Some(target.clone()),
-            Some(ScrollCapture::Boundary(start)) => {
-                return self.scroll_regions[*start..]
+            Some(ScrollCapture::Boundary {
+                hit_region,
+                scroll_region,
+            }) => {
+                let semantic_target = self.hit_regions[*hit_region..]
                     .iter()
                     .rev()
                     .find(|region| region.rect.contains(point))
-                    .map(|region| region.target.clone());
+                    .and_then(|region| Self::semantic_scroll_target(&region.target));
+                return semantic_target.or_else(|| {
+                    self.scroll_regions[*scroll_region..]
+                        .iter()
+                        .rev()
+                        .find(|region| region.rect.contains(point))
+                        .map(|region| region.target.clone())
+                });
             }
             None => {}
         }
-        let semantic_target = match self.hit_target_at(point) {
-            Some(
-                HitTarget::HeaderPickerOverlay
-                | HitTarget::HeaderPickerItem(_)
-                | HitTarget::HeaderPickerDeleteBranch(_)
-                | HitTarget::HeaderPickerDeleteWorktree(_),
-            ) => Some(ScrollTarget::HeaderPicker),
-            Some(
-                HitTarget::AgentPreviewMessageTimeline(agent)
-                | HitTarget::AgentMessage { agent, .. },
-            ) => Some(ScrollTarget::AgentTimeline(agent)),
-            Some(HitTarget::Explorer(
-                ExplorerHitTarget::SurroundingsPane | ExplorerHitTarget::Surrounding { .. },
-            )) => Some(ScrollTarget::WorkspaceExplorerSurroundings),
-            Some(
-                HitTarget::AgentTooltip { agent, .. }
-                | HitTarget::AgentPreviewRequest { agent, .. },
-            ) => Some(ScrollTarget::AgentTranscript(agent)),
-            _ => None,
-        };
+        let semantic_target = self
+            .hit_target_at(point)
+            .as_ref()
+            .and_then(Self::semantic_scroll_target);
         semantic_target.or_else(|| {
             self.scroll_regions
                 .iter()
@@ -794,6 +800,27 @@ impl Regions {
                 .find(|region| region.rect.contains(point))
                 .map(|region| region.target.clone())
         })
+    }
+
+    fn semantic_scroll_target(target: &HitTarget) -> Option<ScrollTarget> {
+        match target {
+            HitTarget::HeaderPickerOverlay
+            | HitTarget::HeaderPickerItem(_)
+            | HitTarget::HeaderPickerDeleteBranch(_)
+            | HitTarget::HeaderPickerDeleteWorktree(_) => Some(ScrollTarget::HeaderPicker),
+            HitTarget::AgentPreviewMessageTimeline(agent)
+            | HitTarget::AgentMessage { agent, .. } => {
+                Some(ScrollTarget::AgentTimeline(agent.clone()))
+            }
+            HitTarget::Explorer(
+                ExplorerHitTarget::SurroundingsPane | ExplorerHitTarget::Surrounding { .. },
+            ) => Some(ScrollTarget::WorkspaceExplorerSurroundings),
+            HitTarget::AgentTooltip { agent, .. }
+            | HitTarget::AgentPreviewRequest { agent, .. } => {
+                Some(ScrollTarget::AgentTranscript(agent.clone()))
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn hit_target_at(&self, point: Position) -> Option<HitTarget> {

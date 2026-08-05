@@ -513,7 +513,14 @@ pub(super) fn draw_history(
     let message_selector = Rect::new(main.x, main.y, main.width, 2.min(main.height));
     let content_width = usize::from(main.width.saturating_sub(4).max(1));
     let user_lines = styled_agent_text(&message.text, content_width);
-    let desired_user_height = user_lines.len().saturating_add(2).min(8).max(3);
+    let user_elapsed = message_total_duration(message).map(format_preview_duration);
+    let user_top_padding = u16::from(user_elapsed.is_some());
+    let desired_user_height = user_lines
+        .len()
+        .saturating_add(2)
+        .min(8)
+        .max(3)
+        .saturating_add(usize::from(user_top_padding));
     let user_y = message_selector.bottom();
     let user_height = u16::try_from(desired_user_height)
         .unwrap_or(u16::MAX)
@@ -527,9 +534,9 @@ pub(super) fn draw_history(
     );
     let user_cards = Rect::new(
         main.x.saturating_add(1),
-        user_viewport.y,
+        user_viewport.y.saturating_add(user_top_padding),
         main.width.saturating_sub(1),
-        user_viewport.height,
+        user_viewport.height.saturating_sub(user_top_padding),
     );
     let cards = Rect::new(
         main.x.saturating_add(1),
@@ -574,13 +581,13 @@ pub(super) fn draw_history(
         user: true,
         lines: user_lines,
         start: 0,
-        height: usize::from(user_viewport.height),
-        elapsed: message_total_duration(message).map(format_preview_duration),
+        height: usize::from(user_cards.height),
+        elapsed: user_elapsed,
         request_count: message.requests.len(),
         request: None,
         expandable: false,
     };
-    if let Some(rect) = draw_transcript_card(frame, &user_block, user_cards, user_viewport, 0) {
+    if let Some(rect) = draw_transcript_card(frame, &user_block, user_cards, user_cards, 0) {
         targets.push((
             HitTarget::AgentMessage {
                 agent: agent_key.clone(),
@@ -604,13 +611,6 @@ pub(super) fn draw_history(
             ));
         }
     }
-    let progress_viewport = Rect::new(
-        main.x.saturating_sub(1),
-        user_viewport.y,
-        main.width,
-        main.bottom().saturating_sub(user_viewport.y),
-    );
-    draw_transcript_progress(frame, progress_viewport, scroll, scroll_max);
     draw_agent_preview_picker(
         frame,
         herdr,
@@ -649,9 +649,18 @@ pub(super) fn draw_scheduled_history(
     let selector = Rect::new(area.x, area.y, area.width, 2.min(area.height));
     let content_width = usize::from(area.width.saturating_sub(4).max(1));
     let user_lines = styled_agent_text(&message.text, content_width);
-    let user_height = u16::try_from(user_lines.len().saturating_add(2).min(8).max(3))
-        .unwrap_or(u16::MAX)
-        .min(area.bottom().saturating_sub(selector.bottom()));
+    let user_elapsed = message_total_duration(message).map(format_preview_duration);
+    let user_top_padding = u16::from(user_elapsed.is_some());
+    let user_height = u16::try_from(
+        user_lines
+            .len()
+            .saturating_add(2)
+            .min(8)
+            .max(3)
+            .saturating_add(usize::from(user_top_padding)),
+    )
+    .unwrap_or(u16::MAX)
+    .min(area.bottom().saturating_sub(selector.bottom()));
     let user_viewport = Rect::new(
         area.x.saturating_sub(1),
         selector.bottom(),
@@ -664,7 +673,12 @@ pub(super) fn draw_scheduled_history(
         area.width,
         area.bottom().saturating_sub(user_viewport.bottom()),
     );
-    let user_cards = Rect::new(area.x, user_viewport.y, area.width, user_viewport.height);
+    let user_cards = Rect::new(
+        area.x,
+        user_viewport.y.saturating_add(user_top_padding),
+        area.width,
+        user_viewport.height.saturating_sub(user_top_padding),
+    );
     let cards = Rect::new(area.x, viewport.y, area.width, viewport.height);
     let (blocks, request_height) = build_request_transcript(
         message,
@@ -688,13 +702,13 @@ pub(super) fn draw_scheduled_history(
         user: true,
         lines: user_lines,
         start: 0,
-        height: usize::from(user_viewport.height),
-        elapsed: message_total_duration(message).map(format_preview_duration),
+        height: usize::from(user_cards.height),
+        elapsed: user_elapsed,
         request_count: message.requests.len(),
         request: None,
         expandable: false,
     };
-    draw_transcript_card(frame, &user_block, user_cards, user_viewport, 0);
+    draw_transcript_card(frame, &user_block, user_cards, user_cards, 0);
     for block in &blocks {
         if let Some(rect) = draw_transcript_card(frame, block, cards, viewport, scroll)
             && block.expandable
@@ -856,7 +870,7 @@ fn build_request_transcript(
     expanded_requests: &[usize],
 ) -> (Vec<TranscriptBlock>, usize) {
     let mut blocks = Vec::new();
-    let mut document_height = 0;
+    let mut document_height = 0usize;
     let request_count = message.requests.len();
     for (request_index, request) in message.requests.iter().enumerate() {
         let request_live = live && request_index + 1 == request_count;
@@ -894,12 +908,14 @@ fn build_request_transcript(
                     .saturating_add(REQUEST_CARD_EXTRA_ROWS),
             )
         };
+        let elapsed = request.duration_ms.map(format_preview_duration);
+        document_height = document_height.saturating_add(usize::from(elapsed.is_some()));
         blocks.push(TranscriptBlock {
             user: false,
             lines,
             start: document_height,
             height,
-            elapsed: request.duration_ms.map(format_preview_duration),
+            elapsed,
             request_count: 0,
             request: Some(request_index),
             expandable,
@@ -1941,5 +1957,26 @@ mod tests {
         ]);
         let (blocks, _) = build_request_transcript(&completed, 80, false, 0, &[]);
         assert!(blocks[0].lines.last().is_some_and(is_agent_output_row));
+    }
+
+    #[test]
+    fn leaves_a_row_above_each_timed_request_card() {
+        let request = |duration_ms| AgentRequestPreview {
+            parts: vec![AgentRequestPartPreview::Text("output".to_owned())],
+            reasoning_active: false,
+            duration_ms,
+            reasoning_duration_ms: None,
+            tool_call_count: 0,
+        };
+        let message = AgentUserMessage {
+            text: "prompt".to_owned(),
+            requests: vec![request(Some(1_000)), request(None), request(Some(2_000))],
+        };
+
+        let (blocks, document_height) = build_request_transcript(&message, 80, false, 0, &[]);
+        assert_eq!(blocks[0].start, 1);
+        assert_eq!(blocks[1].start, blocks[0].start + blocks[0].height);
+        assert_eq!(blocks[2].start, blocks[1].start + blocks[1].height + 1);
+        assert_eq!(document_height, blocks[2].start + blocks[2].height);
     }
 }
