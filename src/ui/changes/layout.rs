@@ -85,7 +85,7 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
                 | HitTarget::AgentMessage { .. }
         )
     });
-    for (target, rect) in agents::draw(
+    let (targets, animation_presented) = agents::draw(
         frame,
         &mut app.herdr,
         &app.linked_worktrees,
@@ -94,7 +94,9 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
         list,
         app.dragging_agents,
         hovered,
-    ) {
+    );
+    app.regions.agent_animation_presented |= animation_presented;
+    for (target, rect) in targets {
         app.regions.register_hit_target(target, rect);
     }
 }

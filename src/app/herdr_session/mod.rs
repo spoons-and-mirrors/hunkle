@@ -335,7 +335,7 @@ enum Completion {
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     LatestUserMessage {
         identity: OpenCodeConversationIdentity,
-        result: Result<Vec<AgentUserMessage>, String>,
+        result: Result<latest_message::TranscriptFetch, String>,
     },
     ScheduledSession {
         run_id: i64,
@@ -343,7 +343,7 @@ enum Completion {
     },
     ScheduledConversation {
         identity: OpenCodeConversationIdentity,
-        result: Result<Vec<AgentUserMessage>, String>,
+        result: Result<latest_message::TranscriptFetch, String>,
     },
 }
 
@@ -621,7 +621,7 @@ impl HerdrSession {
         let session_id = session_id.to_owned();
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = latest_message::fetch(&session_id);
+            let result = latest_message::fetch(&session_id, false);
             let _ = sender.send(Completion::ScheduledConversation { identity, result });
         });
     }
@@ -674,7 +674,7 @@ impl HerdrSession {
     pub(crate) fn poll(
         &mut self,
         agent_cards_presented: bool,
-        agent_surface_presented: bool,
+        agent_animation_presented: bool,
     ) -> HerdrSessionPoll {
         if !self.enabled {
             return HerdrSessionPoll::default();
@@ -707,7 +707,7 @@ impl HerdrSession {
             }
         }
         while let Ok(completion) = self.receiver.try_recv() {
-            poll.changed = true;
+            let mut completion_changed = true;
             match completion {
                 Completion::Snapshot {
                     result,
@@ -858,16 +858,26 @@ impl HerdrSession {
                         .collect();
                 }
                 Completion::LatestUserMessage { identity, result } => {
+                    completion_changed = false;
                     self.latest_user_message_requests.remove(&identity);
                     // Snapshot pruning removes this marker to invalidate departed agents' requests.
                     if self.latest_user_message_refreshes.contains_key(&identity) {
                         match result {
-                            Ok(message) => {
-                                self.latest_user_message_errors.remove(&identity);
-                                self.latest_user_messages.insert(identity, message);
+                            Ok(latest_message::TranscriptFetch::Changed(messages)) => {
+                                completion_changed =
+                                    self.latest_user_message_errors.remove(&identity).is_some();
+                                if self.latest_user_messages.get(&identity) != Some(&messages) {
+                                    self.latest_user_messages.insert(identity, messages);
+                                    completion_changed = true;
+                                }
+                            }
+                            Ok(latest_message::TranscriptFetch::Unchanged) => {
+                                completion_changed =
+                                    self.latest_user_message_errors.remove(&identity).is_some();
                             }
                             Err(error) => {
                                 self.latest_user_message_errors.insert(identity, error);
+                                completion_changed = true;
                             }
                         }
                     }
@@ -889,16 +899,30 @@ impl HerdrSession {
                 Completion::ScheduledConversation { identity, result } => {
                     self.latest_user_message_requests.remove(&identity);
                     match result {
-                        Ok(messages) => {
-                            self.scheduled_conversation_errors.remove(&identity);
-                            self.latest_user_messages.insert(identity, messages);
+                        Ok(latest_message::TranscriptFetch::Changed(messages)) => {
+                            completion_changed = self
+                                .scheduled_conversation_errors
+                                .remove(&identity)
+                                .is_some();
+                            if self.latest_user_messages.get(&identity) != Some(&messages) {
+                                self.latest_user_messages.insert(identity, messages);
+                                completion_changed = true;
+                            }
+                        }
+                        Ok(latest_message::TranscriptFetch::Unchanged) => {
+                            completion_changed = self
+                                .scheduled_conversation_errors
+                                .remove(&identity)
+                                .is_some();
                         }
                         Err(error) => {
                             self.scheduled_conversation_errors.insert(identity, error);
+                            completion_changed = true;
                         }
                     }
                 }
             }
+            poll.changed |= completion_changed;
         }
         if !self.loading && Instant::now() >= self.next_refresh {
             self.start_snapshot();
@@ -907,7 +931,7 @@ impl HerdrSession {
         if agent_cards_presented {
             self.start_agent_change_stats_if_due(Instant::now());
         }
-        poll.changed |= self.poll_spinner(Instant::now(), agent_surface_presented);
+        poll.changed |= self.poll_spinner(Instant::now(), agent_animation_presented);
         poll
     }
 
@@ -1331,7 +1355,8 @@ impl HerdrSession {
             return;
         };
         let now = Instant::now();
-        let needs_refresh = !self.latest_user_messages.contains_key(&identity)
+        let allow_unchanged = self.latest_user_messages.contains_key(&identity);
+        let needs_refresh = !allow_unchanged
             || self.latest_user_message_statuses.get(&identity) != Some(&status)
             || status == AgentStatus::Working;
         if !needs_refresh
@@ -1355,7 +1380,7 @@ impl HerdrSession {
         let _ = thread::Builder::new()
             .name("agent-latest-message".to_owned())
             .spawn(move || {
-                let result = latest_message::fetch(&session_id);
+                let result = latest_message::fetch(&session_id, allow_unchanged);
                 let _ = sender.send(Completion::LatestUserMessage { identity, result });
             });
     }
@@ -2023,7 +2048,7 @@ mod presentation_interest_tests {
     }
 
     #[test]
-    fn hidden_agent_surfaces_do_not_animate_the_spinner() {
+    fn spinner_advances_only_when_an_animation_was_presented() {
         let mut session = session_without_snapshot();
         session.agents = vec![working_agent(None)];
         session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
@@ -2182,7 +2207,9 @@ mod latest_user_message_cache_tests {
             .sender
             .send(Completion::ScheduledConversation {
                 identity: identity.clone(),
-                result: Ok(message("durable history")),
+                result: Ok(latest_message::TranscriptFetch::Changed(message(
+                    "durable history",
+                ))),
             })
             .unwrap();
 
@@ -2212,7 +2239,9 @@ mod latest_user_message_cache_tests {
             .sender
             .send(Completion::ScheduledConversation {
                 identity: scheduled_identity,
-                result: Ok(message("shared history")),
+                result: Ok(latest_message::TranscriptFetch::Changed(message(
+                    "shared history",
+                ))),
             })
             .unwrap();
 
@@ -2270,7 +2299,9 @@ mod latest_user_message_cache_tests {
             .sender
             .send(Completion::LatestUserMessage {
                 identity: conversation_identity.clone(),
-                result: Ok(message("completed")),
+                result: Ok(latest_message::TranscriptFetch::Changed(message(
+                    "completed",
+                ))),
             })
             .unwrap();
         session.poll(false, false);
@@ -2349,7 +2380,7 @@ mod latest_user_message_cache_tests {
             .sender
             .send(Completion::LatestUserMessage {
                 identity: departed_conversation.clone(),
-                result: Ok(message("stale")),
+                result: Ok(latest_message::TranscriptFetch::Changed(message("stale"))),
             })
             .unwrap();
         session.poll(false, false);
@@ -2374,6 +2405,61 @@ mod latest_user_message_cache_tests {
                 .latest_user_message_statuses
                 .contains_key(&departed_conversation)
         );
+    }
+
+    #[test]
+    fn unchanged_and_equal_completions_preserve_cached_transcript_without_redraw() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.next_refresh = Instant::now() + Duration::from_secs(60);
+        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
+        let identity = conversation_identity("ses_cached");
+        session
+            .latest_user_messages
+            .insert(identity.clone(), message("cached"));
+        session.latest_user_message_refreshes.insert(
+            identity.clone(),
+            Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
+        );
+        let original = session.latest_user_messages[&identity].as_ptr();
+
+        session
+            .latest_user_message_requests
+            .insert(identity.clone());
+        session
+            .sender
+            .send(Completion::LatestUserMessage {
+                identity: identity.clone(),
+                result: Ok(latest_message::TranscriptFetch::Unchanged),
+            })
+            .unwrap();
+        assert!(!session.poll(false, false).changed);
+        assert_eq!(session.latest_user_messages[&identity].as_ptr(), original);
+
+        session
+            .latest_user_message_requests
+            .insert(identity.clone());
+        session
+            .sender
+            .send(Completion::LatestUserMessage {
+                identity: identity.clone(),
+                result: Ok(latest_message::TranscriptFetch::Changed(message("cached"))),
+            })
+            .unwrap();
+        assert!(!session.poll(false, false).changed);
+        assert_eq!(session.latest_user_messages[&identity].as_ptr(), original);
+
+        session
+            .latest_user_message_requests
+            .insert(identity.clone());
+        session
+            .sender
+            .send(Completion::LatestUserMessage {
+                identity: identity.clone(),
+                result: Ok(latest_message::TranscriptFetch::Changed(message("updated"))),
+            })
+            .unwrap();
+        assert!(session.poll(false, false).changed);
+        assert_eq!(session.latest_user_messages[&identity][0].text, "updated");
     }
 }
 

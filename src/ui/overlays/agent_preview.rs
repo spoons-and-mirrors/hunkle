@@ -6,6 +6,7 @@ pub(in crate::ui) struct AgentPreviewModalRegions {
     pub(in crate::ui) scroll_target: Option<(ScrollTarget, Rect)>,
     pub(in crate::ui) scroll: usize,
     pub(in crate::ui) scroll_max: usize,
+    pub(in crate::ui) animation_presented: bool,
 }
 
 pub(in crate::ui) fn draw_agent_preview_modal(
@@ -86,6 +87,7 @@ pub(in crate::ui) fn draw_agent_preview_modal(
             scroll_target: None,
             scroll: 0,
             scroll_max: 0,
+            animation_presented: false,
         };
     };
     app.herdr.request_agent_latest_user_message(index);
@@ -95,7 +97,7 @@ pub(in crate::ui) fn draw_agent_preview_modal(
         header.width.saturating_sub(11),
         1,
     );
-    let (history_targets, scroll_max, scroll) = agents::draw_history(
+    let (history_targets, scroll_max, scroll, animation_presented) = agents::draw_history(
         frame,
         &app.herdr,
         index,
@@ -129,5 +131,6 @@ pub(in crate::ui) fn draw_agent_preview_modal(
         scroll_target,
         scroll,
         scroll_max,
+        animation_presented,
     }
 }

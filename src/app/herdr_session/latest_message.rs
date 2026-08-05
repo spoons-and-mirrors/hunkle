@@ -1,6 +1,8 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex,
     time::Duration,
 };
 
@@ -16,18 +18,85 @@ use super::{
 
 const QUERY_LIMITS: Limits = Limits::new(2 * 1024 * 1024, 64 * 1024, Duration::from_secs(5));
 
-pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
+static DATABASE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+static TRANSCRIPT_DATABASE: Mutex<Option<TranscriptDatabase>> = Mutex::new(None);
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TranscriptFetch {
+    Changed(Vec<AgentUserMessage>),
+    Unchanged,
+}
+
+struct TranscriptDatabase {
+    connection: Connection,
+    session_versions: HashMap<String, i64>,
+}
+
+pub(super) fn fetch(session_id: &str, allow_unchanged: bool) -> Result<TranscriptFetch, String> {
     if !session_id
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
         return Err("OpenCode session ID contains unsupported characters".to_owned());
     }
-    let connection = Connection::open_with_flags(
-        database_path()?,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| format!("Could not open the OpenCode database: {error}"))?;
+    let path = database_path()?;
+    fetch_from_database(&TRANSCRIPT_DATABASE, &path, session_id, allow_unchanged)
+}
+
+fn fetch_from_database(
+    cache: &Mutex<Option<TranscriptDatabase>>,
+    path: &Path,
+    session_id: &str,
+    allow_unchanged: bool,
+) -> Result<TranscriptFetch, String> {
+    let mut database = cache.lock().unwrap_or_else(|error| error.into_inner());
+    if database.is_none() {
+        *database = Some(TranscriptDatabase::open(path)?);
+    }
+    let result = database
+        .as_mut()
+        .expect("transcript database was opened")
+        .fetch(session_id, allow_unchanged);
+    if result.is_err() {
+        *database = None;
+    }
+    result
+}
+
+impl TranscriptDatabase {
+    fn open(path: &Path) -> Result<Self, String> {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| format!("Could not open the OpenCode database: {error}"))?;
+        Ok(Self {
+            connection,
+            session_versions: HashMap::new(),
+        })
+    }
+
+    fn fetch(
+        &mut self,
+        session_id: &str,
+        allow_unchanged: bool,
+    ) -> Result<TranscriptFetch, String> {
+        let data_version = self
+            .connection
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+            .map_err(|error| format!("Could not query OpenCode: {error}"))?;
+        if allow_unchanged && self.session_versions.get(session_id) == Some(&data_version) {
+            return Ok(TranscriptFetch::Unchanged);
+        }
+
+        let messages = query(&self.connection, session_id)?;
+        self.session_versions
+            .insert(session_id.to_owned(), data_version);
+        Ok(TranscriptFetch::Changed(messages))
+    }
+}
+
+fn query(connection: &Connection, session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
     let mut statement = connection
         .prepare(
             "WITH responses AS (\
@@ -94,6 +163,23 @@ pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
 }
 
 fn database_path() -> Result<PathBuf, String> {
+    cached_database_path(&DATABASE_PATH, resolve_database_path)
+}
+
+fn cached_database_path(
+    cache: &Mutex<Option<PathBuf>>,
+    resolve: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    let mut path = cache.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(path) = path.as_ref() {
+        return Ok(path.clone());
+    }
+    let resolved = resolve()?;
+    *path = Some(resolved.clone());
+    Ok(resolved)
+}
+
+fn resolve_database_path() -> Result<PathBuf, String> {
     let output = process::run(
         Command::new("opencode").args(["db", "path", "--pure"]),
         QUERY_LIMITS,
@@ -358,9 +444,61 @@ fn request(row: &Value, now_ms: u64) -> AgentRequestPreview {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AgentActivityPreview, AgentRequestPartPreview, parse, parse_session_id, sql_string,
+    use std::{
+        path::PathBuf,
+        sync::{
+            Arc, Barrier, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::Duration,
     };
+
+    use rusqlite::{Connection, params};
+    use tempfile::tempdir;
+
+    use super::{
+        AgentActivityPreview, AgentRequestPartPreview, TranscriptDatabase, TranscriptFetch,
+        cached_database_path, fetch_from_database, parse, parse_session_id, sql_string,
+    };
+
+    fn create_transcript_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                "CREATE TABLE message (\
+                     id TEXT PRIMARY KEY, \
+                     session_id TEXT NOT NULL, \
+                     time_created INTEGER NOT NULL, \
+                     data TEXT NOT NULL\
+                 ); \
+                 CREATE TABLE part (\
+                     id TEXT PRIMARY KEY, \
+                     message_id TEXT NOT NULL, \
+                     session_id TEXT NOT NULL, \
+                     time_created INTEGER NOT NULL, \
+                     data TEXT NOT NULL\
+                 );",
+            )
+            .unwrap();
+    }
+
+    fn insert_user_message(connection: &Connection, session_id: &str, text: &str) {
+        let message_id = format!("{session_id}-message");
+        connection
+            .execute(
+                "INSERT INTO message (id, session_id, time_created, data) \
+                 VALUES (?1, ?2, 1, '{\"role\":\"user\"}')",
+                params![message_id, session_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, data) \
+                 VALUES (?1, ?2, ?3, 1, json_object('type', 'text', 'text', ?4))",
+                params![format!("{session_id}-part"), message_id, session_id, text],
+            )
+            .unwrap();
+    }
 
     #[test]
     fn extracts_text_from_the_latest_user_message() {
@@ -463,5 +601,104 @@ mod tests {
         );
         assert!(parse_session_id(b"[]").is_err());
         assert!(parse_session_id(br#"[{"id":"one"},{"id":"two"}]"#).is_err());
+    }
+
+    #[test]
+    fn database_path_cache_retries_failures_and_serializes_initial_success() {
+        let cache = Arc::new(Mutex::new(None));
+        assert_eq!(
+            cached_database_path(&cache, || Err("not ready".to_owned())),
+            Err("not ready".to_owned())
+        );
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let attempts = Arc::clone(&attempts);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    cached_database_path(&cache, || {
+                        attempts.fetch_add(1, Ordering::Relaxed);
+                        thread::sleep(Duration::from_millis(10));
+                        Ok(PathBuf::from("/tmp/opencode.db"))
+                    })
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            assert_eq!(thread.join().unwrap(), PathBuf::from("/tmp/opencode.db"));
+        }
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn data_version_is_tracked_per_session_and_can_be_bypassed() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("opencode.db");
+        let writer = Connection::open(&path).unwrap();
+        create_transcript_schema(&writer);
+        insert_user_message(&writer, "alpha", "Alpha request");
+        insert_user_message(&writer, "beta", "Beta request");
+        let mut database = TranscriptDatabase::open(&path).unwrap();
+
+        let TranscriptFetch::Changed(alpha) = database.fetch("alpha", true).unwrap() else {
+            panic!("first session fetch must query");
+        };
+        assert_eq!(
+            database.fetch("alpha", true).unwrap(),
+            TranscriptFetch::Unchanged
+        );
+        assert!(matches!(
+            database.fetch("alpha", false).unwrap(),
+            TranscriptFetch::Changed(_)
+        ));
+        assert!(matches!(
+            database.fetch("beta", true).unwrap(),
+            TranscriptFetch::Changed(_)
+        ));
+
+        insert_user_message(&writer, "unrelated", "Unrelated request");
+        assert_eq!(
+            database.fetch("alpha", true).unwrap(),
+            TranscriptFetch::Changed(alpha)
+        );
+        assert_eq!(
+            database.fetch("alpha", true).unwrap(),
+            TranscriptFetch::Unchanged
+        );
+    }
+
+    #[test]
+    fn failed_query_discards_the_cached_connection_for_recovery() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("opencode.db");
+        let writer = Connection::open(&path).unwrap();
+        create_transcript_schema(&writer);
+        insert_user_message(&writer, "alpha", "Before failure");
+        let cache = Mutex::new(None);
+
+        assert!(matches!(
+            fetch_from_database(&cache, &path, "alpha", true).unwrap(),
+            TranscriptFetch::Changed(_)
+        ));
+        writer
+            .execute_batch("DROP TABLE part; DROP TABLE message;")
+            .unwrap();
+        assert!(fetch_from_database(&cache, &path, "alpha", true).is_err());
+        assert!(cache.lock().unwrap().is_none());
+
+        create_transcript_schema(&writer);
+        insert_user_message(&writer, "alpha", "After failure");
+        let TranscriptFetch::Changed(messages) =
+            fetch_from_database(&cache, &path, "alpha", true).unwrap()
+        else {
+            panic!("reopened connection must query");
+        };
+        assert_eq!(messages[0].text, "After failure");
     }
 }

@@ -849,7 +849,7 @@ pub(super) fn draw_agent_history_pane(
         return;
     };
     app.herdr.request_agent_latest_user_message(index);
-    let (targets, scroll_max, scroll) = agents::draw_history(
+    let (targets, scroll_max, scroll, animation_presented) = agents::draw_history(
         frame,
         &app.herdr,
         index,
@@ -863,6 +863,7 @@ pub(super) fn draw_agent_history_pane(
     );
     app.regions.agent_preview_scroll = scroll;
     app.regions.agent_preview_scroll_max = scroll_max;
+    app.regions.agent_animation_presented |= animation_presented;
     for (target, rect) in targets {
         app.regions.register_hit_target(target, rect);
     }

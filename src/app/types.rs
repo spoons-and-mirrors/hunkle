@@ -665,7 +665,7 @@ pub struct Regions {
     pub agents_splitter: Option<Rect>,
     pub agents_bounds: Option<Rect>,
     pub(crate) agent_cards_presented: bool,
-    pub(crate) agent_surface_presented: bool,
+    pub(crate) agent_animation_presented: bool,
     pub diff: Option<Rect>,
     pub preview_body: Option<Rect>,
     pub preview_path: Option<RepoPath>,

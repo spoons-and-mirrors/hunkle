@@ -914,7 +914,7 @@ impl App {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
                 self.herdr.poll(
                     self.regions.agent_cards_presented,
-                    self.regions.agent_surface_presented,
+                    self.regions.agent_animation_presented,
                 )
             };
             changed |= herdr_poll.changed;

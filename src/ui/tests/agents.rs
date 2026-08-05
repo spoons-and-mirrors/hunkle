@@ -1895,6 +1895,88 @@ fn collapses_agents_sharing_a_tab_into_one_card() {
 }
 
 #[test]
+fn offscreen_working_agent_does_not_register_spinner_animation() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let snapshot = serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE", "focused": false }],
+            "agents": [
+                {
+                    "agent": "opencode",
+                    "agent_session": {
+                        "source": "env",
+                        "agent": "opencode",
+                        "kind": "session_id",
+                        "value": "ses_working"
+                    },
+                    "agent_status": "working",
+                    "focused": false,
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "workspace_id": "w1"
+                },
+                {
+                    "agent": "opencode",
+                    "agent_session": {
+                        "source": "env",
+                        "agent": "opencode",
+                        "kind": "session_id",
+                        "value": "ses_idle"
+                    },
+                    "agent_status": "idle",
+                    "focused": false,
+                    "pane_id": "w1:p2",
+                    "tab_id": "w1:t2",
+                    "workspace_id": "w1"
+                }
+            ],
+            "panes": [
+                { "pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1" },
+                { "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1" }
+            ]
+        } }
+    });
+    let mut app = App::new(root.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&snapshot);
+    app.herdr
+        .set_agent_user_messages_for_test(0, &[("Working", None, 1, 0)]);
+    app.herdr
+        .set_agent_user_messages_for_test(1, &[("Idle", None, 1, 0)]);
+    let working = agent_key(&app, 0);
+    let idle = agent_key(&app, 1);
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.agent_animation_presented);
+    app.settings.agents_height = 5;
+    app.herdr.scroll_agents(1);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Agent(working.clone()))
+            .is_none()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Agent(idle))
+            .is_some()
+    );
+    assert!(!app.regions.agent_animation_presented);
+
+    app.herdr.scroll_agents(-1);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Agent(working))
+            .is_some()
+    );
+    assert!(app.regions.agent_animation_presented);
+}
+
+#[test]
 fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
