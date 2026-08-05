@@ -33,7 +33,11 @@ pub(super) fn status(root: &Path) -> Result<(Vec<Change>, WorktreeSignature, Bra
     Ok((status.changes, status.signature, status.sync))
 }
 
-fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> WorktreeSignature {
+pub(super) fn status_signature(
+    root: &Path,
+    output: &[u8],
+    changes: &[Change],
+) -> WorktreeSignature {
     let mut state = DefaultHasher::new();
     output.hash(&mut state);
     for path in changes
@@ -53,9 +57,8 @@ fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> WorktreeS
         }
     }
     let mut branch = DefaultHasher::new();
-    output
-        .split(|byte| *byte == 0)
-        .find(|field| field.starts_with(b"## "))
+    parse_branch_header(output)
+        .map(|header| header.identity)
         .hash(&mut branch);
     let mut inventory = DefaultHasher::new();
     let mut path_states = Vec::new();
@@ -107,25 +110,87 @@ fn status_signature(root: &Path, output: &[u8], changes: &[Change]) -> WorktreeS
 }
 
 pub(super) fn parse_branch_sync(bytes: &[u8]) -> BranchSync {
-    let Some(header) = bytes
+    parse_branch_header(bytes).map_or_else(BranchSync::default, |header| header.sync)
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+enum BranchIdentity<'a> {
+    Branch {
+        name: &'a [u8],
+        upstream: Option<&'a [u8]>,
+    },
+    Detached,
+    Unborn(&'a [u8]),
+    Raw(&'a [u8]),
+}
+
+struct BranchHeader<'a> {
+    identity: BranchIdentity<'a>,
+    sync: BranchSync,
+}
+
+fn parse_branch_header(bytes: &[u8]) -> Option<BranchHeader<'_>> {
+    let header = bytes
         .split(|byte| *byte == 0)
-        .find(|field| field.starts_with(b"## "))
+        .find_map(|field| field.strip_prefix(b"## "))?;
+    let (identity, summary) = strip_divergence(header);
+    let identity = if identity == b"HEAD (no branch)" {
+        BranchIdentity::Detached
+    } else if let Some(name) = identity
+        .strip_prefix(b"No commits yet on ")
+        .or_else(|| identity.strip_prefix(b"Initial commit on "))
+    {
+        BranchIdentity::Unborn(name)
+    } else if let Some(separator) = identity.windows(3).position(|bytes| bytes == b"...") {
+        BranchIdentity::Branch {
+            name: &identity[..separator],
+            upstream: Some(&identity[separator + 3..]),
+        }
+    } else if identity.is_empty() {
+        BranchIdentity::Raw(identity)
+    } else {
+        BranchIdentity::Branch {
+            name: identity,
+            upstream: None,
+        }
+    };
+    Some(BranchHeader {
+        identity,
+        sync: summary.map_or_else(BranchSync::default, parse_divergence),
+    })
+}
+
+fn strip_divergence(header: &[u8]) -> (&[u8], Option<&[u8]>) {
+    let Some(summary_start) = header.windows(2).rposition(|bytes| bytes == b" [") else {
+        return (header, None);
+    };
+    let Some(summary) = header
+        .get(summary_start + 2..)
+        .and_then(|summary| summary.strip_suffix(b"]"))
     else {
-        return BranchSync::default();
+        return (header, None);
     };
-    let header = String::from_utf8_lossy(header);
-    let Some(summary) = header.rsplit_once(" [").map(|(_, summary)| summary) else {
-        return BranchSync::default();
-    };
+    (&header[..summary_start], Some(summary))
+}
+
+fn parse_divergence(summary: &[u8]) -> BranchSync {
     let mut sync = BranchSync::default();
-    for state in summary.trim_end_matches(']').split(", ") {
-        if let Some(ahead) = state.strip_prefix("ahead ") {
-            sync.ahead = ahead.parse().unwrap_or_default();
-        } else if let Some(behind) = state.strip_prefix("behind ") {
-            sync.behind = behind.parse().unwrap_or_default();
+    for state in summary.split(|byte| *byte == b',') {
+        let state = state.strip_prefix(b" ").unwrap_or(state);
+        if let Some(ahead) = state.strip_prefix(b"ahead ") {
+            sync.ahead = parse_count(ahead);
+        } else if let Some(behind) = state.strip_prefix(b"behind ") {
+            sync.behind = parse_count(behind);
         }
     }
     sync
+}
+
+fn parse_count(bytes: &[u8]) -> u64 {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_default()
 }
 
 pub(super) fn parse_status(bytes: &[u8]) -> Result<Vec<Change>> {

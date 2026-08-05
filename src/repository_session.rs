@@ -129,8 +129,20 @@ pub(crate) enum LoadKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefreshRequest {
-    Started,
-    Queued,
+    Started(RefreshScope),
+    Queued(RefreshScope),
+}
+
+impl RefreshRequest {
+    pub(crate) fn scope(self) -> RefreshScope {
+        match self {
+            Self::Started(scope) | Self::Queued(scope) => scope,
+        }
+    }
+
+    pub(crate) fn started(self) -> bool {
+        matches!(self, Self::Started(_))
+    }
 }
 
 pub(crate) struct LoadCompletion {
@@ -375,7 +387,7 @@ impl RepositorySession {
                 self.queued_refresh
                     .map_or(scope, |queued| queued.union(scope)),
             );
-            return Some(RefreshRequest::Queued);
+            return Some(RefreshRequest::Queued(scope));
         }
         let (root, kind, details_ready) = self.data.as_ref().map(|repository| {
             (
@@ -398,13 +410,13 @@ impl RepositorySession {
             fetch_interval,
         ) {
             self.active_refresh_scope = Some(scope);
-            Some(RefreshRequest::Started)
+            Some(RefreshRequest::Started(scope))
         } else {
             self.queued_refresh = Some(
                 self.queued_refresh
                     .map_or(scope, |queued| queued.union(scope)),
             );
-            Some(RefreshRequest::Queued)
+            Some(RefreshRequest::Queued(scope))
         }
     }
 
@@ -426,7 +438,9 @@ impl RepositorySession {
                     } else if signature.is_some() {
                         self.status_signature = signature;
                     }
-                    self.reset_status_interval();
+                    if done.kind == LoadKind::Open || done.scope.includes_worktree() {
+                        self.reset_status_interval();
+                    }
                     match payload {
                         LoadPayload::Open(data) => {
                             if let Some(previous) = self.data.replace(data) {

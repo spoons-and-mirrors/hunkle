@@ -326,6 +326,54 @@ fn parses_branch_tracking_divergence() {
 }
 
 #[test]
+fn branch_signature_ignores_tracking_divergence() {
+    let root = Path::new(".");
+    let before = status_signature(
+        root,
+        b"## feature...origin/feature [ahead 1, behind 2]\0",
+        &[],
+    );
+    let after = status_signature(
+        root,
+        b"## feature...origin/feature [ahead 3, behind 4]\0",
+        &[],
+    );
+
+    assert_ne!(before.state, after.state);
+    assert_eq!(before.branch, after.branch);
+    assert_eq!(after.refresh_scope_since(before), RefreshScope::WORKTREE);
+}
+
+#[test]
+fn branch_signature_tracks_checkout_and_upstream_identity() {
+    let root = Path::new(".");
+    let signature = |header: &[u8]| status_signature(root, header, &[]);
+    let tracking = signature(b"## topic...origin/topic [ahead 1]\0");
+
+    for changed in [
+        signature(b"## topic...upstream/topic [ahead 1]\0"),
+        signature(b"## other...origin/topic [ahead 1]\0"),
+        signature(b"## HEAD (no branch)\0"),
+        signature(b"## No commits yet on topic\0"),
+        signature(b"## Initial commit on topic\0"),
+    ] {
+        assert_eq!(changed.refresh_scope_since(tracking), RefreshScope::ALL);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn branch_signature_preserves_non_utf8_identity_bytes() {
+    let root = Path::new(".");
+    let before = status_signature(root, b"## topic-\xff...origin/topic-\xff [ahead 1]\0", &[]);
+    let divergence = status_signature(root, b"## topic-\xff...origin/topic-\xff [behind 2]\0", &[]);
+    let renamed = status_signature(root, b"## topic-\xfe...origin/topic-\xff [behind 2]\0", &[]);
+
+    assert_eq!(before.branch, divergence.branch);
+    assert_ne!(divergence.branch, renamed.branch);
+}
+
+#[test]
 fn untracked_line_counts_respect_the_read_budget() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("new.txt");

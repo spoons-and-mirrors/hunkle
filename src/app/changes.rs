@@ -532,6 +532,16 @@ impl ChangesState {
         &self.explorer_rows_cache
     }
 
+    #[cfg(test)]
+    pub(super) fn worktree_rows_generation_for_test(&self) -> u64 {
+        self.worktree_rows_generation
+    }
+
+    #[cfg(test)]
+    pub(super) fn preview_request_generation_for_test(&self) -> u64 {
+        self.preview_loader.generation_for_test()
+    }
+
     pub(crate) fn selected_explorer_file_path(&self, _repo: &RepositoryData) -> Option<&RepoPath> {
         let selected = self.explorer_state.selected()?;
         self.explorer_rows().get(selected)?.file_path.as_ref()

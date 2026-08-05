@@ -1176,6 +1176,66 @@ fn auto_fetch_runs_without_blocking_the_app() {
 }
 
 #[test]
+fn history_only_refresh_restores_graph_without_refreshing_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    initialize_repository(root);
+    fs::write(root.join("tracked.txt"), "second\n").unwrap();
+    run_git(root, &["add", "tracked.txt"]);
+    run_git(root, &["commit", "-m", "second"]);
+    let mut app = App::new(root.to_path_buf());
+    app.settings.auto_fetch = false;
+    wait_for_state(&mut app, |app| {
+        app.changes
+            .preview
+            .text()
+            .is_some_and(|text| text.contains("second"))
+    });
+    app.graph_state.select(Some(1));
+    let selected_oid = app.selected_graph_commit().unwrap().oid.clone();
+    app.changes.preview_branch_diff(
+        root,
+        "main".to_owned(),
+        "previous".to_owned(),
+        "refs/heads/main".to_owned(),
+        "HEAD~".to_owned(),
+    );
+    let rows_generation = app.changes.worktree_rows_generation_for_test();
+    let preview_generation = app.changes.preview_request_generation_for_test();
+
+    fs::write(root.join("tracked.txt"), "third\n").unwrap();
+    run_git(root, &["add", "tracked.txt"]);
+    run_git(root, &["commit", "-m", "third"]);
+    app.reload(RefreshScope::HISTORY_AND_REFS);
+
+    let restoration = app.pending_reload.as_ref().unwrap();
+    assert!(restoration.changes.is_none());
+    assert_eq!(
+        restoration.selected_graph_oid.as_deref(),
+        Some(selected_oid.as_str())
+    );
+    wait_for_state(&mut app, |app| {
+        app.pending_reload.is_none() && app.repository().unwrap().commits.len() == 3
+    });
+
+    assert_eq!(app.selected_graph_commit().unwrap().oid, selected_oid);
+    assert_eq!(
+        app.changes
+            .branch_comparison()
+            .map(|comparison| (comparison.current.as_str(), comparison.target.as_str())),
+        Some(("main", "previous"))
+    );
+    assert_eq!(
+        app.changes.worktree_rows_generation_for_test(),
+        rows_generation
+    );
+    assert_eq!(
+        app.changes.preview_request_generation_for_test(),
+        preview_generation
+    );
+}
+
+#[test]
 fn workspace_fetches_expire_after_five_minutes() {
     let now = Instant::now();
     assert!(!fetch_is_fresh(None, now));

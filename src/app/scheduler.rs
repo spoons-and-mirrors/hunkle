@@ -953,7 +953,7 @@ impl App {
                         .into_owned(),
                 );
                 destination.path = Some(path);
-                self.linked_worktrees.refresh();
+                self.linked_worktrees.refresh_after_topology_change();
                 self.save_scheduled_task();
             }
             Err(error) => {

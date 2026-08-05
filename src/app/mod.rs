@@ -121,6 +121,12 @@ mod keys;
 #[cfg(test)]
 mod tests;
 
+#[derive(Default)]
+struct ReloadRestoration {
+    changes: Option<changes::ChangesSelection>,
+    selected_graph_oid: Option<String>,
+}
+
 pub struct App {
     pub(crate) session: RepositorySession,
     graph_hidden: bool,
@@ -180,7 +186,7 @@ pub struct App {
     restart_request: Option<PathBuf>,
     pub should_quit: bool,
     pub(crate) settings_store: SettingsStore,
-    pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
+    pending_reload: Option<ReloadRestoration>,
     pub(crate) editor_input: String,
     pub(crate) file_editor: Option<FileEditor>,
     pub(crate) file_editor_anchor: Option<Position>,
@@ -998,7 +1004,7 @@ impl App {
                 Ok(path) => {
                     self.notice = Some(format!("Cloned {}; opening workspace…", path.display()));
                     self.queue_workspace_restore(path);
-                    self.linked_worktrees.refresh();
+                    self.linked_worktrees.refresh_after_topology_change();
                 }
                 Err(error) => self.notice = Some(format!("Could not clone repository: {error}")),
             }
@@ -1009,7 +1015,7 @@ impl App {
                 Ok(path) => {
                     self.notice = Some(format!("Created {}; opening workspace…", path.display()));
                     self.queue_workspace_restore(path);
-                    self.linked_worktrees.refresh();
+                    self.linked_worktrees.refresh_after_topology_change();
                 }
                 Err(error) => self.notice = Some(format!("Could not create worktree: {error}")),
             }
@@ -1019,7 +1025,7 @@ impl App {
             match result {
                 Ok(path) => {
                     self.notice = Some(format!("Deleted worktree {}", path.display()));
-                    self.linked_worktrees.refresh();
+                    self.linked_worktrees.refresh_after_topology_change();
                 }
                 Err(error) => self.notice = Some(format!("Could not delete worktree: {error}")),
             }
@@ -1346,7 +1352,7 @@ impl App {
                     self.workspace_explorer.error = Some(message);
                 }
                 (LoadKind::Reload, Ok(())) => {
-                    if let Some((selection, selected_oid)) = self.pending_reload.take() {
+                    if let Some(restoration) = self.pending_reload.take() {
                         let repo = self.session.data().expect("reloaded repository");
                         if refresh_scope.includes_graph() {
                             self.author_filter.sync(&repo.root, &repo.commits);
@@ -1358,24 +1364,28 @@ impl App {
                             let visible = self.graph_search.visible_indices();
                             let commit_index =
                                 self.graph_search.current_match_position().or_else(|| {
-                                    selected_oid.and_then(|oid| {
-                                        visible
-                                            .iter()
-                                            .position(|index| repo.commits[*index].oid == oid)
+                                    restoration.selected_graph_oid.as_ref().and_then(|oid| {
+                                        visible.iter().position(|index| {
+                                            repo.commits[*index].oid == oid.as_str()
+                                        })
                                     })
                                 });
                             self.graph_state
                                 .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
                             self.graph_scroll_to_selection = true;
                         }
-                        self.changes
-                            .restore_selection(repo, selection, inventory_refresh);
-                        if let Some(path) = self.pending_file_selection.take() {
-                            let viewport = self
-                                .regions
-                                .explorer_list
-                                .map_or(0, |rect| usize::from(rect.height));
-                            self.changes.select_explorer_path(repo, &path, viewport);
+                        if (refresh_scope.includes_worktree() || refresh_scope.includes_inventory())
+                            && let Some(selection) = restoration.changes
+                        {
+                            self.changes
+                                .restore_selection(repo, selection, inventory_refresh);
+                            if let Some(path) = self.pending_file_selection.take() {
+                                let viewport = self
+                                    .regions
+                                    .explorer_list
+                                    .map_or(0, |rect| usize::from(rect.height));
+                                self.changes.select_explorer_path(repo, &path, viewport);
+                            }
                         }
                     }
                     if let Some(repo) = self.session.data() {
@@ -2237,15 +2247,24 @@ impl App {
         let Some(repo) = self.repository() else {
             return;
         };
-        let selection = self.changes.capture_selection(repo);
+        let scope = request.scope();
         let details_ready = repo.details_ready;
         let local = repo.is_local();
-        let selected_oid = self
-            .selected_graph_commit()
-            .map(|commit| commit.oid.clone());
+        let changes = (scope.includes_worktree() || scope.includes_inventory())
+            .then(|| self.changes.capture_selection(repo));
+        let selected_graph_oid = scope.includes_graph().then(|| {
+            self.selected_graph_commit()
+                .map(|commit| commit.oid.clone())
+        });
 
-        self.pending_reload = Some((selection, selected_oid));
-        if request == RefreshRequest::Started && show_notice {
+        let restoration = self.pending_reload.get_or_insert_default();
+        if let Some(changes) = changes {
+            restoration.changes = Some(changes);
+        }
+        if let Some(selected_graph_oid) = selected_graph_oid {
+            restoration.selected_graph_oid = selected_graph_oid;
+        }
+        if request.started() && show_notice {
             self.notice = Some(
                 if details_ready {
                     "Refreshing…"

@@ -72,6 +72,154 @@ fn ignores_stale_inventory_completions() {
 }
 
 #[test]
+fn repeated_identical_refreshes_share_one_generation() {
+    let mut catalog = LinkedWorktreeCatalog::new(None);
+
+    catalog.refresh();
+    catalog.refresh();
+    catalog.refresh();
+
+    assert_eq!(catalog.generation, 1);
+    assert!(catalog.active_refresh.is_some());
+    assert!(catalog.pending_refresh.is_none());
+}
+
+#[test]
+fn changed_in_flight_refreshes_coalesce_to_one_follow_up() {
+    let mut catalog = LinkedWorktreeCatalog::new(None);
+    catalog.refresh();
+
+    catalog.observe_herdr(LinkedWorktreeObservation {
+        candidates: vec![LinkedWorktreeCandidate {
+            path: PathBuf::from("/first-change"),
+        }],
+    });
+    catalog.refresh();
+    catalog.observe_herdr(LinkedWorktreeObservation {
+        candidates: vec![LinkedWorktreeCandidate {
+            path: PathBuf::from("/latest-change"),
+        }],
+    });
+    catalog.refresh();
+    assert_eq!(catalog.generation, 1);
+
+    catalog
+        .sender
+        .send(InventoryCompletion {
+            generation: 1,
+            repositories: Vec::new(),
+            discovered: Vec::new(),
+            pruned: Vec::new(),
+            relevant: Vec::new(),
+        })
+        .unwrap();
+    catalog.poll();
+
+    assert_eq!(catalog.generation, 2);
+    assert!(catalog.pending_refresh.is_none());
+    assert_eq!(
+        catalog
+            .active_refresh
+            .as_ref()
+            .unwrap()
+            .key
+            .candidates
+            .as_slice(),
+        [LinkedWorktreeCandidate {
+            path: PathBuf::from("/latest-change"),
+        }]
+    );
+}
+
+#[test]
+fn reverted_intent_still_follows_a_superseded_flight() {
+    let mut catalog = LinkedWorktreeCatalog::new(None);
+    let active_key = catalog.refresh_request().key;
+    catalog.generation = 1;
+    catalog.snapshot.loading = true;
+    catalog.active_refresh = Some(CatalogRefreshFlight {
+        key: active_key.clone(),
+        generation: 1,
+        inventory_pending: true,
+        stats_pending: false,
+    });
+    catalog.observe_herdr(LinkedWorktreeObservation {
+        candidates: vec![LinkedWorktreeCandidate {
+            path: PathBuf::from("/transient-change"),
+        }],
+    });
+    catalog.refresh();
+    catalog.observe_herdr(LinkedWorktreeObservation {
+        candidates: Vec::new(),
+    });
+    catalog.refresh();
+    assert!(catalog.pending_refresh.as_ref().unwrap().key == active_key);
+
+    catalog
+        .sender
+        .send(InventoryCompletion {
+            generation: 1,
+            repositories: Vec::new(),
+            discovered: Vec::new(),
+            pruned: Vec::new(),
+            relevant: Vec::new(),
+        })
+        .unwrap();
+    catalog.poll();
+
+    assert_eq!(catalog.generation, 2);
+    assert!(catalog.active_refresh.as_ref().unwrap().key == active_key);
+}
+
+#[test]
+fn superseded_completions_cannot_publish_topology_or_stats() {
+    let mut catalog = LinkedWorktreeCatalog::new(None);
+    catalog.snapshot.repositories = vec![repository()];
+    catalog.store.recent = vec![known_repositories::RecentRepository {
+        common_dir: Some(PathBuf::from("/repo/.git")),
+        root: PathBuf::from("/repo"),
+        stats: Some((3, 2)),
+    }];
+    let active_key = catalog.refresh_request().key;
+    catalog.topology_epoch = 1;
+    let pending_request = catalog.refresh_request();
+    catalog.generation = 7;
+    catalog.snapshot.loading = true;
+    catalog.active_refresh = Some(CatalogRefreshFlight {
+        key: active_key,
+        generation: 7,
+        inventory_pending: true,
+        stats_pending: true,
+    });
+    catalog.pending_refresh = Some(pending_request);
+    catalog
+        .sender
+        .send(InventoryCompletion {
+            generation: 7,
+            repositories: Vec::new(),
+            discovered: Vec::new(),
+            pruned: vec![PathBuf::from("/repo/.git")],
+            relevant: Vec::new(),
+        })
+        .unwrap();
+    catalog
+        .stats_sender
+        .send(RepositoryStatsCompletion {
+            generation: 7,
+            stats: vec![(PathBuf::from("/repo"), (99, 88))],
+        })
+        .unwrap();
+
+    let poll = catalog.poll();
+
+    assert!(!poll.changed);
+    assert_eq!(catalog.snapshot.repositories.len(), 1);
+    assert_eq!(catalog.store.recent[0].stats, Some((3, 2)));
+    assert_eq!(catalog.generation, 8);
+    assert_eq!(catalog.active_refresh.as_ref().unwrap().generation, 8);
+}
+
+#[test]
 fn persists_repository_identity_and_recent_order() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("known-repositories.json");

@@ -221,6 +221,21 @@ pub struct RepositoryUpdate {
     refs: Option<RefsData>,
 }
 
+#[cfg(test)]
+impl RepositoryUpdate {
+    pub(crate) fn for_test(root: PathBuf, scope: RefreshScope) -> Self {
+        Self {
+            root,
+            scope,
+            worktree: None,
+            inventory: None,
+            history: None,
+            graph: None,
+            refs: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Branch {
     pub name: String,

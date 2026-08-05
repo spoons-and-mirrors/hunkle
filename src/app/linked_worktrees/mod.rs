@@ -137,6 +137,33 @@ struct RepositoryStatsCompletion {
     stats: Vec<(PathBuf, (u64, u64))>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct CatalogRefreshKey {
+    known: Vec<PathBuf>,
+    candidates: Vec<LinkedWorktreeCandidate>,
+    stats_roots: Vec<PathBuf>,
+    topology_epoch: u64,
+}
+
+#[derive(Clone)]
+struct CatalogRefreshRequest {
+    key: CatalogRefreshKey,
+    prioritized_stats_roots: Vec<PathBuf>,
+}
+
+struct CatalogRefreshFlight {
+    key: CatalogRefreshKey,
+    generation: u64,
+    inventory_pending: bool,
+    stats_pending: bool,
+}
+
+impl CatalogRefreshFlight {
+    fn settled(&self) -> bool {
+        !self.inventory_pending && !self.stats_pending
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct LinkedWorktreeCatalogPoll {
     pub(crate) changed: bool,
@@ -150,6 +177,9 @@ pub(crate) struct LinkedWorktreeCatalog {
     relevant_common_dirs: Vec<PathBuf>,
     store: KnownRepositoryStore,
     generation: u64,
+    topology_epoch: u64,
+    active_refresh: Option<CatalogRefreshFlight>,
+    pending_refresh: Option<CatalogRefreshRequest>,
     sender: Sender<InventoryCompletion>,
     receiver: Receiver<InventoryCompletion>,
     stats_sender: Sender<RepositoryStatsCompletion>,
@@ -170,6 +200,9 @@ impl LinkedWorktreeCatalog {
             relevant_common_dirs: Vec::new(),
             store: KnownRepositoryStore::new(store_path),
             generation: 0,
+            topology_epoch: 0,
+            active_refresh: None,
+            pending_refresh: None,
             sender,
             receiver,
             stats_sender,
@@ -276,11 +309,48 @@ impl LinkedWorktreeCatalog {
     }
 
     pub(crate) fn refresh(&mut self) {
+        let request = self.refresh_request();
+        if let Some(active) = &self.active_refresh {
+            if active.key != request.key || self.pending_refresh.is_some() {
+                self.pending_refresh = Some(request);
+            }
+            return;
+        }
+        self.start_refresh(request);
+    }
+
+    pub(crate) fn refresh_after_topology_change(&mut self) {
+        self.topology_epoch = self.topology_epoch.wrapping_add(1);
+        self.refresh();
+    }
+
+    fn refresh_request(&self) -> CatalogRefreshRequest {
+        let prioritized_stats_roots = recent_git_roots(self.store.recent.clone());
+        let mut stats_roots = prioritized_stats_roots.clone();
+        stats_roots.sort_unstable();
+        CatalogRefreshRequest {
+            key: CatalogRefreshKey {
+                known: self.store.repositories.clone(),
+                candidates: self.candidates.clone(),
+                stats_roots,
+                topology_epoch: self.topology_epoch,
+            },
+            prioritized_stats_roots,
+        }
+    }
+
+    fn start_refresh(&mut self, request: CatalogRefreshRequest) {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
-        let known = self.store.repositories.clone();
-        let recent = self.store.recent.clone();
-        let candidates = self.candidates.clone();
+        let known = request.key.known.clone();
+        let candidates = request.key.candidates.clone();
+        let stats_roots = request.prioritized_stats_roots;
+        self.active_refresh = Some(CatalogRefreshFlight {
+            key: request.key,
+            generation,
+            inventory_pending: true,
+            stats_pending: !stats_roots.is_empty(),
+        });
         let sender = self.sender.clone();
         let stats_sender = self.stats_sender.clone();
         self.snapshot.loading = true;
@@ -360,9 +430,9 @@ impl LinkedWorktreeCatalog {
                 relevant,
             });
         });
-        if !recent.is_empty() {
+        if !stats_roots.is_empty() {
             thread::spawn(move || {
-                let stats = load_repository_stats(recent);
+                let stats = load_repository_stats(stats_roots);
                 let _ = stats_sender.send(RepositoryStatsCompletion { generation, stats });
             });
         }
@@ -371,10 +441,20 @@ impl LinkedWorktreeCatalog {
     pub(crate) fn poll(&mut self) -> LinkedWorktreeCatalogPoll {
         let mut result = LinkedWorktreeCatalogPoll::default();
         while let Ok(completion) = self.receiver.try_recv() {
-            if completion.generation != self.generation {
+            if self
+                .active_refresh
+                .as_ref()
+                .is_none_or(|active| active.generation != completion.generation)
+            {
                 continue;
             }
-            self.snapshot.loading = false;
+            self.active_refresh
+                .as_mut()
+                .expect("matched active catalog refresh")
+                .inventory_pending = false;
+            if self.pending_refresh.is_some() {
+                continue;
+            }
             self.snapshot.repositories = completion.repositories;
             self.relevant_common_dirs = completion.relevant;
             if let Err(error) = self.store.reconcile_and_save(
@@ -387,7 +467,18 @@ impl LinkedWorktreeCatalog {
             result.changed = true;
         }
         while let Ok(completion) = self.stats_receiver.try_recv() {
-            if completion.generation != self.generation {
+            if self
+                .active_refresh
+                .as_ref()
+                .is_none_or(|active| active.generation != completion.generation)
+            {
+                continue;
+            }
+            self.active_refresh
+                .as_mut()
+                .expect("matched active catalog refresh")
+                .stats_pending = false;
+            if self.pending_refresh.is_some() {
                 continue;
             }
             match self.store.update_stats_and_save(&completion.stats) {
@@ -398,6 +489,18 @@ impl LinkedWorktreeCatalog {
                 Err(error) => result.notice = Some(error),
             }
         }
+        if self
+            .active_refresh
+            .as_ref()
+            .is_some_and(CatalogRefreshFlight::settled)
+        {
+            self.active_refresh = None;
+            if let Some(request) = self.pending_refresh.take() {
+                self.start_refresh(request);
+            } else {
+                self.snapshot.loading = false;
+            }
+        }
         if let Ok(completion) = self.worktree_receiver.try_recv() {
             self.creating_worktree = false;
             result.worktree_creation = Some(completion);
@@ -406,10 +509,7 @@ impl LinkedWorktreeCatalog {
     }
 }
 
-fn load_repository_stats(
-    recent: Vec<known_repositories::RecentRepository>,
-) -> Vec<(PathBuf, (u64, u64))> {
-    let roots = recent_git_roots(recent);
+fn load_repository_stats(roots: Vec<PathBuf>) -> Vec<(PathBuf, (u64, u64))> {
     let worker_count = roots.len().min(
         thread::available_parallelism()
             .map(usize::from)

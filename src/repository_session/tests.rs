@@ -257,7 +257,9 @@ fn scopes_external_refreshes_by_branch_identity() {
         .unwrap();
     assert_eq!(
         session.next_worktree_change(Duration::ZERO),
-        Some(RefreshRequest::Started)
+        Some(RefreshRequest::Started(
+            RefreshScope::WORKTREE_AND_INVENTORY
+        ))
     );
     assert_eq!(
         session.active_refresh_scope,
@@ -277,7 +279,7 @@ fn scopes_external_refreshes_by_branch_identity() {
         .unwrap();
     assert_eq!(
         session.next_worktree_change(Duration::ZERO),
-        Some(RefreshRequest::Queued)
+        Some(RefreshRequest::Queued(RefreshScope::ALL))
     );
     assert_eq!(session.queued_refresh, Some(RefreshScope::ALL));
 }
@@ -291,11 +293,11 @@ fn unions_exact_scopes_while_a_refresh_is_active() {
 
     assert_eq!(
         session.request_refresh(RefreshScope::WORKTREE, Duration::ZERO),
-        Some(RefreshRequest::Queued)
+        Some(RefreshRequest::Queued(RefreshScope::WORKTREE))
     );
     assert_eq!(
         session.request_refresh(RefreshScope::HISTORY_AND_REFS, Duration::ZERO),
-        Some(RefreshRequest::Queued)
+        Some(RefreshRequest::Queued(RefreshScope::HISTORY_AND_REFS))
     );
     assert_eq!(
         session.queued_refresh,
@@ -309,7 +311,7 @@ fn drains_queued_scopes_after_a_refresh_completion() {
     begin_fake_refresh(&mut session, RefreshScope::ALL);
     assert_eq!(
         session.request_refresh(RefreshScope::WORKTREE, Duration::ZERO),
-        Some(RefreshRequest::Queued)
+        Some(RefreshRequest::Queued(RefreshScope::WORKTREE))
     );
     send_failed_load(&session, LoadKind::Reload);
 
@@ -317,7 +319,10 @@ fn drains_queued_scopes_after_a_refresh_completion() {
     assert_eq!(completion.kind, LoadKind::Reload);
     assert_eq!(completion.scope, RefreshScope::ALL);
     assert!(completion.result.is_err());
-    assert_eq!(completion.follow_up_refresh, Some(RefreshRequest::Started));
+    assert_eq!(
+        completion.follow_up_refresh,
+        Some(RefreshRequest::Started(RefreshScope::WORKTREE))
+    );
     assert_eq!(session.active_refresh_scope, Some(RefreshScope::WORKTREE));
     assert_eq!(session.queued_refresh, None);
 }
@@ -329,12 +334,15 @@ fn escalates_refresh_recovery_while_the_snapshot_is_not_ready() {
     begin_fake_refresh(&mut session, RefreshScope::ALL);
     assert_eq!(
         session.request_refresh(RefreshScope::WORKTREE, Duration::ZERO),
-        Some(RefreshRequest::Queued)
+        Some(RefreshRequest::Queued(RefreshScope::WORKTREE))
     );
     send_failed_load(&session, LoadKind::Reload);
 
     let completion = session.next_load_completion().unwrap();
-    assert_eq!(completion.follow_up_refresh, Some(RefreshRequest::Started));
+    assert_eq!(
+        completion.follow_up_refresh,
+        Some(RefreshRequest::Started(RefreshScope::ALL))
+    );
     assert_eq!(session.active_refresh_scope, Some(RefreshScope::ALL));
 }
 
@@ -359,7 +367,10 @@ fn successful_open_automatically_starts_initial_hydration() {
 
     let completion = session.next_load_completion().unwrap();
     assert!(completion.result.is_ok());
-    assert_eq!(completion.follow_up_refresh, Some(RefreshRequest::Started));
+    assert_eq!(
+        completion.follow_up_refresh,
+        Some(RefreshRequest::Started(RefreshScope::ALL))
+    );
     assert_eq!(session.data().unwrap().root, Path::new("/opened"));
     assert!(!session.data().unwrap().details_ready);
     assert_eq!(session.active_refresh_scope, Some(RefreshScope::ALL));
@@ -379,7 +390,10 @@ fn failed_open_resumes_hydration_for_the_retained_bootstrap() {
 
     let completion = session.next_load_completion().unwrap();
     assert!(completion.result.is_err());
-    assert_eq!(completion.follow_up_refresh, Some(RefreshRequest::Started));
+    assert_eq!(
+        completion.follow_up_refresh,
+        Some(RefreshRequest::Started(RefreshScope::ALL))
+    );
     assert_eq!(session.data().unwrap().root, Path::new("/active"));
     assert!(!session.data().unwrap().details_ready);
     assert_eq!(session.active_refresh_scope, Some(RefreshScope::ALL));
@@ -443,6 +457,26 @@ fn operation_state_preserves_repository_concurrency_rules() {
     assert!(!checking_status.can_start(Operation::StatusCheck));
 }
 
+#[test]
+fn history_only_success_preserves_status_backoff() {
+    let mut session = session("/active", Some(10));
+    let idle_deadline = Instant::now() + MAX_STATUS_INTERVAL;
+    session.status_interval = MAX_STATUS_INTERVAL;
+    session.next_status_check = idle_deadline;
+    begin_fake_refresh(&mut session, RefreshScope::HISTORY_AND_REFS);
+    send_successful_load(&session, RefreshScope::HISTORY_AND_REFS);
+
+    assert!(session.next_load_completion().unwrap().result.is_ok());
+    assert_eq!(session.status_interval, MAX_STATUS_INTERVAL);
+    assert_eq!(session.next_status_check, idle_deadline);
+
+    begin_fake_refresh(&mut session, RefreshScope::WORKTREE);
+    send_successful_load(&session, RefreshScope::WORKTREE);
+    assert!(session.next_load_completion().unwrap().result.is_ok());
+    assert_eq!(session.status_interval, MIN_STATUS_INTERVAL);
+    assert!(session.next_status_check < idle_deadline);
+}
+
 fn signature(state: u64, branch: u64) -> git::WorktreeSignature {
     git::WorktreeSignature::for_test(state, branch)
 }
@@ -454,7 +488,27 @@ fn status(state: u64, branch: u64) -> git::WorktreeStatus {
 fn begin_fake_refresh(session: &mut RepositorySession, scope: RefreshScope) {
     assert!(session.operations.start(Operation::Load(LoadKind::Reload)));
     session.active_refresh_scope = Some(scope);
-    session.load_generation = 1;
+    session.load_generation = session.load_generation.wrapping_add(1);
+}
+
+fn send_successful_load(session: &RepositorySession, scope: RefreshScope) {
+    session
+        .load_tx
+        .send(LoadResult {
+            generation: session.load_generation,
+            kind: LoadKind::Reload,
+            scope,
+            fetch_interval: Duration::ZERO,
+            result: Ok((
+                LoadPayload::Refresh(git::RepositoryUpdate::for_test(
+                    session.data().unwrap().root.clone(),
+                    scope,
+                )),
+                None,
+                None,
+            )),
+        })
+        .unwrap();
 }
 
 fn send_failed_load(session: &RepositorySession, kind: LoadKind) {
