@@ -27,7 +27,7 @@ pub(super) use crate::media::MediaPreviewProtocol;
 
 pub(super) use super::text::{
     markdown_prefix_style, styled_diff, styled_diff_window, styled_markdown, styled_source,
-    styled_source_window, wrapped_source_line_starts,
+    styled_source_window_from, wrapped_source_line_starts,
 };
 
 mod diff;
@@ -42,6 +42,7 @@ const MAX_CACHED_PREVIEW_LINES: usize = 30_000;
 const MAX_CACHED_PREVIEW_BYTES: usize = 512 * 1024;
 const MARKDOWN_LINE_GUTTER_WIDTH: usize = 7;
 const MIN_NUMBERED_MARKDOWN_WIDTH: usize = 12;
+const SOURCE_LINE_CHECKPOINT_STRIDE: usize = 256;
 
 const KITTY_DELETE_ALL: &str = "\u{1b}_Ga=d,d=A,q=2\u{1b}\\";
 const KITTY_DELETE_PLACEMENTS: &str = "\u{1b}_Ga=d,d=a,q=2\u{1b}\\";
@@ -190,10 +191,49 @@ struct PreviewCache {
     fully_styled: bool,
     window_start: usize,
     display_count: usize,
+    source_lines: Option<SourceLineIndex>,
     wrapped_line_starts: Option<Vec<usize>>,
     wrapped_window: Option<WrappedWindow>,
     unwrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
     wrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
+}
+
+struct SourceLineIndex {
+    count: usize,
+    checkpoints: Vec<usize>,
+}
+
+impl SourceLineIndex {
+    fn new(source: &str) -> Self {
+        let mut checkpoints = Vec::new();
+        let mut count = 0_usize;
+        let mut byte_offset = 0_usize;
+        for line in source.split_inclusive('\n') {
+            if count.is_multiple_of(SOURCE_LINE_CHECKPOINT_STRIDE) {
+                checkpoints.push(byte_offset);
+            }
+            count = count.saturating_add(1);
+            byte_offset = byte_offset.saturating_add(line.len());
+        }
+        Self { count, checkpoints }
+    }
+
+    fn checkpoint(&self, line: usize) -> Option<(usize, usize)> {
+        (line < self.count).then(|| {
+            let checkpoint_line =
+                line / SOURCE_LINE_CHECKPOINT_STRIDE * SOURCE_LINE_CHECKPOINT_STRIDE;
+            let byte_offset = self.checkpoints[line / SOURCE_LINE_CHECKPOINT_STRIDE];
+            (checkpoint_line, byte_offset)
+        })
+    }
+
+    fn line<'a>(&self, source: &'a str, line: usize) -> Option<&'a str> {
+        let (checkpoint_line, byte_offset) = self.checkpoint(line)?;
+        source
+            .get(byte_offset..)?
+            .lines()
+            .nth(line.saturating_sub(checkpoint_line))
+    }
 }
 
 struct WrappedWindow {
@@ -253,7 +293,7 @@ impl PreviewPresentation {
             return Some((1, 0));
         }
         let (display_line, wrapped_row) = self.display_position_at_rendered_row(row)?;
-        let line = content.lines().nth(display_line).unwrap_or_default();
+        let line = self.source_line(content, display_line).unwrap_or_default();
         let column = column.saturating_sub(gutter);
         let source_column = if cache.wrapped_line_starts.is_some() {
             super::text::word_wrapped_column_at(
@@ -266,6 +306,15 @@ impl PreviewPresentation {
             column
         };
         Some((display_line.saturating_add(1), source_column))
+    }
+
+    pub(crate) fn source_line<'a>(&self, content: &'a str, line: usize) -> Option<&'a str> {
+        let cache = self.cache.as_ref()?;
+        if let Some(lines) = &cache.source_lines {
+            lines.line(content, line)
+        } else {
+            content.lines().nth(line)
+        }
     }
 
     pub(crate) fn diff_position_at_rendered_position(
@@ -615,6 +664,9 @@ impl PreviewPresentation {
                 && cache.width == input.width
         });
         if !cache_matches {
+            let source_lines = (!render_markdown
+                && matches!(input.content, PreviewContent::Source(_)))
+            .then(|| SourceLineIndex::new(raw));
             let (display_count, fully_styled, lines) = if render_markdown {
                 let content_width = markdown_content_width(input.width);
                 let lines = numbered_markdown_lines(
@@ -627,7 +679,12 @@ impl PreviewPresentation {
                     PreviewContent::Diff(document) => {
                         document.display_len(input.show_initial_diff_header)
                     }
-                    PreviewContent::Source(source) => source.lines().count(),
+                    PreviewContent::Source(_) => {
+                        source_lines
+                            .as_ref()
+                            .expect("source line index was initialized")
+                            .count
+                    }
                 };
                 let fully_styled = display_count <= MAX_CACHED_PREVIEW_LINES
                     && raw.len() <= MAX_CACHED_PREVIEW_BYTES;
@@ -659,6 +716,7 @@ impl PreviewPresentation {
                 fully_styled,
                 window_start: 0,
                 display_count,
+                source_lines,
                 wrapped_line_starts: None,
                 wrapped_window: None,
                 unwrapped_hunks: None,
@@ -820,6 +878,9 @@ impl PreviewPresentation {
         count: usize,
         viewport_height: usize,
     ) -> Vec<Line<'static>> {
+        if count == 0 {
+            return Vec::new();
+        }
         let cache = self.cache.as_ref().expect("preview cache was initialized");
         if cache.fully_styled {
             return cache
@@ -845,11 +906,20 @@ impl PreviewPresentation {
                     input.show_initial_diff_header,
                 )
             } else {
-                styled_source_window(
-                    input.content.as_str(),
+                let source = input.content.as_str();
+                let Some((checkpoint_line, byte_offset)) = cache
+                    .source_lines
+                    .as_ref()
+                    .and_then(|lines| lines.checkpoint(window_start))
+                else {
+                    return Vec::new();
+                };
+                styled_source_window_from(
+                    &source[byte_offset..],
                     input.path,
                     input.width,
-                    window_start,
+                    checkpoint_line,
+                    window_start.saturating_sub(checkpoint_line),
                     window_count,
                 )
             };

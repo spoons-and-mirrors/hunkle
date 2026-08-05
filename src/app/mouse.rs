@@ -1077,8 +1077,14 @@ impl App {
             let Some(content) = self.changes.preview.text() else {
                 return;
             };
-            let displayed = content.lines().nth(display_line.saturating_sub(1));
-            let next = content.lines().nth(display_line);
+            let displayed = self
+                .changes
+                .preview_presentation
+                .source_line(content, display_line.saturating_sub(1));
+            let next = self
+                .changes
+                .preview_presentation
+                .source_line(content, display_line);
             if displayed.is_some_and(|line| line.starts_with("[Preview truncated"))
                 || displayed.is_some_and(str::is_empty)
                     && next.is_some_and(|line| line.starts_with("[Preview truncated"))
