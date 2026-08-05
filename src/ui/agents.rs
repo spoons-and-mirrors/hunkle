@@ -873,7 +873,7 @@ fn build_request_transcript(
                     .iter()
                     .any(|part| matches!(part, AgentRequestPartPreview::Text(_)))
                 {
-                    summary.insert(1, Line::default());
+                    summary.insert(1, agent_output_transition_line('▄'));
                 }
             }
             summary.push(Line::styled(
@@ -933,6 +933,39 @@ fn styled_agent_text(text: &str, width: usize) -> Vec<Line<'static>> {
         false,
         false,
     )
+}
+
+fn styled_agent_output_text(text: &str, width: usize) -> Vec<Line<'static>> {
+    styled_agent_text(text, width)
+        .into_iter()
+        .map(|line| line.style(Style::default().bg(palette().panel)))
+        .collect()
+}
+
+fn agent_output_background_line() -> Line<'static> {
+    Line::default().style(Style::default().bg(palette().panel))
+}
+
+fn agent_output_transition_line(glyph: char) -> Line<'static> {
+    Line::styled(
+        glyph.to_string(),
+        Style::default().fg(palette().panel).bg(palette().canvas),
+    )
+}
+
+fn agent_output_transition_glyph(line: &Line<'_>) -> Option<char> {
+    let [span] = line.spans.as_slice() else {
+        return None;
+    };
+    match span.content.as_ref() {
+        "▀" => Some('▀'),
+        "▄" => Some('▄'),
+        _ => None,
+    }
+}
+
+fn is_agent_output_row(line: &Line<'_>) -> bool {
+    line.style.bg == Some(palette().panel) && agent_output_transition_glyph(line).is_none()
 }
 
 fn draw_transcript_card(
@@ -1043,9 +1076,32 @@ fn draw_transcript_card(
             cards.width.saturating_sub(3),
             u16::try_from(content_end - content_start).unwrap_or(u16::MAX),
         );
+        let line_start = content_start.saturating_sub(content_offset);
+        for (row, line) in block
+            .lines
+            .iter()
+            .skip(line_start)
+            .take(usize::from(content.height))
+            .enumerate()
+        {
+            if agent_output_transition_glyph(line).is_none()
+                && line.style.bg == Some(palette().panel)
+            {
+                let band = Rect::new(
+                    cards.x,
+                    content
+                        .y
+                        .saturating_add(u16::try_from(row).unwrap_or(u16::MAX)),
+                    cards.width,
+                    1,
+                );
+                frame.render_widget(Clear, band);
+                fill(frame, band, palette().panel);
+            }
+        }
         frame.render_widget(
             Paragraph::new(block.lines.clone())
-                .style(Style::default().fg(palette().soft).bg(background))
+                .style(Style::default().fg(palette().soft))
                 .wrap(Wrap { trim: true })
                 .scroll((
                     u16::try_from(content_start.saturating_sub(content_offset)).unwrap_or(u16::MAX),
@@ -1053,16 +1109,44 @@ fn draw_transcript_card(
                 )),
             content,
         );
+        for (row, line) in block
+            .lines
+            .iter()
+            .skip(line_start)
+            .take(usize::from(content.height))
+            .enumerate()
+        {
+            let Some(glyph) = agent_output_transition_glyph(line) else {
+                continue;
+            };
+            let symbol = glyph.to_string();
+            let y = content
+                .y
+                .saturating_add(u16::try_from(row).unwrap_or(u16::MAX));
+            for x in cards.x..cards.right() {
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                    cell.set_symbol(&symbol)
+                        .set_fg(palette().panel)
+                        .set_bg(background);
+                }
+            }
+        }
     }
     if local_end == block.height {
         let bottom_y = y.saturating_add(
             u16::try_from(local_end.saturating_sub(local_start).saturating_sub(1)).unwrap_or(0),
         );
-        frame.render_widget(
-            Paragraph::new("▀".repeat(usize::from(cards.width)))
-                .style(Style::default().fg(background).bg(palette().panel)),
-            Rect::new(cards.x, bottom_y, cards.width, 1),
-        );
+        let bottom = Rect::new(cards.x, bottom_y, cards.width, 1);
+        if !block.user && block.lines.last().is_some_and(is_agent_output_row) {
+            frame.render_widget(Clear, bottom);
+            fill(frame, bottom, palette().panel);
+        } else {
+            frame.render_widget(
+                Paragraph::new("▀".repeat(usize::from(cards.width)))
+                    .style(Style::default().fg(background).bg(palette().panel)),
+                bottom,
+            );
+        }
     }
     Some(visible)
 }
@@ -1096,18 +1180,31 @@ fn request_content(
                     .get(index - 1)
                     .is_some_and(|part| matches!(part, AgentRequestPartPreview::Activity(_)))
             {
-                lines.push(Line::default());
+                lines.push(agent_output_transition_line('▄'));
                 height += 1;
             }
-            let text_lines = styled_agent_text(text, width);
+            if index == 0
+                || request
+                    .parts
+                    .get(index - 1)
+                    .is_some_and(|part| matches!(part, AgentRequestPartPreview::Activity(_)))
+            {
+                lines.push(agent_output_background_line());
+                height += 1;
+            }
+            let text_lines = styled_agent_output_text(text, width);
             height += text_lines.len().max(1);
             lines.extend(text_lines);
-            if request
+            let followed_by_activity = request
                 .parts
                 .get(index + 1)
-                .is_some_and(|part| matches!(part, AgentRequestPartPreview::Activity(_)))
-            {
-                lines.push(Line::default());
+                .is_some_and(|part| matches!(part, AgentRequestPartPreview::Activity(_)));
+            if followed_by_activity || index + 1 == request.parts.len() {
+                lines.push(agent_output_background_line());
+                height += 1;
+            }
+            if followed_by_activity {
+                lines.push(agent_output_transition_line('▀'));
                 height += 1;
             }
             continue;
@@ -1151,7 +1248,7 @@ fn request_summary(
             AgentRequestPartPreview::Text(text) => Some(text),
             AgentRequestPartPreview::Activity(_) => None,
         })
-        .flat_map(|text| styled_agent_text(text, width))
+        .flat_map(|text| styled_agent_output_text(text, width))
         .collect::<Vec<_>>();
     let tools = request
         .parts
@@ -1177,9 +1274,14 @@ fn request_summary(
         .saturating_add(tools.len().saturating_sub(TOOL_ROWS));
     let visible_text = text.into_iter().take(TEXT_ROWS).collect::<Vec<_>>();
     let visible_tools = tools.into_iter().take(TOOL_ROWS).collect::<Vec<_>>();
-    let mut lines = visible_text;
-    if !lines.is_empty() && !visible_tools.is_empty() {
-        lines.push(Line::default());
+    let mut lines = Vec::new();
+    if !visible_text.is_empty() {
+        lines.push(agent_output_background_line());
+        lines.extend(visible_text);
+        lines.push(agent_output_background_line());
+        if !visible_tools.is_empty() {
+            lines.push(agent_output_transition_line('▀'));
+        }
     }
     lines.extend(visible_tools);
     (lines, reasoning, hidden)
@@ -1792,6 +1894,19 @@ fn status_color(status: AgentStatus) -> Color {
 mod tests {
     use super::*;
 
+    fn request_message(parts: Vec<AgentRequestPartPreview>) -> AgentUserMessage {
+        AgentUserMessage {
+            text: "prompt".to_owned(),
+            requests: vec![AgentRequestPreview {
+                parts,
+                reasoning_active: false,
+                duration_ms: Some(1_000),
+                reasoning_duration_ms: Some(500),
+                tool_call_count: 0,
+            }],
+        }
+    }
+
     #[test]
     fn formats_agent_durations_as_compact_units() {
         assert_eq!(format_duration(Duration::ZERO), "0s");
@@ -1800,5 +1915,31 @@ mod tests {
         assert_eq!(format_duration(Duration::from_secs(18_360)), "5.1h");
         assert_eq!(format_duration(Duration::from_secs(276_480)), "3.2d");
         assert_eq!(format_duration(Duration::from_secs(665_280)), "1.1w");
+    }
+
+    #[test]
+    fn separates_cropped_and_completed_text_output() {
+        let cropped = request_message(vec![
+            AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning),
+            AgentRequestPartPreview::Text("one\ntwo\nthree\nfour\nfive".to_owned()),
+        ]);
+        let (blocks, _) = build_request_transcript(&cropped, 80, false, 0, &[]);
+        let lines = &blocks[0].lines;
+        assert_eq!(agent_output_transition_glyph(&lines[1]), Some('▄'));
+        assert!(is_agent_output_row(&lines[6]));
+        assert!(lines[6].spans.is_empty());
+        assert!(
+            lines[7]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("2 more"))
+        );
+
+        let completed = request_message(vec![
+            AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning),
+            AgentRequestPartPreview::Text("finished".to_owned()),
+        ]);
+        let (blocks, _) = build_request_transcript(&completed, 80, false, 0, &[]);
+        assert!(blocks[0].lines.last().is_some_and(is_agent_output_row));
     }
 }

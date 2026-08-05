@@ -810,7 +810,7 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
             request: 0,
         })
         .unwrap();
-    assert_eq!(request.height, 12);
+    assert_eq!(request.height, 14);
     let request_row = |row: u16| {
         let start = usize::from(row) * 49 + usize::from(request.x.saturating_add(1));
         let end = usize::from(row) * 49 + usize::from(request.right());
@@ -819,8 +819,39 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
             .map(|cell| cell.symbol())
             .collect::<String>()
     };
-    assert!(request_row(request.y + 2).trim().is_empty());
-    assert!(request_row(request.y + 6).trim().is_empty());
+    assert!(request_row(request.y + 2).contains('▄'));
+    assert!(request_row(request.y + 3).trim().is_empty());
+    assert!(request_row(request.y + 7).trim().is_empty());
+    assert!(request_row(request.y + 8).contains('▀'));
+    let buffer = terminal.backend().buffer();
+    for x in request.x..request.right() {
+        assert_eq!(buffer[(x, request.y + 2)].symbol(), "▄");
+        assert_eq!(buffer[(x, request.y + 2)].fg, super::palette().panel);
+        assert_eq!(buffer[(x, request.y + 2)].bg, super::palette().canvas);
+        assert_eq!(buffer[(x, request.y + 3)].bg, super::palette().panel);
+        assert_eq!(buffer[(x, request.y + 7)].bg, super::palette().panel);
+        assert_eq!(buffer[(x, request.y + 8)].symbol(), "▀");
+        assert_eq!(buffer[(x, request.y + 8)].fg, super::palette().panel);
+        assert_eq!(buffer[(x, request.y + 8)].bg, super::palette().canvas);
+    }
+    for x in request.x + 1..request.right() {
+        assert_eq!(buffer[(x, request.y + 1)].bg, super::palette().canvas);
+        assert_eq!(buffer[(x, request.y + 9)].bg, super::palette().canvas);
+    }
+    assert_eq!(buffer[(request.x, request.y + 1)].symbol(), "┃");
+    assert_eq!(buffer[(request.x, request.y + 2)].symbol(), "▄");
+    assert_eq!(
+        buffer[(request.x, request.y + 2)].fg,
+        super::palette().panel
+    );
+    assert_eq!(buffer[(request.x, request.y + 3)].symbol(), " ");
+    assert_eq!(buffer[(request.x, request.y + 7)].symbol(), " ");
+    assert_eq!(buffer[(request.x, request.y + 8)].symbol(), "▀");
+    assert_eq!(
+        buffer[(request.x, request.y + 8)].fg,
+        super::palette().panel
+    );
+    assert_eq!(buffer[(request.x, request.y + 9)].symbol(), "┃");
     let request_bottom =
         usize::from(request.bottom().saturating_sub(1)) * 49 + usize::from(request.x);
     assert_eq!(
