@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -260,6 +261,43 @@ struct ParsedWorkspace {
     repo_key: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SchedulerLaunchRequest {
+    pub(crate) destination: PathBuf,
+    pub(crate) label: String,
+    pub(crate) prompt: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SchedulerLaunchResult {
+    pub(crate) pane_id: Option<String>,
+    pub(crate) agent_started: bool,
+    pub(crate) status: AgentStatus,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SchedulerObserveResult {
+    Observed(AgentStatus, Result<String, String>),
+    Missing(String),
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone)]
+struct SchedulerCommandError {
+    code: Option<String>,
+    message: String,
+}
+
+impl SchedulerCommandError {
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: None,
+            message: message.into(),
+        }
+    }
+}
+
 #[cfg(not(test))]
 pub(super) fn environment() -> Option<Environment> {
     environment_from(
@@ -272,6 +310,379 @@ pub(super) fn environment() -> Option<Environment> {
 
 pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<AgentPane>), String> {
     run(&["api".to_owned(), "snapshot".to_owned()]).and_then(|value| parse_snapshot(&value))
+}
+
+pub(crate) fn scheduler_launch(request: SchedulerLaunchRequest) -> SchedulerLaunchResult {
+    scheduler_launch_with(request, scheduler_run_json)
+}
+
+pub(crate) fn scheduler_observe(pane_id: &str) -> SchedulerObserveResult {
+    scheduler_observe_with(pane_id, scheduler_run_json, scheduler_run_text)
+}
+
+fn scheduler_launch_with(
+    request: SchedulerLaunchRequest,
+    mut runner: impl FnMut(&[OsString]) -> Result<Value, SchedulerCommandError>,
+) -> SchedulerLaunchResult {
+    let mut result = SchedulerLaunchResult {
+        pane_id: None,
+        agent_started: false,
+        status: AgentStatus::Unknown,
+        error: None,
+    };
+    let snapshot = match runner(&["api".into(), "snapshot".into()]) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return scheduler_launch_failure(result, "workspace snapshot", error),
+    };
+    let workspace_id = match scheduler_matching_workspace(&snapshot, &request.destination) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => {
+            result.error = Some(error);
+            return result;
+        }
+    };
+    let label = scheduler_label(&request.label);
+    let destination = request.destination.into_os_string();
+    let created = if let Some(workspace_id) = workspace_id {
+        let args = [
+            "tab".into(),
+            "create".into(),
+            "--workspace".into(),
+            workspace_id.into(),
+            "--cwd".into(),
+            destination,
+            "--label".into(),
+            label.clone().into(),
+            "--no-focus".into(),
+        ];
+        match runner(&args) {
+            Ok(value) => value,
+            Err(error) => return scheduler_launch_failure(result, "tab creation", error),
+        }
+    } else {
+        let args = [
+            "workspace".into(),
+            "create".into(),
+            "--cwd".into(),
+            destination,
+            "--label".into(),
+            label.clone().into(),
+            "--no-focus".into(),
+        ];
+        match runner(&args) {
+            Ok(value) => value,
+            Err(error) => return scheduler_launch_failure(result, "workspace creation", error),
+        }
+    };
+    let pane_id = match created
+        .pointer("/result/root_pane/pane_id")
+        .and_then(Value::as_str)
+    {
+        Some(id) => id.to_owned(),
+        None => {
+            result.error = Some("Herdr did not identify the created pane".to_owned());
+            return result;
+        }
+    };
+    result.pane_id = Some(pane_id.clone());
+    let agent_name = scheduler_agent_name(&request.label);
+    let start_args = [
+        "agent".into(),
+        "start".into(),
+        agent_name.into(),
+        "--kind".into(),
+        "opencode".into(),
+        "--pane".into(),
+        pane_id.clone().into(),
+        "--timeout".into(),
+        "30000".into(),
+    ];
+    let mut shell_retries = 0;
+    let started = loop {
+        match runner(&start_args) {
+            Ok(value) => break value,
+            Err(error)
+                if error.message.contains("is not an available shell") && shell_retries < 50 =>
+            {
+                shell_retries += 1;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return scheduler_launch_failure(result, "agent start", error),
+        }
+    };
+    result.status = match scheduler_agent_status(&started, &pane_id) {
+        Ok(status) => status,
+        Err(error) => {
+            result.error = Some(format!("agent start: {error}"));
+            return result;
+        }
+    };
+    result.agent_started = true;
+
+    // Herdr can report the agent ready just before its input loop accepts prompts.
+    std::thread::sleep(Duration::from_millis(if cfg!(test) { 0 } else { 2_000 }));
+
+    let prompt_args = [
+        "agent".into(),
+        "prompt".into(),
+        pane_id.clone().into(),
+        request.prompt.into(),
+        "--wait".into(),
+        "--until".into(),
+        "working".into(),
+        "--until".into(),
+        "blocked".into(),
+        "--until".into(),
+        "idle".into(),
+        "--until".into(),
+        "done".into(),
+        "--timeout".into(),
+        "10000".into(),
+    ];
+    let prompted = match runner(&prompt_args) {
+        Ok(value) => value,
+        Err(error) if error.message.contains("produced no observed state change") => {
+            // A newly started OpenCode process can miss the first prompt even after Herdr
+            // reports it ready. Retry only when Herdr confirms that nothing changed.
+            std::thread::sleep(Duration::from_millis(if cfg!(test) { 0 } else { 3_000 }));
+            match runner(&prompt_args) {
+                Ok(value) => value,
+                Err(error) => return scheduler_launch_failure(result, "agent prompt", error),
+            }
+        }
+        Err(error) => return scheduler_launch_failure(result, "agent prompt", error),
+    };
+    match scheduler_agent_status(&prompted, &pane_id) {
+        Ok(status) => result.status = status,
+        Err(error) => result.error = Some(format!("agent prompt: {error}")),
+    }
+    result
+}
+
+fn scheduler_launch_failure(
+    mut result: SchedulerLaunchResult,
+    stage: &str,
+    error: SchedulerCommandError,
+) -> SchedulerLaunchResult {
+    result.error = Some(format!("{stage}: {}", error.message));
+    result
+}
+
+fn scheduler_matching_workspace(
+    value: &Value,
+    destination: &Path,
+) -> Result<Option<String>, String> {
+    let snapshot = value
+        .pointer("/result/snapshot")
+        .ok_or_else(|| "workspace snapshot: Herdr returned an invalid snapshot".to_owned())?;
+    let workspaces = snapshot
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "workspace snapshot: Herdr returned no workspaces".to_owned())?;
+    for workspace in workspaces {
+        let Some(workspace_id) = workspace.get("workspace_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let path = workspace
+            .pointer("/worktree/checkout_path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .or_else(|| workspace_path(workspace, snapshot));
+        if path
+            .as_deref()
+            .is_some_and(|path| scheduler_paths_match(path, destination))
+        {
+            return Ok(Some(workspace_id.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+fn scheduler_paths_match(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn scheduler_agent_status(value: &Value, expected_pane_id: &str) -> Result<AgentStatus, String> {
+    let agent = value
+        .pointer("/result/agent")
+        .ok_or_else(|| "Herdr returned no agent".to_owned())?;
+    if agent.get("pane_id").and_then(Value::as_str) != Some(expected_pane_id) {
+        return Err("Herdr returned an agent in an unexpected pane".to_owned());
+    }
+    Ok(parse_agent_status(
+        agent.get("agent_status").and_then(Value::as_str),
+    ))
+}
+
+fn scheduler_label(value: &str) -> String {
+    let mut label = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if label.is_empty() {
+        label = "hunkle-scheduled".to_owned();
+    }
+    label.chars().take(64).collect()
+}
+
+fn scheduler_agent_name(value: &str) -> String {
+    let mut suffix = String::new();
+    for character in value.chars() {
+        let character = if character.is_ascii_alphanumeric() {
+            character.to_ascii_lowercase()
+        } else if character == '-' || character == '_' {
+            character
+        } else {
+            '-'
+        };
+        if suffix.len() == 25 {
+            break;
+        }
+        if character != '-' || !suffix.ends_with('-') {
+            suffix.push(character);
+        }
+    }
+    let suffix = suffix.trim_matches('-');
+    if suffix.is_empty() {
+        "hunkle-scheduled".to_owned()
+    } else {
+        format!("hunkle-{suffix}")
+    }
+}
+
+fn scheduler_observe_with(
+    pane_id: &str,
+    mut json_runner: impl FnMut(&[OsString]) -> Result<Value, SchedulerCommandError>,
+    mut text_runner: impl FnMut(&[OsString]) -> Result<String, SchedulerCommandError>,
+) -> SchedulerObserveResult {
+    let get_args = ["agent".into(), "get".into(), pane_id.into()];
+    let value = match json_runner(&get_args) {
+        Ok(value) => value,
+        Err(error) if error.code.as_deref() == Some("agent_not_found") => {
+            return SchedulerObserveResult::Missing(error.message);
+        }
+        Err(error) => return SchedulerObserveResult::Unavailable(error.message),
+    };
+    let Some(agent) = value.pointer("/result/agent") else {
+        return SchedulerObserveResult::Unavailable("Herdr returned no agent".to_owned());
+    };
+    if agent.get("pane_id").and_then(Value::as_str) != Some(pane_id) {
+        return SchedulerObserveResult::Unavailable(
+            "Herdr returned an agent in an unexpected pane".to_owned(),
+        );
+    }
+    let status = parse_agent_status(agent.get("agent_status").and_then(Value::as_str));
+    let read_args = [
+        "agent".into(),
+        "read".into(),
+        pane_id.into(),
+        "--source".into(),
+        "recent-unwrapped".into(),
+        "--lines".into(),
+        "200".into(),
+        "--format".into(),
+        "text".into(),
+    ];
+    SchedulerObserveResult::Observed(
+        status,
+        text_runner(&read_args).map_err(|error| error.message),
+    )
+}
+
+fn scheduler_run_json(args: &[OsString]) -> Result<Value, SchedulerCommandError> {
+    let output = scheduler_output(args, 4 * 1024 * 1024)?;
+    scheduler_decode_json(&output.stdout, &output.stderr, output.status.success())
+}
+
+fn scheduler_run_text(args: &[OsString]) -> Result<String, SchedulerCommandError> {
+    let output = scheduler_output(args, 256 * 1024)?;
+    if !output.status.success() {
+        return Err(scheduler_decode_error(&output.stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn scheduler_output(
+    args: &[OsString],
+    stdout_limit: usize,
+) -> Result<process::Output, SchedulerCommandError> {
+    let output = process::run(
+        Command::new("herdr").args(args),
+        Limits::new(stdout_limit, 256 * 1024, Duration::from_secs(60)),
+    )
+    .map_err(|error| SchedulerCommandError::unavailable(format!("Herdr unavailable: {error}")))?;
+    if output.timed_out {
+        return Err(SchedulerCommandError::unavailable(
+            "Herdr command timed out",
+        ));
+    }
+    if output.stdout_truncated {
+        return Err(SchedulerCommandError::unavailable(format!(
+            "Herdr returned more than {stdout_limit} bytes"
+        )));
+    }
+    Ok(output)
+}
+
+fn scheduler_decode_json(
+    stdout: &[u8],
+    stderr: &[u8],
+    success: bool,
+) -> Result<Value, SchedulerCommandError> {
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err(if success {
+            SchedulerCommandError::unavailable("Herdr returned an empty response")
+        } else {
+            scheduler_decode_error(stderr)
+        });
+    }
+    let value: Value = serde_json::from_slice(stdout).map_err(|error| {
+        SchedulerCommandError::unavailable(format!("Could not read Herdr response: {error}"))
+    })?;
+    if let Some(error) = value.get("error") {
+        return Err(SchedulerCommandError {
+            code: error.get("code").and_then(Value::as_str).map(str::to_owned),
+            message: error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Herdr command failed")
+                .to_owned(),
+        });
+    }
+    if !success {
+        return Err(SchedulerCommandError::unavailable("Herdr command failed"));
+    }
+    Ok(value)
+}
+
+fn scheduler_decode_error(stderr: &[u8]) -> SchedulerCommandError {
+    if let Ok(value) = serde_json::from_slice::<Value>(stderr)
+        && let Some(error) = value.get("error")
+    {
+        return SchedulerCommandError {
+            code: error.get("code").and_then(Value::as_str).map(str::to_owned),
+            message: error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Herdr command failed")
+                .to_owned(),
+        };
+    }
+    SchedulerCommandError::unavailable(
+        stderr_detail(stderr).unwrap_or_else(|| "Herdr command failed".to_owned()),
+    )
 }
 
 pub(super) fn display_agent(request: DisplayAgentRequest) -> Result<DisplayAgentResult, String> {
@@ -3347,5 +3758,136 @@ mod tests {
             parse_snapshot(&value).unwrap_err(),
             "Herdr snapshot workspace 1 is malformed"
         );
+    }
+
+    #[test]
+    fn scheduler_launches_in_matching_workspace_with_literal_arguments() {
+        fn joined(args: &[OsString]) -> String {
+            args.iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\0")
+        }
+        let destination = PathBuf::from("/tmp/literal path;$(untouched)");
+        let prompt = "Review `literal`; echo $HOME\nwithout a shell".to_owned();
+        let mut calls = Vec::new();
+        let result = scheduler_launch_with(
+            SchedulerLaunchRequest {
+                destination: destination.clone(),
+                label: "  Nightly\nreview  ".to_owned(),
+                prompt: prompt.clone(),
+            },
+            |args| {
+                calls.push(args.to_vec());
+                Ok(match calls.len() {
+                    1 => serde_json::json!({
+                        "result": { "snapshot": {
+                            "workspaces": [{
+                                "workspace_id": "w7",
+                                "worktree": { "checkout_path": destination }
+                            }],
+                            "panes": [],
+                            "layouts": []
+                        }}
+                    }),
+                    2 => serde_json::json!({
+                        "result": {
+                            "type": "tab_created",
+                            "tab": { "tab_id": "w7:t3" },
+                            "root_pane": {
+                                "pane_id": "w7:p9",
+                                "terminal_id": "term_9"
+                            }
+                        }
+                    }),
+                    3 => {
+                        return Err(SchedulerCommandError::unavailable(
+                            "agent target pane w7:p9 is not an available shell",
+                        ));
+                    }
+                    4 | 6 => serde_json::json!({
+                        "result": { "agent": {
+                            "pane_id": "w7:p9",
+                            "agent_status": if calls.len() == 4 { "idle" } else { "working" }
+                        }}
+                    }),
+                    5 => {
+                        return Err(SchedulerCommandError::unavailable(
+                            "agent prompt produced no observed state change within 5000 ms",
+                        ));
+                    }
+                    _ => panic!("unexpected scheduler command"),
+                })
+            },
+        );
+
+        assert_eq!(result.pane_id.as_deref(), Some("w7:p9"));
+        assert!(result.agent_started);
+        assert_eq!(result.status, AgentStatus::Working);
+        assert_eq!(result.error, None);
+        assert_eq!(
+            joined(&calls[1]),
+            "tab\0create\0--workspace\0w7\0--cwd\0/tmp/literal path;$(untouched)\0--label\0Nightly review\0--no-focus"
+        );
+        assert_eq!(
+            joined(&calls[3]),
+            "agent\0start\0hunkle-nightly-review\0--kind\0opencode\0--pane\0w7:p9\0--timeout\030000"
+        );
+        assert_eq!(calls[2], calls[3]);
+        assert_eq!(calls[4], calls[5]);
+        assert_eq!(calls[5][3], OsString::from(prompt));
+        assert_eq!(
+            joined(&calls[5]),
+            "agent\0prompt\0w7:p9\0Review `literal`; echo $HOME\nwithout a shell\0--wait\0--until\0working\0--until\0blocked\0--until\0idle\0--until\0done\0--timeout\010000"
+        );
+    }
+
+    #[test]
+    fn scheduler_observes_status_and_recent_unwrapped_output() {
+        let calls = RefCell::new(Vec::new());
+        let observed = scheduler_observe_with(
+            "w3:p4",
+            |args| {
+                calls.borrow_mut().push(args.to_vec());
+                Ok(serde_json::json!({
+                    "result": { "agent": {
+                        "pane_id": "w3:p4",
+                        "terminal_id": "term_4",
+                        "agent_status": "blocked"
+                    }}
+                }))
+            },
+            |args| {
+                calls.borrow_mut().push(args.to_vec());
+                Ok("line one\nline two\n".to_owned())
+            },
+        );
+
+        let SchedulerObserveResult::Observed(status, output) = observed else {
+            panic!("expected an observation");
+        };
+        assert_eq!(status, AgentStatus::Blocked);
+        assert_eq!(output.unwrap(), "line one\nline two\n");
+        let calls = calls.into_inner();
+        assert_eq!(calls[0], ["agent", "get", "w3:p4"].map(OsString::from));
+        assert_eq!(
+            calls[1][..3],
+            ["agent", "read", "w3:p4"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn scheduler_only_calls_missing_agent_a_clear_loss() {
+        let missing = scheduler_observe_with(
+            "w1:p2",
+            |_| {
+                Err(SchedulerCommandError {
+                    code: Some("agent_not_found".to_owned()),
+                    message: "agent target not found".to_owned(),
+                })
+            },
+            |_| panic!("missing agent must not be read"),
+        );
+        assert!(matches!(missing, SchedulerObserveResult::Missing(_)));
     }
 }

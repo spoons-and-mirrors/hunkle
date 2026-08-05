@@ -296,6 +296,7 @@ pub enum Mode {
     FileEdit,
     Editor,
     Files,
+    Scheduler,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +349,7 @@ pub(crate) enum HitTarget {
     HeaderDiff,
     HeaderIssue,
     HeaderAgent,
+    HeaderSchedule,
     HeaderLocalBuild,
     HeaderFullscreen,
     AgentPanePickerOverlay,
@@ -376,6 +378,7 @@ pub(crate) enum HitTarget {
     Explorer(ExplorerHitTarget),
     FileSearch(FileSearchHitTarget),
     Settings(SettingsHitTarget),
+    Scheduler(SchedulerHitTarget),
     Agent(AgentKey),
     AgentPaneId(String),
     AgentStashToggle,
@@ -417,6 +420,27 @@ pub(crate) enum SettingsHitTarget {
     ClearAgentTimings,
     MediaPreview,
     Editor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchedulerHitTarget {
+    Overlay,
+    Close,
+    Back,
+    New,
+    Save,
+    Cancel,
+    Task(i64),
+    Run(i64),
+    Field(SchedulerField),
+    PromptExpand,
+    DestinationCard(SchedulerDestinationCard),
+    DestinationPickerOverlay,
+    Destination(usize),
+    Toggle,
+    RunNow,
+    Delete,
+    Refresh,
 }
 
 impl SettingsHitTarget {
@@ -559,6 +583,11 @@ pub(crate) enum ScrollTarget {
     WorkspaceExplorerSurroundings,
     CommandOutput,
     SettingsShortcuts,
+    SchedulerTasks,
+    SchedulerRuns,
+    SchedulerOutput,
+    SchedulerPrompt,
+    SchedulerDestinations,
     Commit,
     Worktree,
     Explorer,
@@ -669,6 +698,14 @@ impl Regions {
 
     pub(crate) fn register_scroll_target(&mut self, target: ScrollTarget, rect: Rect) {
         self.scroll_regions.push(ScrollRegion { target, rect });
+    }
+
+    pub(crate) fn scroll_target_rect(&self, target: ScrollTarget) -> Option<Rect> {
+        self.scroll_regions
+            .iter()
+            .rev()
+            .find(|region| region.target == target)
+            .map(|region| region.rect)
     }
 
     pub(crate) fn capture_scroll_target(&mut self, target: ScrollTarget) {

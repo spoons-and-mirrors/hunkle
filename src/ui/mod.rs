@@ -1,6 +1,8 @@
 mod agents;
 mod changes;
+mod header_card;
 mod history;
+mod location_picker;
 mod overlays;
 pub(crate) mod preview;
 mod sqlite;
@@ -38,10 +40,53 @@ use editor::draw_file_editor;
 use editor::{selected_display_range, wrapped_editor_cursor};
 mod header;
 use header::*;
+use header_card::*;
+use location_picker::*;
 
 fn palette() -> &'static Palette {
     static THEME: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
     THEME.get_or_init(|| load_theme().palette)
+}
+
+fn text_input_lines(input: &TextInput, active: bool, inactive: Color) -> Vec<Line<'static>> {
+    let selection = active.then(|| input.selection()).flatten();
+    let mut line_start = 0;
+    input
+        .text()
+        .split('\n')
+        .map(|line| {
+            if !active {
+                line_start += line.len() + 1;
+                return Line::styled(line.to_owned(), Style::default().fg(inactive));
+            }
+            let mut spans = line
+                .char_indices()
+                .map(|(offset, character)| {
+                    let index = line_start + offset;
+                    let style = if input.cursor_visible() && input.cursor() == index {
+                        Style::default().fg(palette().canvas).bg(palette().accent)
+                    } else if selection.is_some_and(|(start, end)| start <= index && index < end) {
+                        Style::default().fg(palette().ink).bg(palette().selected)
+                    } else {
+                        Style::default().fg(palette().ink)
+                    };
+                    Span::styled(character.to_string(), style)
+                })
+                .collect::<Vec<_>>();
+            if input.cursor() == line_start + line.len() {
+                spans.push(Span::styled(
+                    " ",
+                    if input.cursor_visible() {
+                        Style::default().bg(palette().accent)
+                    } else {
+                        Style::default()
+                    },
+                ));
+            }
+            line_start += line.len() + 1;
+            Line::from(spans)
+        })
+        .collect()
 }
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
@@ -112,6 +157,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             | Mode::Editor
             | Mode::Files
             | Mode::Help
+            | Mode::Scheduler
     ) {
         app.regions.capture_scroll_boundary();
     }
@@ -252,6 +298,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::Help => {
             dim(frame);
             overlays::draw_help(frame, &app.settings.shortcuts, app.herdr_available());
+        }
+        Mode::Scheduler => {
+            dim(frame);
+            let regions = overlays::draw_scheduler(frame, app, profile);
+            for (target, rect) in regions.targets {
+                app.regions.register_hit_target(target, rect);
+            }
+            for (target, rect) in regions.scrolls {
+                app.regions.register_scroll_target(target, rect);
+            }
         }
         Mode::Normal | Mode::Commit => {}
     }

@@ -15,6 +15,7 @@ mod herdr_session;
 mod issues;
 mod linked_worktrees;
 mod mouse;
+mod scheduler;
 mod settings;
 mod shortcuts;
 mod text_input;
@@ -32,13 +33,14 @@ pub(crate) use file_search::{FileSearch, FileSearchRow, SearchDestination, Searc
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use graph_search::GraphSearch;
 pub(crate) use header_picker::{
-    BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem, HeaderPickerKind,
+    BranchPickerStep, CloneField, HeaderPicker, HeaderPickerItem, HeaderPickerKind, PickerState,
     RepositoryPickerStep, WorktreePickerStep,
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
     AgentActivityPreview, AgentEntryState, AgentKey, AgentRequestPartPreview, AgentRequestPreview,
-    AgentStatus, AgentUserMessage, HerdrPaneLayout, HerdrSession,
+    AgentStatus, AgentUserMessage, HerdrPaneLayout, HerdrSession, ScheduledRun, ScheduledRunStatus,
+    ScheduledTask, ScheduledTaskEdit,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -46,6 +48,12 @@ pub(crate) use issues::{IssueCatalog, IssueScope};
 pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
     LinkedWorktreeObservation, RepositoryPickerItem,
+};
+#[cfg(test)]
+pub(crate) use scheduler::SchedulerDestination;
+pub(crate) use scheduler::{
+    ScheduledTaskComposer, SchedulerDestinationCard, SchedulerField, SchedulerState,
+    SchedulerSurface,
 };
 pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use settings::{SettingsStore, valid_opencode_model};
@@ -147,6 +155,7 @@ pub struct App {
     pub(crate) header_picker: HeaderPicker,
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) herdr: HerdrSession,
+    pub(crate) scheduler: SchedulerState,
     pub(crate) agents_visible: bool,
     agent_preview_selection: Option<AgentKey>,
     agent_preview_transcript_scroll: Option<AgentPreviewTranscriptScroll>,
@@ -309,6 +318,7 @@ impl App {
             header_picker: HeaderPicker::default(),
             linked_worktrees,
             herdr,
+            scheduler: SchedulerState::default(),
             agents_visible: true,
             agent_preview_selection: None,
             agent_preview_transcript_scroll: None,
@@ -680,6 +690,14 @@ impl App {
             self.should_quit = true;
             return;
         }
+        if self.mode == Mode::Normal
+            && self.herdr_available()
+            && key.code == KeyCode::F(4)
+            && key.modifiers.is_empty()
+        {
+            self.open_scheduler();
+            return;
+        }
         if self.mode == Mode::Normal && self.view() == View::RepositorySearch {
             self.handle_file_search(key);
             return;
@@ -729,6 +747,7 @@ impl App {
             Mode::FileEdit => unreachable!("file editor keys are handled first"),
             Mode::Editor => self.handle_editor(key),
             Mode::Files => self.handle_file_dialog(key),
+            Mode::Scheduler => self.handle_scheduler(key),
             Mode::Help => {
                 if key.code == KeyCode::Esc
                     || self
@@ -822,6 +841,7 @@ impl App {
                     self.opencode_error = None;
                 }
             }
+            Mode::Scheduler => self.paste_scheduler(text),
             Mode::Files => {
                 if let Some(dialog) = &mut self.file_dialog
                     && matches!(dialog.kind, FileDialogKind::Name { .. })
@@ -855,6 +875,9 @@ impl App {
                 self.herdr.poll()
             };
             changed |= herdr_poll.changed;
+            if herdr_poll.changed {
+                self.sync_scheduler_selection();
+            }
             if let Some(error) = herdr_poll.notice {
                 self.notice = Some(error);
             }
@@ -899,6 +922,7 @@ impl App {
             changed = true;
         }
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        changed |= self.poll_scheduler_inputs();
         changed |= self
             .file_search
             .query

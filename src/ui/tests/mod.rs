@@ -15,8 +15,8 @@ pub(super) use crate::app::{
     AgentActivityPreview, AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator,
     ExplorerHitTarget, FOOTER_MARQUEE_PAUSE, FOOTER_MARQUEE_STEP, GraphColumn, GraphHitTarget,
     HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget,
-    LeftPane, Mode, ScrollTarget, Settings, SettingsHitTarget, SettingsPage, SettingsStore,
-    ShortcutAction, SqliteFocus, StashedAgent, View,
+    LeftPane, Mode, SchedulerHitTarget, ScrollTarget, Settings, SettingsHitTarget, SettingsPage,
+    SettingsStore, ShortcutAction, SqliteFocus, StashedAgent, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
@@ -30,6 +30,7 @@ mod editor;
 mod files;
 mod header;
 mod media;
+mod scheduler;
 mod sqlite;
 
 fn assert_black_underlay(terminal: &Terminal<TestBackend>) {

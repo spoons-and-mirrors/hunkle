@@ -99,6 +99,14 @@ impl TextInput {
         self.cursor_visible
     }
 
+    pub(crate) fn visual_cursor_row(&self, width: usize) -> usize {
+        visual_position(&self.text, self.cursor, width).0
+    }
+
+    pub(crate) fn visual_height(&self, width: usize) -> usize {
+        visual_position(&self.text, self.text.len(), width).0 + 1
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.text.is_empty()
     }

@@ -174,6 +174,10 @@ impl LinkedWorktreeCatalog {
         self.snapshot.repository(common_dir)
     }
 
+    pub(crate) fn snapshot(&self) -> &LinkedWorktreeCatalogSnapshot {
+        &self.snapshot
+    }
+
     pub(crate) fn worktree_name(&self, path: &Path) -> Option<String> {
         self.snapshot.worktree_name(path)
     }

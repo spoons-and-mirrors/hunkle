@@ -3,10 +3,93 @@ use crate::git::{self, Branch, LinkedWorktree};
 use super::{TextInput, linked_worktrees::RepositoryPickerItem};
 
 use std::{
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
 };
+
+#[derive(Debug, Default)]
+pub(crate) struct PickerState {
+    pub(crate) query: TextInput,
+    pub(crate) selected: usize,
+    item_count: usize,
+    scroll: usize,
+    viewport_rows: usize,
+    scroll_follows_selection: bool,
+}
+
+impl PickerState {
+    pub(crate) fn reset_items(&mut self, item_count: usize, selected: usize) {
+        self.item_count = item_count;
+        self.selected = selected.min(item_count.saturating_sub(1));
+        self.scroll = 0;
+        self.scroll_follows_selection = true;
+        self.ensure_selection_visible();
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: isize) {
+        if self.item_count == 0 {
+            return;
+        }
+        self.selected = self
+            .selected
+            .saturating_add_signed(delta)
+            .min(self.item_count - 1);
+        self.scroll_follows_selection = true;
+        self.ensure_selection_visible();
+    }
+
+    pub(crate) fn move_selection_page(&mut self, direction: isize) {
+        self.move_selection(
+            direction.saturating_mul(self.viewport_rows.saturating_sub(1).max(1) as isize),
+        );
+    }
+
+    pub(crate) fn scroll_by(&mut self, delta: isize) {
+        self.scroll_follows_selection = false;
+        self.scroll = self
+            .scroll
+            .saturating_add_signed(delta)
+            .min(self.maximum_scroll());
+    }
+
+    pub(crate) fn scroll_to(&mut self, row: usize) {
+        self.scroll_follows_selection = false;
+        self.scroll = row.min(self.maximum_scroll());
+    }
+
+    pub(crate) fn set_viewport_rows(&mut self, rows: usize) {
+        self.viewport_rows = rows;
+        self.scroll = self.scroll.min(self.maximum_scroll());
+        if self.scroll_follows_selection {
+            self.ensure_selection_visible();
+        }
+    }
+
+    pub(crate) fn visible_start(&self) -> usize {
+        self.scroll
+    }
+
+    fn maximum_scroll(&self) -> usize {
+        self.item_count.saturating_sub(self.viewport_rows)
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        if self.viewport_rows == 0 {
+            return;
+        }
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll.saturating_add(self.viewport_rows) {
+            self.scroll = self
+                .selected
+                .saturating_add(1)
+                .saturating_sub(self.viewport_rows);
+        }
+        self.scroll = self.scroll.min(self.maximum_scroll());
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeaderPickerKind {
@@ -97,12 +180,8 @@ pub(crate) struct HeaderPicker {
     searchable_items: Vec<String>,
     default_selected: usize,
     searchable: bool,
-    pub(crate) selected: usize,
-    scroll: usize,
-    viewport_rows: usize,
-    scroll_follows_selection: bool,
+    picker: PickerState,
     pub(crate) message: Option<String>,
-    pub(crate) query: TextInput,
     pub(crate) branch_step: BranchPickerStep,
     pub(crate) branch_base: Option<Branch>,
     pub(crate) branch_name: TextInput,
@@ -118,6 +197,20 @@ pub(crate) struct HeaderPicker {
     worktree_rx: Option<Receiver<Result<PathBuf, String>>>,
     worktree_delete_rx: Option<Receiver<Result<PathBuf, String>>>,
     change_details_rx: Option<Receiver<ChangeDetailsCompletion>>,
+}
+
+impl Deref for HeaderPicker {
+    type Target = PickerState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.picker
+    }
+}
+
+impl DerefMut for HeaderPicker {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.picker
+    }
 }
 
 impl HeaderPicker {
@@ -183,10 +276,7 @@ impl HeaderPicker {
     fn set_items(&mut self, items: Vec<HeaderPickerItem>, selected: usize) {
         self.default_selected = selected.min(items.len().saturating_sub(1));
         self.searchable = true;
-        self.selected = self.default_selected;
-        self.scroll = 0;
-        self.viewport_rows = 0;
-        self.scroll_follows_selection = true;
+        self.picker.reset_items(items.len(), self.default_selected);
         self.searchable_items = items
             .iter()
             .map(HeaderPickerItem::normalized_search_text)
@@ -201,10 +291,7 @@ impl HeaderPicker {
         self.searchable_items.clear();
         self.default_selected = 0;
         self.searchable = false;
-        self.selected = 0;
-        self.scroll = 0;
-        self.viewport_rows = 0;
-        self.scroll_follows_selection = true;
+        self.picker.reset_items(0, 0);
     }
 
     fn reset_transient_state(&mut self) {
@@ -615,12 +702,8 @@ impl HeaderPicker {
             .collect::<Vec<_>>();
         if terms.is_empty() {
             self.items.clone_from(&self.all_items);
-            self.selected = self
-                .default_selected
-                .min(self.items.len().saturating_sub(1));
-            self.scroll = 0;
-            self.scroll_follows_selection = true;
-            self.ensure_selection_visible();
+            self.picker
+                .reset_items(self.items.len(), self.default_selected);
             return;
         }
         self.items = self
@@ -631,70 +714,7 @@ impl HeaderPicker {
             .map(|(item, _)| item)
             .cloned()
             .collect();
-        self.selected = 0;
-        self.scroll = 0;
-        self.scroll_follows_selection = true;
-    }
-
-    pub(crate) fn move_selection(&mut self, delta: isize) {
-        if self.items.is_empty() {
-            return;
-        }
-        self.selected = self
-            .selected
-            .saturating_add_signed(delta)
-            .min(self.items.len() - 1);
-        self.scroll_follows_selection = true;
-        self.ensure_selection_visible();
-    }
-
-    pub(crate) fn move_selection_page(&mut self, direction: isize) {
-        let page = self.viewport_rows.saturating_sub(1).max(1);
-        self.move_selection(direction.saturating_mul(page as isize));
-    }
-
-    pub(crate) fn scroll_by(&mut self, delta: isize) {
-        self.scroll_follows_selection = false;
-        self.scroll = self
-            .scroll
-            .saturating_add_signed(delta)
-            .min(self.maximum_scroll());
-    }
-
-    pub(crate) fn scroll_to(&mut self, row: usize) {
-        self.scroll_follows_selection = false;
-        self.scroll = row.min(self.maximum_scroll());
-    }
-
-    pub(crate) fn set_viewport_rows(&mut self, rows: usize) {
-        self.viewport_rows = rows;
-        self.scroll = self.scroll.min(self.maximum_scroll());
-        if self.scroll_follows_selection {
-            self.ensure_selection_visible();
-        }
-    }
-
-    pub(crate) fn visible_start(&self) -> usize {
-        self.scroll
-    }
-
-    fn maximum_scroll(&self) -> usize {
-        self.items.len().saturating_sub(self.viewport_rows)
-    }
-
-    fn ensure_selection_visible(&mut self) {
-        if self.viewport_rows == 0 {
-            return;
-        }
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if self.selected >= self.scroll.saturating_add(self.viewport_rows) {
-            self.scroll = self
-                .selected
-                .saturating_add(1)
-                .saturating_sub(self.viewport_rows);
-        }
-        self.scroll = self.scroll.min(self.maximum_scroll());
+        self.picker.reset_items(self.items.len(), 0);
     }
 }
 

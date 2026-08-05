@@ -16,6 +16,28 @@ const AGENT_PREVIEW_SWIPE_THRESHOLD: u16 = 4;
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.mode == Mode::Scheduler {
+            let point = Position::new(mouse.column, mouse.row);
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(HitTarget::Scheduler(target)) = self.regions.hit_target_at(point) {
+                        self.activate_scheduler_target(target);
+                    }
+                }
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    if let Some(target) = self.regions.scroll_target_at(point) {
+                        let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                            -1
+                        } else {
+                            1
+                        };
+                        self.scroll_scheduler(target, delta);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.handle_mobile_scroll_gesture(mouse) {
             return;
         }
@@ -146,6 +168,10 @@ impl App {
                 }
                 Some(HitTarget::HeaderAgent) => {
                     self.start_header_agent();
+                    return;
+                }
+                Some(HitTarget::HeaderSchedule) => {
+                    self.open_scheduler();
                     return;
                 }
                 Some(HitTarget::HeaderLocalBuild) => {
@@ -603,6 +629,11 @@ impl App {
                     self.handle_shortcut_settings(KeyEvent::new(key, KeyModifiers::NONE));
                 }
             }
+            ScrollTarget::SchedulerTasks
+            | ScrollTarget::SchedulerRuns
+            | ScrollTarget::SchedulerOutput
+            | ScrollTarget::SchedulerPrompt
+            | ScrollTarget::SchedulerDestinations => self.scroll_scheduler(target, delta),
             ScrollTarget::Commit => self.scroll_commit(delta, wheel),
             ScrollTarget::Worktree => self.scroll_worktree(wheel_amount(delta)),
             ScrollTarget::Explorer => self.scroll_explorer(wheel_amount(delta)),
@@ -836,6 +867,11 @@ impl App {
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
+            Mode::Scheduler => {
+                if let Some(HitTarget::Scheduler(target)) = self.regions.hit_target_at(point) {
+                    self.activate_scheduler_target(target);
+                }
+            }
             Mode::Normal if self.view() == View::RepositorySearch => {
                 let global_navigation = [
                     self.regions.graph,

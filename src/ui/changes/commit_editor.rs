@@ -66,7 +66,7 @@ pub(super) fn draw_commit_editor(
             1,
         )
     } else if commit_active || !app.commit_input.is_empty() {
-        let lines = commit_input_lines(&app.commit_input, commit_active);
+        let lines = text_input_lines(&app.commit_input, commit_active, palette().muted);
         let height = rendered_text_height(&lines, usize::from(commit_content.width), true);
         (Text::from(lines), height)
     } else {
@@ -120,48 +120,6 @@ pub(super) fn draw_commit_editor(
             .style(Style::default().bg(palette().canvas)),
         commit_content,
     );
-}
-
-pub(super) fn commit_input_lines(input: &TextInput, active: bool) -> Vec<Line<'static>> {
-    let selection = active.then(|| input.selection()).flatten();
-    let mut line_start = 0;
-    input
-        .text()
-        .split('\n')
-        .map(|line| {
-            if !active {
-                line_start += line.len() + 1;
-                return Line::styled(line.to_owned(), Style::default().fg(palette().muted));
-            }
-
-            let mut spans = Vec::new();
-            for (offset, character) in line.char_indices() {
-                let index = line_start + offset;
-                let selected = selection.is_some_and(|(start, end)| start <= index && index < end);
-                let cursor = input.cursor_visible() && input.cursor() == index;
-                let style = if cursor {
-                    Style::default().fg(palette().canvas).bg(palette().accent)
-                } else if selected {
-                    Style::default().fg(palette().ink).bg(palette().selected)
-                } else {
-                    Style::default().fg(palette().ink)
-                };
-                spans.push(Span::styled(character.to_string(), style));
-            }
-            if input.cursor() == line_start + line.len() {
-                spans.push(Span::styled(
-                    " ",
-                    if input.cursor_visible() {
-                        Style::default().bg(palette().accent)
-                    } else {
-                        Style::default()
-                    },
-                ));
-            }
-            line_start += line.len() + 1;
-            Line::from(spans)
-        })
-        .collect()
 }
 
 pub(super) fn commit_cursor_row(input: &TextInput, width: usize) -> usize {

@@ -21,6 +21,7 @@ use crate::git;
 
 mod client;
 mod latest_message;
+mod scheduler;
 mod stash;
 mod timings;
 
@@ -29,6 +30,7 @@ pub(crate) use stash::StashedAgent;
 pub(crate) use client::HerdrPaneLayout;
 #[cfg(test)]
 pub(crate) use client::HerdrPaneRect;
+pub(crate) use scheduler::{ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskEdit};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const AGENT_CHANGE_STATS_INTERVAL: Duration = Duration::from_secs(5);
@@ -392,6 +394,8 @@ pub(crate) struct HerdrSession {
     agent_stash_running: bool,
     pending_agent_stash: Option<PendingAgentStash>,
     stashed_pane_ids: HashSet<String>,
+    scheduler: Option<scheduler::SchedulerService>,
+    scheduler_error: Option<String>,
 }
 
 impl HerdrSession {
@@ -418,6 +422,12 @@ impl HerdrSession {
                 session.agent_layouts_path = Some(path);
             }
             session.start_event_listener();
+            match scheduler::SchedulerService::open(
+                config_dir.map(|path| path.join("scheduler.sqlite3")),
+            ) {
+                Ok(scheduler) => session.scheduler = Some(scheduler),
+                Err(error) => session.scheduler_error = Some(error),
+            }
         }
         session
     }
@@ -469,6 +479,8 @@ impl HerdrSession {
             agent_stash_running: false,
             pending_agent_stash: None,
             stashed_pane_ids: HashSet::new(),
+            scheduler: None,
+            scheduler_error: None,
         }
     }
 
@@ -476,7 +488,48 @@ impl HerdrSession {
         self.enabled
     }
 
+    pub(crate) fn scheduled_tasks(&self) -> &[ScheduledTask] {
+        self.scheduler
+            .as_ref()
+            .map_or(&[], |scheduler| scheduler.tasks.as_slice())
+    }
+
+    pub(crate) fn scheduled_runs(&self) -> &[ScheduledRun] {
+        self.scheduler
+            .as_ref()
+            .map_or(&[], |scheduler| scheduler.runs.as_slice())
+    }
+
+    pub(crate) fn save_scheduled_task(&self, edit: ScheduledTaskEdit) -> Result<(), String> {
+        self.scheduler_service()?.save_task(edit)
+    }
+
+    pub(crate) fn toggle_scheduled_task(&self, id: i64, enabled: bool) -> Result<(), String> {
+        self.scheduler_service()?.toggle_task(id, enabled)
+    }
+
+    pub(crate) fn delete_scheduled_task(&self, id: i64) -> Result<(), String> {
+        self.scheduler_service()?.delete_task(id)
+    }
+
+    pub(crate) fn run_scheduled_task_now(&self, id: i64) -> Result<(), String> {
+        self.scheduler_service()?.run_now(id)
+    }
+
+    pub(crate) fn refresh_scheduled_run(&self, id: i64) -> Result<(), String> {
+        self.scheduler_service()?.refresh_run(id)
+    }
+
+    fn scheduler_service(&self) -> Result<&scheduler::SchedulerService, String> {
+        self.scheduler
+            .as_ref()
+            .ok_or_else(|| "scheduler is unavailable".to_owned())
+    }
+
     pub(crate) fn shutdown(&mut self) {
+        if let Some(scheduler) = self.scheduler.as_mut() {
+            scheduler.shutdown();
+        }
         if let Some(persistence) = self.agent_timing_persistence.as_mut() {
             persistence.shutdown();
         }
@@ -501,6 +554,15 @@ impl HerdrSession {
             return HerdrSessionPoll::default();
         }
         let mut poll = HerdrSessionPoll::default();
+        if let Some(scheduler) = self.scheduler.as_mut() {
+            poll.changed |= scheduler.poll_completions();
+            if let Some(error) = scheduler.take_error() {
+                poll.notice = Some(format!("Scheduler: {error}"));
+            }
+        }
+        if let Some(error) = self.scheduler_error.take() {
+            poll.notice = Some(format!("Could not open scheduler: {error}"));
+        }
         if let Some(notice) = self.agent_timing_persistence_notice.take() {
             poll.notice = Some(notice);
         }

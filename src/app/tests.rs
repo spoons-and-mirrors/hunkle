@@ -1,5 +1,7 @@
 use std::{process::Command, thread};
 
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
 use crate::media::MediaPreviewProtocol;
 
 use super::*;
@@ -867,6 +869,126 @@ fn function_keys_select_changes_files_and_agents() {
     app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
     assert_eq!(app.changes.pane, LeftPane::Worktree);
     assert!(!app.agents_pane_visible());
+}
+
+#[test]
+fn scheduler_f4_is_herdr_gated_and_toggles_the_modal() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+
+    app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+
+    enable_herdr(&mut app);
+    app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Scheduler);
+    app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
+fn scheduler_composer_uses_text_input_and_narrow_back_returns_to_tasks() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.layout_profile = LayoutProfile::Single;
+    app.open_scheduler();
+    app.begin_scheduled_task();
+
+    app.handle_paste("Nightly review\nignored");
+    assert_eq!(
+        app.scheduler.composer.as_ref().unwrap().title.text(),
+        "Nightly reviewignored"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_paste("Check open changes");
+    assert_eq!(
+        app.scheduler.composer.as_ref().unwrap().description.text(),
+        "Check open changes"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_paste("Review the diff\nand summarize it");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let composer = app.scheduler.composer.as_ref().unwrap();
+    assert_eq!(
+        composer.prompt.text(),
+        "Review the diff\nand summarize it\n"
+    );
+    assert!(!composer.prompt_expanded);
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    assert!(app.scheduler.composer.as_ref().unwrap().prompt_expanded);
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.scheduler.composer.as_ref().unwrap().schedule.text(),
+        "15"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(
+        app.scheduler.composer.as_ref().unwrap().schedule.text(),
+        "15"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.scheduler.composer.as_ref().unwrap().prompt_expanded);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.scheduler.composer.is_none());
+    assert_eq!(app.scheduler.surface, SchedulerSurface::Tasks);
+    assert_eq!(app.mode, Mode::Scheduler);
+}
+
+#[test]
+fn scheduler_prompt_follows_the_cursor_and_accepts_wheel_scrolling() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.open_scheduler();
+    app.begin_scheduled_task();
+    let prompt = (0..30)
+        .map(|line| format!("prompt line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let composer = app.scheduler.composer.as_mut().unwrap();
+    composer.field = SchedulerField::Prompt;
+    composer.prompt.set(prompt);
+    app.regions.register_hit_target(
+        HitTarget::Scheduler(SchedulerHitTarget::Field(SchedulerField::Prompt)),
+        Rect::new(0, 0, 40, 5),
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    let cursor_scroll = app.scheduler.composer.as_ref().unwrap().prompt_scroll;
+    assert!(cursor_scroll > 0);
+    app.scroll_scheduler(ScrollTarget::SchedulerPrompt, -1);
+    assert!(app.scheduler.composer.as_ref().unwrap().prompt_scroll < cursor_scroll);
+}
+
+#[test]
+fn scheduler_modal_pointer_target_intercepts_underlying_header() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.open_scheduler();
+    let rect = Rect::new(2, 2, 8, 1);
+    app.regions
+        .register_hit_target(HitTarget::HeaderRepository, rect);
+    app.regions
+        .register_hit_target(HitTarget::Scheduler(SchedulerHitTarget::Overlay), rect);
+
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row: 2,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert_eq!(app.mode, Mode::Scheduler);
+    assert!(!app.header_picker.is_open());
 }
 
 #[test]

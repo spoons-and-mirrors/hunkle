@@ -22,7 +22,7 @@ pub(super) use super::{
     agents, fill, palette,
     preview::{PreparedPreview, PreviewInput, take_inline_transmission, take_kitty_transmission},
     text::word_wrapped_height,
-    truncate_width,
+    text_input_lines, truncate_width,
 };
 
 mod commit_editor;

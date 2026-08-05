@@ -669,7 +669,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
 
     let mut app = App::new(root.to_path_buf());
     enable_herdr(&mut app);
-    let mut terminal = Terminal::new(TestBackend::new(107, 30)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(121, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let repository = app
