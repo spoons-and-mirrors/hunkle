@@ -952,10 +952,37 @@ fn styled_agent_text(text: &str, width: usize) -> Vec<Line<'static>> {
 }
 
 fn styled_agent_output_text(text: &str, width: usize) -> Vec<Line<'static>> {
-    styled_agent_text(text, width)
-        .into_iter()
-        .map(|line| line.style(Style::default().bg(palette().panel)))
-        .collect()
+    let mut output = Vec::new();
+    let mut code_block = false;
+    for mut line in styled_agent_text(text, width) {
+        let code_row = line.style.bg == Some(palette().surface_alt);
+        if code_row && !code_block {
+            output.push(agent_code_border('▄', width));
+        } else if !code_row && code_block {
+            output.push(agent_code_border('▀', width));
+        }
+        if code_row {
+            line.style = Style::default().bg(palette().raised);
+            for span in &mut line.spans {
+                span.style = span.style.bg(palette().raised);
+            }
+        } else {
+            line.style = Style::default().bg(palette().panel);
+        }
+        output.push(line);
+        code_block = code_row;
+    }
+    if code_block {
+        output.push(agent_code_border('▀', width));
+    }
+    output
+}
+
+fn agent_code_border(glyph: char, width: usize) -> Line<'static> {
+    Line::styled(
+        glyph.to_string().repeat(width.max(1)),
+        Style::default().fg(palette().raised).bg(palette().panel),
+    )
 }
 
 fn agent_output_background_line() -> Line<'static> {
@@ -1101,18 +1128,27 @@ fn draw_transcript_card(
             .enumerate()
         {
             if agent_output_transition_glyph(line).is_none()
-                && line.style.bg == Some(palette().panel)
+                && matches!(line.style.bg, Some(background) if background == palette().panel || background == palette().raised)
             {
+                let code_row = line.style.bg == Some(palette().raised);
                 let band = Rect::new(
-                    cards.x,
+                    if code_row { content.x } else { cards.x },
                     content
                         .y
                         .saturating_add(u16::try_from(row).unwrap_or(u16::MAX)),
-                    cards.width,
+                    if code_row { content.width } else { cards.width },
                     1,
                 );
                 frame.render_widget(Clear, band);
-                fill(frame, band, palette().panel);
+                fill(
+                    frame,
+                    band,
+                    if code_row {
+                        palette().raised
+                    } else {
+                        palette().panel
+                    },
+                );
             }
         }
         frame.render_widget(
@@ -1978,5 +2014,44 @@ mod tests {
         assert_eq!(blocks[1].start, blocks[0].start + blocks[0].height);
         assert_eq!(blocks[2].start, blocks[1].start + blocks[1].height + 1);
         assert_eq!(document_height, blocks[2].start + blocks[2].height);
+    }
+
+    #[test]
+    fn renders_agent_code_blocks_as_raised_cards() {
+        let width = 24;
+        let lines =
+            styled_agent_output_text("Before\n\n```rust\nfn preview() {}\n```\n\nAfter", width);
+        let text = |line: &Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let top = lines
+            .iter()
+            .position(|line| text(line) == "▄".repeat(width))
+            .unwrap();
+        let bottom = lines
+            .iter()
+            .enumerate()
+            .skip(top + 1)
+            .find_map(|(index, line)| (text(line) == "▀".repeat(width)).then_some(index))
+            .unwrap();
+
+        assert!(bottom > top + 1);
+        assert!(lines[top + 1..bottom].iter().all(|line| {
+            line.style.bg == Some(palette().raised)
+                && line
+                    .spans
+                    .iter()
+                    .all(|span| span.style.bg == Some(palette().raised))
+        }));
+        assert!(lines[top + 1..bottom].iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content == "fn" && span.style.fg == Some(palette().purple))
+        }));
+        assert_eq!(lines.first().unwrap().style.bg, Some(palette().panel));
+        assert_eq!(lines.last().unwrap().style.bg, Some(palette().panel));
     }
 }
