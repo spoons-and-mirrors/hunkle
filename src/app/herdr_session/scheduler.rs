@@ -16,12 +16,13 @@ use super::{
 };
 
 const MAX_RUNS: i64 = 50;
-const MAX_OUTPUT: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScheduledTask {
     pub(crate) id: i64,
     pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) prompt: String,
     pub(crate) destination: PathBuf,
     pub(crate) repository: String,
     pub(crate) branch: String,
@@ -81,7 +82,7 @@ pub(crate) struct ScheduledRun {
     pub(crate) id: i64,
     pub(crate) task_id: i64,
     pub(crate) status: ScheduledRunStatus,
-    pub(crate) output: String,
+    pub(crate) pane_id: Option<String>,
     pub(crate) error: Option<String>,
 }
 
@@ -411,12 +412,9 @@ fn apply_observation(
             return fail_run(db, run_id, &error);
         }
         SchedulerObserveResult::Unavailable(error) => {
-            (ScheduledRunStatus::Unknown, None, Some(error))
+            (ScheduledRunStatus::Unknown, None::<String>, Some(error))
         }
-        SchedulerObserveResult::Observed(status, result) => match result {
-            Ok(output) => (agent_status(status), Some(bounded_output(&output)), None),
-            Err(error) => (agent_status(status), None, Some(error)),
-        },
+        SchedulerObserveResult::Observed(status) => (agent_status(status), None, None),
     };
     db.execute(
         "UPDATE scheduled_runs SET status = ?2, output = COALESCE(?3, output), error = ?4 WHERE id = ?1",
@@ -460,14 +458,6 @@ fn validate_destination(path: &Path) -> Result<PathBuf, String> {
     }
     std::fs::canonicalize(path)
         .map_err(|error| format!("Could not resolve scheduler destination: {error}"))
-}
-
-fn bounded_output(output: &str) -> String {
-    let mut start = output.len().saturating_sub(MAX_OUTPUT);
-    while !output.is_char_boundary(start) {
-        start += 1;
-    }
-    output[start..].to_owned()
 }
 
 fn now_ms() -> i64 {
@@ -565,28 +555,30 @@ fn decode_path(bytes: Vec<u8>) -> rusqlite::Result<PathBuf> {
 fn load_state(db: &Connection) -> Result<State, String> {
     let tasks = query_all(
         db,
-        "SELECT id, title, destination, repository, branch, enabled, interval_minutes FROM scheduled_tasks ORDER BY id",
+        "SELECT id, title, description, prompt, destination, repository, branch, enabled, interval_minutes FROM scheduled_tasks ORDER BY id",
         |row| {
             Ok(ScheduledTask {
                 id: row.get(0)?,
                 title: row.get(1)?,
-                destination: decode_path(row.get(2)?)?,
-                repository: row.get(3)?,
-                branch: row.get(4)?,
-                enabled: row.get(5)?,
-                interval_minutes: row.get(6)?,
+                description: row.get(2)?,
+                prompt: row.get(3)?,
+                destination: decode_path(row.get(4)?)?,
+                repository: row.get(5)?,
+                branch: row.get(6)?,
+                enabled: row.get(7)?,
+                interval_minutes: row.get(8)?,
             })
         },
     )?;
     let runs = query_all(
         db,
-        "SELECT id, task_id, status, output, error FROM scheduled_runs ORDER BY created_at_ms DESC, id DESC",
+        "SELECT id, task_id, status, pane_id, error FROM scheduled_runs ORDER BY created_at_ms DESC, id DESC",
         |row| {
             Ok(ScheduledRun {
                 id: row.get(0)?,
                 task_id: row.get(1)?,
                 status: ScheduledRunStatus::parse(&row.get::<_, String>(2)?)?,
-                output: bounded_output(&row.get::<_, String>(3)?),
+                pane_id: row.get(3)?,
                 error: row.get(4)?,
             })
         },
@@ -629,18 +621,17 @@ mod tests {
         })
         .unwrap();
         refresh(&first, None, &mut |_| {
-            SchedulerObserveResult::Observed(AgentStatus::Done, Ok("é".repeat(MAX_OUTPUT)))
+            SchedulerObserveResult::Observed(AgentStatus::Done)
         })
         .unwrap();
         first.execute("INSERT OR REPLACE INTO scheduled_runs (task_id, scheduled_for_ms, status, created_at_ms) VALUES (1, 99, 'launching', 1)", []).unwrap();
         recover_stale_launches(&first, 500_000).unwrap();
         let state = load_state(&first).unwrap();
-        let bounded = state.1.iter().all(|run| run.output.len() <= MAX_OUTPUT);
         let failed = state
             .1
             .iter()
             .any(|run| run.status == ScheduledRunStatus::Failed);
-        assert!(bounded && failed);
+        assert!(failed);
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStringExt;

@@ -3,6 +3,7 @@ use super::super::location_picker::{
     LocationPickerRow, LocationPickerRowKind, LocationPickerView, draw_location_picker,
 };
 use super::*;
+use ansi_to_tui::IntoText;
 
 type Target = SchedulerHitTarget;
 
@@ -26,11 +27,8 @@ pub(crate) fn draw_scheduler(
     app: &App,
     profile: LayoutProfile,
 ) -> SchedulerRegions {
-    let outer = if profile.is_single() {
-        centered_min(frame.area(), 96, 90, 40, 24)
-    } else {
-        centered_min(frame.area(), 78, 90, 112, 30)
-    };
+    let pane_open = app.scheduler.surface == SchedulerSurface::Pane;
+    let outer = scheduler_area(frame.area(), profile, pane_open);
     frame.render_widget(Clear, outer);
     fill(frame, outer, palette().panel);
     fill(
@@ -40,13 +38,24 @@ pub(crate) fn draw_scheduler(
     );
     fill(
         frame,
-        Rect::new(outer.x, outer.bottom().saturating_sub(2), outer.width, 2),
+        Rect::new(outer.x, outer.bottom().saturating_sub(1), outer.width, 1),
         palette().surface_alt,
     );
-    bold_text(
-        frame,
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "SCHEDULER",
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Automated Herdr tasks",
+                Style::default().fg(palette().faint),
+            ),
+        ]))
+        .style(Style::default().bg(palette().surface_alt)),
         Rect::new(outer.x + 2, outer.y + 1, outer.width.saturating_sub(12), 1),
-        "SCHEDULER  Automated Herdr tasks",
     );
     let close = Rect::new(outer.right().saturating_sub(9), outer.y + 1, 7, 1);
     let mut regions = SchedulerRegions {
@@ -66,9 +75,11 @@ pub(crate) fn draw_scheduler(
         outer.x + 1,
         outer.y + 3,
         outer.width.saturating_sub(2),
-        outer.height.saturating_sub(5),
+        outer.height.saturating_sub(4),
     );
-    if profile.is_single() {
+    if pane_open {
+        draw_live_pane(frame, app, content, &mut regions);
+    } else if profile.is_single() {
         if app.scheduler.surface == SchedulerSurface::Tasks {
             draw_tasks(frame, app, content, &mut regions);
         } else {
@@ -90,50 +101,244 @@ pub(crate) fn draw_scheduler(
             draw_detail(frame, app, detail, &mut regions);
         }
     } else {
-        let columns = Layout::horizontal([Constraint::Length(30), Constraint::Min(42)])
-            .spacing(1)
-            .split(content);
+        let columns = Layout::horizontal([
+            Constraint::Length(33),
+            Constraint::Length(1),
+            Constraint::Min(42),
+        ])
+        .split(content);
         draw_tasks(frame, app, columns[0], &mut regions);
-        draw_detail(frame, app, columns[1], &mut regions);
+        fill(frame, columns[1], palette().surface_alt);
+        draw_detail(frame, app, columns[2], &mut regions);
     }
 
-    let (footer, footer_color) = app.scheduler.error.as_deref().map_or(
-        (
-            "Schedules run while Hunkle is open. Interval is measured in minutes.",
-            palette().faint,
-        ),
-        |error| (error, palette().red),
+    let footer = Rect::new(
+        outer.x + 2,
+        outer.bottom().saturating_sub(1),
+        outer.width.saturating_sub(4),
+        1,
     );
-    draw_text(
-        frame,
-        Rect::new(
-            outer.x + 2,
-            outer.bottom().saturating_sub(1),
-            outer.width.saturating_sub(4),
-            1,
-        ),
-        truncate_width(footer, usize::from(outer.width.saturating_sub(4))),
-        Style::default().fg(footer_color),
-    );
+    if let Some(error) = app.scheduler.error.as_deref() {
+        draw_text(
+            frame,
+            footer,
+            truncate_width(error, usize::from(footer.width)),
+            Style::default().fg(palette().red).bg(palette().surface_alt),
+        );
+    } else {
+        let hints = if pane_open {
+            &[
+                ("←→", "pan"),
+                ("↑↓", "scroll"),
+                ("V", "conversation"),
+                ("P/Esc", "back"),
+            ][..]
+        } else if app.scheduler.composer.is_some() {
+            &[
+                ("Ctrl+S", "save"),
+                ("Ctrl+E", "expand prompt"),
+                ("Esc", "cancel"),
+            ][..]
+        } else if profile.is_single() && app.scheduler.surface == SchedulerSurface::Tasks {
+            &[
+                ("N", "new"),
+                ("↑↓", "select"),
+                ("Enter", "open"),
+                ("Esc", "close"),
+            ][..]
+        } else {
+            &[
+                ("N", "new"),
+                ("Tab", "tasks/runs"),
+                ("R", "run"),
+                ("P", "live pane"),
+                ("V", "conversation"),
+                ("Esc", "close"),
+            ][..]
+        };
+        frame.render_widget(
+            Paragraph::new(key_hint_line(hints, usize::from(footer.width)))
+                .style(Style::default().bg(palette().surface_alt)),
+            footer,
+        );
+    }
     regions
 }
 
-fn draw_tasks(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut SchedulerRegions) {
+fn scheduler_area(area: Rect, profile: LayoutProfile, pane_open: bool) -> Rect {
+    let mut outer = if pane_open {
+        centered_min(area, 96, 94, 88, 28)
+    } else if profile.is_single() {
+        centered_min(area, 96, 92, 40, 24)
+    } else {
+        centered_min(area, 88, 82, 88, 28)
+    };
+    let height = outer.height.min(if pane_open { 70 } else { 46 });
+    let width = outer.width.min(if pane_open { 220 } else { 132 });
+    outer.y = area.y + area.height.saturating_sub(height) / 2;
+    outer.x = area.x + area.width.saturating_sub(width) / 2;
+    outer.width = width;
+    outer.height = height;
+    outer
+}
+
+fn draw_live_pane(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut SchedulerRegions) {
+    let inner = Rect::new(
+        area.x + 1,
+        area.y,
+        area.width.saturating_sub(2),
+        area.height,
+    );
+    let back = Rect::new(inner.x, inner.y, 9, 1);
+    button(
+        frame,
+        regions,
+        back,
+        " < BACK ",
+        Target::ClosePane,
+        palette().cyan,
+    );
+    let conversation = Rect::new(inner.right().saturating_sub(20), inner.y, 20, 1);
+    button(
+        frame,
+        regions,
+        conversation,
+        " OPEN CONVERSATION ",
+        Target::OpenConversation,
+        palette().accent,
+    );
     bold_text(
         frame,
+        Rect::new(
+            back.right().saturating_add(2),
+            inner.y,
+            conversation.x.saturating_sub(back.right() + 4),
+            1,
+        ),
+        "LIVE PANE",
+    );
+    let Some(pane_id) = app.selected_scheduled_run_pane_id() else {
+        draw_text(
+            frame,
+            Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            "This run has no available Herdr pane.",
+            Style::default().fg(palette().red),
+        );
+        return;
+    };
+    let viewport = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    fill(frame, viewport, Color::Black);
+    regions.scroll(ScrollTarget::SchedulerPane, viewport);
+    if let Some(error) = app.herdr.pane_preview_error(&pane_id) {
+        draw_text(
+            frame,
+            Rect::new(
+                viewport.x + 2,
+                viewport.y + 1,
+                viewport.width.saturating_sub(4),
+                2,
+            ),
+            format!("Could not read {pane_id}: {error}"),
+            Style::default().fg(palette().red).bg(Color::Black),
+        );
+        return;
+    }
+    let Some(preview) = app.herdr.pane_preview(&pane_id) else {
+        draw_text(
+            frame,
+            Rect::new(
+                viewport.x + 2,
+                viewport.y + 1,
+                viewport.width.saturating_sub(4),
+                1,
+            ),
+            format!("Reading {pane_id}…"),
+            Style::default().fg(palette().faint).bg(Color::Black),
+        );
+        return;
+    };
+    let Ok(text) = preview.ansi.as_bytes().into_text() else {
+        draw_text(
+            frame,
+            Rect::new(
+                viewport.x + 2,
+                viewport.y + 1,
+                viewport.width.saturating_sub(4),
+                1,
+            ),
+            "Herdr returned an ANSI pane snapshot Hunkle could not render.",
+            Style::default().fg(palette().red).bg(Color::Black),
+        );
+        return;
+    };
+    let source_width = text.width();
+    let source_height = text.height();
+    let maximum_x = source_width.saturating_sub(usize::from(viewport.width));
+    let maximum_y = source_height.saturating_sub(usize::from(viewport.height));
+    let scroll_x = app.scheduler.pane_scroll_x.min(maximum_x);
+    let scroll_y = maximum_y.saturating_sub(app.scheduler.pane_scroll_bottom.min(maximum_y));
+    frame.render_widget(
+        Paragraph::new(text).scroll((
+            scroll_y.min(u16::MAX as usize) as u16,
+            scroll_x.min(u16::MAX as usize) as u16,
+        )),
+        viewport,
+    );
+    let dimensions = format!(
+        " {pane_id}  {source_width}×{source_height} → {}×{} ",
+        viewport.width, viewport.height
+    );
+    let width = UnicodeWidthStr::width(dimensions.as_str()) as u16;
+    draw_text(
+        frame,
+        Rect::new(
+            inner.right().saturating_sub(width.min(inner.width)),
+            inner.y + 1,
+            width.min(inner.width),
+            1,
+        ),
+        dimensions,
+        Style::default().fg(palette().cyan).bg(palette().panel),
+    );
+}
+
+fn draw_tasks(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut SchedulerRegions) {
+    let tasks = app.herdr.scheduled_tasks();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "TASKS",
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", tasks.len()),
+                Style::default().fg(palette().faint),
+            ),
+        ])),
         Rect::new(area.x + 1, area.y, area.width.saturating_sub(11), 1),
-        " TASKS ",
     );
     let new = Rect::new(area.right().saturating_sub(7), area.y, 6, 1);
     button(frame, regions, new, " + NEW", Target::New, palette().accent);
+    draw_text(
+        frame,
+        Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), 1),
+        "Runs while Hunkle is open",
+        Style::default().fg(palette().faint),
+    );
     let list = Rect::new(
         area.x + 1,
-        area.y + 2,
+        area.y + 3,
         area.width.saturating_sub(2),
-        area.height.saturating_sub(3),
+        area.height.saturating_sub(4),
     );
     regions.scroll(ScrollTarget::SchedulerTasks, list);
-    let tasks = app.herdr.scheduled_tasks();
     if tasks.is_empty() {
         frame.render_widget(
             Paragraph::new("No scheduled tasks\n\nChoose + NEW to create one.")
@@ -143,35 +348,62 @@ fn draw_tasks(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Schedu
         );
         return;
     }
+    let visible = usize::from(list.height.saturating_add(1) / 3).max(1);
     for (row, task) in tasks
         .iter()
         .skip(app.scheduler.task_scroll)
-        .take(usize::from(list.height))
+        .take(visible)
         .enumerate()
     {
-        let rect = Rect::new(list.x, list.y + row as u16, list.width, 1);
-        let selected = app.scheduler.selected_task_id == Some(task.id);
-        let marker = if task.enabled { "●" } else { "○" };
-        let label = truncate_width(
-            &format!(" {marker} {}", task.title),
-            usize::from(rect.width),
+        let y = list.y + u16::try_from(row).unwrap_or(u16::MAX).saturating_mul(3);
+        let rect = Rect::new(
+            list.x,
+            y,
+            list.width,
+            2.min(list.bottom().saturating_sub(y)),
         );
+        let selected = app.scheduler.selected_task_id == Some(task.id);
+        let background = if selected {
+            palette().selected
+        } else {
+            palette().surface_alt
+        };
+        fill(frame, rect, background);
         draw_text(
             frame,
-            rect,
-            label,
-            Style::default()
-                .fg(if task.enabled {
-                    palette().ink
-                } else {
-                    palette().faint
-                })
-                .bg(if selected {
-                    palette().selected
-                } else {
-                    palette().panel
-                }),
+            Rect::new(rect.x + 1, rect.y, rect.width.saturating_sub(2), 1),
+            Line::from(vec![
+                Span::styled(
+                    if task.enabled { "● " } else { "○ " },
+                    Style::default().fg(if task.enabled {
+                        palette().green
+                    } else {
+                        palette().faint
+                    }),
+                ),
+                Span::styled(
+                    truncate_width(&task.title, usize::from(rect.width.saturating_sub(4))),
+                    Style::default()
+                        .fg(palette().ink)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Style::default().bg(background),
         );
+        if rect.height > 1 {
+            draw_text(
+                frame,
+                Rect::new(rect.x + 3, rect.y + 1, rect.width.saturating_sub(4), 1),
+                truncate_width(
+                    &format!(
+                        "{} / {}  ·  {}m",
+                        task.repository, task.branch, task.interval_minutes
+                    ),
+                    usize::from(rect.width.saturating_sub(4)),
+                ),
+                Style::default().fg(palette().muted).bg(background),
+            );
+        }
         regions.target(Target::Task(task.id), rect);
     }
 }
@@ -183,7 +415,7 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
     }
     let Some(task) = app.selected_scheduled_task() else {
         frame.render_widget(
-            Paragraph::new("Select a task to see its schedule, runs, and output.")
+            Paragraph::new("Select a task to review its schedule and run history.")
                 .wrap(Wrap { trim: true })
                 .style(Style::default().fg(palette().faint)),
             Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(4), 3),
@@ -191,24 +423,51 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
         return;
     };
     let inner = Rect::new(
-        area.x + 1,
+        area.x + 2,
         area.y,
-        area.width.saturating_sub(2),
+        area.width.saturating_sub(4),
         area.height,
     );
+    let status = if task.enabled { "ENABLED" } else { "PAUSED" };
+    let status_width = UnicodeWidthStr::width(status) as u16;
     bold_text(
         frame,
-        Rect::new(inner.x, inner.y, inner.width, 1),
-        truncate_width(&task.title, usize::from(inner.width)),
+        Rect::new(
+            inner.x,
+            inner.y,
+            inner.width.saturating_sub(status_width + 2),
+            1,
+        ),
+        truncate_width(
+            &task.title,
+            usize::from(inner.width.saturating_sub(status_width + 2)),
+        ),
+    );
+    draw_text(
+        frame,
+        Rect::new(
+            inner.right().saturating_sub(status_width),
+            inner.y,
+            status_width,
+            1,
+        ),
+        status,
+        Style::default()
+            .fg(if task.enabled {
+                palette().green
+            } else {
+                palette().faint
+            })
+            .add_modifier(Modifier::BOLD),
     );
     let action_y = inner.y + 2;
     let actions = [
+        (" RUN NOW ", Target::RunNow, palette().accent),
         (
             if task.enabled { " PAUSE " } else { " ENABLE " },
             Target::Toggle,
             palette().cyan,
         ),
-        (" RUN NOW ", Target::RunNow, palette().accent),
         (" DELETE ", Target::Delete, palette().red),
     ];
     let mut x = inner.x;
@@ -218,36 +477,78 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
         button(frame, regions, rect, label, target, color);
         x = rect.right().saturating_add(1);
     }
-    let schedule = format!(
-        "every {} minute{}",
-        task.interval_minutes,
-        if task.interval_minutes == 1 { "" } else { "s" }
+    draw_text(
+        frame,
+        Rect::new(inner.x, action_y + 2, inner.width, 1),
+        Line::from(vec![
+            Span::styled(&task.repository, Style::default().fg(palette().yellow)),
+            Span::styled("  /  ", Style::default().fg(palette().faint)),
+            Span::styled(&task.branch, Style::default().fg(palette().accent)),
+            Span::styled(
+                format!(
+                    "  ·  every {} minute{}",
+                    task.interval_minutes,
+                    if task.interval_minutes == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(palette().muted),
+            ),
+        ]),
+        Style::default(),
     );
-    let metadata = format!(
-        "{}  ·  {}  ·  {}\n{}\n{}",
-        if task.enabled { "Enabled" } else { "Paused" },
-        schedule,
-        task.repository,
-        task.branch,
-        task.destination.display()
+    draw_text(
+        frame,
+        Rect::new(inner.x, action_y + 3, inner.width, 1),
+        truncate_width(
+            &task.destination.display().to_string(),
+            usize::from(inner.width),
+        ),
+        Style::default().fg(palette().faint),
     );
+    if !task.description.is_empty() {
+        draw_text(
+            frame,
+            Rect::new(inner.x, action_y + 5, inner.width, 1),
+            truncate_width(&task.description, usize::from(inner.width)),
+            Style::default().fg(palette().soft),
+        );
+    }
+    let prompt_y = action_y + 7;
+    bold_text(
+        frame,
+        Rect::new(inner.x, prompt_y, inner.width, 1),
+        "PROMPT",
+    );
+    let prompt = Rect::new(inner.x, prompt_y + 1, inner.width, 2);
+    fill(frame, prompt, palette().surface_alt);
     frame.render_widget(
-        Paragraph::new(metadata)
+        Paragraph::new(task.prompt.as_str())
             .wrap(Wrap { trim: true })
-            .style(Style::default().fg(palette().muted)),
-        Rect::new(inner.x, action_y + 2, inner.width, 4),
+            .style(
+                Style::default()
+                    .fg(palette().soft)
+                    .bg(palette().surface_alt),
+            ),
+        Rect::new(
+            prompt.x + 1,
+            prompt.y,
+            prompt.width.saturating_sub(2),
+            prompt.height,
+        ),
     );
-    let runs_y = action_y + 7;
+    let runs_y = prompt.bottom().saturating_add(1);
     if runs_y >= inner.bottom() {
         return;
     }
     bold_text(
         frame,
         Rect::new(inner.x, runs_y, inner.width, 1),
-        "RUN HISTORY",
+        format!(
+            "RUN HISTORY  {}",
+            app.scheduled_runs_for_selected_task().len()
+        ),
     );
     let available = inner.bottom().saturating_sub(runs_y + 1);
-    let runs_height = available.min(6);
+    let runs_height = available.saturating_sub(7).clamp(3, 7).min(available);
     let run_list = Rect::new(inner.x, runs_y + 1, inner.width, runs_height);
     regions.scroll(ScrollTarget::SchedulerRuns, run_list);
     let runs = app.scheduled_runs_for_selected_task();
@@ -259,24 +560,38 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
     {
         let rect = Rect::new(run_list.x, run_list.y + row as u16, run_list.width, 1);
         let selected = app.scheduler.selected_run_id == Some(run.id);
-        let color = run_status_color(run.status);
+        let background = if selected {
+            palette().selected
+        } else {
+            palette().panel
+        };
+        fill(frame, rect, background);
         draw_text(
             frame,
-            rect,
-            format!(" {:>9}", run.status.text()),
-            Style::default().fg(color).bg(if selected {
-                palette().selected
-            } else {
-                palette().panel
-            }),
+            Rect::new(rect.x + 1, rect.y, rect.width.saturating_sub(12), 1),
+            format!("●  Run #{}", run.id),
+            Style::default()
+                .fg(run_status_color(run.status))
+                .bg(background),
+        );
+        let label = run.status.text().to_uppercase();
+        let width = UnicodeWidthStr::width(label.as_str()) as u16;
+        draw_text(
+            frame,
+            Rect::new(rect.right().saturating_sub(width + 1), rect.y, width, 1),
+            label,
+            Style::default()
+                .fg(run_status_color(run.status))
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
         );
         regions.target(Target::Run(run.id), rect);
     }
-    let output_y = run_list.bottom().saturating_add(1);
-    if output_y >= inner.bottom() {
+    let conversation_y = run_list.bottom().saturating_add(1);
+    if conversation_y >= inner.bottom() {
         return;
     }
-    let refresh = Rect::new(inner.right().saturating_sub(10), output_y, 10, 1);
+    let refresh = Rect::new(inner.right().saturating_sub(9), conversation_y, 9, 1);
     button(
         frame,
         regions,
@@ -285,37 +600,118 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
         Target::Refresh,
         palette().cyan,
     );
+    let open_width = 20.min(inner.width.saturating_sub(10));
+    let open = Rect::new(
+        refresh.x.saturating_sub(open_width + 1),
+        conversation_y,
+        open_width,
+        1,
+    );
+    button(
+        frame,
+        regions,
+        open,
+        " OPEN CONVERSATION ",
+        Target::OpenConversation,
+        palette().accent,
+    );
+    let pane_width = 13.min(open.x.saturating_sub(inner.x + 1));
+    let pane = Rect::new(
+        open.x.saturating_sub(pane_width + 1),
+        conversation_y,
+        pane_width,
+        1,
+    );
+    button(
+        frame,
+        regions,
+        pane,
+        " LIVE PANE ",
+        Target::OpenPane,
+        palette().cyan,
+    );
     bold_text(
         frame,
-        Rect::new(inner.x, output_y, inner.width.saturating_sub(11), 1),
-        "OUTPUT",
+        Rect::new(
+            inner.x,
+            conversation_y,
+            pane.x.saturating_sub(inner.x + 1),
+            1,
+        ),
+        "CONVERSATION",
     );
-    let output = Rect::new(
+    let conversation = Rect::new(
         inner.x,
-        output_y + 1,
+        conversation_y + 1,
         inner.width,
-        inner.bottom().saturating_sub(output_y + 1),
+        inner.bottom().saturating_sub(conversation_y + 1),
     );
-    regions.scroll(ScrollTarget::SchedulerOutput, output);
     let selected_run = app
         .scheduler
         .selected_run_id
         .and_then(|id| runs.iter().find(|run| run.id == id).copied());
-    let text = selected_run.map_or("No run selected", |run| {
-        if !run.output.is_empty() {
-            run.output.as_str()
-        } else if let Some(error) = run.error.as_deref() {
-            error
-        } else {
-            "No output yet"
-        }
-    });
+    draw_conversation_handoff(frame, selected_run, conversation);
+}
+
+fn draw_conversation_handoff(
+    frame: &mut Frame<'_>,
+    run: Option<&crate::app::ScheduledRun>,
+    area: Rect,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let Some(run) = run else {
+        draw_text(
+            frame,
+            area,
+            "Select a run to inspect its conversation.",
+            Style::default().fg(palette().faint),
+        );
+        return;
+    };
+    let accent = if run.error.is_some() {
+        palette().red
+    } else {
+        palette().cyan
+    };
+    fill(frame, area, palette().surface_alt);
+    fill(frame, Rect::new(area.x, area.y, 1, area.height), accent);
+    let body = Rect::new(
+        area.x + 2,
+        area.y + 1,
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(2),
+    );
+    let (label, text) = if let Some(error) = run.error.as_deref() {
+        ("RUN ERROR", error)
+    } else if run.pane_id.is_some() {
+        (
+            "OPEN IN AGENTS",
+            "View the structured OpenCode transcript, reasoning, and tool activity in the existing Agents preview.",
+        )
+    } else {
+        (
+            "NO LIVE CONVERSATION",
+            "Herdr did not report an available agent pane for this run.",
+        )
+    };
+    draw_text(
+        frame,
+        Rect::new(area.x + 2, area.y, area.width.saturating_sub(4), 1),
+        label,
+        Style::default()
+            .fg(accent)
+            .bg(palette().surface_alt)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(
-        Paragraph::new(text)
-            .scroll((app.scheduler.output_scroll.min(u16::MAX as usize) as u16, 0))
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(palette().muted)),
-        output,
+        Paragraph::new(text).wrap(Wrap { trim: true }).style(
+            Style::default()
+                .fg(palette().soft)
+                .bg(palette().surface_alt),
+        ),
+        body,
     );
 }
 
@@ -640,7 +1036,15 @@ fn button(
     target: SchedulerHitTarget,
     color: Color,
 ) {
-    draw_text(frame, area, label, Style::default().fg(color));
+    draw_text(
+        frame,
+        area,
+        label,
+        Style::default()
+            .fg(color)
+            .bg(palette().surface_alt)
+            .add_modifier(Modifier::BOLD),
+    );
     regions.target(target, area);
 }
 

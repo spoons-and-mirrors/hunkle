@@ -870,6 +870,11 @@ impl App {
         changed |= self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
         changed |= self.file_search.poll(self.session.data());
         if self.herdr_available() {
+            let pane_preview = (self.mode == Mode::Scheduler
+                && self.scheduler.surface == SchedulerSurface::Pane)
+                .then(|| self.selected_scheduled_run_pane_id())
+                .flatten();
+            self.herdr.set_pane_preview(pane_preview);
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
                 self.herdr.poll()

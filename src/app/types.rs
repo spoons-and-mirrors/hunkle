@@ -440,6 +440,9 @@ pub(crate) enum SchedulerHitTarget {
     RunNow,
     Delete,
     Refresh,
+    OpenPane,
+    ClosePane,
+    OpenConversation,
 }
 
 impl SettingsHitTarget {
@@ -584,7 +587,7 @@ pub(crate) enum ScrollTarget {
     SettingsShortcuts,
     SchedulerTasks,
     SchedulerRuns,
-    SchedulerOutput,
+    SchedulerPane,
     SchedulerPrompt,
     SchedulerDestinations,
     Commit,

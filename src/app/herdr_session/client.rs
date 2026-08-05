@@ -279,7 +279,7 @@ pub(crate) struct SchedulerLaunchResult {
 
 #[derive(Debug, Clone)]
 pub(crate) enum SchedulerObserveResult {
-    Observed(AgentStatus, Result<String, String>),
+    Observed(AgentStatus),
     Missing(String),
     Unavailable(String),
 }
@@ -318,7 +318,29 @@ pub(crate) fn scheduler_launch(request: SchedulerLaunchRequest) -> SchedulerLaun
 }
 
 pub(crate) fn scheduler_observe(pane_id: &str) -> SchedulerObserveResult {
-    scheduler_observe_with(pane_id, run_required_json, run_text)
+    scheduler_observe_with(pane_id, run_required_json)
+}
+
+pub(crate) fn pane_visible_ansi(pane_id: &str) -> Result<String, String> {
+    let output = run_output(
+        &[
+            OsString::from("pane"),
+            OsString::from("read"),
+            OsString::from(pane_id),
+            OsString::from("--source"),
+            OsString::from("visible"),
+            OsString::from("--format"),
+            OsString::from("ansi"),
+        ],
+        4 * 1024 * 1024,
+    )
+    .map_err(|error| error.message)?;
+    if !output.status.success() {
+        return Err(decode_response(&output.stdout, &output.stderr, false)
+            .unwrap_err()
+            .message);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn scheduler_launch_with(
@@ -514,7 +536,6 @@ fn scheduler_agent_name(value: &str) -> String {
 fn scheduler_observe_with(
     pane_id: &str,
     mut json_runner: impl FnMut(&[OsString]) -> Result<Value, CommandError>,
-    mut text_runner: impl FnMut(&[OsString]) -> Result<String, CommandError>,
 ) -> SchedulerObserveResult {
     let get_args = ["agent".into(), "get".into(), pane_id.into()];
     let value = match json_runner(&get_args) {
@@ -524,25 +545,10 @@ fn scheduler_observe_with(
         }
         Err(error) => return SchedulerObserveResult::Unavailable(error.message),
     };
-    let status = match scheduler_agent_status(&value, pane_id) {
-        Ok(status) => status,
+    match scheduler_agent_status(&value, pane_id) {
+        Ok(status) => SchedulerObserveResult::Observed(status),
         Err(error) => return SchedulerObserveResult::Unavailable(error),
-    };
-    let read_args = [
-        "agent".into(),
-        "read".into(),
-        pane_id.into(),
-        "--source".into(),
-        "recent-unwrapped".into(),
-        "--lines".into(),
-        "200".into(),
-        "--format".into(),
-        "text".into(),
-    ];
-    SchedulerObserveResult::Observed(
-        status,
-        text_runner(&read_args).map_err(|error| error.message),
-    )
+    }
 }
 
 pub(super) fn display_agent(request: DisplayAgentRequest) -> Result<DisplayAgentResult, String> {
@@ -1844,14 +1850,6 @@ fn run_required_json<S: AsRef<OsStr>>(args: &[S]) -> Result<Value, CommandError>
         )),
         value => Ok(value),
     }
-}
-
-fn run_text<S: AsRef<OsStr>>(args: &[S]) -> Result<String, CommandError> {
-    let output = run_output(args, 256 * 1024)?;
-    if !output.status.success() {
-        return Err(decode_command_error(&output.stderr));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn run_output<S: AsRef<OsStr>>(
@@ -3766,47 +3764,31 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_observes_status_and_recent_unwrapped_output() {
+    fn scheduler_observes_status_without_scraping_the_terminal() {
         let calls = RefCell::new(Vec::new());
-        let observed = scheduler_observe_with(
-            "w3:p4",
-            |args| {
-                calls.borrow_mut().push(args.to_vec());
-                Ok(serde_json::json!({
-                    "result": { "agent": {
-                        "pane_id": "w3:p4",
-                        "terminal_id": "term_4",
-                        "agent_status": "blocked"
-                    }}
-                }))
-            },
-            |args| {
-                calls.borrow_mut().push(args.to_vec());
-                Ok("line one\nline two\n".to_owned())
-            },
-        );
+        let observed = scheduler_observe_with("w3:p4", |args| {
+            calls.borrow_mut().push(args.to_vec());
+            Ok(serde_json::json!({
+                "result": { "agent": {
+                    "pane_id": "w3:p4",
+                    "terminal_id": "term_4",
+                    "agent_status": "blocked"
+                }}
+            }))
+        });
 
-        let SchedulerObserveResult::Observed(status, output) = observed else {
+        let SchedulerObserveResult::Observed(status) = observed else {
             panic!("expected an observation");
         };
         assert_eq!(status, AgentStatus::Blocked);
-        assert_eq!(output.unwrap(), "line one\nline two\n");
         let calls = calls.into_inner();
-        assert_eq!(calls[0], ["agent", "get", "w3:p4"].map(OsString::from));
-        assert_eq!(
-            calls[1][..3],
-            ["agent", "read", "w3:p4"].map(OsString::from)
-        );
-        let missing = scheduler_observe_with(
-            "w1:p2",
-            |_| {
-                Err(CommandError {
-                    code: Some("agent_not_found".to_owned()),
-                    message: "agent target not found".to_owned(),
-                })
-            },
-            |_| panic!("missing agent must not be read"),
-        );
+        assert_eq!(calls, [["agent", "get", "w3:p4"].map(OsString::from)]);
+        let missing = scheduler_observe_with("w1:p2", |_| {
+            Err(CommandError {
+                code: Some("agent_not_found".to_owned()),
+                message: "agent target not found".to_owned(),
+            })
+        });
         assert!(matches!(missing, SchedulerObserveResult::Missing(_)));
     }
 }

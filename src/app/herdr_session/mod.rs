@@ -35,6 +35,7 @@ pub(crate) use scheduler::{ScheduledRun, ScheduledRunStatus, ScheduledTask, Sche
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const AGENT_CHANGE_STATS_INTERVAL: Duration = Duration::from_secs(5);
 const AGENT_MESSAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const PANE_PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
 const LAYOUT_INDEX_VERSION: u8 = 1;
@@ -313,6 +314,16 @@ enum Completion {
         identity: AgentSessionIdentity,
         result: Result<Vec<AgentUserMessage>, String>,
     },
+    PanePreview {
+        pane_id: String,
+        result: Result<String, String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PanePreview {
+    pub(crate) pane_id: String,
+    pub(crate) ansi: String,
 }
 
 struct PendingAgentStash {
@@ -359,6 +370,8 @@ pub(crate) struct HerdrSession {
     enabled: bool,
     pub(crate) workspaces: Vec<HerdrWorkspace>,
     pub(crate) agents: Vec<AgentPane>,
+    observed_agents: Vec<AgentPane>,
+    revealed_agent_pane_ids: HashSet<String>,
     pub(crate) agent_scroll: usize,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
@@ -396,6 +409,11 @@ pub(crate) struct HerdrSession {
     stashed_pane_ids: HashSet<String>,
     scheduler: Option<scheduler::SchedulerService>,
     scheduler_error: Option<String>,
+    pane_preview_wanted: Option<String>,
+    pane_preview_loading: Option<String>,
+    pane_preview: Option<PanePreview>,
+    pane_preview_error: Option<(String, String)>,
+    next_pane_preview: Instant,
 }
 
 impl HerdrSession {
@@ -442,6 +460,8 @@ impl HerdrSession {
             enabled,
             workspaces: Vec::new(),
             agents: Vec::new(),
+            observed_agents: Vec::new(),
+            revealed_agent_pane_ids: HashSet::new(),
             agent_scroll: 0,
             loading: false,
             error: None,
@@ -481,6 +501,11 @@ impl HerdrSession {
             stashed_pane_ids: HashSet::new(),
             scheduler: None,
             scheduler_error: None,
+            pane_preview_wanted: None,
+            pane_preview_loading: None,
+            pane_preview: None,
+            pane_preview_error: None,
+            next_pane_preview: Instant::now(),
         }
     }
 
@@ -518,6 +543,28 @@ impl HerdrSession {
 
     pub(crate) fn refresh_scheduled_run(&self, id: i64) -> Result<(), String> {
         self.scheduler_service()?.refresh_run(id)
+    }
+
+    pub(crate) fn set_pane_preview(&mut self, pane_id: Option<String>) {
+        if self.pane_preview_wanted != pane_id {
+            self.pane_preview = None;
+            self.pane_preview_error = None;
+            self.next_pane_preview = Instant::now();
+        }
+        self.pane_preview_wanted = pane_id;
+    }
+
+    pub(crate) fn pane_preview(&self, pane_id: &str) -> Option<&PanePreview> {
+        self.pane_preview
+            .as_ref()
+            .filter(|preview| preview.pane_id == pane_id)
+    }
+
+    pub(crate) fn pane_preview_error(&self, pane_id: &str) -> Option<&str> {
+        self.pane_preview_error
+            .as_ref()
+            .filter(|(id, _)| id == pane_id)
+            .map(|(_, error)| error.as_str())
     }
 
     fn scheduler_service(&self) -> Result<&scheduler::SchedulerService, String> {
@@ -740,8 +787,24 @@ impl HerdrSession {
                         self.latest_user_messages.insert(identity, message);
                     }
                 }
+                Completion::PanePreview { pane_id, result } => {
+                    if self.pane_preview_loading.as_deref() == Some(&pane_id) {
+                        self.pane_preview_loading = None;
+                    }
+                    if self.pane_preview_wanted.as_deref() == Some(&pane_id) {
+                        match result {
+                            Ok(ansi) => {
+                                self.pane_preview = Some(PanePreview { pane_id, ansi });
+                                self.pane_preview_error = None;
+                            }
+                            Err(error) => self.pane_preview_error = Some((pane_id, error)),
+                        }
+                        self.next_pane_preview = Instant::now() + PANE_PREVIEW_REFRESH_INTERVAL;
+                    }
+                }
             }
         }
+        self.start_pane_preview_if_due();
         if !self.loading && Instant::now() >= self.next_refresh {
             self.start_snapshot();
             poll.changed = true;
@@ -751,12 +814,29 @@ impl HerdrSession {
         poll
     }
 
+    fn start_pane_preview_if_due(&mut self) {
+        let Some(pane_id) = self.pane_preview_wanted.clone() else {
+            return;
+        };
+        if self.pane_preview_loading.is_some() || Instant::now() < self.next_pane_preview {
+            return;
+        }
+        self.pane_preview_loading = Some(pane_id.clone());
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = client::pane_visible_ansi(&pane_id);
+            let _ = sender.send(Completion::PanePreview { pane_id, result });
+        });
+    }
+
     fn apply_agent_snapshot_at(&mut self, agents: Vec<AgentPane>, now_ms: u64) {
         let observed_panes = agents
             .iter()
             .map(|agent| agent.pane_id.as_str())
             .collect::<HashSet<_>>();
         self.stashed_pane_ids
+            .retain(|pane_id| observed_panes.contains(pane_id.as_str()));
+        self.revealed_agent_pane_ids
             .retain(|pane_id| observed_panes.contains(pane_id.as_str()));
         let pending_pane = self
             .pending_agent_stash
@@ -769,12 +849,16 @@ impl HerdrSession {
                     && !self.stashed_pane_ids.contains(&agent.pane_id)
             })
             .collect::<Vec<_>>();
+        self.observed_agents = agents.clone();
         let agents = if self.cross_workspace_agents || self.host_workspace_id.is_none() {
             agents
         } else {
             agents
                 .into_iter()
-                .filter(|agent| self.host_workspace_id.as_deref() == Some(&agent.workspace_id))
+                .filter(|agent| {
+                    self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
+                        || self.revealed_agent_pane_ids.contains(&agent.pane_id)
+                })
                 .collect()
         };
         let active_identities = agents
@@ -870,6 +954,28 @@ impl HerdrSession {
         self.agents
             .get(index)
             .map(|agent| AgentKey(agent.runtime.timing_key.clone()))
+    }
+
+    pub(crate) fn reveal_agent_index_for_pane(&mut self, pane_id: &str) -> Option<usize> {
+        if let Some(index) = self
+            .agents
+            .iter()
+            .position(|agent| agent.pane_id == pane_id)
+        {
+            return Some(index);
+        }
+        if !self
+            .observed_agents
+            .iter()
+            .any(|agent| agent.pane_id == pane_id)
+        {
+            return None;
+        }
+        self.revealed_agent_pane_ids.insert(pane_id.to_owned());
+        self.apply_agent_snapshot_at(self.observed_agents.clone(), unix_time_ms());
+        self.agents
+            .iter()
+            .position(|agent| agent.pane_id == pane_id)
     }
 
     pub(crate) fn agent_index(&self, key: &AgentKey) -> Option<usize> {
@@ -1806,6 +1912,23 @@ mod latest_user_message_cache_tests {
                 .collect::<Vec<_>>(),
             vec![&retained]
         );
+    }
+
+    #[test]
+    fn explicitly_reveals_one_cross_workspace_agent() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.host_workspace_id = Some("w1".to_owned());
+        let local = agent("w1:p1", identity("ses_local"));
+        let mut remote = agent("w2:p1", identity("ses_remote"));
+        remote.workspace_id = "w2".to_owned();
+        remote.tab_id = "w2:t1".to_owned();
+
+        session.apply_agent_snapshot_at(vec![local, remote], unix_time_ms());
+
+        assert_eq!(session.agents.len(), 1);
+        let index = session.reveal_agent_index_for_pane("w2:p1").unwrap();
+        assert_eq!(session.agents[index].pane_id, "w2:p1");
+        assert!(!session.cross_workspace_agents);
     }
 
     #[test]

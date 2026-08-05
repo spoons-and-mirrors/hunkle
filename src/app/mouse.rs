@@ -24,7 +24,7 @@ impl App {
                     if let Some(
                         target @ (ScrollTarget::SchedulerTasks
                         | ScrollTarget::SchedulerRuns
-                        | ScrollTarget::SchedulerOutput
+                        | ScrollTarget::SchedulerPane
                         | ScrollTarget::SchedulerPrompt
                         | ScrollTarget::SchedulerDestinations),
                     ) = self.regions.scroll_target_at(point)
@@ -634,7 +634,7 @@ impl App {
             }
             ScrollTarget::SchedulerTasks
             | ScrollTarget::SchedulerRuns
-            | ScrollTarget::SchedulerOutput
+            | ScrollTarget::SchedulerPane
             | ScrollTarget::SchedulerPrompt
             | ScrollTarget::SchedulerDestinations => self.scroll_scheduler(target, delta),
             ScrollTarget::Commit => self.scroll_commit(delta, wheel),

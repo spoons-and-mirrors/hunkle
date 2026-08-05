@@ -47,12 +47,12 @@ fn narrow_scheduler_uses_semantic_new_target_and_shared_composer() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(scheduler_rect(&app, SchedulerHitTarget::New).is_some());
+    assert!(screen_text(&terminal).contains("Runs while Hunkle is open"));
     app.begin_scheduled_task();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let text = screen_text(&terminal);
     assert!(text.contains("NEW SCHEDULED TASK"));
-    assert!(text.contains("Schedules run while Hunkle is open"));
     assert!(text.contains("Minutes"));
 }
 
@@ -150,6 +150,6 @@ fn wide_scheduler_reserves_a_full_master_detail_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert!(
-        screen_text(&terminal).contains("Select a task to see its schedule, runs, and output.")
+        screen_text(&terminal).contains("Select a task to review its schedule and run history.")
     );
 }
