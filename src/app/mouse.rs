@@ -8,8 +8,8 @@ use super::{
     ACTION_ITEMS, AgentKey, AgentPreviewExpandedRequests, AgentPreviewMessageSelection,
     AgentPreviewTranscriptScroll, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget,
     FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane,
-    MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, ScrollTarget, SettingsHitTarget,
-    SettingsPage, View, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
+    MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, ScrollTarget, SettingsHitTarget, View,
+    changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
 const AGENT_PREVIEW_BUTTON_FLASH: Duration = Duration::from_millis(150);
@@ -273,13 +273,15 @@ impl App {
             mouse.kind,
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
         ) {
-            let forward = mouse.kind == MouseEventKind::ScrollDown;
-            let delta = if forward { 3 } else { -3 };
-            if self.scroll_agent_preview_message_timeline(point, forward)
-                || self.scroll_agent_preview_transcript(point, delta)
-            {
-                return;
+            let delta = if mouse.kind == MouseEventKind::ScrollDown {
+                1
+            } else {
+                -1
+            };
+            if let Some(target) = self.regions.scroll_target_at(point) {
+                self.scroll_target(target, delta, true);
             }
+            return;
         }
 
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -372,7 +374,6 @@ impl App {
             return;
         }
         if self.mode == Mode::Command {
-            self.handle_command_mouse(mouse);
             return;
         }
         if self.mode == Mode::HerdrPrompt {
@@ -423,23 +424,18 @@ impl App {
             self.flush_commit_draft();
         }
 
-        match mouse.kind {
-            MouseEventKind::ScrollDown => self.scroll_at(point, 1, true),
-            MouseEventKind::ScrollUp => self.scroll_at(point, -1, true),
-            MouseEventKind::Down(MouseButton::Right) => {
-                let effect = self
-                    .regions
-                    .hit_target_at(point)
-                    .and_then(|target| match target {
-                        HitTarget::Changes(target) => self
-                            .session
-                            .data()
-                            .and_then(|repo| self.changes.stage_target(target, repo)),
-                        _ => None,
-                    });
-                self.apply_changes_effect(effect);
-            }
-            _ => {}
+        if let MouseEventKind::Down(MouseButton::Right) = mouse.kind {
+            let effect = self
+                .regions
+                .hit_target_at(point)
+                .and_then(|target| match target {
+                    HitTarget::Changes(target) => self
+                        .session
+                        .data()
+                        .and_then(|repo| self.changes.stage_target(target, repo)),
+                    _ => None,
+                });
+            self.apply_changes_effect(effect);
         }
     }
 
@@ -485,7 +481,9 @@ impl App {
                         if drag.axis == Some(MobileDragAxis::Vertical) {
                             let delta = drag.previous.y as isize - point.y as isize;
                             if delta != 0 {
-                                self.scroll_mobile(drag.scroll_target.clone(), delta);
+                                if let Some(target) = drag.scroll_target.clone() {
+                                    self.scroll_target(target, delta, false);
+                                }
                             }
                         }
                         drag.previous = point;
@@ -533,11 +531,13 @@ impl App {
             return false;
         }
         self.selection.clear();
-        if self.begin_mouse_control(point) {
+        let scroll_target = self.regions.scroll_target_at(point);
+        if !self.regions.has_hard_scroll_capture() && self.begin_mouse_control(point) {
             return true;
         }
-        let agent_preview = self.agent_preview_at(point);
-        let scroll_target = self.regions.scroll_target_at(point);
+        let agent_preview = (!self.regions.has_scroll_capture())
+            .then(|| self.agent_preview_at(point))
+            .flatten();
         self.mobile_scroll_drag = Some(MobileScrollDrag {
             start: point,
             previous: point,
@@ -565,14 +565,12 @@ impl App {
         }
     }
 
-    fn scroll_mobile(&mut self, target: Option<ScrollTarget>, delta: isize) {
-        let Some(target) = target else {
-            return;
-        };
+    fn scroll_target(&mut self, target: ScrollTarget, delta: isize, wheel: bool) {
+        let wheel_amount = |amount: isize| amount.saturating_mul(if wheel { 3 } else { 1 });
         match target {
             ScrollTarget::HeaderPicker => {
                 self.hovered_hit_target = None;
-                self.header_picker.scroll_by(delta);
+                self.header_picker.scroll_by(wheel_amount(delta));
             }
             ScrollTarget::ActionMenu => self.actions.move_selection(delta),
             ScrollTarget::AuthorFilter => self.author_filter.move_selection(delta),
@@ -586,43 +584,45 @@ impl App {
             ScrollTarget::WorkspaceExplorerSurroundings => {
                 self.workspace_explorer.move_surrounding_selection(delta);
             }
-            ScrollTarget::CommandOutput => self.actions.scroll_by(delta),
+            ScrollTarget::CommandOutput => self.actions.scroll_by(wheel_amount(delta)),
             ScrollTarget::SettingsShortcuts => {
                 let key = if delta < 0 {
                     KeyCode::Up
                 } else {
                     KeyCode::Down
                 };
-                for _ in 0..delta.unsigned_abs() {
+                for _ in 0..wheel_amount(delta).unsigned_abs() {
                     self.handle_shortcut_settings(KeyEvent::new(key, KeyModifiers::NONE));
                 }
             }
-            ScrollTarget::Commit => self.scroll_commit(delta, false),
-            ScrollTarget::Worktree => self.scroll_worktree(delta),
-            ScrollTarget::Explorer => self.scroll_explorer(delta),
+            ScrollTarget::Commit => self.scroll_commit(delta, wheel),
+            ScrollTarget::Worktree => self.scroll_worktree(wheel_amount(delta)),
+            ScrollTarget::Explorer => self.scroll_explorer(wheel_amount(delta)),
             ScrollTarget::Agents => self.herdr.scroll_agents(delta),
-            ScrollTarget::Preview => self.scroll_diff_by(delta),
+            ScrollTarget::Preview => self.scroll_diff_by(wheel_amount(delta)),
             ScrollTarget::SqliteObjects => {
                 let viewport = self
                     .regions
                     .sqlite_objects
                     .map_or(0, |rect| usize::from(rect.height));
-                self.changes.scroll_sqlite_objects(viewport, delta);
+                self.changes
+                    .scroll_sqlite_objects(viewport, wheel_amount(delta));
             }
             ScrollTarget::SqliteRows => {
                 let viewport = self
                     .regions
                     .sqlite_rows
                     .map_or(0, |rect| usize::from(rect.height));
-                self.changes.scroll_sqlite_rows(viewport, delta);
+                self.changes
+                    .scroll_sqlite_rows(viewport, wheel_amount(delta));
             }
-            ScrollTarget::Graph => self.scroll_graph(delta),
+            ScrollTarget::Graph => self.scroll_graph(wheel_amount(delta)),
             ScrollTarget::RepositorySearch => self.file_search.move_selection(delta),
             ScrollTarget::AgentTimeline(agent) => {
                 self.scroll_agent_preview_timeline(agent, delta > 0);
             }
             ScrollTarget::AgentTranscript(agent) => {
-                self.set_agent_preview_scroll(agent, delta);
+                self.set_agent_preview_scroll(agent, wheel_amount(delta));
             }
         }
     }
@@ -819,7 +819,7 @@ impl App {
         };
         match self.mode {
             Mode::ActionMenu => self.handle_action_mouse(mouse),
-            Mode::Command => self.handle_command_mouse(mouse),
+            Mode::Command => {}
             Mode::HerdrPrompt => {}
             Mode::FileEdit => self.place_file_editor_cursor(point, false),
             Mode::Explorer => self.handle_explorer_mouse(mouse),
@@ -1313,8 +1313,6 @@ impl App {
     fn handle_action_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.actions.move_selection(1),
-            MouseEventKind::ScrollUp => self.actions.move_selection(-1),
             MouseEventKind::Moved => {
                 if let Some(index) = self.action_at(point) {
                     self.actions.selection = index;
@@ -1343,8 +1341,6 @@ impl App {
     fn handle_author_filter_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.author_filter.move_selection(1),
-            MouseEventKind::ScrollUp => self.author_filter.move_selection(-1),
             MouseEventKind::Moved => {
                 if let Some(HitTarget::Graph(GraphHitTarget::FilterItem(index))) =
                     self.regions.hit_target_at(point)
@@ -1375,36 +1371,9 @@ impl App {
         (index < ACTION_ITEMS.len()).then_some(index)
     }
 
-    fn handle_command_mouse(&mut self, mouse: MouseEvent) {
-        match mouse.kind {
-            MouseEventKind::ScrollDown => self.actions.scroll_by(3),
-            MouseEventKind::ScrollUp => self.actions.scroll_by(-3),
-            _ => {}
-        }
-    }
-
     fn handle_explorer_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
-            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-                let delta = if mouse.kind == MouseEventKind::ScrollDown {
-                    1
-                } else {
-                    -1
-                };
-                if self.workspace_explorer.editing_path {
-                    self.workspace_explorer.move_match_selection(delta);
-                } else if matches!(
-                    self.regions.hit_target_at(point),
-                    Some(HitTarget::Explorer(
-                        ExplorerHitTarget::SurroundingsPane | ExplorerHitTarget::Surrounding { .. }
-                    ))
-                ) {
-                    self.workspace_explorer.move_surrounding_selection(delta);
-                } else {
-                    self.workspace_explorer.move_selection(delta);
-                }
-            }
             MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
                 Some(HitTarget::Explorer(target)) => {
                     let command = self.workspace_explorer.activate_target(target);
@@ -1422,22 +1391,6 @@ impl App {
     fn handle_file_search_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
-            MouseEventKind::ScrollDown
-                if self
-                    .regions
-                    .file_search_list
-                    .is_some_and(|rect| rect.contains(point)) =>
-            {
-                self.file_search.move_selection(1);
-            }
-            MouseEventKind::ScrollUp
-                if self
-                    .regions
-                    .file_search_list
-                    .is_some_and(|rect| rect.contains(point)) =>
-            {
-                self.file_search.move_selection(-1);
-            }
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(HitTarget::FileSearch(target)) = self.regions.hit_target_at(point) else {
                     self.last_file_search_click = None;
@@ -1493,22 +1446,6 @@ impl App {
     }
 
     fn handle_settings_mouse(&mut self, mouse: MouseEvent) {
-        if self.settings_page == SettingsPage::Shortcuts
-            && matches!(
-                mouse.kind,
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-            )
-        {
-            let key = if mouse.kind == MouseEventKind::ScrollUp {
-                KeyCode::Up
-            } else {
-                KeyCode::Down
-            };
-            for _ in 0..3 {
-                self.handle_shortcut_settings(KeyEvent::new(key, KeyModifiers::NONE));
-            }
-            return;
-        }
         let point = Position::new(mouse.column, mouse.row);
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
             return;
@@ -1605,15 +1542,6 @@ impl App {
         });
     }
 
-    fn scroll_agent_preview_message_timeline(&mut self, point: Position, forward: bool) -> bool {
-        let Some(HitTarget::AgentPreviewMessageTimeline(key)) = self.regions.hit_target_at(point)
-        else {
-            return false;
-        };
-        self.scroll_agent_preview_timeline(key, forward);
-        true
-    }
-
     fn scroll_agent_preview_timeline(&mut self, key: AgentKey, forward: bool) {
         let Some(agent) = self.herdr.agent_index(&key) else {
             return;
@@ -1665,19 +1593,6 @@ impl App {
         self.set_agent_preview_scroll(key, delta);
     }
 
-    fn scroll_agent_preview_transcript(&mut self, point: Position, delta: isize) -> bool {
-        let agent = match self.regions.hit_target_at(point) {
-            Some(
-                HitTarget::AgentTooltip { agent, .. }
-                | HitTarget::AgentMessage { agent, .. }
-                | HitTarget::AgentPreviewRequest { agent, .. },
-            ) => agent,
-            _ => return false,
-        };
-        self.set_agent_preview_scroll(agent, delta);
-        true
-    }
-
     fn set_agent_preview_scroll(&mut self, key: AgentKey, delta: isize) {
         let Some(agent) = self.herdr.agent_index(&key) else {
             return;
@@ -1704,63 +1619,6 @@ impl App {
                 message,
                 offset,
             });
-    }
-
-    fn scroll_at(&mut self, point: Position, delta: isize, wheel: bool) {
-        if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
-            self.scroll_commit(delta, wheel);
-        } else if self
-            .regions
-            .sqlite_objects
-            .is_some_and(|rect| rect.contains(point))
-        {
-            let viewport = self
-                .regions
-                .sqlite_objects
-                .map_or(0, |rect| usize::from(rect.height));
-            self.changes
-                .scroll_sqlite_objects(viewport, delta.saturating_mul(if wheel { 3 } else { 1 }));
-        } else if self
-            .regions
-            .sqlite_rows
-            .is_some_and(|rect| rect.contains(point))
-        {
-            let viewport = self
-                .regions
-                .sqlite_rows
-                .map_or(0, |rect| usize::from(rect.height));
-            self.changes
-                .scroll_sqlite_rows(viewport, delta.saturating_mul(if wheel { 3 } else { 1 }));
-        } else if self.regions.diff.is_some_and(|rect| rect.contains(point)) {
-            self.changes.scroll_diff_by(
-                self.regions.diff_scroll_max,
-                delta.saturating_mul(if wheel { 3 } else { 1 }),
-            );
-        } else if self
-            .regions
-            .explorer_list
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.scroll_explorer(delta.saturating_mul(if wheel { 3 } else { 1 }));
-        } else if self
-            .regions
-            .agents_list
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.herdr.scroll_agents(delta);
-        } else if self
-            .regions
-            .worktree_list
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.scroll_worktree(delta.saturating_mul(if wheel { 3 } else { 1 }));
-        } else if self
-            .regions
-            .graph_table
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.scroll_graph(delta.saturating_mul(if wheel { 3 } else { 1 }));
-        }
     }
 
     fn scroll_commit(&mut self, delta: isize, wheel: bool) {

@@ -26,7 +26,7 @@ pub(super) use crate::{
     app::{
         APP_MIN_WIDTH, App, BranchPickerStep, CloneField, FOOTER_MARQUEE_PAUSE,
         FOOTER_MARQUEE_STEP, FileDialogKind, GraphHitTarget, HeaderPickerItem, HeaderPickerKind,
-        HitTarget, LayoutProfile, LeftPane, Mode, Regions, RepositoryPickerStep, ScrollTarget,
+        HitTarget, LayoutProfile, LeftPane, Mode, RepositoryPickerStep, ScrollTarget,
         ShortcutAction, TAB_WIDTH, TextInput, View, WorktreePickerStep,
     },
     theme::{Palette, load_theme},
@@ -45,9 +45,7 @@ fn palette() -> &'static Palette {
 }
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
-    app.regions = Regions::default();
-    app.regions.screen = Some(frame.area());
-    let profile = LayoutProfile::for_area(frame.area());
+    let profile = app.begin_render_frame(frame.area());
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().canvas).fg(palette().ink)),
         frame.area(),
@@ -102,6 +100,20 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     workspace::draw(frame, app, main_content, profile);
     draw_main_top_padding(frame, app, layout[1], profile);
     draw_navigation(frame, app, layout[2], profile);
+    if matches!(
+        app.mode,
+        Mode::Explorer
+            | Mode::Settings
+            | Mode::AuthorFilter
+            | Mode::ActionMenu
+            | Mode::Command
+            | Mode::HerdrPrompt
+            | Mode::Editor
+            | Mode::Files
+            | Mode::Help
+    ) {
+        app.regions.capture_scroll_boundary();
+    }
     match app.mode {
         Mode::Explorer => {
             dim(frame);
@@ -111,6 +123,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 &app.settings.shortcuts,
             );
             for (target, rect) in targets {
+                if matches!(
+                    target,
+                    HitTarget::Explorer(
+                        crate::app::ExplorerHitTarget::SurroundingsPane
+                            | crate::app::ExplorerHitTarget::Surrounding { .. }
+                    )
+                ) {
+                    app.regions
+                        .register_scroll_target(ScrollTarget::WorkspaceExplorerSurroundings, rect);
+                }
                 if target == HitTarget::Explorer(crate::app::ExplorerHitTarget::Overlay) {
                     app.regions
                         .register_scroll_target(ScrollTarget::WorkspaceExplorer, rect);
@@ -236,12 +258,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.header_picker.is_open() {
         dim_except_header_controls(frame, app);
         draw_header_picker(frame, app, profile);
+        app.regions
+            .capture_scroll_target(ScrollTarget::HeaderPicker);
     }
     finish_selection(frame, app);
 }
 
 fn draw_agent_pane_picker_overlay(frame: &mut Frame<'_>, app: &mut App) {
     if app.herdr_prompt.agent_pane_picker_open() {
+        app.regions.capture_scroll_boundary();
         dim_except_header_controls(frame, app);
         for (target, rect) in overlays::draw_agent_pane_picker(
             frame,

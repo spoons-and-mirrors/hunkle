@@ -66,6 +66,13 @@ pub(crate) struct WorkspaceNavigation {
     agents: Option<WorkspaceSurface>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WorkspaceBack {
+    None,
+    GraphCommit,
+    Detail { changes: bool, agent: bool },
+}
+
 impl Default for WorkspaceNavigation {
     fn default() -> Self {
         let content = WorkspaceContent::Changes(WorkspaceSurface::Master);
@@ -165,6 +172,26 @@ impl WorkspaceNavigation {
     pub(crate) fn select_sidebar(&mut self) {
         self.agents = None;
     }
+
+    pub(crate) fn back(&mut self) -> WorkspaceBack {
+        if self.graph_commit_open() {
+            self.close_graph_commit();
+            return WorkspaceBack::GraphCommit;
+        }
+
+        let changes_detail = self.changes_detail_open();
+        let agent_detail = self.agent_detail_open();
+        self.close_changes_detail();
+        self.close_agent_detail();
+        if changes_detail || agent_detail {
+            WorkspaceBack::Detail {
+                changes: changes_detail,
+                agent: agent_detail,
+            }
+        } else {
+            WorkspaceBack::None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +233,25 @@ mod workspace_tests {
     }
 
     #[test]
+    fn workspace_navigation_owns_back_priority() {
+        let mut navigation = WorkspaceNavigation::default();
+        navigation.select_agents();
+        navigation.show_agent_detail();
+        navigation.show_graph_commit();
+
+        assert_eq!(navigation.back(), WorkspaceBack::GraphCommit);
+        assert!(navigation.agent_detail_open());
+        assert_eq!(
+            navigation.back(),
+            WorkspaceBack::Detail {
+                changes: false,
+                agent: true,
+            }
+        );
+        assert!(!navigation.agent_detail_open());
+    }
+
+    #[test]
     fn nested_scroll_target_owns_the_gesture() {
         let mut regions = Regions::default();
         regions.register_scroll_target(ScrollTarget::Preview, Rect::new(0, 0, 20, 20));
@@ -219,6 +265,20 @@ mod workspace_tests {
             regions.scroll_target_at(Position::new(2, 2)),
             Some(ScrollTarget::Preview)
         );
+    }
+
+    #[test]
+    fn modal_scroll_boundary_hides_workspace_targets() {
+        let mut regions = Regions::default();
+        regions.register_scroll_target(ScrollTarget::Preview, Rect::new(0, 0, 20, 20));
+        regions.capture_scroll_boundary();
+        regions.register_scroll_target(ScrollTarget::ActionMenu, Rect::new(5, 5, 5, 5));
+
+        assert_eq!(
+            regions.scroll_target_at(Position::new(7, 7)),
+            Some(ScrollTarget::ActionMenu)
+        );
+        assert_eq!(regions.scroll_target_at(Position::new(2, 2)), None);
     }
 }
 
@@ -517,6 +577,12 @@ struct ScrollRegion {
     rect: Rect,
 }
 
+#[derive(Clone, Debug)]
+enum ScrollCapture {
+    Target(ScrollTarget),
+    Boundary(usize),
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct HitRegion {
     target: HitTarget,
@@ -592,6 +658,7 @@ pub struct Regions {
     pub diff_hunks: Vec<DiffHunkRegion>,
     hit_regions: Vec<HitRegion>,
     scroll_regions: Vec<ScrollRegion>,
+    scroll_capture: Option<ScrollCapture>,
 }
 
 impl Regions {
@@ -603,7 +670,34 @@ impl Regions {
         self.scroll_regions.push(ScrollRegion { target, rect });
     }
 
+    pub(crate) fn capture_scroll_target(&mut self, target: ScrollTarget) {
+        self.scroll_capture = Some(ScrollCapture::Target(target));
+    }
+
+    pub(crate) fn capture_scroll_boundary(&mut self) {
+        self.scroll_capture = Some(ScrollCapture::Boundary(self.scroll_regions.len()));
+    }
+
+    pub(crate) fn has_scroll_capture(&self) -> bool {
+        self.scroll_capture.is_some()
+    }
+
+    pub(crate) fn has_hard_scroll_capture(&self) -> bool {
+        matches!(self.scroll_capture, Some(ScrollCapture::Target(_)))
+    }
+
     pub(crate) fn scroll_target_at(&self, point: Position) -> Option<ScrollTarget> {
+        match self.scroll_capture.as_ref() {
+            Some(ScrollCapture::Target(target)) => return Some(target.clone()),
+            Some(ScrollCapture::Boundary(start)) => {
+                return self.scroll_regions[*start..]
+                    .iter()
+                    .rev()
+                    .find(|region| region.rect.contains(point))
+                    .map(|region| region.target.clone());
+            }
+            None => {}
+        }
         let semantic_target = match self.hit_target_at(point) {
             Some(
                 HitTarget::HeaderPickerOverlay

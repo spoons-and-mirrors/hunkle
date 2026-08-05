@@ -73,6 +73,7 @@ fn columns_render_one_empty_workspace_without_a_repository() {
                     areas: [Rect::new(0, 0, 38, 30), Rect::new(39, 0, 61, 30)],
                     sidebar_pane: LeftPane::Worktree,
                     preview_pane: Some(LeftPane::Worktree),
+                    agents: changes::ColumnAgents::Hidden,
                 },
             );
         })
@@ -217,6 +218,46 @@ fn clean_changes_view_uses_the_git_graph_as_its_detail_surface() {
     terminal.draw(|frame| draw(frame, &mut dirty_app)).unwrap();
     assert!(dirty_app.regions.graph_table.is_none());
     assert!(dirty_app.regions.diff.is_some());
+}
+
+#[test]
+fn narrow_explorer_splitter_drag_stays_owned_by_the_modal() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    fs::write(root.join("file.txt"), "content\n").unwrap();
+    let mut app = App::new(root.to_path_buf());
+    wait_for(&mut app, |app| !app.workspace_loading_initial_state());
+    app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Explorer);
+
+    let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let splitter = app
+        .regions
+        .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Splitter))
+        .unwrap();
+    let initial_width = app.workspace_explorer.left_pane_width;
+
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        splitter.x,
+        splitter.y,
+    ));
+    assert!(app.workspace_explorer.dragging_splitter);
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        splitter.x + 4,
+        splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        splitter.x + 4,
+        splitter.y,
+    ));
+
+    assert!(!app.workspace_explorer.dragging_splitter);
+    assert!(app.workspace_explorer.left_pane_width > initial_width);
 }
 
 #[test]
@@ -1126,6 +1167,17 @@ fn renders_every_primary_surface() {
             .scroll_target_at(Position::new(action_list.x, action_list.y)),
         Some(ScrollTarget::ActionMenu)
     );
+    let diff = app.regions.diff.unwrap();
+    let workspace_point = Position::new(diff.right() - 1, diff.bottom() - 1);
+    assert!(!action_list.contains(workspace_point));
+    assert_eq!(app.regions.scroll_target_at(workspace_point), None);
+    app.changes.diff_scroll = 0;
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        workspace_point.x,
+        workspace_point.y,
+    ));
+    assert_eq!(app.changes.diff_scroll, 0);
     app.handle_mouse(mouse(
         MouseEventKind::Moved,
         action_list.x + 2,
@@ -1153,6 +1205,18 @@ fn renders_every_primary_surface() {
             .scroll_target_at(Position::new(command_output.x, command_output.y)),
         Some(ScrollTarget::CommandOutput)
     );
+    let workspace_point = (diff.y..diff.bottom())
+        .flat_map(|y| (diff.x..diff.right()).map(move |x| Position::new(x, y)))
+        .find(|point| !command_output.contains(*point))
+        .unwrap();
+    assert_eq!(app.regions.scroll_target_at(workspace_point), None);
+    app.changes.diff_scroll = 0;
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        workspace_point.x,
+        workspace_point.y,
+    ));
+    assert_eq!(app.changes.diff_scroll, 0);
     assert_eq!(
         command_output.bottom().saturating_add(1),
         command_overlay.bottom().saturating_sub(5)

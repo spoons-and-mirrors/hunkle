@@ -57,14 +57,32 @@ pub(super) enum ChangesPlan {
         areas: [Rect; 2],
         sidebar_pane: LeftPane,
         preview_pane: Option<LeftPane>,
+        agents: ColumnAgents,
     },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ColumnAgents {
+    Hidden,
+    Master,
+    MasterDetail,
+}
+
+impl ColumnAgents {
+    fn master_visible(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+
+    fn detail_visible(self) -> bool {
+        matches!(self, Self::MasterDetail)
+    }
 }
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, plan: ChangesPlan) {
     match plan {
         ChangesPlan::SingleMaster { area, pane } => {
             app.reset_media_presentation();
-            draw_master(frame, app, area, pane, None);
+            draw_master(frame, app, area, pane, None, ColumnAgents::Hidden);
         }
         ChangesPlan::SinglePreview { area, pane } => {
             draw_detail(frame, app, area, pane, true);
@@ -81,8 +99,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, plan: ChangesPlan) {
             areas,
             sidebar_pane,
             preview_pane,
+            agents,
         } => {
-            draw_master(frame, app, areas[0], sidebar_pane, Some(areas[1]));
+            draw_master(frame, app, areas[0], sidebar_pane, Some(areas[1]), agents);
             if let Some(preview_pane) = preview_pane {
                 draw_detail(frame, app, areas[1], preview_pane, false);
             }
@@ -96,6 +115,7 @@ fn draw_master(
     area: Rect,
     pane: LeftPane,
     detail_area: Option<Rect>,
+    agents: ColumnAgents,
 ) {
     let single_panel = detail_area.is_none();
     let workspace = detail_area.map_or(area, |detail| {
@@ -131,7 +151,7 @@ fn draw_master(
         );
     }
     if pane == LeftPane::Files {
-        draw_explorer_master(frame, app, area, single_panel);
+        draw_explorer_master(frame, app, area, single_panel, agents);
         return;
     }
 
@@ -164,7 +184,12 @@ fn draw_master(
         1,
     );
     let worktree_list_y = staging_row.bottom();
-    let worktree_list = layout_agents_pane(app, worktree_content, worktree_list_y, single_panel);
+    let worktree_list = layout_agents_pane(
+        app,
+        worktree_content,
+        worktree_list_y,
+        agents.master_visible(),
+    );
     app.regions.worktree_list = Some(worktree_list);
     app.regions
         .register_scroll_target(ScrollTarget::Worktree, worktree_list);
@@ -316,7 +341,9 @@ fn draw_master(
     } else {
         Some(draw_actions(frame, actions_row, app.mode))
     };
-    draw_agents_section(frame, app);
+    if agents.master_visible() {
+        draw_agents_section(frame, app);
+    }
     draw_commit_editor(
         frame,
         app,
@@ -326,7 +353,9 @@ fn draw_master(
         has_changes,
         details_ready,
     );
-    draw_agent_history_pane(frame, app, worktree_content, single_panel);
+    if agents.detail_visible() {
+        draw_agent_history_pane(frame, app, worktree_content, single_panel);
+    }
 }
 
 fn draw_detail(
@@ -776,9 +805,6 @@ pub(super) fn draw_agent_history_pane(
     content: Rect,
     single_panel: bool,
 ) {
-    if !app.agents_pane_visible() {
-        return;
-    }
     let bottom = app
         .regions
         .agents_splitter

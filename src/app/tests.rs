@@ -1520,6 +1520,17 @@ fn undersized_inline_editor_rejects_text_input() {
 }
 
 #[test]
+fn input_uses_the_profile_computed_for_the_rendered_frame() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+
+    app.begin_render_frame(Rect::new(0, 0, 49, 48));
+    app.regions.screen = Some(Rect::new(0, 0, 120, 48));
+
+    assert_eq!(app.layout_profile(), LayoutProfile::Single);
+}
+
+#[test]
 fn workspace_open_is_blocked_while_inline_editor_exists() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

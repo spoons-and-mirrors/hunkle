@@ -4,14 +4,14 @@ pub(super) fn layout_agents_pane(
     app: &mut App,
     content: Rect,
     list_y: u16,
-    single_panel: bool,
+    show_agents: bool,
 ) -> Rect {
     app.regions.agents_list = None;
     app.regions.agents_splitter = None;
     app.regions.agents_bounds = None;
 
     let available = content.bottom().saturating_sub(list_y);
-    if !app.herdr_available() || single_panel || !app.agents_visible || available < 5 {
+    if !show_agents || available < 5 {
         return Rect::new(content.x, list_y, content.width, available);
     }
 

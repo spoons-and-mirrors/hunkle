@@ -5,6 +5,7 @@ pub(super) fn draw_explorer_master(
     app: &mut App,
     area: Rect,
     single_panel: bool,
+    agents: ColumnAgents,
 ) {
     app.regions.worktree_list = None;
     app.regions.commit = None;
@@ -16,7 +17,7 @@ pub(super) fn draw_explorer_master(
         content.width,
         1,
     );
-    let list_area = layout_agents_pane(app, content, controls.bottom(), single_panel);
+    let list_area = layout_agents_pane(app, content, controls.bottom(), agents.master_visible());
     let add_width = 7.min(controls.width);
     let add_button = Rect::new(
         controls.right().saturating_sub(add_width),
@@ -96,8 +97,12 @@ pub(super) fn draw_explorer_master(
             .collect()
     };
     frame.render_widget(List::new(items), list_area);
-    draw_agents_section(frame, app);
-    draw_agent_history_pane(frame, app, content, single_panel);
+    if agents.master_visible() {
+        draw_agents_section(frame, app);
+    }
+    if agents.detail_visible() {
+        draw_agent_history_pane(frame, app, content, single_panel);
+    }
 }
 
 pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: Rect) {

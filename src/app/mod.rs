@@ -115,6 +115,7 @@ pub struct App {
     pub(crate) session: RepositorySession,
     graph_hidden: bool,
     navigation: WorkspaceNavigation,
+    layout_profile: LayoutProfile,
     pub mode: Mode,
     pub changes: ChangesState,
     pub graph_state: TableState,
@@ -272,6 +273,7 @@ impl App {
             session,
             graph_hidden: false,
             navigation: WorkspaceNavigation::default(),
+            layout_profile: LayoutProfile::default(),
             mode,
             changes,
             graph_state,
@@ -2144,9 +2146,14 @@ impl App {
     }
 
     pub(crate) fn layout_profile(&self) -> LayoutProfile {
-        self.regions
-            .screen
-            .map_or_else(LayoutProfile::default, LayoutProfile::for_area)
+        self.layout_profile
+    }
+
+    pub(crate) fn begin_render_frame(&mut self, area: Rect) -> LayoutProfile {
+        self.layout_profile = LayoutProfile::for_area(area);
+        self.regions = Regions::default();
+        self.regions.screen = Some(area);
+        self.layout_profile
     }
 
     pub(crate) fn graph_commit_open(&self) -> bool {
@@ -2176,15 +2183,15 @@ impl App {
     }
 
     pub(super) fn show_previous_panel(&mut self) {
-        if self.graph_commit_open() {
-            self.navigation.close_graph_commit();
-        } else {
-            self.changes.deactivate_sqlite();
-            self.navigation.close_changes_detail();
-            self.navigation.close_agent_detail();
-            self.agent_preview_transcript_scroll = None;
-            self.agent_preview_message_selection = None;
-            self.agent_preview_expanded_requests = None;
+        if let WorkspaceBack::Detail { changes, agent } = self.navigation.back() {
+            if changes {
+                self.changes.deactivate_sqlite();
+            }
+            if agent {
+                self.agent_preview_transcript_scroll = None;
+                self.agent_preview_message_selection = None;
+                self.agent_preview_expanded_requests = None;
+            }
         }
     }
 

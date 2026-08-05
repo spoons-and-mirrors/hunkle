@@ -13,6 +13,7 @@ enum WorkspacePlan {
         areas: [Rect; 2],
         sidebar_pane: LeftPane,
         detail: DetailSurface,
+        agents: changes::ColumnAgents,
     },
 }
 
@@ -37,6 +38,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
             areas,
             sidebar_pane,
             detail,
+            agents,
         } => {
             let preview_pane = match detail {
                 DetailSurface::Preview(pane) => pane,
@@ -50,6 +52,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
                     sidebar_pane,
                     preview_pane: matches!(detail, DetailSurface::Preview(_))
                         .then_some(preview_pane),
+                    agents,
                 },
             );
             if matches!(detail, DetailSurface::Graph) {
@@ -89,10 +92,18 @@ fn plan(app: &App, area: Rect, profile: LayoutProfile) -> WorkspacePlan {
     } else {
         DetailSurface::Preview(preview_pane)
     };
+    let agents = if !app.herdr_available() || !app.agents_visible {
+        changes::ColumnAgents::Hidden
+    } else if app.agents_pane_visible() {
+        changes::ColumnAgents::MasterDetail
+    } else {
+        changes::ColumnAgents::Master
+    };
     WorkspacePlan::Columns {
         areas: column_areas(app.settings.worktree_width, area),
         sidebar_pane,
         detail,
+        agents,
     }
 }
 
