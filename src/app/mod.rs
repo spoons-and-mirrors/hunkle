@@ -1379,10 +1379,11 @@ impl App {
                 }
             }
             #[cfg(not(test))]
-            if let Some(repository) = self
-                .session
-                .data()
-                .filter(|repository| repository.details_ready)
+            if self.mode != Mode::Explorer
+                && let Some(repository) = self
+                    .session
+                    .data()
+                    .filter(|repository| repository.details_ready)
             {
                 self.workspace_explorer.prewarm_index(&repository.root);
             }
