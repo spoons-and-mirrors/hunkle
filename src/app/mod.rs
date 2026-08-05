@@ -1176,6 +1176,7 @@ impl App {
             let prepared_file_tree = done.prepared_file_tree;
             let follow_up_refresh = done.follow_up_refresh;
             let inventory_refresh = done.inventory_refresh;
+            let refresh_scope = done.scope;
             match (done.kind, done.result) {
                 (LoadKind::Open, Ok(())) => {
                     if let (Some(state), Some(repository)) =
@@ -1275,21 +1276,23 @@ impl App {
                 (LoadKind::Reload, Ok(())) => {
                     if let Some((selection, selected_oid)) = self.pending_reload.take() {
                         let repo = self.session.data().expect("reloaded repository");
-                        self.author_filter.sync(&repo.root, &repo.commits);
-                        self.graph_search.sync(
-                            &repo.root,
-                            &repo.commits,
-                            self.author_filter.visible_indices(),
-                        );
-                        let visible = self.graph_search.visible_indices();
-                        let commit_index = selected_oid.and_then(|oid| {
-                            visible
-                                .iter()
-                                .position(|index| repo.commits[*index].oid == oid)
-                        });
-                        self.graph_state
-                            .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
-                        self.graph_scroll_to_selection = true;
+                        if refresh_scope.includes_graph() {
+                            self.author_filter.sync(&repo.root, &repo.commits);
+                            self.graph_search.sync(
+                                &repo.root,
+                                &repo.commits,
+                                self.author_filter.visible_indices(),
+                            );
+                            let visible = self.graph_search.visible_indices();
+                            let commit_index = selected_oid.and_then(|oid| {
+                                visible
+                                    .iter()
+                                    .position(|index| repo.commits[*index].oid == oid)
+                            });
+                            self.graph_state
+                                .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
+                            self.graph_scroll_to_selection = true;
+                        }
                         self.changes
                             .restore_selection(repo, selection, inventory_refresh);
                         if let Some(path) = self.pending_file_selection.take() {
@@ -1306,10 +1309,17 @@ impl App {
                             self.changes.set_pane(pane, Some(repo));
                             self.initial_pane_pending = false;
                         }
-                        if self.view() == View::RepositorySearch {
+                        if self.view() == View::RepositorySearch
+                            && (refresh_scope.includes_worktree()
+                                || refresh_scope.includes_inventory())
+                        {
                             self.file_search.repository_refreshed(repo);
-                        } else {
-                            self.file_search.invalidate();
+                        } else if refresh_scope.includes_inventory() {
+                            self.file_search.reindex(
+                                &repo.files,
+                                &repo.ignored_files,
+                                Some(repo.files_fingerprint),
+                            );
                         }
                     }
                     if self.notice.as_deref() == Some("Refreshing…") {
@@ -2208,8 +2218,7 @@ impl App {
 
     pub(crate) fn begin_render_frame(&mut self, area: Rect) -> LayoutProfile {
         self.layout_profile = LayoutProfile::for_area(area);
-        self.regions = Regions::default();
-        self.regions.screen = Some(area);
+        self.regions.begin_frame(area);
         self.layout_profile
     }
 

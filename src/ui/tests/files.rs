@@ -857,7 +857,15 @@ fn fuzzy_searches_and_opens_repository_files() {
     for character in "profile card".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
+    for _ in 0..100 {
+        let _ = app.poll_worker();
+        if !app.file_search.searching {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(app.view(), View::RepositorySearch);
+    assert!(!app.file_search.searching);
     assert_eq!(app.file_search.match_count, 1);
     let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
     narrow.draw(|frame| draw(frame, &mut app)).unwrap();

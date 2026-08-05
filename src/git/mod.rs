@@ -172,6 +172,18 @@ impl RefreshScope {
         Self(self.0 | other.0)
     }
 
+    pub(crate) const fn includes_worktree(self) -> bool {
+        self.includes(Self::WORKTREE)
+    }
+
+    pub(crate) const fn includes_inventory(self) -> bool {
+        self.includes(Self::INVENTORY)
+    }
+
+    pub(crate) const fn includes_graph(self) -> bool {
+        self.includes(Self::GRAPH)
+    }
+
     const fn includes(self, facet: Self) -> bool {
         self.0 & facet.0 != 0
     }

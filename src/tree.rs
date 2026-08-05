@@ -87,18 +87,21 @@ impl FileTree {
         if self.directories.get(&directory) == Some(&entries) {
             return false;
         }
-        let child_directories: Vec<_> = entries
+        let child_directories: HashSet<_> = entries
             .iter()
             .filter(|entry| entry.is_directory)
-            .map(|entry| entry.path.clone())
+            .map(|entry| entry.path.as_path())
             .collect();
         self.directories.retain(|path, _| {
             path == &directory
                 || !path.as_path().starts_with(directory.as_path())
-                || child_directories
-                    .iter()
-                    .any(|child| path == child || path.as_path().starts_with(child.as_path()))
+                || path
+                    .as_path()
+                    .ancestors()
+                    .find(|ancestor| ancestor.parent() == Some(directory.as_path()))
+                    .is_some_and(|child| child_directories.contains(child))
         });
+        drop(child_directories);
         self.directories.insert(directory, entries);
         true
     }
