@@ -359,6 +359,7 @@ impl App {
             footer_marquee: None,
         };
         app.restore_commit_draft();
+        app.queue_local_build_restart();
         app
     }
 
@@ -587,18 +588,26 @@ impl App {
             && !self.file_editor.as_ref().is_some_and(FileEditor::dirty)
     }
 
-    pub(crate) fn local_build_available(&self) -> bool {
-        self.local_build_executable()
-            .is_some_and(|path| path.is_file())
-    }
-
-    pub(crate) fn request_local_build_restart(&mut self) {
+    fn queue_local_build_restart(&mut self) {
+        if self.restart_request.is_some() {
+            return;
+        }
         let Some(executable) = self.local_build_executable().filter(|path| path.is_file()) else {
-            self.notice = Some("Local Hunkle build is unavailable".to_owned());
             return;
         };
+        let Ok(current_executable) = std::env::current_exe() else {
+            diagnostics::event("local build handoff skipped; current executable unavailable");
+            return;
+        };
+        if same_path(&current_executable, &executable) {
+            return;
+        }
+        diagnostics::event(format!(
+            "local build handoff queued executable={}",
+            executable.display()
+        ));
         self.restart_request = Some(executable);
-        self.notice = Some("Reloading local Hunkle build…".to_owned());
+        self.notice = Some("Switching to workspace Hunkle build…".to_owned());
     }
 
     pub(crate) fn take_restart_request(&mut self) -> Option<PathBuf> {
@@ -1256,6 +1265,7 @@ impl App {
                             .to_owned(),
                         )
                     });
+                    self.queue_local_build_restart();
                 }
                 (LoadKind::Open, Err(error)) => {
                     diagnostics::event(format!("workspace open failed error={error}"));

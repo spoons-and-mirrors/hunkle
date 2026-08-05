@@ -1526,6 +1526,28 @@ fn dirty_inline_editor_blocks_restart() {
 }
 
 #[test]
+fn opening_a_workspace_queues_its_local_hunkle_build() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    initialize_repository(root);
+    let executable = root
+        .join("target")
+        .join("hunkle-install")
+        .join("bin")
+        .join(format!("hunkle{}", std::env::consts::EXE_SUFFIX));
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::write(&executable, "local build").unwrap();
+    let mut app = App::opening(root.to_path_buf());
+
+    wait_for_state(&mut app, |app| !app.session.open_running());
+
+    assert_eq!(
+        app.take_restart_request().as_deref(),
+        Some(executable.as_path())
+    );
+}
+
+#[test]
 fn undersized_inline_editor_rejects_text_input() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

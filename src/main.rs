@@ -68,10 +68,10 @@ fn main() -> Result<()> {
     let _diagnostics_guard = DiagnosticsGuard;
     install_panic_hook();
     #[cfg(unix)]
-    let mut restart_coordinator = match restart::RestartCoordinator::start() {
-        Ok(coordinator) => Some(coordinator),
+    let mut restart_watcher = match restart::RestartWatcher::start() {
+        Ok(watcher) => Some(watcher),
         Err(error) => {
-            diagnostics::event(format!("restart coordination unavailable error={error}"));
+            diagnostics::event(format!("restart watcher unavailable error={error}"));
             None
         }
     };
@@ -100,14 +100,14 @@ fn main() -> Result<()> {
         }
         #[cfg(unix)]
         if restart_request.is_none()
-            && let Some(coordinator) = restart_coordinator.as_mut()
+            && let Some(watcher) = restart_watcher.as_mut()
         {
-            match coordinator.poll() {
+            match watcher.poll() {
                 Ok(Some(executable)) => restart_request = Some(executable),
                 Ok(None) => {}
                 Err(error) => {
-                    diagnostics::event(format!("restart coordination failed error={error}"));
-                    restart_coordinator = None;
+                    diagnostics::event(format!("restart watcher failed error={error}"));
+                    restart_watcher = None;
                 }
             }
         }

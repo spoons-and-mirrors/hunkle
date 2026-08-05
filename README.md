@@ -39,12 +39,13 @@ its own ignored `target` directory instead of replacing the global binary:
 cargo hunkle-install-local
 ```
 
-When the open workspace contains that local install, Hunkle shows `↻` in the
-top-right. Click it to restart Hunkle with that workspace's binary while keeping
-the workspace open. Each worktree therefore has an independent build channel;
-installing from another worktree cannot replace the binary currently in use.
-The local target directory is explicit so a user-level Cargo configuration
-cannot make worktrees share stale build artifacts.
+When Hunkle opens a workspace containing that local install, it automatically
+restarts with the workspace's binary while keeping the workspace open. On Unix,
+running local builds also detect and load later installs automatically. Each
+worktree therefore has an independent build channel; installing from another
+worktree cannot replace the binary currently in use. The local target directory
+is explicit so a user-level Cargo configuration cannot make worktrees share
+stale build artifacts.
 
 For a deliberate one-time update of the globally launched bootstrap binary,
 use `cargo hunkle-install-global`. Development agents are instructed to use only
@@ -179,7 +180,6 @@ terminal, are shared between Hunkle processes, and persist across restarts in
 ## Mouse
 
 - Click header controls to switch views, refresh, open Explorer, or open help.
-- Click `↻` at the top-right to run the Hunkle build installed in the open worktree.
 - Drag the divider between Changes and Diff to resize either panel.
 - Hover an agent to preview its latest user message. Scroll over the card or
   preview to cycle through the last five messages, or hover the history squares
