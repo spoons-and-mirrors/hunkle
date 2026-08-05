@@ -31,7 +31,11 @@ enum DetailSurface {
 }
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: LayoutProfile) {
-    match plan(app, area, profile) {
+    let plan = plan(app, area, profile);
+    let (cards_presented, surface_presented) = plan.agent_presentation(app.repository().is_some());
+    app.regions.agent_cards_presented = cards_presented;
+    app.regions.agent_surface_presented = surface_presented;
+    match plan {
         WorkspacePlan::Search => draw_search(frame, app, area),
         WorkspacePlan::Single(surface) => draw_single(frame, app, area, surface),
         WorkspacePlan::Columns {
@@ -58,6 +62,20 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
             if matches!(detail, DetailSurface::Graph) {
                 draw_graph(frame, app, areas[1]);
             }
+        }
+    }
+}
+
+impl WorkspacePlan {
+    fn agent_presentation(&self, repository_present: bool) -> (bool, bool) {
+        match self {
+            Self::Single(SingleSurface::Agents) => (true, true),
+            Self::Single(SingleSurface::AgentHistory) => (false, true),
+            Self::Columns {
+                agents: changes::ColumnAgents::Master | changes::ColumnAgents::MasterDetail,
+                ..
+            } if repository_present => (true, true),
+            _ => (false, false),
         }
     }
 }
@@ -186,5 +204,41 @@ mod tests {
 
         assert_eq!(areas[0], Rect::new(2, 3, 31, 40));
         assert_eq!(areas[1], Rect::new(34, 3, 68, 40));
+    }
+
+    #[test]
+    fn composition_declares_agent_presentation_interest() {
+        let area = Rect::new(0, 0, 80, 40);
+        let columns = |agents| WorkspacePlan::Columns {
+            areas: [area, area],
+            sidebar_pane: LeftPane::Worktree,
+            detail: DetailSurface::Preview(LeftPane::Worktree),
+            agents,
+        };
+
+        assert_eq!(
+            WorkspacePlan::Single(SingleSurface::Agents).agent_presentation(false),
+            (true, true)
+        );
+        assert_eq!(
+            WorkspacePlan::Single(SingleSurface::AgentHistory).agent_presentation(false),
+            (false, true)
+        );
+        assert_eq!(
+            columns(changes::ColumnAgents::Master).agent_presentation(true),
+            (true, true)
+        );
+        assert_eq!(
+            columns(changes::ColumnAgents::Master).agent_presentation(false),
+            (false, false)
+        );
+        assert_eq!(
+            columns(changes::ColumnAgents::Hidden).agent_presentation(true),
+            (false, false)
+        );
+        assert_eq!(
+            WorkspacePlan::Search.agent_presentation(true),
+            (false, false)
+        );
     }
 }

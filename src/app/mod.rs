@@ -852,7 +852,10 @@ impl App {
         if self.herdr_available() {
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
-                self.herdr.poll()
+                self.herdr.poll(
+                    self.regions.agent_cards_presented,
+                    self.regions.agent_surface_presented,
+                )
             };
             changed |= herdr_poll.changed;
             if let Some(error) = herdr_poll.notice {

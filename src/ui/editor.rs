@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ratatui::buffer::Buffer;
 
@@ -17,6 +17,12 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
         1,
     );
     let narrow = profile.is_single();
+    let wrapped = app.changes.diff_wrap;
+    let line_count = (narrow || !wrapped).then(|| {
+        app.file_editor
+            .as_ref()
+            .map_or(0, |editor| editor.visible_line_count())
+    });
     let body = Rect::new(
         if narrow { panel.x } else { header.x },
         header.y.saturating_add(2),
@@ -24,9 +30,7 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
         panel.bottom().saturating_sub(header.y.saturating_add(3)),
     );
     let number_width = if narrow {
-        app.file_editor.as_ref().map_or(1, |editor| {
-            editor.visible_line_count().max(1).ilog10() as usize + 1
-        })
+        line_count.unwrap_or(1).max(1).ilog10() as usize + 1
     } else {
         5
     };
@@ -52,7 +56,6 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
     );
 
     let save_label = app.settings.shortcuts.label(ShortcutAction::SaveOrFormat);
-    let wrapped = app.changes.diff_wrap;
     let formatting = app.format_running();
     let Some(editor) = &mut app.file_editor else {
         return;
@@ -61,7 +64,6 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
         app.changes.preview.document(),
         editor.path(),
         editor.locally_changed_lines(),
-        editor.visible_line_count(),
     );
     let (cursor_line, cursor_column) = editor.cursor_position();
     let path = editor.path().display();
@@ -140,13 +142,13 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
         while lines.len() <= cursor_line.saturating_sub(editor.scroll_line) {
             lines.push(Line::default().style(Style::default().bg(palette().panel)));
         }
-        let line_count = editor.visible_line_count();
+        let line_count = line_count.expect("unwrapped editor counted visible lines");
         let line_numbers = (0..viewport_height)
             .map(|row| {
                 let line = editor.scroll_line.saturating_add(row);
                 editor_line_number(
                     (line < line_count).then_some(line),
-                    line_markers.get(line).copied().flatten(),
+                    line_markers.get(&line).copied(),
                     number_width,
                     narrow,
                 )
@@ -310,20 +312,15 @@ fn editor_line_markers(
     diff: Option<&crate::ui::preview::DiffDocument>,
     path: &RepoPath,
     locally_changed_lines: &BTreeSet<usize>,
-    line_count: usize,
-) -> Vec<Option<char>> {
-    let mut markers = vec![None; line_count];
+) -> BTreeMap<usize, char> {
+    let mut markers = BTreeMap::new();
     if let Some(diff) = diff {
         for (line, marker) in diff.new_line_markers(path) {
-            if let Some(slot) = markers.get_mut(line) {
-                *slot = Some(marker);
-            }
+            markers.insert(line, marker);
         }
     }
     for line in locally_changed_lines {
-        if let Some(slot) = markers.get_mut(*line) {
-            *slot = Some('~');
-        }
+        markers.insert(*line, '~');
     }
     markers
 }
@@ -375,8 +372,8 @@ pub(super) fn wrapped_editor_cursor(
 ) -> (usize, usize) {
     let mut visual_row = 0usize;
     for (line, content) in editor_source_lines(source).enumerate() {
-        let rows = text::word_wrapped_rows(content, width);
         if line == cursor_line {
+            let rows = text::word_wrapped_rows(content, width);
             let (row, rendered_column) = rows
                 .iter()
                 .enumerate()
@@ -389,7 +386,7 @@ pub(super) fn wrapped_editor_cursor(
                 });
             return (visual_row.saturating_add(row), rendered_column);
         }
-        visual_row = visual_row.saturating_add(rows.len());
+        visual_row = visual_row.saturating_add(text::word_wrapped_height(content, width));
     }
     (visual_row, 0)
 }
@@ -400,7 +397,7 @@ fn wrapped_editor_view(
     width: usize,
     scroll: usize,
     height: usize,
-    line_markers: &[Option<char>],
+    line_markers: &BTreeMap<usize, char>,
     number_width: usize,
     flush_line_numbers_left: bool,
 ) -> (
@@ -412,17 +409,28 @@ fn wrapped_editor_view(
     let mut line_numbers = Vec::new();
     let mut rendered_rows = Vec::new();
     let mut visual_row = 0usize;
+    let viewport_end = scroll.saturating_add(height);
     for (line_number, content) in editor_source_lines(source).enumerate() {
+        if visual_row >= viewport_end {
+            break;
+        }
+        if visual_row < scroll {
+            let line_end = visual_row.saturating_add(text::word_wrapped_height(content, width));
+            if line_end <= scroll {
+                visual_row = line_end;
+                continue;
+            }
+        }
         let rows = text::word_wrapped_rows(content, width);
         let line_end = visual_row.saturating_add(rows.len());
-        if line_end > scroll && visual_row < scroll.saturating_add(height) {
+        if line_end > scroll && visual_row < viewport_end {
             let styled = text::styled_source_window(source, path, 0, line_number, 1)
                 .into_iter()
                 .next()
                 .unwrap_or_default();
             for (index, row) in rows.iter().enumerate() {
                 let absolute_row = visual_row.saturating_add(index);
-                if absolute_row < scroll || absolute_row >= scroll.saturating_add(height) {
+                if absolute_row < scroll || absolute_row >= viewport_end {
                     continue;
                 }
                 let rendered =
@@ -433,7 +441,7 @@ fn wrapped_editor_view(
                 lines.push(rendered);
                 line_numbers.push(editor_line_number(
                     (index == 0).then_some(line_number),
-                    line_markers.get(line_number).copied().flatten(),
+                    line_markers.get(&line_number).copied(),
                     number_width,
                     flush_line_numbers_left,
                 ));
@@ -444,9 +452,6 @@ fn wrapped_editor_view(
             }
         }
         visual_row = line_end;
-        if visual_row >= scroll.saturating_add(height) {
-            break;
-        }
     }
     while lines.len() < height {
         lines.push(Line::default().style(Style::default().bg(palette().panel)));
@@ -514,4 +519,20 @@ fn editor_visible_lines(
         line.spans = visible_spans;
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_markers_are_sparse() {
+        let changed = BTreeSet::from([2, 1_000_000]);
+
+        let markers = editor_line_markers(None, &RepoPath::from("notes.txt"), &changed);
+
+        assert_eq!(markers.len(), 2);
+        assert_eq!(markers.get(&2), Some(&'~'));
+        assert_eq!(markers.get(&1_000_000), Some(&'~'));
+    }
 }
