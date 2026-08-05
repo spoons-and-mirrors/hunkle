@@ -895,7 +895,7 @@ impl App {
         changed |= self.mode == Mode::Explorer && explorer_changed;
         changed |= self.file_search.poll(self.session.data());
         if self.herdr_available() {
-            let scheduled_session = (self.mode == Mode::Scheduler
+            let scheduled_run = (self.mode == Mode::Scheduler
                 && self.scheduler.surface == SchedulerSurface::Conversation)
                 .then(|| {
                     self.scheduler.selected_run_id.and_then(|id| {
@@ -903,12 +903,32 @@ impl App {
                             .scheduled_runs()
                             .iter()
                             .find(|run| run.id == id)
-                            .and_then(|run| run.session_id.clone())
+                            .cloned()
                     })
                 })
                 .flatten();
-            if let Some(session_id) = scheduled_session {
-                self.herdr.request_scheduled_conversation(&session_id);
+            if let Some(run) = scheduled_run {
+                if let Some(session_id) = run.session_id.as_deref() {
+                    self.herdr
+                        .request_scheduled_conversation(session_id, run.status.is_active());
+                } else if let Some(task) = self
+                    .herdr
+                    .scheduled_tasks()
+                    .iter()
+                    .find(|task| task.id == run.task_id)
+                    .cloned()
+                {
+                    if run.status.is_active()
+                        || self.herdr.scheduled_session_error(run.id).is_none()
+                    {
+                        self.herdr.resolve_scheduled_run_session(
+                            run.id,
+                            task.destination,
+                            task.prompt,
+                            run.created_at_ms,
+                        );
+                    }
+                }
             }
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");

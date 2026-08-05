@@ -910,12 +910,6 @@ impl App {
         };
         let task_id = composer.task_id;
         let source = composer.source.clone();
-        let refresh_open_workspace = self.repository().is_some_and(|repository| {
-            same_path(&repository.root, &destination_path)
-                || source
-                    .as_ref()
-                    .is_some_and(|source| same_path(&repository.root, &source.destination))
-        });
         match self.herdr.save_scheduled_task(task_id, edit, source) {
             Ok(()) => {
                 self.scheduler.composer = None;
@@ -926,9 +920,6 @@ impl App {
                     SchedulerSurface::Tasks
                 };
                 self.notice = Some("Scheduled task saved".to_owned());
-                if refresh_open_workspace {
-                    self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
-                }
             }
             Err(error) => self.scheduler.error = Some(error),
         }
@@ -971,24 +962,13 @@ impl App {
     }
 
     fn toggle_selected_scheduled_task(&mut self) {
-        let Some((id, enabled, refresh_open_workspace)) =
-            self.selected_scheduled_task().map(|task| {
-                (
-                    task.id,
-                    !task.enabled,
-                    task.source.is_some()
-                        && self.repository().is_some_and(|repository| {
-                            same_path(&repository.root, &task.destination)
-                        }),
-                )
-            })
+        let Some((id, enabled)) = self
+            .selected_scheduled_task()
+            .map(|task| (task.id, !task.enabled))
         else {
             return;
         };
         self.scheduler.error = self.herdr.toggle_scheduled_task(id, enabled).err();
-        if self.scheduler.error.is_none() && refresh_open_workspace {
-            self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
-        }
     }
 
     fn run_selected_scheduled_task(&mut self) {
@@ -996,18 +976,20 @@ impl App {
             return;
         };
         self.scheduler.error = self.herdr.run_scheduled_task_now(id).err();
+        if self.scheduler.error.is_none() {
+            // The next scheduler update contains the newly claimed run at the front.
+            self.scheduler.selected_run_id = None;
+            self.scheduler.run_scroll = 0;
+            self.scheduler.surface = SchedulerSurface::Conversation;
+            self.scheduler.conversation_scroll = None;
+            self.scheduler.conversation_message = None;
+            self.scheduler.conversation_expanded_requests.clear();
+            self.herdr.clear_scheduled_conversation();
+        }
     }
 
     fn delete_selected_scheduled_task(&mut self) {
-        let Some((id, refresh_open_workspace)) = self.selected_scheduled_task().map(|task| {
-            (
-                task.id,
-                task.source.is_some()
-                    && self
-                        .repository()
-                        .is_some_and(|repository| same_path(&repository.root, &task.destination)),
-            )
-        }) else {
+        let Some(id) = self.selected_scheduled_task().map(|task| task.id) else {
             return;
         };
         if let Err(error) = self.herdr.delete_scheduled_task(id) {
@@ -1018,9 +1000,6 @@ impl App {
         self.scheduler.selected_run_id = None;
         self.scheduler.surface = SchedulerSurface::Tasks;
         self.scheduler.error = None;
-        if refresh_open_workspace {
-            self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
-        }
     }
 
     fn refresh_selected_scheduled_run(&mut self) {
@@ -1041,7 +1020,8 @@ impl App {
             return;
         };
         if let Some(session_id) = run.session_id.as_deref() {
-            self.herdr.request_scheduled_conversation(session_id);
+            self.herdr
+                .request_scheduled_conversation(session_id, run.status.is_active());
         } else if let Some(task) = self
             .herdr
             .scheduled_tasks()
@@ -1052,6 +1032,7 @@ impl App {
                 run.id,
                 task.destination.clone(),
                 task.prompt.clone(),
+                run.created_at_ms,
             );
         }
         self.scheduler.surface = SchedulerSurface::Conversation;

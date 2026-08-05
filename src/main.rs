@@ -4,6 +4,7 @@ mod filesystem;
 mod formatter;
 mod git;
 mod media;
+mod paths;
 mod process;
 mod repo_path;
 mod repository_session;

@@ -196,10 +196,17 @@ fn draw_conversation(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut
         return;
     };
     let Some(session_id) = run.session_id.as_deref() else {
-        let message = app
-            .herdr
-            .scheduled_session_error(run.id)
-            .unwrap_or("Finding this run's OpenCode session…");
+        let message = if run.status.is_active() {
+            "Waiting for this run's OpenCode session…"
+        } else if app.herdr.scheduled_session_error(run.id)
+            == Some("OpenCode session could not be identified")
+        {
+            "No OpenCode conversation was recorded for this run. The task is intact; run it again to create a new conversation."
+        } else {
+            app.herdr
+                .scheduled_session_error(run.id)
+                .unwrap_or("Finding this run's OpenCode session…")
+        };
         draw_text(
             frame,
             body,

@@ -1015,6 +1015,36 @@ fn scheduler_edits_an_existing_task_in_the_shared_composer() {
 }
 
 #[test]
+fn scheduler_run_now_opens_the_live_conversation() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+        id: 7,
+        title: "Nightly review".to_owned(),
+        description: String::new(),
+        prompt: "Review the diff.".to_owned(),
+        destination: directory.path().to_path_buf(),
+        repository: "repo".to_owned(),
+        branch: "main".to_owned(),
+        enabled: true,
+        interval_minutes: 90,
+        next_run_ms: 1,
+        source: None,
+    }]);
+    app.mode = Mode::Scheduler;
+    app.scheduler.surface = SchedulerSurface::Detail;
+    app.scheduler.selected_task_id = Some(7);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+
+    assert_eq!(app.scheduler.surface, SchedulerSurface::Conversation);
+    assert_eq!(app.scheduler.selected_run_id, None);
+    assert_eq!(app.scheduler.run_scroll, 0);
+}
+
+#[test]
 fn scheduler_prompt_follows_the_cursor_and_accepts_wheel_scrolling() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());
