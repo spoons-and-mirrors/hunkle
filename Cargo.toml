@@ -17,7 +17,7 @@ image = { version = "0.25.6", default-features = false, features = ["bmp", "gif"
 interprocess = "2.4.2"
 process-wrap = { version = "9.1", default-features = false, features = ["std", "process-group", "job-object"] }
 pulldown-cmark = "0.13"
-ratatui = "0.30"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
 regex = "1.11"
 rusqlite = { version = "0.37", features = ["bundled", "hooks"] }

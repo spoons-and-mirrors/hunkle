@@ -39,13 +39,16 @@ its own ignored `target` directory instead of replacing the global binary:
 cargo hunkle-install-local
 ```
 
-When Hunkle opens a workspace containing that local install, it automatically
-restarts with the workspace's binary while keeping the workspace open. On Unix,
-running local builds also detect and load later installs automatically. Each
-worktree therefore has an independent build channel; installing from another
-worktree cannot replace the binary currently in use. The local target directory
-is explicit so a user-level Cargo configuration cannot make worktrees share
-stale build artifacts.
+Local installs use an unoptimized incremental profile for fast edit-build cycles.
+The incremental cache stays inside that worktree's ignored `target` directory;
+`cargo hunkle-clean-local-cache` safely reclaims it when needed at the cost of one
+full rebuild. The cleanup leaves the installed Hunkle binary intact. When Hunkle
+opens a workspace containing that local install, it automatically restarts with
+the workspace's binary while keeping the workspace open. On Unix, running local
+builds also detect and load later installs automatically. Each worktree therefore
+has an independent build channel; installing from another worktree cannot replace
+the binary currently in use. The local target directory is explicit so a
+user-level Cargo configuration cannot make worktrees share stale build artifacts.
 
 For a deliberate one-time update of the globally launched bootstrap binary,
 use `cargo hunkle-install-global`. Development agents are instructed to use only
