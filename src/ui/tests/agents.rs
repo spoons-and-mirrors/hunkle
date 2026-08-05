@@ -909,7 +909,7 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
     assert!(collapsed_screen.contains("tool_0"));
     assert!(collapsed_screen.contains("tool_2"));
     assert!(!collapsed_screen.contains("tool_3"));
-    assert!(collapsed_screen.contains("⌄ 38 more"));
+    assert!(collapsed_screen.contains("⌄ more"));
     assert!(!collapsed_screen.contains("click to expand"));
     assert!(collapsed_screen.contains("user line 00"));
     let preview = app
@@ -928,6 +928,12 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
         })
         .unwrap();
     assert_eq!(request.height, 14);
+    let build_counts = app.agent_transcript_presentation.build_counts_for_test();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        app.agent_transcript_presentation.build_counts_for_test(),
+        build_counts
+    );
     let request_row = |row: u16| {
         let start = usize::from(row) * 49 + usize::from(request.x.saturating_add(1));
         let end = usize::from(row) * 49 + usize::from(request.right());

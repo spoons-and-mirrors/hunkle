@@ -39,8 +39,9 @@ pub(crate) use header_picker::{
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
     AgentActivityPreview, AgentEntryState, AgentKey, AgentRequestPartPreview, AgentRequestPreview,
-    AgentStatus, AgentUserMessage, HerdrPaneLayout, HerdrSession, ScheduledRun, ScheduledRunStatus,
-    ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit, ScheduledTaskSource,
+    AgentStatus, AgentTranscript, AgentUserMessage, HerdrPaneLayout, HerdrSession, ScheduledRun,
+    ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit,
+    ScheduledTaskSource,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -167,6 +168,7 @@ pub struct App {
     agent_preview_transcript_scroll: Option<AgentPreviewTranscriptScroll>,
     agent_preview_message_selection: Option<AgentPreviewMessageSelection>,
     agent_preview_expanded_requests: Option<AgentPreviewExpandedRequests>,
+    pub(crate) agent_transcript_presentation: crate::ui::AgentTranscriptPresentation,
     agent_preview_picker_open: bool,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
@@ -330,6 +332,7 @@ impl App {
             agent_preview_transcript_scroll: None,
             agent_preview_message_selection: None,
             agent_preview_expanded_requests: None,
+            agent_transcript_presentation: crate::ui::AgentTranscriptPresentation::default(),
             agent_preview_picker_open: false,
             hovered_hit_target: None,
             settings,
@@ -2377,6 +2380,9 @@ impl App {
 
     pub(crate) fn begin_render_frame(&mut self, area: Rect) -> LayoutProfile {
         self.layout_profile = LayoutProfile::for_area(area);
+        let herdr = &self.herdr;
+        self.agent_transcript_presentation
+            .retain_conversations(|identity| herdr.has_transcript(identity));
         self.regions.begin_frame(area);
         self.layout_profile
     }

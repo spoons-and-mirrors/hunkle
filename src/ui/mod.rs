@@ -1,4 +1,5 @@
 mod agents;
+pub(crate) use agents::AgentTranscriptPresentation;
 mod changes;
 mod header_card;
 mod history;

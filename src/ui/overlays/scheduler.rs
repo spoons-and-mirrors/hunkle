@@ -24,7 +24,7 @@ impl SchedulerRegions {
 
 pub(crate) fn draw_scheduler(
     frame: &mut Frame<'_>,
-    app: &App,
+    app: &mut App,
     profile: LayoutProfile,
 ) -> SchedulerRegions {
     let conversation_open = app.scheduler.surface == SchedulerSurface::Conversation;
@@ -166,7 +166,12 @@ pub(crate) fn draw_scheduler(
     regions
 }
 
-fn draw_conversation(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut SchedulerRegions) {
+fn draw_conversation(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    regions: &mut SchedulerRegions,
+) {
     let back = Rect::new(area.x + 1, area.y, 8, 1);
     button(
         frame,
@@ -217,17 +222,17 @@ fn draw_conversation(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut
         );
         return;
     }
-    let messages = app
-        .herdr
-        .scheduled_conversation(session_id)
-        .unwrap_or_default();
+    let selected_message = app.scheduler.conversation_message;
+    let transcript_scroll = app.scheduler.conversation_scroll;
+    let expanded_requests = app.scheduler.conversation_expanded_requests.clone();
+    let transcript = app.herdr.scheduled_transcript(session_id);
     let (targets, maximum, _) = draw_scheduled_history(
         frame,
-        messages,
-        app.scheduler.conversation_message,
-        app.scheduler.conversation_scroll,
-        &app.scheduler.conversation_expanded_requests,
-        app.herdr.spinner_frame(),
+        transcript,
+        &mut app.agent_transcript_presentation,
+        selected_message,
+        transcript_scroll,
+        &expanded_requests,
         body,
     );
     regions.targets.extend(targets);

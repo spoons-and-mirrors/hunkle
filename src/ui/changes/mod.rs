@@ -849,15 +849,21 @@ pub(super) fn draw_agent_history_pane(
         return;
     };
     app.herdr.request_agent_latest_user_message(index);
+    let selected_message = app.agent_preview_message(index);
+    let transcript_scroll = app.agent_preview_transcript_scroll(index);
+    let expanded_requests = app.agent_preview_expanded_requests(index).to_vec();
+    let picker_open = app.agent_preview_picker_open();
+    let hovered = app.hovered_hit_target.clone();
     let (targets, scroll_max, scroll, animation_presented) = agents::draw_history(
         frame,
         &app.herdr,
+        &mut app.agent_transcript_presentation,
         index,
-        app.agent_preview_message(index),
-        app.agent_preview_transcript_scroll(index),
-        app.agent_preview_expanded_requests(index),
-        app.agent_preview_picker_open(),
-        app.hovered_hit_target.clone(),
+        selected_message,
+        transcript_scroll,
+        &expanded_requests,
+        picker_open,
+        hovered,
         tabs_trailing,
         history,
     );

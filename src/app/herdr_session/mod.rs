@@ -369,6 +369,18 @@ pub(crate) struct AgentUserMessage {
     pub(crate) requests: Vec<AgentRequestPreview>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct AgentTranscript<'a> {
+    pub(crate) identity: &'a str,
+    pub(crate) revision: u64,
+    pub(crate) messages: &'a [AgentUserMessage],
+}
+
+struct AgentTranscriptEntry {
+    revision: u64,
+    messages: Vec<AgentUserMessage>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentRequestPreview {
     pub(crate) parts: Vec<AgentRequestPartPreview>,
@@ -403,7 +415,8 @@ pub(crate) struct HerdrSession {
     agent_display_running: bool,
     fullscreen_running: bool,
     fullscreen: bool,
-    latest_user_messages: HashMap<OpenCodeConversationIdentity, Vec<AgentUserMessage>>,
+    latest_user_messages: HashMap<OpenCodeConversationIdentity, AgentTranscriptEntry>,
+    transcript_revision: u64,
     latest_user_message_requests: HashSet<OpenCodeConversationIdentity>,
     latest_user_message_refreshes: HashMap<OpenCodeConversationIdentity, Instant>,
     latest_user_message_statuses: HashMap<OpenCodeConversationIdentity, AgentStatus>,
@@ -490,6 +503,7 @@ impl HerdrSession {
             fullscreen_running: false,
             fullscreen: false,
             latest_user_messages: HashMap::new(),
+            transcript_revision: 0,
             latest_user_message_requests: HashSet::new(),
             latest_user_message_refreshes: HashMap::new(),
             latest_user_message_statuses: HashMap::new(),
@@ -618,9 +632,18 @@ impl HerdrSession {
     }
 
     pub(crate) fn scheduled_conversation(&self, session_id: &str) -> Option<&[AgentUserMessage]> {
-        self.latest_user_messages
-            .get(&scheduled_conversation_identity(session_id))
-            .map(Vec::as_slice)
+        self.scheduled_transcript(session_id)
+            .map(|transcript| transcript.messages)
+    }
+
+    pub(crate) fn scheduled_transcript(&self, session_id: &str) -> Option<AgentTranscript<'_>> {
+        let identity = scheduled_conversation_identity(session_id);
+        let (identity, transcript) = self.latest_user_messages.get_key_value(&identity)?;
+        Some(AgentTranscript {
+            identity: identity.session_id.as_str(),
+            revision: transcript.revision,
+            messages: transcript.messages.as_slice(),
+        })
     }
 
     pub(crate) fn scheduled_conversation_error(&self, session_id: &str) -> Option<&str> {
@@ -845,8 +868,7 @@ impl HerdrSession {
                             Ok(latest_message::TranscriptFetch::Changed(messages)) => {
                                 completion_changed =
                                     self.latest_user_message_errors.remove(&identity).is_some();
-                                if self.latest_user_messages.get(&identity) != Some(&messages) {
-                                    self.latest_user_messages.insert(identity, messages);
+                                if self.update_transcript(identity, messages) {
                                     completion_changed = true;
                                 }
                             }
@@ -883,8 +905,7 @@ impl HerdrSession {
                                 .scheduled_conversation_errors
                                 .remove(&identity)
                                 .is_some();
-                            if self.latest_user_messages.get(&identity) != Some(&messages) {
-                                self.latest_user_messages.insert(identity, messages);
+                            if self.update_transcript(identity, messages) {
                                 completion_changed = true;
                             }
                         }
@@ -1286,6 +1307,11 @@ impl HerdrSession {
     }
 
     pub(crate) fn agent_user_messages(&self, index: usize) -> Option<&[AgentUserMessage]> {
+        self.agent_transcript(index)
+            .map(|transcript| transcript.messages)
+    }
+
+    pub(crate) fn agent_transcript(&self, index: usize) -> Option<AgentTranscript<'_>> {
         let AgentTimingKey::Session(identity) = self
             .agents
             .get(index)?
@@ -1295,8 +1321,42 @@ impl HerdrSession {
         else {
             return None;
         };
-        let identity = OpenCodeConversationIdentity::from_agent_session(identity)?;
-        self.latest_user_messages.get(&identity).map(Vec::as_slice)
+        let conversation = OpenCodeConversationIdentity::from_agent_session(identity)?;
+        let transcript = self.latest_user_messages.get(&conversation)?;
+        Some(AgentTranscript {
+            identity: identity.value.as_str(),
+            revision: transcript.revision,
+            messages: transcript.messages.as_slice(),
+        })
+    }
+
+    pub(crate) fn has_transcript(&self, identity: &str) -> bool {
+        self.latest_user_messages
+            .keys()
+            .any(|candidate| candidate.session_id == identity)
+    }
+
+    fn update_transcript(
+        &mut self,
+        identity: OpenCodeConversationIdentity,
+        messages: Vec<AgentUserMessage>,
+    ) -> bool {
+        if self
+            .latest_user_messages
+            .get(&identity)
+            .is_some_and(|transcript| transcript.messages == messages)
+        {
+            return false;
+        }
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        self.latest_user_messages.insert(
+            identity,
+            AgentTranscriptEntry {
+                revision: self.transcript_revision,
+                messages,
+            },
+        );
+        true
     }
 
     pub(crate) fn agent_user_message_error(&self, index: usize) -> Option<&str> {
@@ -1710,40 +1770,37 @@ impl HerdrSession {
         let identity = OpenCodeConversationIdentity::from_agent_session(identity)
             .expect("test agent is not OpenCode");
         let status = self.agents[index].runtime.status;
-        self.latest_user_messages.insert(
-            identity.clone(),
-            messages
-                .iter()
-                .map(
-                    |(text, latest_agent_text, request_count, tool_call_count)| {
-                        let request_count = usize::try_from(*request_count).unwrap_or(usize::MAX);
-                        let request_count =
-                            request_count.max(usize::from(latest_agent_text.is_some()));
-                        let mut requests = (0..request_count)
-                            .map(|_| AgentRequestPreview {
-                                parts: Vec::new(),
-                                reasoning_active: false,
-                                duration_ms: None,
-                                reasoning_duration_ms: None,
-                                tool_call_count: 0,
-                            })
-                            .collect::<Vec<_>>();
-                        if let Some(request) = requests.last_mut() {
-                            if let Some(text) = latest_agent_text {
-                                request
-                                    .parts
-                                    .push(AgentRequestPartPreview::Text((*text).to_owned()));
-                            }
-                            request.tool_call_count = *tool_call_count;
+        let messages = messages
+            .iter()
+            .map(
+                |(text, latest_agent_text, request_count, tool_call_count)| {
+                    let request_count = usize::try_from(*request_count).unwrap_or(usize::MAX);
+                    let request_count = request_count.max(usize::from(latest_agent_text.is_some()));
+                    let mut requests = (0..request_count)
+                        .map(|_| AgentRequestPreview {
+                            parts: Vec::new(),
+                            reasoning_active: false,
+                            duration_ms: None,
+                            reasoning_duration_ms: None,
+                            tool_call_count: 0,
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(request) = requests.last_mut() {
+                        if let Some(text) = latest_agent_text {
+                            request
+                                .parts
+                                .push(AgentRequestPartPreview::Text((*text).to_owned()));
                         }
-                        AgentUserMessage {
-                            text: (*text).to_owned(),
-                            requests,
-                        }
-                    },
-                )
-                .collect(),
-        );
+                        request.tool_call_count = *tool_call_count;
+                    }
+                    AgentUserMessage {
+                        text: (*text).to_owned(),
+                        requests,
+                    }
+                },
+            )
+            .collect();
+        self.update_transcript(identity.clone(), messages);
         self.latest_user_message_refreshes.insert(
             identity.clone(),
             Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
@@ -1769,29 +1826,36 @@ impl HerdrSession {
         else {
             panic!("test agent has no session identity");
         };
-        let message = &mut self
-            .latest_user_messages
-            .get_mut(
-                &OpenCodeConversationIdentity::from_agent_session(identity)
-                    .expect("test agent is not OpenCode"),
-            )
-            .expect("test agent has no messages")[message];
-        let request = message
-            .requests
-            .last_mut()
-            .expect("test message has no requests");
-        request
-            .parts
-            .retain(|part| matches!(part, AgentRequestPartPreview::Text(_)));
-        request.parts.extend(
-            activities
-                .iter()
-                .cloned()
-                .map(AgentRequestPartPreview::Activity),
-        );
-        request.reasoning_active = reasoning_active;
-        request.duration_ms = duration_ms;
-        request.reasoning_duration_ms = reasoning_duration_ms;
+        let identity = OpenCodeConversationIdentity::from_agent_session(identity)
+            .expect("test agent is not OpenCode");
+        {
+            let message = &mut self
+                .latest_user_messages
+                .get_mut(&identity)
+                .expect("test agent has no messages")
+                .messages[message];
+            let request = message
+                .requests
+                .last_mut()
+                .expect("test message has no requests");
+            request
+                .parts
+                .retain(|part| matches!(part, AgentRequestPartPreview::Text(_)));
+            request.parts.extend(
+                activities
+                    .iter()
+                    .cloned()
+                    .map(AgentRequestPartPreview::Activity),
+            );
+            request.reasoning_active = reasoning_active;
+            request.duration_ms = duration_ms;
+            request.reasoning_duration_ms = reasoning_duration_ms;
+        }
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        self.latest_user_messages
+            .get_mut(&identity)
+            .expect("test agent has no messages")
+            .revision = self.transcript_revision;
     }
 
     #[cfg(test)]
@@ -1810,13 +1874,18 @@ impl HerdrSession {
         else {
             panic!("test agent has no session identity");
         };
+        let identity = OpenCodeConversationIdentity::from_agent_session(identity)
+            .expect("test agent is not OpenCode");
         self.latest_user_messages
-            .get_mut(
-                &OpenCodeConversationIdentity::from_agent_session(identity)
-                    .expect("test agent is not OpenCode"),
-            )
-            .expect("test agent has no messages")[message]
+            .get_mut(&identity)
+            .expect("test agent has no messages")
+            .messages[message]
             .requests[request] = preview;
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        self.latest_user_messages
+            .get_mut(&identity)
+            .expect("test agent has no messages")
+            .revision = self.transcript_revision;
     }
 }
 
@@ -2036,9 +2105,7 @@ mod latest_user_message_cache_tests {
             .apply_agent_snapshot_at(vec![retained_agent.clone(), departed_agent], unix_time_ms());
         for identity in [&retained, &departed] {
             let conversation_identity = conversation_identity(&identity.value);
-            session
-                .latest_user_messages
-                .insert(conversation_identity.clone(), message(&identity.value));
+            session.update_transcript(conversation_identity.clone(), message(&identity.value));
             session.latest_user_message_refreshes.insert(
                 conversation_identity.clone(),
                 Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
@@ -2187,9 +2254,7 @@ mod latest_user_message_cache_tests {
         };
         let conversation_identity = conversation_identity("ses_stable");
         session.apply_agent_snapshot_at(vec![agent("w1:p1", first_identity)], unix_time_ms());
-        session
-            .latest_user_messages
-            .insert(conversation_identity.clone(), message("cached"));
+        session.update_transcript(conversation_identity.clone(), message("cached"));
         session
             .latest_user_message_requests
             .insert(conversation_identity.clone());
@@ -2326,14 +2391,13 @@ mod latest_user_message_cache_tests {
         let mut session = HerdrSession::new(true, None, None);
         session.next_refresh = Instant::now() + Duration::from_secs(60);
         let identity = conversation_identity("ses_cached");
-        session
-            .latest_user_messages
-            .insert(identity.clone(), message("cached"));
+        session.update_transcript(identity.clone(), message("cached"));
         session.latest_user_message_refreshes.insert(
             identity.clone(),
             Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
         );
-        let original = session.latest_user_messages[&identity].as_ptr();
+        let original = session.latest_user_messages[&identity].messages.as_ptr();
+        let original_revision = session.latest_user_messages[&identity].revision;
 
         session
             .latest_user_message_requests
@@ -2346,7 +2410,14 @@ mod latest_user_message_cache_tests {
             })
             .unwrap();
         assert!(!session.poll(false).changed);
-        assert_eq!(session.latest_user_messages[&identity].as_ptr(), original);
+        assert_eq!(
+            session.latest_user_messages[&identity].messages.as_ptr(),
+            original
+        );
+        assert_eq!(
+            session.latest_user_messages[&identity].revision,
+            original_revision
+        );
 
         session
             .latest_user_message_requests
@@ -2359,7 +2430,14 @@ mod latest_user_message_cache_tests {
             })
             .unwrap();
         assert!(!session.poll(false).changed);
-        assert_eq!(session.latest_user_messages[&identity].as_ptr(), original);
+        assert_eq!(
+            session.latest_user_messages[&identity].messages.as_ptr(),
+            original
+        );
+        assert_eq!(
+            session.latest_user_messages[&identity].revision,
+            original_revision
+        );
 
         session
             .latest_user_message_requests
@@ -2372,7 +2450,14 @@ mod latest_user_message_cache_tests {
             })
             .unwrap();
         assert!(session.poll(false).changed);
-        assert_eq!(session.latest_user_messages[&identity][0].text, "updated");
+        assert_eq!(
+            session.latest_user_messages[&identity].messages[0].text,
+            "updated"
+        );
+        assert_ne!(
+            session.latest_user_messages[&identity].revision,
+            original_revision
+        );
     }
 }
 

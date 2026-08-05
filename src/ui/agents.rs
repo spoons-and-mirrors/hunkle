@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use ratatui::{
     Frame,
@@ -11,9 +14,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey,
-    AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentUserMessage, HerdrSession,
-    HitTarget, LinkedWorktreeCatalog, SchedulerHitTarget, Settings,
+    AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript, AgentUserMessage,
+    HerdrSession, HitTarget, LinkedWorktreeCatalog, SchedulerHitTarget, Settings,
 };
+use crate::theme::Palette;
 
 use super::{
     fill, palette, preview::hard_wrap_preview_lines, text::styled_markdown_preserving_breaks,
@@ -21,11 +25,12 @@ use super::{
 };
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const MAX_AGENT_TRANSCRIPT_PRESENTATIONS: usize = 8;
 
 struct TranscriptBlock {
     user: bool,
-    lines: Vec<Line<'static>>,
-    animated_rows: Vec<usize>,
+    lines: Arc<[Line<'static>]>,
+    animated_rows: Arc<[usize]>,
     start: usize,
     height: usize,
     elapsed: Option<String>,
@@ -37,8 +42,167 @@ struct TranscriptBlock {
 struct RequestSummary {
     lines: Vec<Line<'static>>,
     reasoning: Option<(Line<'static>, bool)>,
-    hidden: usize,
+    hidden: bool,
     animated_rows: Vec<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentTranscriptMode {
+    Agent,
+    Scheduled,
+}
+
+struct AgentTranscriptCacheKey {
+    identity: String,
+    revision: u64,
+    message: usize,
+    width: usize,
+    expanded_requests: Vec<usize>,
+    live: bool,
+    mode: AgentTranscriptMode,
+    palette: Palette,
+}
+
+struct CachedAgentTranscript {
+    key: AgentTranscriptCacheKey,
+    user_lines: Arc<[Line<'static>]>,
+    user_elapsed: Option<String>,
+    request_count: usize,
+    blocks: Vec<TranscriptBlock>,
+    request_height: usize,
+}
+
+struct AgentTranscriptPresentationInput<'a> {
+    transcript: AgentTranscript<'a>,
+    message: usize,
+    width: usize,
+    expanded_requests: &'a [usize],
+    live: bool,
+    mode: AgentTranscriptMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AgentTranscriptBuildStats {
+    presentations: usize,
+    markdown_parses: usize,
+    static_wraps: usize,
+    markdown_input_bytes: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct AgentTranscriptPresentation {
+    cache: Vec<CachedAgentTranscript>,
+    build_stats: AgentTranscriptBuildStats,
+}
+
+impl AgentTranscriptPresentation {
+    fn prepare(&mut self, input: AgentTranscriptPresentationInput<'_>) -> &CachedAgentTranscript {
+        self.cache.retain(|cached| {
+            cached.key.identity != input.transcript.identity
+                || cached.key.revision == input.transcript.revision
+        });
+        if let Some(index) = self
+            .cache
+            .iter()
+            .position(|cached| cached.key.matches(&input, *palette()))
+        {
+            let cached = self.cache.remove(index);
+            self.cache.push(cached);
+            return self
+                .cache
+                .last()
+                .expect("transcript cache hit was retained");
+        }
+
+        let message = &input.transcript.messages[input.message];
+        self.build_stats.presentations = self.build_stats.presentations.saturating_add(1);
+        let user_lines = Arc::from(styled_agent_text_counted(
+            &message.text,
+            input.width,
+            &mut self.build_stats,
+        ));
+        let user_elapsed = message_total_duration(message).map(format_preview_duration);
+        let (blocks, request_height) = build_request_transcript_counted(
+            message,
+            input.width,
+            input.live,
+            input.expanded_requests,
+            &mut self.build_stats,
+        );
+        let mut expanded_requests = input.expanded_requests.to_vec();
+        expanded_requests.sort_unstable();
+        expanded_requests.dedup();
+        if self.cache.len() == MAX_AGENT_TRANSCRIPT_PRESENTATIONS {
+            self.cache.remove(0);
+        }
+        self.cache.push(CachedAgentTranscript {
+            key: AgentTranscriptCacheKey {
+                identity: input.transcript.identity.to_owned(),
+                revision: input.transcript.revision,
+                message: input.message,
+                width: input.width,
+                expanded_requests,
+                live: input.live,
+                mode: input.mode,
+                palette: *palette(),
+            },
+            user_lines,
+            user_elapsed,
+            request_count: message.requests.len(),
+            blocks,
+            request_height,
+        });
+        self.cache
+            .last()
+            .expect("transcript cache miss was inserted")
+    }
+
+    pub(crate) fn retain_conversations(&mut self, mut retain: impl FnMut(&str) -> bool) {
+        self.cache.retain(|cached| retain(&cached.key.identity));
+    }
+
+    #[cfg(test)]
+    fn build_stats(&self) -> AgentTranscriptBuildStats {
+        self.build_stats
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_counts_for_test(&self) -> (usize, usize, usize) {
+        (
+            self.build_stats.presentations,
+            self.build_stats.markdown_parses,
+            self.build_stats.static_wraps,
+        )
+    }
+
+    #[cfg(test)]
+    fn cache_len(&self) -> usize {
+        self.cache.len()
+    }
+
+    #[cfg(test)]
+    fn contains_conversation(&self, identity: &str) -> bool {
+        self.cache
+            .iter()
+            .any(|cached| cached.key.identity == identity)
+    }
+}
+
+impl AgentTranscriptCacheKey {
+    fn matches(&self, input: &AgentTranscriptPresentationInput<'_>, palette: Palette) -> bool {
+        self.identity == input.transcript.identity
+            && self.revision == input.transcript.revision
+            && self.message == input.message
+            && self.width == input.width
+            && self.live == input.live
+            && self.mode == input.mode
+            && self.palette == palette
+            && self.expanded_requests.len() == input.expanded_requests.len()
+            && input
+                .expanded_requests
+                .iter()
+                .all(|request| self.expanded_requests.binary_search(request).is_ok())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -421,6 +585,7 @@ fn draw_stashed_agents(
 pub(super) fn draw_history(
     frame: &mut Frame<'_>,
     herdr: &HerdrSession,
+    presentation: &mut AgentTranscriptPresentation,
     index: usize,
     selected_message: Option<usize>,
     transcript_scroll: Option<usize>,
@@ -437,7 +602,8 @@ pub(super) fn draw_history(
         return (Vec::new(), 0, 0, false);
     };
     fill(frame, area, palette().panel);
-    let messages = herdr.agent_user_messages(index).unwrap_or_default();
+    let transcript = herdr.agent_transcript(index);
+    let messages = transcript.map_or(&[][..], |transcript| transcript.messages);
     let message_error = herdr.agent_user_message_error(index);
     let status = herdr
         .agents
@@ -523,14 +689,21 @@ pub(super) fn draw_history(
     let selected_message = selected_message
         .unwrap_or_else(|| messages.len().saturating_sub(1))
         .min(messages.len().saturating_sub(1));
-    let message = &messages[selected_message];
     let main = Rect::new(area.x, area.y, area.width, area.height);
     let message_selector = Rect::new(main.x, main.y, main.width, 2.min(main.height));
     let content_width = usize::from(main.width.saturating_sub(4).max(1));
-    let user_lines = styled_agent_text(&message.text, content_width);
-    let user_elapsed = message_total_duration(message).map(format_preview_duration);
-    let user_top_padding = u16::from(user_elapsed.is_some());
-    let desired_user_height = user_lines
+    let live = status == AgentStatus::Working && selected_message + 1 == messages.len();
+    let cached = presentation.prepare(AgentTranscriptPresentationInput {
+        transcript: transcript.expect("non-empty agent messages have a transcript"),
+        message: selected_message,
+        width: content_width,
+        expanded_requests,
+        live,
+        mode: AgentTranscriptMode::Agent,
+    });
+    let user_top_padding = u16::from(cached.user_elapsed.is_some());
+    let desired_user_height = cached
+        .user_lines
         .len()
         .saturating_add(2)
         .min(8)
@@ -559,15 +732,9 @@ pub(super) fn draw_history(
         main.width.saturating_sub(1),
         viewport.height,
     );
-    let live = status == AgentStatus::Working && selected_message + 1 == messages.len();
-    let (blocks, request_height) = build_request_transcript(
-        message,
-        content_width,
-        live,
-        herdr.spinner_frame(),
-        expanded_requests,
-    );
-    let scroll_max = request_height.saturating_sub(usize::from(viewport.height));
+    let scroll_max = cached
+        .request_height
+        .saturating_sub(usize::from(viewport.height));
     let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
     let mut targets = vec![(
         HitTarget::AgentTooltip {
@@ -595,16 +762,23 @@ pub(super) fn draw_history(
     );
     let user_block = TranscriptBlock {
         user: true,
-        lines: user_lines,
-        animated_rows: Vec::new(),
+        lines: cached.user_lines.clone(),
+        animated_rows: Arc::default(),
         start: 0,
         height: usize::from(user_cards.height),
-        elapsed: user_elapsed,
-        request_count: message.requests.len(),
+        elapsed: cached.user_elapsed.clone(),
+        request_count: cached.request_count,
         request: None,
         expandable: false,
     };
-    if let Some((rect, _)) = draw_transcript_card(frame, &user_block, user_cards, user_cards, 0) {
+    if let Some((rect, _)) = draw_transcript_card(
+        frame,
+        &user_block,
+        user_cards,
+        user_cards,
+        0,
+        herdr.spinner_frame(),
+    ) {
         targets.push((
             HitTarget::AgentMessage {
                 agent: agent_key.clone(),
@@ -613,9 +787,9 @@ pub(super) fn draw_history(
             rect,
         ));
     }
-    for block in &blocks {
+    for block in &cached.blocks {
         if let Some((rect, block_animation_presented)) =
-            draw_transcript_card(frame, block, cards, viewport, scroll)
+            draw_transcript_card(frame, block, cards, viewport, scroll, herdr.spinner_frame())
         {
             animation_presented |= block_animation_presented;
             if block.expandable
@@ -647,14 +821,15 @@ pub(super) fn draw_history(
 
 pub(super) fn draw_scheduled_history(
     frame: &mut Frame<'_>,
-    messages: &[AgentUserMessage],
+    transcript: Option<AgentTranscript<'_>>,
+    presentation: &mut AgentTranscriptPresentation,
     selected_message: Option<usize>,
     transcript_scroll: Option<usize>,
     expanded_requests: &[usize],
-    spinner_frame: usize,
     area: Rect,
 ) -> (Vec<(HitTarget, Rect)>, usize, usize) {
     fill(frame, area, palette().panel);
+    let messages = transcript.map_or(&[][..], |transcript| transcript.messages);
     if messages.is_empty() {
         frame.render_widget(
             Paragraph::new("Loading conversation history…")
@@ -666,14 +841,20 @@ pub(super) fn draw_scheduled_history(
     let selected_message = selected_message
         .unwrap_or_else(|| messages.len().saturating_sub(1))
         .min(messages.len().saturating_sub(1));
-    let message = &messages[selected_message];
     let selector = Rect::new(area.x, area.y, area.width, 2.min(area.height));
     let content_width = usize::from(area.width.saturating_sub(4).max(1));
-    let user_lines = styled_agent_text(&message.text, content_width);
-    let user_elapsed = message_total_duration(message).map(format_preview_duration);
-    let user_top_padding = u16::from(user_elapsed.is_some());
+    let cached = presentation.prepare(AgentTranscriptPresentationInput {
+        transcript: transcript.expect("non-empty scheduled messages have a transcript"),
+        message: selected_message,
+        width: content_width,
+        expanded_requests,
+        live: false,
+        mode: AgentTranscriptMode::Scheduled,
+    });
+    let user_top_padding = u16::from(cached.user_elapsed.is_some());
     let user_height = u16::try_from(
-        user_lines
+        cached
+            .user_lines
             .len()
             .saturating_add(2)
             .min(8)
@@ -701,14 +882,9 @@ pub(super) fn draw_scheduled_history(
         user_viewport.height.saturating_sub(user_top_padding),
     );
     let cards = Rect::new(area.x, viewport.y, area.width, viewport.height);
-    let (blocks, request_height) = build_request_transcript(
-        message,
-        content_width,
-        false,
-        spinner_frame,
-        expanded_requests,
-    );
-    let scroll_max = request_height.saturating_sub(usize::from(viewport.height));
+    let scroll_max = cached
+        .request_height
+        .saturating_sub(usize::from(viewport.height));
     let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
     let mut targets = Vec::new();
     draw_message_timeline(
@@ -721,18 +897,18 @@ pub(super) fn draw_scheduled_history(
     );
     let user_block = TranscriptBlock {
         user: true,
-        lines: user_lines,
-        animated_rows: Vec::new(),
+        lines: cached.user_lines.clone(),
+        animated_rows: Arc::default(),
         start: 0,
         height: usize::from(user_cards.height),
-        elapsed: user_elapsed,
-        request_count: message.requests.len(),
+        elapsed: cached.user_elapsed.clone(),
+        request_count: cached.request_count,
         request: None,
         expandable: false,
     };
-    draw_transcript_card(frame, &user_block, user_cards, user_cards, 0);
-    for block in &blocks {
-        if let Some((rect, _)) = draw_transcript_card(frame, block, cards, viewport, scroll)
+    draw_transcript_card(frame, &user_block, user_cards, user_cards, 0, 0);
+    for block in &cached.blocks {
+        if let Some((rect, _)) = draw_transcript_card(frame, block, cards, viewport, scroll, 0)
             && block.expandable
             && let Some(request) = block.request
         {
@@ -884,12 +1060,12 @@ fn draw_agent_preview_picker(
 
 const REQUEST_CARD_EXTRA_ROWS: usize = 2;
 
-fn build_request_transcript(
+fn build_request_transcript_counted(
     message: &AgentUserMessage,
     width: usize,
     live: bool,
-    spinner_frame: usize,
     expanded_requests: &[usize],
+    stats: &mut AgentTranscriptBuildStats,
 ) -> (Vec<TranscriptBlock>, usize) {
     let mut blocks = Vec::new();
     let mut document_height = 0usize;
@@ -901,8 +1077,8 @@ fn build_request_transcript(
             reasoning,
             hidden,
             animated_rows: summary_animated_rows,
-        } = request_summary(request, width, request_live, spinner_frame);
-        let expandable = hidden > 0;
+        } = request_summary(request, width, request_live, stats);
+        let expandable = hidden;
         let expanded = expanded_requests.contains(&request_index);
         let collapsed = expandable && !expanded;
         let (lines, height, animated_rows) = if collapsed {
@@ -929,7 +1105,7 @@ fn build_request_transcript(
             );
             lines.extend(summary);
             lines.push(Line::styled(
-                format!("⌄ {hidden} more"),
+                "⌄ more",
                 Style::default()
                     .fg(palette().cyan)
                     .add_modifier(Modifier::BOLD),
@@ -938,7 +1114,7 @@ fn build_request_transcript(
             (lines, height, animated_rows)
         } else {
             let (lines, content_height, animated_rows) =
-                request_content(Some(request), width, request_live, spinner_frame);
+                request_content(Some(request), width, request_live, stats);
             (
                 lines,
                 content_height
@@ -951,8 +1127,8 @@ fn build_request_transcript(
         document_height = document_height.saturating_add(usize::from(elapsed.is_some()));
         blocks.push(TranscriptBlock {
             user: false,
-            lines,
-            animated_rows,
+            lines: lines.into(),
+            animated_rows: animated_rows.into(),
             start: document_height,
             height,
             elapsed,
@@ -963,11 +1139,11 @@ fn build_request_transcript(
         document_height = document_height.saturating_add(height);
     }
     if blocks.is_empty() {
-        let (lines, height, animated_rows) = request_content(None, width, live, spinner_frame);
+        let (lines, height, animated_rows) = request_content(None, width, live, stats);
         blocks.push(TranscriptBlock {
             user: false,
-            lines,
-            animated_rows,
+            lines: lines.into(),
+            animated_rows: animated_rows.into(),
             start: 0,
             height: height.saturating_add(REQUEST_CARD_EXTRA_ROWS),
             elapsed: None,
@@ -978,6 +1154,23 @@ fn build_request_transcript(
         document_height = height.saturating_add(REQUEST_CARD_EXTRA_ROWS);
     }
     (blocks, document_height)
+}
+
+#[cfg(test)]
+fn build_request_transcript(
+    message: &AgentUserMessage,
+    width: usize,
+    live: bool,
+    _spinner_frame: usize,
+    expanded_requests: &[usize],
+) -> (Vec<TranscriptBlock>, usize) {
+    build_request_transcript_counted(
+        message,
+        width,
+        live,
+        expanded_requests,
+        &mut AgentTranscriptBuildStats::default(),
+    )
 }
 
 fn styled_agent_text(text: &str, width: usize) -> Vec<Line<'static>> {
@@ -992,10 +1185,56 @@ fn styled_agent_text(text: &str, width: usize) -> Vec<Line<'static>> {
     )
 }
 
+fn styled_agent_text_counted(
+    text: &str,
+    width: usize,
+    stats: &mut AgentTranscriptBuildStats,
+) -> Vec<Line<'static>> {
+    stats.markdown_parses = stats.markdown_parses.saturating_add(1);
+    stats.static_wraps = stats.static_wraps.saturating_add(1);
+    stats.markdown_input_bytes = stats.markdown_input_bytes.saturating_add(text.len());
+    styled_agent_text(text, width)
+}
+
+fn styled_agent_output_text_counted(
+    text: &str,
+    width: usize,
+    stats: &mut AgentTranscriptBuildStats,
+) -> Vec<Line<'static>> {
+    style_agent_output_lines(styled_agent_text_counted(text, width, stats), width)
+}
+
+#[cfg(test)]
 fn styled_agent_output_text(text: &str, width: usize) -> Vec<Line<'static>> {
+    style_agent_output_lines(styled_agent_text(text, width), width)
+}
+
+fn styled_agent_output_text_window_counted(
+    text: &str,
+    width: usize,
+    rows: usize,
+    stats: &mut AgentTranscriptBuildStats,
+) -> (Vec<Line<'static>>, bool) {
+    let byte_limit = width
+        .max(1)
+        .saturating_mul(rows.max(1))
+        .saturating_mul(8)
+        .clamp(512, 8_192);
+    let mut end = text.len().min(byte_limit);
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let source = &text[..end];
+    let mut lines = styled_agent_output_text_counted(source, width, stats);
+    let truncated = end < text.len() || lines.len() > rows;
+    lines.truncate(rows);
+    (lines, truncated)
+}
+
+fn style_agent_output_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
     let mut output = Vec::new();
     let mut code_block = false;
-    for mut line in styled_agent_text(text, width) {
+    for mut line in lines {
         let code_row = line.style.bg == Some(palette().surface_alt);
         if code_row && !code_block {
             output.push(agent_code_border('▄', width));
@@ -1058,6 +1297,7 @@ fn draw_transcript_card(
     cards: Rect,
     viewport: Rect,
     scroll: usize,
+    spinner_frame: usize,
 ) -> Option<(Rect, bool)> {
     let visible_start = block.start.max(scroll);
     let visible_end = block
@@ -1198,16 +1438,40 @@ fn draw_transcript_card(
                 );
             }
         }
-        frame.render_widget(
-            Paragraph::new(block.lines.clone())
-                .style(Style::default().fg(palette().soft))
-                .wrap(Wrap { trim: true })
-                .scroll((
-                    u16::try_from(content_start.saturating_sub(content_offset)).unwrap_or(u16::MAX),
-                    0,
-                )),
-            content,
-        );
+        for (row, line) in block
+            .lines
+            .iter()
+            .skip(line_start)
+            .take(usize::from(content.height))
+            .enumerate()
+        {
+            let line_area = Rect::new(
+                content.x,
+                content
+                    .y
+                    .saturating_add(u16::try_from(row).unwrap_or(u16::MAX)),
+                content.width,
+                1,
+            );
+            frame
+                .buffer_mut()
+                .set_style(line_area, Style::default().fg(palette().soft));
+            frame.render_widget(line, line_area);
+        }
+        let spinner = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
+        for row in block
+            .animated_rows
+            .iter()
+            .copied()
+            .filter(|row| (line_start..line_end).contains(row))
+        {
+            let y = content
+                .y
+                .saturating_add(u16::try_from(row.saturating_sub(line_start)).unwrap_or(u16::MAX));
+            if let Some(cell) = frame.buffer_mut().cell_mut((content.x, y)) {
+                cell.set_symbol(spinner);
+            }
+        }
         for (row, line) in block
             .lines
             .iter()
@@ -1254,7 +1518,7 @@ fn request_content(
     request: Option<&AgentRequestPreview>,
     width: usize,
     live: bool,
-    spinner_frame: usize,
+    stats: &mut AgentTranscriptBuildStats,
 ) -> (Vec<Line<'static>>, usize, Vec<usize>) {
     let Some(request) = request else {
         return (
@@ -1293,7 +1557,7 @@ fn request_content(
                 lines.push(agent_output_background_line());
                 height += 1;
             }
-            let text_lines = styled_agent_output_text(text, width);
+            let text_lines = styled_agent_output_text_counted(text, width, stats);
             height += text_lines.len().max(1);
             lines.extend(text_lines);
             let followed_by_activity = request
@@ -1317,8 +1581,8 @@ fn request_content(
             reasoning_seen = true;
         }
         let (line, animated) = match activity {
-            AgentActivityPreview::Reasoning => reasoning_line(request, live, spinner_frame),
-            AgentActivityPreview::Tool { .. } => tool_line(activity, width, live, spinner_frame),
+            AgentActivityPreview::Reasoning => reasoning_line(request, width, live),
+            AgentActivityPreview::Tool { .. } => tool_line(activity, width, live),
         };
         height += 1;
         if animated {
@@ -1340,44 +1604,59 @@ fn request_summary(
     request: &AgentRequestPreview,
     width: usize,
     live: bool,
-    spinner_frame: usize,
+    stats: &mut AgentTranscriptBuildStats,
 ) -> RequestSummary {
     const TEXT_ROWS: usize = 3;
     const TOOL_ROWS: usize = 3;
 
-    let text = request
+    let mut text = Vec::new();
+    let mut hidden_text = false;
+    for text_part in request.parts.iter().filter_map(|part| match part {
+        AgentRequestPartPreview::Text(text) => Some(text.as_str()),
+        AgentRequestPartPreview::Activity(_) => None,
+    }) {
+        if text.len() >= TEXT_ROWS {
+            hidden_text |= !text_part.is_empty();
+            continue;
+        }
+        let remaining = TEXT_ROWS.saturating_sub(text.len());
+        let (lines, truncated) =
+            styled_agent_output_text_window_counted(text_part, width, remaining, stats);
+        hidden_text |= truncated;
+        text.extend(lines);
+    }
+    let tool_count = request
         .parts
         .iter()
-        .filter_map(|part| match part {
-            AgentRequestPartPreview::Text(text) => Some(text),
-            AgentRequestPartPreview::Activity(_) => None,
+        .filter(|part| {
+            matches!(
+                part,
+                AgentRequestPartPreview::Activity(AgentActivityPreview::Tool { .. })
+            )
         })
-        .flat_map(|text| styled_agent_output_text(text, width))
-        .collect::<Vec<_>>();
+        .count();
     let tools = request
         .parts
         .iter()
         .filter_map(|part| match part {
             AgentRequestPartPreview::Activity(activity @ AgentActivityPreview::Tool { .. }) => {
-                Some(tool_line(activity, width, live, spinner_frame))
+                Some(tool_line(activity, width, live))
             }
             AgentRequestPartPreview::Text(_)
             | AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning) => None,
         })
+        .take(TOOL_ROWS)
         .collect::<Vec<_>>();
     let reasoning = request.parts.iter().find_map(|part| match part {
         AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning) => {
-            Some(reasoning_line(request, live, spinner_frame))
+            Some(reasoning_line(request, width, live))
         }
         AgentRequestPartPreview::Text(_)
         | AgentRequestPartPreview::Activity(AgentActivityPreview::Tool { .. }) => None,
     });
-    let hidden = text
-        .len()
-        .saturating_sub(TEXT_ROWS)
-        .saturating_add(tools.len().saturating_sub(TOOL_ROWS));
-    let visible_text = text.into_iter().take(TEXT_ROWS).collect::<Vec<_>>();
-    let visible_tools = tools.into_iter().take(TOOL_ROWS).collect::<Vec<_>>();
+    let hidden = hidden_text || tool_count > TOOL_ROWS;
+    let visible_text = text;
+    let visible_tools = tools;
     let mut lines = Vec::new();
     let mut animated_rows = Vec::new();
     if !visible_text.is_empty() {
@@ -1404,39 +1683,39 @@ fn request_summary(
 
 fn reasoning_line(
     request: &AgentRequestPreview,
+    width: usize,
     live: bool,
-    spinner_frame: usize,
 ) -> (Line<'static>, bool) {
     let active = live && request.reasoning_active;
-    let prefix = if active {
-        SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()]
-    } else {
-        "›"
-    };
-    let mut spans = vec![
-        Span::styled(prefix.to_owned(), Style::default().fg(palette().orange)),
-        Span::styled(
-            " reasoning",
-            Style::default()
-                .fg(palette().orange)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let prefix = if active { SPINNER_FRAMES[0] } else { "›" };
+    let mut spans = Vec::new();
+    let mut remaining = width;
+    push_truncated_span(
+        &mut spans,
+        prefix,
+        Style::default().fg(palette().orange),
+        &mut remaining,
+    );
+    push_truncated_span(
+        &mut spans,
+        " reasoning",
+        Style::default()
+            .fg(palette().orange)
+            .add_modifier(Modifier::BOLD),
+        &mut remaining,
+    );
     if let Some(duration_ms) = request.reasoning_duration_ms {
-        spans.push(Span::styled(
-            format!("  {}", format_preview_duration(duration_ms)),
+        push_truncated_span(
+            &mut spans,
+            &format!("  {}", format_preview_duration(duration_ms)),
             Style::default().fg(palette().faint),
-        ));
+            &mut remaining,
+        );
     }
     (Line::from(spans), active)
 }
 
-fn tool_line(
-    activity: &AgentActivityPreview,
-    width: usize,
-    live: bool,
-    spinner_frame: usize,
-) -> (Line<'static>, bool) {
+fn tool_line(activity: &AgentActivityPreview, width: usize, live: bool) -> (Line<'static>, bool) {
     let AgentActivityPreview::Tool {
         name,
         title,
@@ -1446,11 +1725,7 @@ fn tool_line(
         unreachable!();
     };
     let active = live && *running;
-    let prefix = if active {
-        SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()]
-    } else {
-        "›"
-    };
+    let prefix = if active { SPINNER_FRAMES[0] } else { "›" };
     let mut spans = Vec::new();
     let mut remaining = width;
     push_truncated_span(
@@ -2024,6 +2299,232 @@ mod tests {
         }
     }
 
+    fn presentation_input<'a>(
+        identity: &'a str,
+        revision: u64,
+        messages: &'a [AgentUserMessage],
+        message: usize,
+        width: usize,
+        expanded_requests: &'a [usize],
+        live: bool,
+    ) -> AgentTranscriptPresentationInput<'a> {
+        AgentTranscriptPresentationInput {
+            transcript: AgentTranscript {
+                identity,
+                revision,
+                messages,
+            },
+            message,
+            width,
+            expanded_requests,
+            live,
+            mode: AgentTranscriptMode::Agent,
+        }
+    }
+
+    fn running_tool_message(text: &str) -> AgentUserMessage {
+        request_message(vec![
+            AgentRequestPartPreview::Text(text.to_owned()),
+            AgentRequestPartPreview::Activity(AgentActivityPreview::Tool {
+                name: "read".to_owned(),
+                title: Some("Inspecting transcript".to_owned()),
+                running: true,
+            }),
+        ])
+    }
+
+    #[test]
+    fn transcript_presentation_hit_does_no_static_build_work() {
+        let messages = vec![running_tool_message("output")];
+        let mut presentation = AgentTranscriptPresentation::default();
+
+        presentation.prepare(presentation_input(
+            "conversation",
+            1,
+            &messages,
+            0,
+            40,
+            &[],
+            true,
+        ));
+        let built = presentation.build_stats();
+        presentation.prepare(presentation_input(
+            "conversation",
+            1,
+            &messages,
+            0,
+            40,
+            &[],
+            true,
+        ));
+
+        assert_eq!(presentation.build_stats(), built);
+        assert_eq!(built.presentations, 1);
+        assert!(built.markdown_parses > 0);
+        assert!(built.static_wraps > 0);
+    }
+
+    #[test]
+    fn transcript_presentation_invalidates_all_static_inputs() {
+        let messages = vec![
+            running_tool_message("first"),
+            running_tool_message("second"),
+        ];
+        let mut presentation = AgentTranscriptPresentation::default();
+        let prepare = |presentation: &mut AgentTranscriptPresentation,
+                       revision,
+                       message,
+                       width,
+                       expanded: &[usize]| {
+            presentation.prepare(presentation_input(
+                "conversation",
+                revision,
+                &messages,
+                message,
+                width,
+                expanded,
+                true,
+            ));
+            presentation.build_stats().presentations
+        };
+
+        assert_eq!(prepare(&mut presentation, 1, 0, 40, &[]), 1);
+        assert_eq!(prepare(&mut presentation, 1, 0, 41, &[]), 2);
+        assert_eq!(prepare(&mut presentation, 1, 1, 41, &[]), 3);
+        assert_eq!(prepare(&mut presentation, 1, 1, 41, &[0]), 4);
+        assert_eq!(prepare(&mut presentation, 2, 1, 41, &[0]), 5);
+        assert_eq!(presentation.cache_len(), 1);
+    }
+
+    #[test]
+    fn collapsed_transcript_builds_only_a_bounded_markdown_window() {
+        let hidden = (0..1_000)
+            .map(|row| format!("**row {row}** hidden payload"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let messages = vec![running_tool_message(&hidden)];
+        let mut presentation = AgentTranscriptPresentation::default();
+
+        let cached = presentation.prepare(presentation_input(
+            "conversation",
+            1,
+            &messages,
+            0,
+            40,
+            &[],
+            false,
+        ));
+        let rendered = cached.blocks[0]
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(rendered.contains("row 0"));
+        assert!(!rendered.contains("row 999"));
+        assert!(cached.blocks[0].lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        }));
+        assert!(presentation.build_stats().markdown_input_bytes < hidden.len() / 10);
+    }
+
+    #[test]
+    fn collapsed_transcript_bounds_a_single_long_markdown_event() {
+        let hidden = format!("**{}**", "word ".repeat(20_000));
+        let messages = vec![running_tool_message(&hidden)];
+        let mut presentation = AgentTranscriptPresentation::default();
+
+        let cached = presentation.prepare(presentation_input(
+            "conversation",
+            1,
+            &messages,
+            0,
+            40,
+            &[],
+            false,
+        ));
+
+        assert!(cached.blocks[0].expandable);
+        assert!(presentation.build_stats().markdown_input_bytes < 2_000);
+    }
+
+    #[test]
+    fn transcript_presentation_is_bounded_and_prunes_departed_conversations() {
+        let messages = vec![running_tool_message("output")];
+        let mut presentation = AgentTranscriptPresentation::default();
+        let identities = (0..=MAX_AGENT_TRANSCRIPT_PRESENTATIONS)
+            .map(|index| format!("conversation-{index}"))
+            .collect::<Vec<_>>();
+        for (index, identity) in identities.iter().enumerate() {
+            presentation.prepare(presentation_input(
+                identity,
+                u64::try_from(index + 1).unwrap(),
+                &messages,
+                0,
+                40,
+                &[],
+                false,
+            ));
+        }
+
+        assert_eq!(presentation.cache_len(), MAX_AGENT_TRANSCRIPT_PRESENTATIONS);
+        assert!(!presentation.contains_conversation(&identities[0]));
+        let retained = identities.last().unwrap();
+        presentation.retain_conversations(|identity| identity == retained);
+        assert_eq!(presentation.cache_len(), 1);
+        assert!(presentation.contains_conversation(retained));
+    }
+
+    #[test]
+    fn transcript_presentation_hit_uses_current_spinner_and_reports_visibility() {
+        let messages = vec![running_tool_message("output")];
+        let mut presentation = AgentTranscriptPresentation::default();
+        presentation.prepare(presentation_input(
+            "conversation",
+            1,
+            &messages,
+            0,
+            40,
+            &[],
+            true,
+        ));
+        let cached = presentation.prepare(presentation_input(
+            "conversation",
+            1,
+            &messages,
+            0,
+            40,
+            &[],
+            true,
+        ));
+        let block = &cached.blocks[0];
+        let area = Rect::new(0, 0, 40, 12);
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut animation_presented = false;
+
+        terminal
+            .draw(|frame| {
+                animation_presented = draw_transcript_card(frame, block, area, area, 0, 7)
+                    .unwrap()
+                    .1;
+            })
+            .unwrap();
+
+        assert!(animation_presented);
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == SPINNER_FRAMES[7])
+        );
+        assert_eq!(presentation.build_stats().presentations, 1);
+    }
+
     #[test]
     fn formats_agent_durations_as_compact_units() {
         assert_eq!(format_duration(Duration::ZERO), "0s");
@@ -2049,7 +2550,7 @@ mod tests {
             lines[7]
                 .spans
                 .iter()
-                .any(|span| span.content.contains("2 more"))
+                .any(|span| span.content.contains("⌄ more"))
         );
 
         let completed = request_message(vec![
@@ -2160,8 +2661,9 @@ mod tests {
                         Line::from(format!("line {row}"))
                     }
                 })
-                .collect(),
-            animated_rows: vec![animated_row],
+                .collect::<Vec<_>>()
+                .into(),
+            animated_rows: vec![animated_row].into(),
             start: 0,
             height: 22,
             elapsed: None,
@@ -2175,7 +2677,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                animation_presented = draw_transcript_card(frame, &block, area, area, 0)
+                animation_presented = draw_transcript_card(frame, &block, area, area, 0, 0)
                     .unwrap()
                     .1;
             })
@@ -2184,7 +2686,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                animation_presented = draw_transcript_card(frame, &block, area, area, 10)
+                animation_presented = draw_transcript_card(frame, &block, area, area, 10, 0)
                     .unwrap()
                     .1;
             })
