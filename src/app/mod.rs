@@ -2204,6 +2204,10 @@ impl App {
         self.markdown_preview_available() && self.changes.markdown_rendered
     }
 
+    pub(crate) fn fullscreen_agent_activation_pending(&self) -> bool {
+        self.herdr.fullscreen() && self.last_agent_click.is_some()
+    }
+
     fn toggle_markdown_preview(&mut self) {
         if !self.markdown_preview_available() {
             return;
@@ -2212,8 +2216,11 @@ impl App {
     }
 
     fn toggle_fullscreen(&mut self) {
-        if let Err(error) = self.herdr.toggle_fullscreen() {
-            self.notice = Some(format!("Could not toggle fullscreen: {error}"));
+        match self.herdr.toggle_fullscreen() {
+            Ok(()) => self.last_agent_click = None,
+            Err(error) => {
+                self.notice = Some(format!("Could not toggle fullscreen: {error}"));
+            }
         }
     }
 
