@@ -386,8 +386,8 @@ fn renders_every_primary_surface() {
     enable_herdr(&mut app);
     app.settings.graph_lane_width = 0;
     app.settings.graph_description_width = 0;
-    app.settings.graph_changes_width = 11;
-    app.settings.graph_date_width = 11;
+    app.settings.graph_changes_width = 12;
+    app.settings.graph_date_width = 12;
     app.settings.graph_author_width = 16;
     app.settings.graph_commit_width = 7;
     app.commit_message_generator = CommitMessageGenerator::ready_for_test();
@@ -1390,10 +1390,8 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("DATE"));
     assert!(!screen.contains("ALL BRANCHES"));
     assert!(!screen.contains("date order"));
-    assert!(screen.contains(&format!(
-        "+{} -{}",
-        visible_summary.additions, visible_summary.deletions
-    )));
+    assert!(screen.contains(&format!("+{}", visible_summary.additions)));
+    assert!(screen.contains(&format!("-{}", visible_summary.deletions)));
     assert!(screen.contains("HEAD"));
     assert!(screen.contains("Render Test"));
     assert!(!screen.contains("Detailed body line."));

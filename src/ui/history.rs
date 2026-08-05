@@ -117,9 +117,15 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
     *scroll_to_selection = false;
     *state.offset_mut() = offset;
     let search_active = search.match_status().is_some();
+    let changes_width = column_widths[2];
     let rows = visible.iter().skip(offset).take(viewport).map(|index| {
         let commit = &repo.commits[*index];
-        graph_row(commit, summaries.get(&commit.oid), search_active)
+        graph_row(
+            commit,
+            summaries.get(&commit.oid),
+            changes_width,
+            search_active,
+        )
     });
     let author_label = if author_filter.active_count() == author_filter.entries().len() {
         "AUTHOR ▾".to_owned()
@@ -460,6 +466,7 @@ pub(super) fn draw_author_filter(
 fn graph_row(
     commit: &Commit,
     summary: Option<&crate::git::DiffSummary>,
+    changes_width: u16,
     search_active: bool,
 ) -> Row<'static> {
     let is_head = commit_is_head(commit);
@@ -502,7 +509,7 @@ fn graph_row(
     ));
 
     let short_oid: String = commit.oid.chars().take(7).collect();
-    let changes = commit_changes(summary);
+    let changes = commit_changes(summary, changes_width);
     Row::new([
         Cell::from(graph),
         Cell::from(Line::from(description)),
@@ -555,21 +562,36 @@ fn blend_channel(background: u8, color: u8) -> u8 {
     ((u16::from(background) * 4 + u16::from(color)) / 5) as u8
 }
 
-fn commit_changes(summary: Option<&crate::git::DiffSummary>) -> Cell<'static> {
+fn commit_changes(summary: Option<&crate::git::DiffSummary>, width: u16) -> Cell<'static> {
     let Some(summary) = summary else {
         return Cell::from("…").style(Style::default().fg(palette().faint));
     };
+    let (additions, deletions) = commit_change_columns(summary, width);
     Cell::from(Line::from(vec![
-        Span::styled(
-            format!("+{}", summary.additions),
-            Style::default().fg(palette().green),
-        ),
+        Span::styled(additions, Style::default().fg(palette().green)),
         Span::raw(" "),
-        Span::styled(
-            format!("-{}", summary.deletions),
-            Style::default().fg(palette().red),
-        ),
+        Span::styled(deletions, Style::default().fg(palette().red)),
+        Span::raw(" "),
     ]))
+}
+
+fn commit_change_columns(summary: &crate::git::DiffSummary, width: u16) -> (String, String) {
+    const STAT_WIDTH: usize = 5;
+    let content_width = usize::from(width.saturating_sub(2));
+    let additions_width = (content_width / 2).min(STAT_WIDTH);
+    let deletions_width = content_width
+        .saturating_sub(additions_width)
+        .min(STAT_WIDTH);
+    let left_padding = content_width.saturating_sub(additions_width + deletions_width);
+    let additions = format!("+{}", summary.additions);
+    let deletions = format!("-{}", summary.deletions);
+    (
+        format!(
+            "{additions:>width$}",
+            width = left_padding + additions_width
+        ),
+        format!("{deletions:>deletions_width$}"),
+    )
 }
 
 fn ref_badge(label: &str, color: Color) -> Span<'static> {
@@ -637,17 +659,36 @@ mod tests {
         };
 
         assert_eq!(
-            Styled::style(&graph_row(&commit, None, false)).bg,
+            Styled::style(&graph_row(&commit, None, 11, false)).bg,
             Some(commit_graph_highlight(&commit))
         );
         assert_ne!(commit_graph_highlight(&commit), palette().add_bg);
 
         commit.refs = vec!["main".to_owned()];
-        assert_eq!(Styled::style(&graph_row(&commit, None, false)).bg, None);
+        assert_eq!(Styled::style(&graph_row(&commit, None, 11, false)).bg, None);
         assert_eq!(
-            Styled::style(&graph_row(&commit, None, true)).bg,
+            Styled::style(&graph_row(&commit, None, 11, true)).bg,
             Some(palette().surface_alt)
         );
+    }
+
+    #[test]
+    fn commit_changes_use_two_right_aligned_columns() {
+        let summary = crate::git::DiffSummary {
+            additions: 12,
+            deletions: 3,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            commit_change_columns(&summary, 12),
+            ("  +12".to_owned(), "   -3".to_owned())
+        );
+
+        let (additions, deletions) = commit_change_columns(&summary, 31);
+        let resized = format!("{additions} {deletions}");
+        assert_eq!(resized.len(), 30);
+        assert!(resized.ends_with("  +12    -3"));
     }
 
     #[test]

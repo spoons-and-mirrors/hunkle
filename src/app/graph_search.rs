@@ -86,13 +86,32 @@ impl GraphSearch {
 
 fn searchable_commit_text(commit: &Commit) -> String {
     normalize_search_text(&format!(
-        "{} {} {} {} {}",
+        "{} {} {} {} {} {}",
         commit.oid,
         commit.refs.join(" "),
         commit.subject,
         commit.message,
-        commit.date
+        commit.date,
+        numeric_month(&commit.date).unwrap_or_default()
     ))
+}
+
+fn numeric_month(date: &str) -> Option<&'static str> {
+    match date.split_whitespace().nth(1)? {
+        "Jan" => Some("01"),
+        "Feb" => Some("02"),
+        "Mar" => Some("03"),
+        "Apr" => Some("04"),
+        "May" => Some("05"),
+        "Jun" => Some("06"),
+        "Jul" => Some("07"),
+        "Aug" => Some("08"),
+        "Sep" => Some("09"),
+        "Oct" => Some("10"),
+        "Nov" => Some("11"),
+        "Dec" => Some("12"),
+        _ => None,
+    }
 }
 
 fn normalize_search_text(text: &str) -> String {
@@ -125,14 +144,14 @@ mod tests {
             commit(
                 "abc1234",
                 "Ada Lovelace",
-                "03Aug 14:20",
+                "03 Aug 14:20",
                 "Polish graph search",
                 "Searches the complete commit message",
             ),
             commit(
                 "def5678",
                 "Grace Hopper",
-                "02Aug 09:10",
+                "02 Sep 09:10",
                 "Improve navigation",
                 "Keeps keyboard movement predictable",
             ),
@@ -140,7 +159,7 @@ mod tests {
         let mut search = GraphSearch::default();
         search.sync(Path::new("/repo"), &commits, &[0, 1]);
 
-        for query in ["abc", "graph", "complete message", "03Aug"] {
+        for query in ["abc", "graph", "complete message", "03Aug", "08"] {
             search.input.set(query);
             search.apply(&[0, 1]);
             assert_eq!(search.visible_indices(), &[0, 1], "query={query}");
@@ -158,9 +177,9 @@ mod tests {
     #[test]
     fn cycles_matches_within_the_author_filter() {
         let commits = vec![
-            commit("abc", "Ada", "03Aug", "First match", ""),
-            commit("def", "Grace", "03Aug", "Second match", ""),
-            commit("ghi", "Linus", "02Aug", "No match", ""),
+            commit("abc", "Ada", "03 Aug", "First match", ""),
+            commit("def", "Grace", "03 Aug", "Second match", ""),
+            commit("ghi", "Linus", "02 Sep", "No match", ""),
         ];
         let mut search = GraphSearch::default();
         search.sync(Path::new("/repo"), &commits, &[0, 1, 2]);
