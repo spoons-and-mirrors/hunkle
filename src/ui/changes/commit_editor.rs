@@ -97,7 +97,7 @@ pub(super) fn draw_commit_editor(
         }
     };
     let automatic_commit_scroll = if commit_active {
-        commit_cursor_row(&app.commit_input, usize::from(commit_content.width))
+        TextInput::visual_cursor_row(&app.commit_input, usize::from(commit_content.width))
             .saturating_sub(usize::from(commit_content.height).saturating_sub(1))
     } else {
         commit_height.saturating_sub(usize::from(commit_content.height))
@@ -120,21 +120,6 @@ pub(super) fn draw_commit_editor(
             .style(Style::default().bg(palette().canvas)),
         commit_content,
     );
-}
-
-pub(super) fn commit_cursor_row(input: &TextInput, width: usize) -> usize {
-    let width = width.max(1);
-    let mut row = 0;
-    let mut lines = input.text()[..input.cursor()].split('\n').peekable();
-    while let Some(line) = lines.next() {
-        let line_width = UnicodeWidthStr::width(line);
-        if lines.peek().is_some() {
-            row += line_width.saturating_sub(1) / width + 1;
-        } else {
-            row += line_width / width;
-        }
-    }
-    row
 }
 
 pub(super) fn draw_actions(frame: &mut Frame<'_>, area: Rect, mode: Mode) -> Rect {

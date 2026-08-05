@@ -52,7 +52,7 @@ pub(crate) enum ScheduledRunStatus {
 }
 
 impl ScheduledRunStatus {
-    fn text(self) -> &'static str {
+    pub(crate) fn text(self) -> &'static str {
         [
             "launching",
             "working",

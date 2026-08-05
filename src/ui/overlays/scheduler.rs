@@ -1,7 +1,6 @@
 use super::super::header_card::draw_header_card;
 use super::super::location_picker::{
-    LocationPickerPart, LocationPickerRow, LocationPickerRowKind, LocationPickerView,
-    draw_location_picker,
+    LocationPickerRow, LocationPickerRowKind, LocationPickerView, draw_location_picker,
 };
 use super::*;
 
@@ -51,7 +50,7 @@ pub(crate) fn draw_scheduler(
     );
     let close = Rect::new(outer.right().saturating_sub(9), outer.y + 1, 7, 1);
     let mut regions = SchedulerRegions {
-        targets: vec![(HitTarget::Scheduler(Target::Overlay), outer)],
+        targets: Vec::new(),
         scrolls: Vec::new(),
     };
     button(
@@ -179,7 +178,7 @@ fn draw_tasks(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Schedu
 
 fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut SchedulerRegions) {
     if let Some(composer) = app.scheduler.composer.as_ref() {
-        draw_composer(frame, app, composer, area, regions);
+        draw_composer(frame, composer, area, regions);
         return;
     }
     let Some(task) = app.selected_scheduled_task() else {
@@ -260,11 +259,11 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
     {
         let rect = Rect::new(run_list.x, run_list.y + row as u16, run_list.width, 1);
         let selected = app.scheduler.selected_run_id == Some(run.id);
-        let (status, color) = run_status(run.status);
+        let color = run_status_color(run.status);
         draw_text(
             frame,
             rect,
-            format!(" {:>9}", status),
+            format!(" {:>9}", run.status.text()),
             Style::default().fg(color).bg(if selected {
                 palette().selected
             } else {
@@ -322,7 +321,6 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
 
 fn draw_composer(
     frame: &mut Frame<'_>,
-    app: &App,
     composer: &crate::app::ScheduledTaskComposer,
     area: Rect,
     regions: &mut SchedulerRegions,
@@ -374,21 +372,16 @@ fn draw_composer(
         );
         let rect = Rect::new(inner.x + 12, y, inner.width.saturating_sub(12), 1);
         let input = composer.input(field);
-        let mut value = input.text().to_owned();
-        if composer.field == field && input.cursor_visible() {
-            value.insert(input.cursor(), '▌');
-        }
-        draw_text(
-            frame,
-            rect,
-            truncate_width(&value, usize::from(rect.width)),
-            Style::default()
-                .fg(palette().ink)
-                .bg(if composer.field == field {
+        let active = composer.field == field;
+        frame.render_widget(
+            Paragraph::new(text_input_lines(input, active, palette().ink)).style(
+                Style::default().bg(if active {
                     palette().selected
                 } else {
                     palette().surface_alt
                 }),
+            ),
+            rect,
         );
         regions.target(Target::Field(field), rect);
         y += 1;
@@ -414,7 +407,7 @@ fn draw_composer(
             "No linked worktree destinations are available.",
             Style::default().fg(palette().red),
         );
-    } else if composer.destination_picker.is_none()
+    } else if !composer.destination_picker_open
         && let Some(destination) = composer.destinations.get(composer.destination)
     {
         draw_text(
@@ -427,16 +420,8 @@ fn draw_composer(
             Style::default().fg(palette().muted),
         );
     }
-    if let Some(error) = app.scheduler.error.as_deref() {
-        draw_text(
-            frame,
-            Rect::new(inner.x, inner.bottom().saturating_sub(3), inner.width, 1),
-            truncate_width(error, usize::from(inner.width)),
-            Style::default().fg(palette().red),
-        );
-    }
     let cancel = draw_composer_actions(frame, inner, regions);
-    if composer.destination_picker.is_some() {
+    if composer.destination_picker_open {
         draw_destination_picker(
             frame,
             composer,
@@ -506,8 +491,12 @@ fn draw_destination_picker(
     regions: &mut SchedulerRegions,
 ) {
     let candidates = composer.destination_candidates();
-    let card = composer.destination_picker.unwrap();
+    let card = composer.destination_card;
     let selected = composer.destinations.get(composer.destination);
+    let selected_index = candidates
+        .get(composer.picker.selected)
+        .copied()
+        .unwrap_or(composer.destination);
     let rows = candidates
         .iter()
         .map(|index| {
@@ -522,7 +511,7 @@ fn draw_destination_picker(
                 SchedulerDestinationCard::Branch => LocationPickerRowKind::Choice,
             };
             LocationPickerRow {
-                id: *index,
+                target: HitTarget::Scheduler(Target::Destination(*index)),
                 label: card.value(destination).to_owned(),
                 detail: match card {
                     SchedulerDestinationCard::Branch => destination.worktree.clone(),
@@ -532,8 +521,9 @@ fn draw_destination_picker(
                     .is_some_and(|selected| card.value(selected) == card.value(destination)),
                 stats: None,
                 kind,
+                selected: selected_index == *index,
                 hovered: false,
-                delete: false,
+                delete_target: None,
             }
         })
         .collect::<Vec<_>>();
@@ -542,7 +532,7 @@ fn draw_destination_picker(
         SchedulerDestinationCard::Worktree => ("Search worktrees...", 58),
         SchedulerDestinationCard::Branch => ("Search branch...", 58),
     };
-    let picker = draw_location_picker(
+    let (targets, scroll) = draw_location_picker(
         frame,
         bounds,
         anchor,
@@ -550,24 +540,14 @@ fn draw_destination_picker(
             query: &composer.picker.query,
             placeholder,
             rows: &rows,
-            selected: candidates
-                .get(composer.picker.selected)
-                .copied()
-                .unwrap_or(composer.destination),
             visible_start: composer.picker.visible_start(),
             actions: &[],
             maximum_width,
+            overlay_target: HitTarget::Scheduler(Target::DestinationPickerOverlay),
         },
     );
-    for (part, rect) in picker.parts {
-        let target = match part {
-            LocationPickerPart::Overlay => Target::DestinationPickerOverlay,
-            LocationPickerPart::Row(index) => Target::Destination(index),
-            LocationPickerPart::Delete(_) | LocationPickerPart::Action(_) => continue,
-        };
-        regions.target(target, rect);
-    }
-    regions.scroll(ScrollTarget::SchedulerDestinations, picker.scroll);
+    regions.targets.extend(targets);
+    regions.scroll(ScrollTarget::SchedulerDestinations, scroll);
 }
 
 fn draw_prompt_label(
@@ -680,13 +660,13 @@ fn bold_text<'a>(frame: &mut Frame, area: Rect, text: impl Into<Line<'a>>) {
     );
 }
 
-fn run_status(status: ScheduledRunStatus) -> (&'static str, Color) {
+fn run_status_color(status: ScheduledRunStatus) -> Color {
     match status {
-        ScheduledRunStatus::Launching => ("launching", palette().cyan),
-        ScheduledRunStatus::Working => ("working", palette().accent),
-        ScheduledRunStatus::Blocked => ("blocked", palette().yellow),
-        ScheduledRunStatus::Unknown => ("unknown", palette().faint),
-        ScheduledRunStatus::Completed => ("completed", palette().green),
-        ScheduledRunStatus::Failed => ("failed", palette().red),
+        ScheduledRunStatus::Launching => palette().cyan,
+        ScheduledRunStatus::Working => palette().accent,
+        ScheduledRunStatus::Blocked => palette().yellow,
+        ScheduledRunStatus::Unknown => palette().faint,
+        ScheduledRunStatus::Completed => palette().green,
+        ScheduledRunStatus::Failed => palette().red,
     }
 }

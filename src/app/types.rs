@@ -424,7 +424,6 @@ pub(crate) enum SettingsHitTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SchedulerHitTarget {
-    Overlay,
     Close,
     Back,
     New,

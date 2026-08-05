@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -12,7 +12,10 @@ use interprocess::local_socket::{Stream, traits::Stream as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::process::{self, Limits};
+use crate::{
+    filesystem,
+    process::{self, Limits},
+};
 
 use super::{
     AgentPane, AgentPaneDirection, AgentRuntime, AgentSessionIdentity, AgentStatus, AgentTimingKey,
@@ -284,12 +287,12 @@ pub(crate) enum SchedulerObserveResult {
 }
 
 #[derive(Debug, Clone)]
-struct SchedulerCommandError {
+struct CommandError {
     code: Option<String>,
     message: String,
 }
 
-impl SchedulerCommandError {
+impl CommandError {
     fn unavailable(message: impl Into<String>) -> Self {
         Self {
             code: None,
@@ -313,16 +316,16 @@ pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<AgentPane>)
 }
 
 pub(crate) fn scheduler_launch(request: SchedulerLaunchRequest) -> SchedulerLaunchResult {
-    scheduler_launch_with(request, scheduler_run_json)
+    scheduler_launch_with(request, run_required_json)
 }
 
 pub(crate) fn scheduler_observe(pane_id: &str) -> SchedulerObserveResult {
-    scheduler_observe_with(pane_id, scheduler_run_json, scheduler_run_text)
+    scheduler_observe_with(pane_id, run_required_json, run_text)
 }
 
 fn scheduler_launch_with(
     request: SchedulerLaunchRequest,
-    mut runner: impl FnMut(&[OsString]) -> Result<Value, SchedulerCommandError>,
+    mut runner: impl FnMut(&[OsString]) -> Result<Value, CommandError>,
 ) -> SchedulerLaunchResult {
     let mut result = SchedulerLaunchResult {
         pane_id: None,
@@ -441,7 +444,10 @@ fn scheduler_launch_with(
     ];
     let prompted = match runner(&prompt_args) {
         Ok(value) => value,
-        Err(error) if error.message.contains("produced no observed state change") => {
+        Err(error)
+            if error.code.as_deref() == Some("agent_prompt_stalled")
+                || error.message.contains("produced no observed state change") =>
+        {
             // A newly started OpenCode process can miss the first prompt even after Herdr
             // reports it ready. Retry only when Herdr confirms that nothing changed.
             std::thread::sleep(Duration::from_millis(if cfg!(test) { 0 } else { 3_000 }));
@@ -462,7 +468,7 @@ fn scheduler_launch_with(
 fn scheduler_launch_failure(
     mut result: SchedulerLaunchResult,
     stage: &str,
-    error: SchedulerCommandError,
+    error: CommandError,
 ) -> SchedulerLaunchResult {
     result.error = Some(format!("{stage}: {}", error.message));
     result
@@ -490,7 +496,7 @@ fn scheduler_matching_workspace(
             .or_else(|| workspace_path(workspace, snapshot));
         if path
             .as_deref()
-            .is_some_and(|path| scheduler_paths_match(path, destination))
+            .is_some_and(|path| filesystem::same_path(path, destination))
         {
             return Ok(Some(workspace_id.to_owned()));
         }
@@ -498,23 +504,21 @@ fn scheduler_matching_workspace(
     Ok(None)
 }
 
-fn scheduler_paths_match(left: &Path, right: &Path) -> bool {
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
+fn scheduler_agent_status(value: &Value, expected_pane_id: &str) -> Result<AgentStatus, String> {
+    let agent = scheduler_agent(value, expected_pane_id)?;
+    Ok(parse_agent_status(
+        agent.get("agent_status").and_then(Value::as_str),
+    ))
 }
 
-fn scheduler_agent_status(value: &Value, expected_pane_id: &str) -> Result<AgentStatus, String> {
+fn scheduler_agent<'a>(value: &'a Value, expected_pane_id: &str) -> Result<&'a Value, String> {
     let agent = value
         .pointer("/result/agent")
         .ok_or_else(|| "Herdr returned no agent".to_owned())?;
     if agent.get("pane_id").and_then(Value::as_str) != Some(expected_pane_id) {
         return Err("Herdr returned an agent in an unexpected pane".to_owned());
     }
-    Ok(parse_agent_status(
-        agent.get("agent_status").and_then(Value::as_str),
-    ))
+    Ok(agent)
 }
 
 fn scheduler_label(value: &str) -> String {
@@ -564,8 +568,8 @@ fn scheduler_agent_name(value: &str) -> String {
 
 fn scheduler_observe_with(
     pane_id: &str,
-    mut json_runner: impl FnMut(&[OsString]) -> Result<Value, SchedulerCommandError>,
-    mut text_runner: impl FnMut(&[OsString]) -> Result<String, SchedulerCommandError>,
+    mut json_runner: impl FnMut(&[OsString]) -> Result<Value, CommandError>,
+    mut text_runner: impl FnMut(&[OsString]) -> Result<String, CommandError>,
 ) -> SchedulerObserveResult {
     let get_args = ["agent".into(), "get".into(), pane_id.into()];
     let value = match json_runner(&get_args) {
@@ -575,15 +579,10 @@ fn scheduler_observe_with(
         }
         Err(error) => return SchedulerObserveResult::Unavailable(error.message),
     };
-    let Some(agent) = value.pointer("/result/agent") else {
-        return SchedulerObserveResult::Unavailable("Herdr returned no agent".to_owned());
+    let status = match scheduler_agent_status(&value, pane_id) {
+        Ok(status) => status,
+        Err(error) => return SchedulerObserveResult::Unavailable(error),
     };
-    if agent.get("pane_id").and_then(Value::as_str) != Some(pane_id) {
-        return SchedulerObserveResult::Unavailable(
-            "Herdr returned an agent in an unexpected pane".to_owned(),
-        );
-    }
-    let status = parse_agent_status(agent.get("agent_status").and_then(Value::as_str));
     let read_args = [
         "agent".into(),
         "read".into(),
@@ -598,90 +597,6 @@ fn scheduler_observe_with(
     SchedulerObserveResult::Observed(
         status,
         text_runner(&read_args).map_err(|error| error.message),
-    )
-}
-
-fn scheduler_run_json(args: &[OsString]) -> Result<Value, SchedulerCommandError> {
-    let output = scheduler_output(args, 4 * 1024 * 1024)?;
-    scheduler_decode_json(&output.stdout, &output.stderr, output.status.success())
-}
-
-fn scheduler_run_text(args: &[OsString]) -> Result<String, SchedulerCommandError> {
-    let output = scheduler_output(args, 256 * 1024)?;
-    if !output.status.success() {
-        return Err(scheduler_decode_error(&output.stderr));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn scheduler_output(
-    args: &[OsString],
-    stdout_limit: usize,
-) -> Result<process::Output, SchedulerCommandError> {
-    let output = process::run(
-        Command::new("herdr").args(args),
-        Limits::new(stdout_limit, 256 * 1024, Duration::from_secs(60)),
-    )
-    .map_err(|error| SchedulerCommandError::unavailable(format!("Herdr unavailable: {error}")))?;
-    if output.timed_out {
-        return Err(SchedulerCommandError::unavailable(
-            "Herdr command timed out",
-        ));
-    }
-    if output.stdout_truncated {
-        return Err(SchedulerCommandError::unavailable(format!(
-            "Herdr returned more than {stdout_limit} bytes"
-        )));
-    }
-    Ok(output)
-}
-
-fn scheduler_decode_json(
-    stdout: &[u8],
-    stderr: &[u8],
-    success: bool,
-) -> Result<Value, SchedulerCommandError> {
-    if stdout.iter().all(u8::is_ascii_whitespace) {
-        return Err(if success {
-            SchedulerCommandError::unavailable("Herdr returned an empty response")
-        } else {
-            scheduler_decode_error(stderr)
-        });
-    }
-    let value: Value = serde_json::from_slice(stdout).map_err(|error| {
-        SchedulerCommandError::unavailable(format!("Could not read Herdr response: {error}"))
-    })?;
-    if let Some(error) = value.get("error") {
-        return Err(SchedulerCommandError {
-            code: error.get("code").and_then(Value::as_str).map(str::to_owned),
-            message: error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Herdr command failed")
-                .to_owned(),
-        });
-    }
-    if !success {
-        return Err(SchedulerCommandError::unavailable("Herdr command failed"));
-    }
-    Ok(value)
-}
-
-fn scheduler_decode_error(stderr: &[u8]) -> SchedulerCommandError {
-    if let Ok(value) = serde_json::from_slice::<Value>(stderr)
-        && let Some(error) = value.get("error")
-    {
-        return SchedulerCommandError {
-            code: error.get("code").and_then(Value::as_str).map(str::to_owned),
-            message: error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Herdr command failed")
-                .to_owned(),
-        };
-    }
-    SchedulerCommandError::unavailable(
-        stderr_detail(stderr).unwrap_or_else(|| "Herdr command failed".to_owned()),
     )
 }
 
@@ -1969,41 +1884,93 @@ fn environment_from(
 }
 
 fn run(args: &[String]) -> Result<Value, String> {
-    let output = process::run(
-        Command::new("herdr").args(args),
-        Limits::new(4 * 1024 * 1024, 256 * 1024, Duration::from_secs(60)),
-    )
-    .map_err(|error| format!("Herdr unavailable: {error}"))?;
-    if output.timed_out {
-        return Err("Herdr command timed out".to_owned());
-    }
-    if output.stdout_truncated {
-        return Err("Herdr returned more than 4 MiB".to_owned());
-    }
+    run_json(args).map_err(|error| error.message)
+}
+
+fn run_json<S: AsRef<OsStr>>(args: &[S]) -> Result<Value, CommandError> {
+    let output = run_output(args, 4 * 1024 * 1024)?;
     decode_response(&output.stdout, &output.stderr, output.status.success())
 }
 
-fn decode_response(stdout: &[u8], stderr: &[u8], success: bool) -> Result<Value, String> {
+fn run_required_json<S: AsRef<OsStr>>(args: &[S]) -> Result<Value, CommandError> {
+    match run_json(args)? {
+        Value::Null => Err(CommandError::unavailable(
+            "Herdr returned an empty response",
+        )),
+        value => Ok(value),
+    }
+}
+
+fn run_text<S: AsRef<OsStr>>(args: &[S]) -> Result<String, CommandError> {
+    let output = run_output(args, 256 * 1024)?;
+    if !output.status.success() {
+        return Err(decode_command_error(&output.stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_output<S: AsRef<OsStr>>(
+    args: &[S],
+    stdout_limit: usize,
+) -> Result<process::Output, CommandError> {
+    let output = process::run(
+        Command::new("herdr").args(args),
+        Limits::new(stdout_limit, 256 * 1024, Duration::from_secs(60)),
+    )
+    .map_err(|error| CommandError::unavailable(format!("Herdr unavailable: {error}")))?;
+    if output.timed_out {
+        return Err(CommandError::unavailable("Herdr command timed out"));
+    }
+    if output.stdout_truncated {
+        return Err(CommandError::unavailable(format!(
+            "Herdr returned more than {stdout_limit} bytes"
+        )));
+    }
+    Ok(output)
+}
+
+fn decode_response(stdout: &[u8], stderr: &[u8], success: bool) -> Result<Value, CommandError> {
     if stdout.iter().all(u8::is_ascii_whitespace) {
         if success {
             return Ok(Value::Null);
         }
-        return Err(stderr_detail(stderr).unwrap_or_else(|| "Herdr command failed".to_owned()));
+        return Err(decode_command_error(stderr));
     }
     let value: Value = serde_json::from_slice(stdout).map_err(|error| {
-        stderr_detail(stderr).unwrap_or_else(|| format!("Could not read Herdr response: {error}"))
+        CommandError::unavailable(
+            stderr_detail(stderr)
+                .unwrap_or_else(|| format!("Could not read Herdr response: {error}")),
+        )
     })?;
     if let Some(error) = value.get("error") {
-        return Err(error
+        return Err(command_error(error));
+    }
+    if !success {
+        return Err(CommandError::unavailable("Herdr command failed"));
+    }
+    Ok(value)
+}
+
+fn decode_command_error(stderr: &[u8]) -> CommandError {
+    if let Ok(value) = serde_json::from_slice::<Value>(stderr)
+        && let Some(error) = value.get("error")
+    {
+        return command_error(error);
+    }
+    CommandError::unavailable(
+        stderr_detail(stderr).unwrap_or_else(|| "Herdr command failed".to_owned()),
+    )
+}
+
+fn command_error(error: &Value) -> CommandError {
+    CommandError {
+        code: error.get("code").and_then(Value::as_str).map(str::to_owned),
+        message: error
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("Herdr command failed")
-            .to_owned());
+            .to_owned(),
     }
-    if !success {
-        return Err("Herdr command failed".to_owned());
-    }
-    Ok(value)
 }
 
 fn stderr_detail(stderr: &[u8]) -> Option<String> {
@@ -3289,6 +3256,18 @@ mod tests {
     }
 
     #[test]
+    fn preserves_structured_command_errors_from_stderr() {
+        let error = decode_response(
+            b"",
+            br#"{"error":{"code":"agent_not_found","message":"agent target not found"}}"#,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code.as_deref(), Some("agent_not_found"));
+        assert_eq!(error.message, "agent target not found");
+    }
+
+    #[test]
     fn creates_a_pane_below_before_sending() {
         let mut calls = Vec::new();
         let pane_id = send_command_below_with("review this".to_owned(), |args| {
@@ -3801,7 +3780,7 @@ mod tests {
                         }
                     }),
                     3 => {
-                        return Err(SchedulerCommandError::unavailable(
+                        return Err(CommandError::unavailable(
                             "agent target pane w7:p9 is not an available shell",
                         ));
                     }
@@ -3812,7 +3791,7 @@ mod tests {
                         }}
                     }),
                     5 => {
-                        return Err(SchedulerCommandError::unavailable(
+                        return Err(CommandError::unavailable(
                             "agent prompt produced no observed state change within 5000 ms",
                         ));
                     }
@@ -3881,7 +3860,7 @@ mod tests {
         let missing = scheduler_observe_with(
             "w1:p2",
             |_| {
-                Err(SchedulerCommandError {
+                Err(CommandError {
                     code: Some("agent_not_found".to_owned()),
                     message: "agent target not found".to_owned(),
                 })

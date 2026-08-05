@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) struct LocationPickerAction<'a> {
-    pub(super) id: usize,
+    pub(super) target: HitTarget,
     pub(super) label: &'a str,
     pub(super) color: Color,
     pub(super) hovered: bool,
@@ -13,36 +13,25 @@ pub(super) enum LocationPickerRowKind {
 }
 
 pub(super) struct LocationPickerRow {
-    pub(super) id: usize,
+    pub(super) target: HitTarget,
     pub(super) label: String,
     pub(super) detail: String,
     pub(super) current: bool,
     pub(super) stats: Option<(u64, u64)>,
     pub(super) kind: LocationPickerRowKind,
+    pub(super) selected: bool,
     pub(super) hovered: bool,
-    pub(super) delete: bool,
+    pub(super) delete_target: Option<HitTarget>,
 }
 
 pub(super) struct LocationPickerView<'a> {
     pub(super) query: &'a TextInput,
     pub(super) placeholder: &'a str,
     pub(super) rows: &'a [LocationPickerRow],
-    pub(super) selected: usize,
     pub(super) visible_start: usize,
     pub(super) actions: &'a [LocationPickerAction<'a>],
     pub(super) maximum_width: u16,
-}
-
-pub(super) enum LocationPickerPart {
-    Overlay,
-    Row(usize),
-    Delete(usize),
-    Action(usize),
-}
-
-pub(super) struct LocationPickerRegions {
-    pub(super) parts: Vec<(LocationPickerPart, Rect)>,
-    pub(super) scroll: Rect,
+    pub(super) overlay_target: HitTarget,
 }
 
 pub(super) fn location_picker_capacity(screen: Rect, bounds: Rect, anchor: Rect) -> usize {
@@ -56,7 +45,7 @@ pub(super) fn draw_location_picker(
     bounds: Rect,
     anchor: Rect,
     view: LocationPickerView<'_>,
-) -> LocationPickerRegions {
+) -> (Vec<(HitTarget, Rect)>, Rect) {
     let visible_rows =
         view.rows
             .len()
@@ -83,7 +72,7 @@ pub(super) fn draw_location_picker(
         width.saturating_add(UnicodeWidthStr::width(action.label) as u16 + 1)
     });
     draw_location_picker_search(frame, view.query, view.placeholder, area, action_space);
-    let mut parts = vec![(LocationPickerPart::Overlay, area)];
+    let mut targets = vec![(view.overlay_target.clone(), area)];
     let mut action_x = area.right().saturating_sub(action_space);
     for action in view.actions {
         let width = UnicodeWidthStr::width(action.label) as u16;
@@ -106,7 +95,7 @@ pub(super) fn draw_location_picker(
             Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
             Rect::new(rect.right(), rect.y, 1, 1),
         );
-        parts.push((LocationPickerPart::Action(action.id), rect));
+        targets.push((action.target.clone(), rect));
         action_x = rect.right().saturating_add(1);
     }
 
@@ -124,7 +113,7 @@ pub(super) fn draw_location_picker(
         .enumerate()
     {
         let rect = Rect::new(scroll.x, scroll.y + row as u16, scroll.width, 1);
-        let background = if item.id == view.selected || item.hovered {
+        let background = if item.selected || item.hovered {
             palette().selected
         } else {
             palette().surface_alt
@@ -142,8 +131,8 @@ pub(super) fn draw_location_picker(
             ),
             LocationPickerRowKind::Choice => draw_choice_row(frame, rect, item, background),
         }
-        parts.push((LocationPickerPart::Row(item.id), rect));
-        if item.hovered && item.delete {
+        targets.push((item.target.clone(), rect));
+        if let Some(delete_target) = item.delete_target.as_ref().filter(|_| item.hovered) {
             let delete = Rect::new(rect.right().saturating_sub(3), rect.y, 3.min(rect.width), 1);
             frame.render_widget(
                 Paragraph::new(" X ").style(
@@ -154,7 +143,7 @@ pub(super) fn draw_location_picker(
                 ),
                 delete,
             );
-            parts.push((LocationPickerPart::Delete(item.id), delete));
+            targets.push((delete_target.clone(), delete));
         }
     }
     draw_half_padding(
@@ -164,10 +153,10 @@ pub(super) fn draw_location_picker(
         palette().surface_alt,
         Color::Rgb(0, 0, 0),
     );
-    LocationPickerRegions { parts, scroll }
+    (targets, scroll)
 }
 
-fn draw_location_picker_search(
+pub(super) fn draw_location_picker_search(
     frame: &mut Frame<'_>,
     query: &TextInput,
     placeholder: &str,

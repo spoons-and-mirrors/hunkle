@@ -81,7 +81,7 @@ pub(crate) struct ScheduledTaskComposer {
     pub(crate) destinations: Vec<SchedulerDestination>,
     pub(crate) destination: usize,
     pub(crate) destination_card: SchedulerDestinationCard,
-    pub(crate) destination_picker: Option<SchedulerDestinationCard>,
+    pub(crate) destination_picker_open: bool,
     pub(crate) picker: PickerState,
     pub(crate) field: SchedulerField,
 }
@@ -100,7 +100,7 @@ impl ScheduledTaskComposer {
             destinations,
             destination: 0,
             destination_card: SchedulerDestinationCard::Repository,
-            destination_picker: None,
+            destination_picker_open: false,
             picker: PickerState::default(),
             field: SchedulerField::Title,
         }
@@ -110,7 +110,7 @@ impl ScheduledTaskComposer {
         let Some(selected) = self.destinations.get(self.destination) else {
             return Vec::new();
         };
-        let card = self.destination_picker.unwrap_or(self.destination_card);
+        let card = self.destination_card;
         let query = self.picker.query.text().to_lowercase();
         let mut candidates = Vec::new();
         for (index, destination) in self.destinations.iter().enumerate() {
@@ -138,7 +138,8 @@ impl ScheduledTaskComposer {
     }
 
     fn open_destination_picker(&mut self, card: SchedulerDestinationCard) {
-        self.destination_picker = Some(card);
+        self.destination_card = card;
+        self.destination_picker_open = true;
         self.picker.query.clear();
         self.picker.query.focus();
         let candidates = self.destination_candidates();
@@ -152,7 +153,7 @@ impl ScheduledTaskComposer {
     }
 
     fn close_destination_picker(&mut self) {
-        self.destination_picker = None;
+        self.destination_picker_open = false;
         self.picker.query.clear();
     }
 
@@ -345,7 +346,6 @@ impl App {
 
     pub(crate) fn activate_scheduler_target(&mut self, target: SchedulerHitTarget) {
         match target {
-            SchedulerHitTarget::Overlay => {}
             SchedulerHitTarget::Close => self.close_scheduler(),
             SchedulerHitTarget::Back => {
                 self.scheduler.composer = None;
@@ -367,7 +367,7 @@ impl App {
                 if let Some(composer) = self.scheduler.composer.as_mut() {
                     composer.field = SchedulerField::Destination;
                     composer.destination_card = card;
-                    if composer.destination_picker == Some(card) {
+                    if composer.destination_picker_open && composer.destination_card == card {
                         composer.close_destination_picker();
                     } else {
                         composer.open_destination_picker(card);
@@ -425,7 +425,7 @@ impl App {
     fn handle_scheduler_composer(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             let composer = self.scheduler.composer.as_mut().unwrap();
-            if composer.destination_picker.is_some() {
+            if composer.destination_picker_open {
                 composer.close_destination_picker();
                 return;
             }
@@ -498,7 +498,7 @@ impl App {
     fn handle_scheduler_destination(&mut self, key: KeyEvent) {
         let viewport = self.scheduler_destination_viewport();
         let composer = self.scheduler.composer.as_mut().unwrap();
-        if composer.destination_picker.is_none() {
+        if !composer.destination_picker_open {
             match key.code {
                 KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
                     composer.destination_card = composer
@@ -517,8 +517,14 @@ impl App {
             KeyCode::Enter => composer.close_destination_picker(),
             KeyCode::Down => composer.update_destination_picker(Some(1)),
             KeyCode::Up => composer.update_destination_picker(Some(-1)),
-            KeyCode::PageDown => composer.update_destination_picker(Some(5)),
-            KeyCode::PageUp => composer.update_destination_picker(Some(-5)),
+            KeyCode::PageDown => {
+                composer.picker.move_selection_page(1);
+                composer.update_destination_picker(Some(0));
+            }
+            KeyCode::PageUp => {
+                composer.picker.move_selection_page(-1);
+                composer.update_destination_picker(Some(0));
+            }
             _ => {
                 if composer.picker.query.handle_edit_key(key) != EditOutcome::Unhandled {
                     composer.update_destination_picker(None);
@@ -540,7 +546,7 @@ impl App {
                     .filter(char::is_ascii_digit)
                     .collect::<String>(),
             ),
-            SchedulerField::Destination if composer.destination_picker.is_some() => {
+            SchedulerField::Destination if composer.destination_picker_open => {
                 composer.picker.query.insert_single_line(text);
                 composer.update_destination_picker(None);
             }
@@ -562,7 +568,7 @@ impl App {
         let mut changed = composer
             .picker
             .query
-            .poll_blink(scheduler_active && composer.destination_picker.is_some());
+            .poll_blink(scheduler_active && composer.destination_picker_open);
         for input_field in [
             SchedulerField::Title,
             SchedulerField::Description,
@@ -713,7 +719,7 @@ impl App {
                 return;
             };
             composer.field = SchedulerField::Destination;
-            if composer.destination_picker.is_none() {
+            if !composer.destination_picker_open {
                 composer.open_destination_picker(composer.destination_card);
             }
             composer.picker.set_viewport_rows(viewport);

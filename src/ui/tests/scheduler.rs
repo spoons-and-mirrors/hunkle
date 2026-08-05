@@ -129,12 +129,11 @@ fn scheduler_destination_reuses_repository_worktree_and_branch_cards() {
     click(&mut app, beta.x, beta.y);
     assert_eq!(app.scheduler.composer.as_ref().unwrap().destination, 2);
     assert!(
-        app.scheduler
+        !app.scheduler
             .composer
             .as_ref()
             .unwrap()
-            .destination_picker
-            .is_none()
+            .destination_picker_open
     );
 
     for (card, destination) in [

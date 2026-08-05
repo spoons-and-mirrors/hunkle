@@ -499,35 +499,20 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App, profile: 
     if available_height < 5 || frame.area().width < 12 {
         return;
     }
-    if matches!(
-        kind,
-        HeaderPickerKind::Repositories
-            | HeaderPickerKind::Worktrees
-            | HeaderPickerKind::Branches
-            | HeaderPickerKind::DiffTargets
-    ) && app.header_picker.filtering()
-    {
-        draw_header_location_picker(frame, app, anchor, kind);
+    if app.header_picker.filtering() {
+        if kind == HeaderPickerKind::Issues {
+            draw_header_issue_picker(frame, app, anchor, available_height, profile);
+        } else {
+            draw_header_location_picker(frame, app, anchor, kind);
+        }
         return;
     }
     let naming_branch = app.header_picker.naming_branch();
     let deleting_branch = app.header_picker.deleting_branch();
-    let cloning_repository = app.header_picker.cloning_repository();
+    let cloning_repository = kind == HeaderPickerKind::Repositories
+        && app.header_picker.repository_step == RepositoryPickerStep::Clone;
     let creating_worktree = app.header_picker.creating_worktree();
     let deleting_worktree = app.header_picker.deleting_worktree();
-    let filtering = app.header_picker.filtering();
-    let picker_chrome = if filtering { 4 } else { 1 };
-    let item_offset = if filtering { 3 } else { 1 };
-    let mobile_issue_picker = kind == HeaderPickerKind::Issues && profile.is_single();
-    let item_height = if mobile_issue_picker { 3 } else { 1 };
-    let visible_item_rows = if mobile_issue_picker {
-        usize::from(
-            available_height.saturating_sub(u16::try_from(picker_chrome).unwrap_or(u16::MAX)),
-        )
-    } else {
-        header_picker_visible_items(frame.area().height, available_height, picker_chrome)
-    };
-    let visible_items = (visible_item_rows / item_height).max(1);
     let row_count = if cloning_repository {
         5
     } else if creating_worktree {
@@ -536,37 +521,21 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App, profile: 
         3
     } else if naming_branch {
         2
-    } else if app.header_picker.items.is_empty() {
-        1
     } else {
-        app.header_picker.items.len().min(visible_items)
+        return;
     };
     app.header_picker.set_viewport_rows(row_count);
-    let maximum_width = match kind {
-        HeaderPickerKind::Repositories => 80,
-        HeaderPickerKind::Issues => frame.area().width.saturating_mul(9) / 10,
-        _ => 58,
-    };
-    let width = if mobile_issue_picker {
-        frame.area().width
-    } else {
-        frame
-            .area()
-            .width
-            .saturating_sub(2)
-            .min(maximum_width)
-            .max(12)
-    };
-    let x = if mobile_issue_picker {
-        frame.area().x
-    } else {
-        anchor
-            .x
-            .min(frame.area().right().saturating_sub(width).saturating_sub(1))
-    };
-    let picker_height = row_count
-        .saturating_mul(item_height)
-        .saturating_add(picker_chrome);
+    let maximum_width = if cloning_repository { 80 } else { 58 };
+    let width = frame
+        .area()
+        .width
+        .saturating_sub(2)
+        .min(maximum_width)
+        .max(12);
+    let x = anchor
+        .x
+        .min(frame.area().right().saturating_sub(width).saturating_sub(1));
+    let picker_height = row_count.saturating_add(1);
     let area = Rect::new(
         x,
         picker_y,
@@ -575,230 +544,35 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App, profile: 
     );
     frame.render_widget(Clear, area);
     fill(frame, area, palette().surface_alt);
-    let title = match kind {
-        HeaderPickerKind::Repositories => match app.header_picker.repository_step {
-            RepositoryPickerStep::Repositories => " RECENT REPOSITORIES".to_owned(),
-            RepositoryPickerStep::Clone => " CLONE REPOSITORY".to_owned(),
-        },
-        HeaderPickerKind::Worktrees => match app.header_picker.worktree_step {
-            WorktreePickerStep::Worktrees => " WORKTREES".to_owned(),
-            WorktreePickerStep::Create => " NEW WORKTREE".to_owned(),
-            WorktreePickerStep::Base => " NEW WORKTREE · SELECT BASE".to_owned(),
-            WorktreePickerStep::Delete => " DELETE WORKTREE".to_owned(),
-        },
-        HeaderPickerKind::Branches => match app.header_picker.branch_step {
-            BranchPickerStep::Branches => " BRANCHES".to_owned(),
-            BranchPickerStep::Base => " NEW BRANCH · SELECT BASE".to_owned(),
-            BranchPickerStep::Name => format!(
-                " NEW BRANCH FROM {}",
-                app.header_picker
-                    .branch_base
-                    .as_ref()
-                    .map_or("branch", |branch| branch.name.as_str())
-            ),
-            BranchPickerStep::Delete => " DELETE BRANCH".to_owned(),
-        },
-        HeaderPickerKind::DiffTargets => " DIFF AGAINST".to_owned(),
-        HeaderPickerKind::Issues => format!(
-            " ISSUES & PULL REQUESTS · {}{}",
-            app.header_picker.items.len(),
-            if app.issues.loading() {
-                " · LOADING"
+    let title = if cloning_repository {
+        " CLONE REPOSITORY".to_owned()
+    } else if creating_worktree {
+        " NEW WORKTREE".to_owned()
+    } else if deleting_worktree {
+        " DELETE WORKTREE".to_owned()
+    } else if naming_branch {
+        format!(
+            " NEW BRANCH FROM {}",
+            app.header_picker
+                .branch_base
+                .as_ref()
+                .map_or("branch", |branch| branch.name.as_str())
+        )
+    } else {
+        " DELETE BRANCH".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_width(&title, usize::from(area.width))).style(Style::default().fg(
+            if deleting_worktree || deleting_branch {
+                palette().red
             } else {
-                ""
-            }
-        ),
-    };
-    let new_branch_action = kind == HeaderPickerKind::Branches
-        && app.header_picker.branch_step == BranchPickerStep::Branches;
-    let clone_action = kind == HeaderPickerKind::Repositories
-        && app.header_picker.repository_step == RepositoryPickerStep::Repositories;
-    let new_worktree_action = kind == HeaderPickerKind::Worktrees
-        && app.header_picker.worktree_step == WorktreePickerStep::Worktrees
-        && filtering;
-    let issue_scope_action = kind == HeaderPickerKind::Issues && filtering;
-    let action_width = if new_branch_action {
-        11
-    } else if clone_action {
-        14
-    } else if new_worktree_action {
-        10
-    } else if issue_scope_action {
-        8
-    } else {
-        0
-    };
-    let has_action = new_branch_action || clone_action || new_worktree_action || issue_scope_action;
-    let action_space = action_width + u16::from(has_action);
-    if filtering {
-        draw_header_picker_search(frame, app, area, action_space, 1);
-    } else {
-        frame.render_widget(
-            Paragraph::new(truncate_width(
-                &title,
-                usize::from(area.width.saturating_sub(action_space)),
-            ))
-            .style(
-                Style::default().fg(if deleting_worktree || deleting_branch {
-                    palette().red
-                } else {
-                    palette().muted
-                }),
-            ),
-            Rect::new(area.x, area.y, area.width.saturating_sub(action_width), 1),
-        );
-    }
+                palette().muted
+            },
+        )),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
     app.regions
         .register_hit_target(HitTarget::HeaderPickerOverlay, area);
-    if new_branch_action {
-        let action_row = Rect::new(
-            area.right().saturating_sub(action_space),
-            area.y.saturating_add(1),
-            action_width,
-            1,
-        );
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerNewBranch);
-        let background = if hovered {
-            palette().selected
-        } else {
-            palette().green
-        };
-        frame.render_widget(
-            Paragraph::new(" New branch").style(
-                Style::default()
-                    .fg(palette().canvas)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            action_row,
-        );
-        frame.render_widget(
-            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
-            Rect::new(action_row.right(), action_row.y, 1, 1),
-        );
-        app.regions
-            .register_hit_target(HitTarget::HeaderPickerNewBranch, action_row);
-    } else if clone_action {
-        let open_row = Rect::new(
-            area.right().saturating_sub(action_space),
-            area.y.saturating_add(1),
-            6,
-            1,
-        );
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerOpenExplorer);
-        let background = if hovered {
-            palette().selected
-        } else {
-            palette().cyan
-        };
-        frame.render_widget(
-            Paragraph::new(" Open ").style(
-                Style::default()
-                    .fg(palette().canvas)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            open_row,
-        );
-        frame.render_widget(
-            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
-            Rect::new(open_row.right(), open_row.y, 1, 1),
-        );
-        app.regions
-            .register_hit_target(HitTarget::HeaderPickerOpenExplorer, open_row);
-        let action_row = Rect::new(
-            open_row.right().saturating_add(1),
-            area.y.saturating_add(1),
-            7,
-            1,
-        );
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerClone);
-        let background = if hovered {
-            palette().selected
-        } else {
-            palette().green
-        };
-        frame.render_widget(
-            Paragraph::new(" Clone ").style(
-                Style::default()
-                    .fg(palette().canvas)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            action_row,
-        );
-        frame.render_widget(
-            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
-            Rect::new(action_row.right(), action_row.y, 1, 1),
-        );
-        app.regions
-            .register_hit_target(HitTarget::HeaderPickerClone, action_row);
-    } else if new_worktree_action {
-        let action_row = Rect::new(
-            area.right().saturating_sub(action_space),
-            area.y.saturating_add(1),
-            action_width,
-            1,
-        );
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerNewWorktree);
-        let background = if hovered {
-            palette().selected
-        } else {
-            palette().green
-        };
-        frame.render_widget(
-            Paragraph::new(" New tree ").style(
-                Style::default()
-                    .fg(palette().canvas)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            action_row,
-        );
-        frame.render_widget(
-            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
-            Rect::new(action_row.right(), action_row.y, 1, 1),
-        );
-        app.regions
-            .register_hit_target(HitTarget::HeaderPickerNewWorktree, action_row);
-    } else if issue_scope_action {
-        let action_row = Rect::new(
-            area.right().saturating_sub(action_space),
-            area.y.saturating_add(1),
-            action_width,
-            1,
-        );
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerIssueScope);
-        let background = if hovered {
-            palette().selected
-        } else {
-            palette().cyan
-        };
-        frame.render_widget(
-            Paragraph::new(format!(" {:^6} ", app.issues.scope().label())).style(
-                Style::default()
-                    .fg(palette().canvas)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            action_row,
-        );
-        frame.render_widget(
-            Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
-            Rect::new(action_row.right(), action_row.y, 1, 1),
-        );
-        app.regions
-            .register_hit_target(HitTarget::HeaderPickerIssueScope, action_row);
-    }
-    if filtering {
-        draw_half_padding(
-            frame,
-            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
-            '▀',
-            palette().surface_alt,
-            Color::Rgb(0, 0, 0),
-        );
-    }
 
     if naming_branch {
         let mut input = app.header_picker.branch_name.text().to_owned();
@@ -994,6 +768,104 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App, profile: 
             .register_hit_target(HitTarget::HeaderPickerCancelDeleteWorktree, cancel);
         return;
     }
+}
+
+fn draw_header_issue_picker(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    anchor: Rect,
+    available_height: u16,
+    profile: LayoutProfile,
+) {
+    const PICKER_CHROME: usize = 4;
+    const ITEM_OFFSET: u16 = 3;
+    const ACTION_WIDTH: u16 = 8;
+    const ACTION_SPACE: u16 = ACTION_WIDTH + 1;
+
+    let mobile = profile.is_single();
+    let item_height = if mobile { 3 } else { 1 };
+    let visible_item_rows = if mobile {
+        usize::from(
+            available_height.saturating_sub(u16::try_from(PICKER_CHROME).unwrap_or(u16::MAX)),
+        )
+    } else {
+        header_picker_visible_items(frame.area().height, available_height, PICKER_CHROME)
+    };
+    let visible_items = (visible_item_rows / item_height).max(1);
+    let row_count = app.header_picker.items.len().min(visible_items).max(1);
+    app.header_picker.set_viewport_rows(row_count);
+    let width = if mobile {
+        frame.area().width
+    } else {
+        frame
+            .area()
+            .width
+            .saturating_sub(2)
+            .min(frame.area().width.saturating_mul(9) / 10)
+            .max(12)
+    };
+    let x = if mobile {
+        frame.area().x
+    } else {
+        anchor
+            .x
+            .min(frame.area().right().saturating_sub(width).saturating_sub(1))
+    };
+    let picker_height = row_count
+        .saturating_mul(item_height)
+        .saturating_add(PICKER_CHROME);
+    let area = Rect::new(
+        x,
+        anchor.bottom(),
+        width,
+        u16::try_from(picker_height).unwrap_or(available_height),
+    );
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().surface_alt);
+    draw_location_picker_search(
+        frame,
+        &app.header_picker.query,
+        "Search issues and pull requests...",
+        area,
+        ACTION_SPACE,
+    );
+    app.regions
+        .register_hit_target(HitTarget::HeaderPickerOverlay, area);
+
+    let action_row = Rect::new(
+        area.right().saturating_sub(ACTION_SPACE),
+        area.y.saturating_add(1),
+        ACTION_WIDTH,
+        1,
+    );
+    let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerIssueScope);
+    let background = if hovered {
+        palette().selected
+    } else {
+        palette().cyan
+    };
+    frame.render_widget(
+        Paragraph::new(format!(" {:^6} ", app.issues.scope().label())).style(
+            Style::default()
+                .fg(palette().canvas)
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
+        ),
+        action_row,
+    );
+    frame.render_widget(
+        Paragraph::new("▌").style(Style::default().fg(background).bg(palette().surface_alt)),
+        Rect::new(action_row.right(), action_row.y, 1, 1),
+    );
+    app.regions
+        .register_hit_target(HitTarget::HeaderPickerIssueScope, action_row);
+    draw_half_padding(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        '▀',
+        palette().surface_alt,
+        Color::Rgb(0, 0, 0),
+    );
 
     if app.header_picker.items.is_empty() {
         let message = app.header_picker.message.as_deref().unwrap_or_else(|| {
@@ -1005,45 +877,39 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App, profile: 
         });
         frame.render_widget(
             Paragraph::new(format!(" {message}")).style(Style::default().fg(palette().faint)),
-            Rect::new(area.x, area.y.saturating_add(item_offset), area.width, 1),
+            Rect::new(area.x, area.y.saturating_add(ITEM_OFFSET), area.width, 1),
         );
         return;
     }
 
-    if kind == HeaderPickerKind::Issues {
-        let start = app.header_picker.visible_start();
-        let rows = app
-            .header_picker
-            .items
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(row_count)
-            .filter_map(|(index, item)| {
-                matches!(item, HeaderPickerItem::Issue { .. }).then_some(index)
-            })
-            .collect::<Vec<_>>();
-        for (row, index) in rows.into_iter().enumerate() {
-            let rect = Rect::new(
-                area.x,
-                area.y.saturating_add(
-                    item_offset
-                        + u16::try_from(row.saturating_mul(item_height)).unwrap_or(u16::MAX),
-                ),
-                area.width,
-                u16::try_from(item_height).unwrap_or(1),
-            );
-            let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerItem(index));
-            let background = if app.header_picker.selected == index || hovered {
-                palette().selected
-            } else {
-                palette().surface_alt
-            };
-            draw_issue_picker_row(frame, rect, &app.header_picker.items[index], background);
-            app.regions
-                .register_hit_target(HitTarget::HeaderPickerItem(index), rect);
-        }
-        return;
+    let start = app.header_picker.visible_start();
+    let rows = app
+        .header_picker
+        .items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(row_count)
+        .filter_map(|(index, item)| matches!(item, HeaderPickerItem::Issue { .. }).then_some(index))
+        .collect::<Vec<_>>();
+    for (row, index) in rows.into_iter().enumerate() {
+        let rect = Rect::new(
+            area.x,
+            area.y.saturating_add(
+                ITEM_OFFSET + u16::try_from(row.saturating_mul(item_height)).unwrap_or(u16::MAX),
+            ),
+            area.width,
+            u16::try_from(item_height).unwrap_or(1),
+        );
+        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerItem(index));
+        let background = if app.header_picker.selected == index || hovered {
+            palette().selected
+        } else {
+            palette().surface_alt
+        };
+        draw_issue_picker_row(frame, rect, &app.header_picker.items[index], background);
+        app.regions
+            .register_hit_target(HitTarget::HeaderPickerItem(index), rect);
     }
 }
 
@@ -1074,7 +940,7 @@ fn draw_header_location_picker(
                     stats,
                     branch,
                 } => Some(LocationPickerRow {
-                    id: index,
+                    target: HitTarget::HeaderPickerItem(index),
                     label: label.clone(),
                     detail: path.display().to_string(),
                     current: current_root.is_some_and(|current| current == path),
@@ -1082,13 +948,14 @@ fn draw_header_location_picker(
                     kind: LocationPickerRowKind::Location {
                         branch: branch.clone(),
                     },
+                    selected: app.header_picker.selected == index,
                     hovered,
-                    delete: false,
+                    delete_target: None,
                 }),
                 HeaderPickerItem::Worktree { worktree, stats } => {
                     let current = current_root.is_some_and(|root| root == worktree.path);
                     Some(LocationPickerRow {
-                        id: index,
+                        target: HitTarget::HeaderPickerItem(index),
                         label: worktree
                             .path
                             .file_name()
@@ -1099,20 +966,24 @@ fn draw_header_location_picker(
                         current,
                         stats: *stats,
                         kind: LocationPickerRowKind::Location { branch: None },
+                        selected: app.header_picker.selected == index,
                         hovered,
-                        delete: !worktree.is_main && !current,
+                        delete_target: (!worktree.is_main && !current)
+                            .then_some(HitTarget::HeaderPickerDeleteWorktree(index)),
                     })
                 }
                 HeaderPickerItem::Branch(branch) | HeaderPickerItem::BranchBase(branch) => {
                     Some(LocationPickerRow {
-                        id: index,
+                        target: HitTarget::HeaderPickerItem(index),
                         label: branch.name.clone(),
                         detail: branch_picker_detail(branch),
                         current: branch.current,
                         stats: None,
                         kind: LocationPickerRowKind::Choice,
+                        selected: app.header_picker.selected == index,
                         hovered,
-                        delete: matches!(item, HeaderPickerItem::Branch(branch) if !branch.remote && !branch.current),
+                        delete_target: matches!(item, HeaderPickerItem::Branch(branch) if !branch.remote && !branch.current)
+                            .then_some(HitTarget::HeaderPickerDeleteBranch(index)),
                     })
                 }
                 HeaderPickerItem::DiffTarget {
@@ -1121,14 +992,15 @@ fn draw_header_location_picker(
                     default,
                     ..
                 } => Some(LocationPickerRow {
-                    id: index,
+                    target: HitTarget::HeaderPickerItem(index),
                     label: label.clone(),
                     detail: detail.clone(),
                     current: *default,
                     stats: None,
                     kind: LocationPickerRowKind::Choice,
+                    selected: app.header_picker.selected == index,
                     hovered,
-                    delete: false,
+                    delete_target: None,
                 }),
                 _ => None,
             }
@@ -1137,13 +1009,13 @@ fn draw_header_location_picker(
     let actions = match kind {
         HeaderPickerKind::Repositories => vec![
             LocationPickerAction {
-                id: 0,
+                target: HitTarget::HeaderPickerOpenExplorer,
                 label: " Open ",
                 color: palette().cyan,
                 hovered: app.hovered_hit_target == Some(HitTarget::HeaderPickerOpenExplorer),
             },
             LocationPickerAction {
-                id: 1,
+                target: HitTarget::HeaderPickerClone,
                 label: " Clone ",
                 color: palette().green,
                 hovered: app.hovered_hit_target == Some(HitTarget::HeaderPickerClone),
@@ -1153,7 +1025,7 @@ fn draw_header_location_picker(
             if app.header_picker.worktree_step == WorktreePickerStep::Worktrees =>
         {
             vec![LocationPickerAction {
-                id: 0,
+                target: HitTarget::HeaderPickerNewWorktree,
                 label: " New tree ",
                 color: palette().green,
                 hovered: app.hovered_hit_target == Some(HitTarget::HeaderPickerNewWorktree),
@@ -1163,7 +1035,7 @@ fn draw_header_location_picker(
             if app.header_picker.branch_step == BranchPickerStep::Branches =>
         {
             vec![LocationPickerAction {
-                id: 0,
+                target: HitTarget::HeaderPickerNewBranch,
                 label: " New branch",
                 color: palette().green,
                 hovered: app.hovered_hit_target == Some(HitTarget::HeaderPickerNewBranch),
@@ -1184,7 +1056,7 @@ fn draw_header_location_picker(
         HeaderPickerKind::DiffTargets => "Search target branch...",
         _ => "Search...",
     };
-    let picker = draw_location_picker(
+    let (targets, _) = draw_location_picker(
         frame,
         frame.area(),
         anchor,
@@ -1192,7 +1064,6 @@ fn draw_header_location_picker(
             query: &app.header_picker.query,
             placeholder,
             rows: &rows,
-            selected: app.header_picker.selected,
             visible_start: app.header_picker.visible_start(),
             actions: &actions,
             maximum_width: if kind == HeaderPickerKind::Repositories {
@@ -1200,30 +1071,10 @@ fn draw_header_location_picker(
             } else {
                 58
             },
+            overlay_target: HitTarget::HeaderPickerOverlay,
         },
     );
-    for (part, rect) in picker.parts {
-        let target = match part {
-            LocationPickerPart::Overlay => HitTarget::HeaderPickerOverlay,
-            LocationPickerPart::Row(index) => HitTarget::HeaderPickerItem(index),
-            LocationPickerPart::Delete(index) => match app.header_picker.items.get(index) {
-                Some(HeaderPickerItem::Worktree { .. }) => {
-                    HitTarget::HeaderPickerDeleteWorktree(index)
-                }
-                _ => HitTarget::HeaderPickerDeleteBranch(index),
-            },
-            LocationPickerPart::Action(0) if kind == HeaderPickerKind::Repositories => {
-                HitTarget::HeaderPickerOpenExplorer
-            }
-            LocationPickerPart::Action(1) if kind == HeaderPickerKind::Repositories => {
-                HitTarget::HeaderPickerClone
-            }
-            LocationPickerPart::Action(0) if kind == HeaderPickerKind::Worktrees => {
-                HitTarget::HeaderPickerNewWorktree
-            }
-            LocationPickerPart::Action(0) => HitTarget::HeaderPickerNewBranch,
-            LocationPickerPart::Action(_) => continue,
-        };
+    for (target, rect) in targets {
         app.regions.register_hit_target(target, rect);
     }
 }
@@ -1527,75 +1378,6 @@ fn draw_picker_input(frame: &mut Frame<'_>, input: &TextInput, area: Rect, activ
             palette().panel
         })),
         area,
-    );
-}
-
-pub(super) fn draw_header_picker_search(
-    frame: &mut Frame<'_>,
-    app: &App,
-    area: Rect,
-    action_width: u16,
-    row_offset: u16,
-) {
-    let mut query = app.header_picker.query.text().to_owned();
-    let cursor_visible = app.header_picker.query.cursor_visible();
-    if !query.is_empty() && cursor_visible {
-        query.insert(app.header_picker.query.cursor(), '▌');
-    }
-    let text = if query.is_empty() {
-        let placeholder = match app.header_picker.kind {
-            Some(HeaderPickerKind::Repositories) => "Search repositories...",
-            Some(HeaderPickerKind::Worktrees) => "Search worktrees...",
-            Some(HeaderPickerKind::Branches)
-                if app.header_picker.branch_step == BranchPickerStep::Base =>
-            {
-                "Search base branch..."
-            }
-            Some(HeaderPickerKind::Branches) => "Search branch...",
-            Some(HeaderPickerKind::DiffTargets) => "Search target branch...",
-            Some(HeaderPickerKind::Issues) => "Search issues and pull requests...",
-            None => "Search...",
-        };
-        format!(" {}{placeholder}", if cursor_visible { "▌" } else { " " })
-    } else {
-        format!(" {query}")
-    };
-    let search = Rect::new(
-        area.x,
-        area.y.saturating_add(row_offset),
-        area.width.saturating_sub(action_width),
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(truncate_start_width(&text, usize::from(search.width))).style(
-            Style::default()
-                .fg(if query.is_empty() {
-                    palette().soft
-                } else {
-                    palette().ink
-                })
-                .bg(palette().surface_alt),
-        ),
-        search,
-    );
-    draw_half_padding(
-        frame,
-        Rect::new(area.x, area.y, area.width, 1),
-        '▄',
-        palette().surface_alt,
-        Color::Rgb(0, 0, 0),
-    );
-    draw_half_padding(
-        frame,
-        Rect::new(
-            area.x,
-            area.y.saturating_add(row_offset.saturating_add(1)),
-            area.width,
-            1,
-        ),
-        '▀',
-        palette().surface_alt,
-        palette().surface_alt,
     );
 }
 

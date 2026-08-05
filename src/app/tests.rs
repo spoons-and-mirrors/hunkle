@@ -968,7 +968,7 @@ fn scheduler_prompt_follows_the_cursor_and_accepts_wheel_scrolling() {
 }
 
 #[test]
-fn scheduler_modal_pointer_target_intercepts_underlying_header() {
+fn scheduler_mode_intercepts_underlying_header_pointer_target() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());
     let mut app = App::new(directory.path().to_path_buf());
@@ -977,8 +977,6 @@ fn scheduler_modal_pointer_target_intercepts_underlying_header() {
     let rect = Rect::new(2, 2, 8, 1);
     app.regions
         .register_hit_target(HitTarget::HeaderRepository, rect);
-    app.regions
-        .register_hit_target(HitTarget::Scheduler(SchedulerHitTarget::Overlay), rect);
 
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),

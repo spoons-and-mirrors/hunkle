@@ -35,7 +35,7 @@ pub(super) use herdr::*;
 mod settings;
 pub(super) use settings::*;
 mod scheduler;
-pub(super) use scheduler::*;
+pub(super) use scheduler::draw_scheduler;
 
 pub(super) struct FileSearchRegions {
     pub(super) overlay: Rect,

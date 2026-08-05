@@ -19,19 +19,22 @@ impl App {
         if self.mode == Mode::Scheduler {
             let point = Position::new(mouse.column, mouse.row);
             match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(HitTarget::Scheduler(target)) = self.regions.hit_target_at(point) {
-                        self.activate_scheduler_target(target);
-                    }
-                }
+                MouseEventKind::Down(MouseButton::Left) => self.handle_left_click(point),
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    if let Some(target) = self.regions.scroll_target_at(point) {
+                    if let Some(
+                        target @ (ScrollTarget::SchedulerTasks
+                        | ScrollTarget::SchedulerRuns
+                        | ScrollTarget::SchedulerOutput
+                        | ScrollTarget::SchedulerPrompt
+                        | ScrollTarget::SchedulerDestinations),
+                    ) = self.regions.scroll_target_at(point)
+                    {
                         let delta = if mouse.kind == MouseEventKind::ScrollUp {
                             -1
                         } else {
                             1
                         };
-                        self.scroll_scheduler(target, delta);
+                        self.scroll_target(target, delta, true);
                     }
                 }
                 _ => {}
