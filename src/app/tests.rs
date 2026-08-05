@@ -701,6 +701,31 @@ fn explorer_captures_typing_instead_of_normal_shortcuts() {
 }
 
 #[test]
+fn explorer_browse_finishes_while_the_explorer_is_hidden() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let nested = root.join("nested");
+    let child = nested.join("ready");
+    fs::create_dir_all(&child).unwrap();
+    initialize_repository(root);
+    let mut app = App::new(root.to_path_buf());
+    wait_for_state(&mut app, |app| app.repository().is_some());
+    app.mode = Mode::Normal;
+    app.workspace_explorer.navigate(nested.clone());
+
+    wait_for_state(&mut app, |app| !app.workspace_explorer.loading);
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.workspace_explorer.directory, nested);
+    assert!(
+        app.workspace_explorer
+            .entries
+            .iter()
+            .any(|entry| entry.path == child)
+    );
+}
+
+#[test]
 fn primary_navigation_has_stable_precedence_and_edits_settings() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config");

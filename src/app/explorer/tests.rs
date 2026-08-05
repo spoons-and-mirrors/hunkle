@@ -8,16 +8,15 @@ fn shutdown_joins_the_match_worker_once() {
     explorer.shutdown();
     assert!(explorer.match_worker.is_none());
     assert!(explorer.match_wake.is_none());
-    assert!(explorer.index_worker.is_none());
+    assert!(explorer.preview_wake.is_none());
     assert!(explorer.index_wake.is_none());
-    assert!(explorer.browse_worker.is_none());
     assert!(explorer.browse_wake.is_none());
 }
 
 fn wait_for_matches(picker: &mut Explorer) {
     for _ in 0..100 {
         picker.poll_index();
-        if !picker.searching {
+        if !picker.searching && !picker.preview_loading {
             return;
         }
         thread::sleep(std::time::Duration::from_millis(5));
@@ -88,22 +87,33 @@ fn browse_worker_keeps_only_the_latest_pending_request() {
 fn index_worker_keeps_only_the_latest_pending_request() {
     let pending = Arc::new(Mutex::new(None::<IndexRequest>));
     let worker_pending = Arc::clone(&pending);
+    let active_generation = Arc::new(AtomicU64::new(1));
+    let worker_generation = Arc::clone(&active_generation);
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
     let (result_tx, result_rx) = mpsc::channel();
     let (started_tx, started_rx) = mpsc::channel();
     let (continue_tx, continue_rx) = mpsc::channel();
     let worker = thread::spawn(move || {
-        run_index_worker(worker_pending, wake_rx, result_tx, |roots| {
-            let path = roots[0].clone();
-            started_tx.send(path.clone()).unwrap();
-            continue_rx.recv().unwrap();
-            vec![IndexedDirectory {
-                name_lower: path.to_string_lossy().into_owned(),
-                depth: 1,
-                is_repo: false,
-                path,
-            }]
-        });
+        run_index_worker(
+            worker_pending,
+            worker_generation,
+            wake_rx,
+            result_tx,
+            |roots, publish, _| {
+                let path = roots[0].clone();
+                started_tx.send(path.clone()).unwrap();
+                continue_rx.recv().unwrap();
+                publish(
+                    vec![IndexedDirectory {
+                        name_lower: path.to_string_lossy().into_owned(),
+                        depth: 1,
+                        is_repo: false,
+                        path,
+                    }],
+                    true,
+                );
+            },
+        );
     });
 
     *pending.lock().unwrap() = Some(IndexRequest {
@@ -117,15 +127,16 @@ fn index_worker_keeps_only_the_latest_pending_request() {
         generation: 2,
         roots: vec![PathBuf::from("second")],
     });
+    active_generation.store(2, Ordering::Relaxed);
     wake_tx.try_send(()).unwrap();
     *pending.lock().unwrap() = Some(IndexRequest {
         generation: 3,
         roots: vec![PathBuf::from("latest")],
     });
+    active_generation.store(3, Ordering::Relaxed);
     assert!(wake_tx.try_send(()).is_err());
 
     continue_tx.send(()).unwrap();
-    assert_eq!(result_rx.recv().unwrap().generation, 1);
     assert_eq!(started_rx.recv().unwrap(), Path::new("latest"));
     continue_tx.send(()).unwrap();
     assert_eq!(result_rx.recv().unwrap().generation, 3);
@@ -169,27 +180,151 @@ fn stale_browse_and_index_completions_are_rejected() {
     let index_generation = explorer.index_generation;
     assert!(!explorer.apply_index_completion(IndexCompletion {
         generation: index_generation.wrapping_sub(1),
-        index: vec![IndexedDirectory {
+        entries: vec![IndexedDirectory {
             path: PathBuf::from("stale"),
             name_lower: "stale".to_owned(),
             depth: 1,
             is_repo: false,
         }],
+        complete: true,
     }));
     assert!(explorer.index_loading);
     assert!(explorer.directory_index.is_empty());
 
     assert!(explorer.apply_index_completion(IndexCompletion {
         generation: index_generation,
-        index: vec![IndexedDirectory {
+        entries: vec![IndexedDirectory {
             path: PathBuf::from("current"),
             name_lower: "current".to_owned(),
             depth: 1,
             is_repo: false,
         }],
+        complete: true,
     }));
     assert!(!explorer.index_loading);
-    assert_eq!(explorer.directory_index[0].path, Path::new("current"));
+    assert_eq!(
+        explorer.directory_index.iter().next().unwrap().path,
+        Path::new("current")
+    );
+}
+
+#[test]
+fn prewarmed_index_is_populated_without_a_query() {
+    let temp = tempfile::tempdir().unwrap();
+    let nested = temp.path().join("projects/hunkle");
+    fs::create_dir_all(&nested).unwrap();
+    let mut explorer = Explorer::new(temp.path().to_path_buf());
+    let roots = vec![temp.path().to_path_buf()];
+
+    explorer.prewarm_index_roots(roots.clone());
+    for _ in 0..100 {
+        explorer.poll_index();
+        if !explorer.index_loading {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert!(!explorer.index_loading);
+    assert!(
+        explorer
+            .directory_index
+            .iter()
+            .any(|entry| entry.path == nested)
+    );
+
+    explorer.reload();
+    explorer.prewarm_index_roots(roots);
+    assert!(!explorer.index_loading);
+
+    let other = tempfile::tempdir().unwrap();
+    explorer.prewarm_index_roots(vec![other.path().to_path_buf()]);
+    assert!(explorer.index_loading);
+}
+
+#[test]
+fn partial_index_batches_are_searchable_before_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let needle = temp.path().join("needle");
+    fs::create_dir(&needle).unwrap();
+    let mut explorer = Explorer::new(temp.path().to_path_buf());
+    explorer.editing_path = true;
+    explorer.path_input = "needle".to_owned();
+    explorer.path_cursor = explorer.path_input.len();
+    explorer.index_loading = true;
+    let generation = explorer.index_generation;
+
+    assert!(explorer.apply_index_completion(IndexCompletion {
+        generation,
+        entries: vec![IndexedDirectory {
+            path: needle.clone(),
+            name_lower: "needle".to_owned(),
+            depth: 1,
+            is_repo: false,
+        }],
+        complete: false,
+    }));
+    for _ in 0..100 {
+        explorer.poll_index();
+        if explorer.matches.iter().any(|entry| entry.path == needle) {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(explorer.index_loading);
+    assert!(explorer.matches.iter().any(|entry| entry.path == needle));
+    let match_generation = explorer.match_generation;
+    let later = temp.path().join("needle-later");
+
+    assert!(explorer.apply_index_completion(IndexCompletion {
+        generation,
+        entries: vec![IndexedDirectory {
+            path: later.clone(),
+            name_lower: "needle-later".to_owned(),
+            depth: 1,
+            is_repo: false,
+        }],
+        complete: false,
+    }));
+    assert!(explorer.match_generation > match_generation);
+    for _ in 0..100 {
+        explorer.poll_index();
+        if explorer.matches.iter().any(|entry| entry.path == later) {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(explorer.matches.iter().any(|entry| entry.path == later));
+
+    assert!(explorer.apply_index_completion(IndexCompletion {
+        generation,
+        entries: Vec::new(),
+        complete: true,
+    }));
+    wait_for_matches(&mut explorer);
+    assert!(!explorer.index_loading);
+}
+
+#[test]
+fn index_batches_do_not_restart_path_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut explorer = Explorer::new(temp.path().to_path_buf());
+    explorer.editing_path = true;
+    explorer.path_input = temp.path().join("nested").display().to_string();
+    explorer.match_generation = 7;
+    explorer.index_generation = 3;
+
+    assert!(explorer.apply_index_completion(IndexCompletion {
+        generation: 3,
+        entries: vec![IndexedDirectory {
+            path: temp.path().join("indexed"),
+            name_lower: "indexed".to_owned(),
+            depth: 1,
+            is_repo: false,
+        }],
+        complete: false,
+    }));
+    assert_eq!(explorer.match_generation, 7);
 }
 
 #[test]
@@ -205,7 +340,7 @@ fn fuzzy_repository_paths_resolve_and_complete() {
     assert_eq!(resolve_fuzzy_path("cod/hunk", root), Some(hunkle.clone()));
 
     let mut picker = Explorer::new(root.to_path_buf());
-    picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]));
+    picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]).into());
     picker.begin_search(Some("hnk"));
     wait_for_matches(&mut picker);
     assert_eq!(picker.matches[0].path, hunkle);
@@ -265,7 +400,7 @@ fn includes_config_directories_in_browsing_and_global_search() {
     assert!(!paths.contains(&&root.join(".cache")));
 
     let mut picker = Explorer::new(root.to_path_buf());
-    picker.directory_index = Arc::new(index);
+    picker.directory_index = Arc::new(index.into());
     picker.begin_search(Some("opencode"));
     wait_for_matches(&mut picker);
     assert_eq!(picker.matches[0].path, opencode);
@@ -369,12 +504,15 @@ fn invalidates_fuzzy_index_when_roaming_to_another_root() {
     fs::create_dir_all(&second).unwrap();
 
     let mut picker = Explorer::new(first.clone());
-    picker.directory_index = Arc::new(vec![IndexedDirectory {
-        path: first.join("stale"),
-        name_lower: "stale".to_owned(),
-        depth: 1,
-        is_repo: false,
-    }]);
+    picker.directory_index = Arc::new(
+        vec![IndexedDirectory {
+            path: first.join("stale"),
+            name_lower: "stale".to_owned(),
+            depth: 1,
+            is_repo: false,
+        }]
+        .into(),
+    );
     picker.index_loading = true;
     let generation = picker.index_generation;
 
@@ -389,12 +527,15 @@ fn invalidates_fuzzy_index_when_roaming_to_another_root() {
 fn explicit_reload_invalidates_the_fuzzy_index_for_the_same_root() {
     let temp = tempfile::tempdir().unwrap();
     let mut picker = Explorer::new(temp.path().to_path_buf());
-    picker.directory_index = Arc::new(vec![IndexedDirectory {
-        path: temp.path().join("stale"),
-        name_lower: "stale".to_owned(),
-        depth: 1,
-        is_repo: false,
-    }]);
+    picker.directory_index = Arc::new(
+        vec![IndexedDirectory {
+            path: temp.path().join("stale"),
+            name_lower: "stale".to_owned(),
+            depth: 1,
+            is_repo: false,
+        }]
+        .into(),
+    );
     picker.index_loading = true;
     let generation = picker.index_generation;
 
@@ -527,7 +668,7 @@ fn single_click_on_a_match_previews_and_double_click_confirms() {
     let child = root.join("child");
     fs::create_dir_all(child.join("inside")).unwrap();
     let mut picker = Explorer::new(root.to_path_buf());
-    picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]));
+    picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]).into());
     picker.begin_search(Some("child"));
     wait_for_matches(&mut picker);
 
@@ -536,6 +677,7 @@ fn single_click_on_a_match_previews_and_double_click_confirms() {
         picker.activate_target(target),
         PickerCommand::None
     ));
+    wait_for_matches(&mut picker);
     assert_eq!(picker.directory, root);
     assert_eq!(picker.match_state.selected(), Some(0));
     assert!(
@@ -619,7 +761,8 @@ fn fuzzy_search_keeps_only_the_best_twelve_matches() {
                     is_repo: false,
                 }
             })
-            .collect(),
+            .collect::<Vec<_>>()
+            .into(),
     );
 
     picker.begin_search(Some("needle"));
@@ -737,7 +880,7 @@ fn enter_opens_an_exact_file_in_the_current_directory() {
     fs::write(root.join("auth.json"), "{}\n").unwrap();
 
     let mut picker = Explorer::new(root.to_path_buf());
-    picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]));
+    picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]).into());
     picker.begin_search(Some("auth.json"));
     wait_for_matches(&mut picker);
 
@@ -753,7 +896,7 @@ fn enter_reports_paths_that_do_not_exist() {
     let root = temp.path();
 
     let mut picker = Explorer::new(root.to_path_buf());
-    picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]));
+    picker.directory_index = Arc::new(index_directories(&[root.to_path_buf()]).into());
     picker.begin_search(Some("missing.json"));
     wait_for_matches(&mut picker);
 

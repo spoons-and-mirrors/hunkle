@@ -847,7 +847,8 @@ impl App {
             marquee.next_frame = now + FOOTER_MARQUEE_STEP;
             changed = true;
         }
-        changed |= self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
+        let explorer_changed = self.workspace_explorer.poll_index();
+        changed |= self.mode == Mode::Explorer && explorer_changed;
         changed |= self.file_search.poll(self.session.data());
         if self.herdr_available() {
             let herdr_poll = {
@@ -1373,6 +1374,14 @@ impl App {
                         });
                     }
                 }
+            }
+            #[cfg(not(test))]
+            if let Some(repository) = self
+                .session
+                .data()
+                .filter(|repository| repository.details_ready)
+            {
+                self.workspace_explorer.prewarm_index(&repository.root);
             }
         }
         drop(session_load_activity);
