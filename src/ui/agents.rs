@@ -505,69 +505,17 @@ pub(super) fn draw_history(
         );
         return (navigation_targets, 0, 0);
     }
-    let selected_message = selected_message
-        .unwrap_or_else(|| messages.len().saturating_sub(1))
-        .min(messages.len().saturating_sub(1));
-    let message = &messages[selected_message];
-    let main = Rect::new(area.x, area.y, area.width, area.height);
-    let message_selector = Rect::new(main.x, main.y, main.width, 2.min(main.height));
-    let content_width = usize::from(main.width.saturating_sub(4).max(1));
-    let user_lines = styled_agent_text(&message.text, content_width);
-    let user_elapsed = message_total_duration(message).map(format_preview_duration);
-    let user_top_padding = u16::from(user_elapsed.is_some());
-    let desired_user_height = user_lines
-        .len()
-        .saturating_add(2)
-        .min(8)
-        .max(3)
-        .saturating_add(usize::from(user_top_padding));
-    let user_y = message_selector.bottom();
-    let user_height = u16::try_from(desired_user_height)
-        .unwrap_or(u16::MAX)
-        .min(main.bottom().saturating_sub(user_y));
-    let user_viewport = Rect::new(main.x.saturating_sub(1), user_y, main.width, user_height);
-    let viewport = Rect::new(
-        main.x.saturating_sub(1),
-        user_viewport.bottom(),
-        main.width,
-        main.bottom().saturating_sub(user_viewport.bottom()),
-    );
-    let user_cards = Rect::new(
-        main.x.saturating_add(1),
-        user_viewport.y.saturating_add(user_top_padding),
-        main.width.saturating_sub(1),
-        user_viewport.height.saturating_sub(user_top_padding),
-    );
-    let cards = Rect::new(
-        main.x.saturating_add(1),
-        viewport.y,
-        main.width.saturating_sub(1),
-        viewport.height,
-    );
-    let live = status == AgentStatus::Working && selected_message + 1 == messages.len();
-    let (blocks, request_height) = build_request_transcript(
-        message,
-        content_width,
-        live,
-        herdr.spinner_frame(),
-        expanded_requests,
-    );
-    let scroll_max = request_height.saturating_sub(usize::from(viewport.height));
-    let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
-    let mut targets = vec![(
-        HitTarget::AgentTooltip {
-            agent: agent_key.clone(),
-            message: selected_message,
-        },
-        area,
-    )];
-    draw_message_timeline(
+    let live = status == AgentStatus::Working;
+    let (mut targets, scroll_max, scroll) = draw_transcript_history(
         frame,
-        message_selector,
-        Some(agent_key.clone()),
+        messages,
         selected_message,
-        messages.len(),
-        &mut targets,
+        transcript_scroll,
+        expanded_requests,
+        herdr.spinner_frame(),
+        live,
+        Some(agent_key.clone()),
+        area,
     );
     targets.extend(navigation_targets);
     draw_badge(
@@ -577,40 +525,6 @@ pub(super) fn draw_history(
         palette().cyan,
         palette().panel,
     );
-    let user_block = TranscriptBlock {
-        user: true,
-        lines: user_lines,
-        start: 0,
-        height: usize::from(user_cards.height),
-        elapsed: user_elapsed,
-        request_count: message.requests.len(),
-        request: None,
-        expandable: false,
-    };
-    if let Some(rect) = draw_transcript_card(frame, &user_block, user_cards, user_cards, 0) {
-        targets.push((
-            HitTarget::AgentMessage {
-                agent: agent_key.clone(),
-                message: selected_message,
-            },
-            rect,
-        ));
-    }
-    for block in &blocks {
-        if let Some(rect) = draw_transcript_card(frame, block, cards, viewport, scroll)
-            && block.expandable
-            && let Some(request) = block.request
-        {
-            targets.push((
-                HitTarget::AgentPreviewRequest {
-                    agent: agent_key.clone(),
-                    message: selected_message,
-                    request,
-                },
-                rect,
-            ));
-        }
-    }
     draw_agent_preview_picker(
         frame,
         herdr,
@@ -642,6 +556,31 @@ pub(super) fn draw_scheduled_history(
         );
         return (Vec::new(), 0, 0);
     }
+    draw_transcript_history(
+        frame,
+        messages,
+        selected_message,
+        transcript_scroll,
+        expanded_requests,
+        spinner_frame,
+        false,
+        None,
+        area,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_transcript_history(
+    frame: &mut Frame<'_>,
+    messages: &[AgentUserMessage],
+    selected_message: Option<usize>,
+    transcript_scroll: Option<usize>,
+    expanded_requests: &[usize],
+    spinner_frame: usize,
+    live: bool,
+    agent: Option<AgentKey>,
+    area: Rect,
+) -> (Vec<(HitTarget, Rect)>, usize, usize) {
     let selected_message = selected_message
         .unwrap_or_else(|| messages.len().saturating_sub(1))
         .min(messages.len().saturating_sub(1));
@@ -674,26 +613,40 @@ pub(super) fn draw_scheduled_history(
         area.bottom().saturating_sub(user_viewport.bottom()),
     );
     let user_cards = Rect::new(
-        area.x,
+        area.x.saturating_add(1),
         user_viewport.y.saturating_add(user_top_padding),
-        area.width,
+        area.width.saturating_sub(1),
         user_viewport.height.saturating_sub(user_top_padding),
     );
-    let cards = Rect::new(area.x, viewport.y, area.width, viewport.height);
+    let cards = Rect::new(
+        area.x.saturating_add(1),
+        viewport.y,
+        area.width.saturating_sub(1),
+        viewport.height,
+    );
     let (blocks, request_height) = build_request_transcript(
         message,
         content_width,
-        false,
+        live && selected_message + 1 == messages.len(),
         spinner_frame,
         expanded_requests,
     );
     let scroll_max = request_height.saturating_sub(usize::from(viewport.height));
     let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
     let mut targets = Vec::new();
+    if let Some(agent) = &agent {
+        targets.push((
+            HitTarget::AgentTooltip {
+                agent: agent.clone(),
+                message: selected_message,
+            },
+            area,
+        ));
+    }
     draw_message_timeline(
         frame,
         selector,
-        None,
+        agent.clone(),
         selected_message,
         messages.len(),
         &mut targets,
@@ -708,16 +661,31 @@ pub(super) fn draw_scheduled_history(
         request: None,
         expandable: false,
     };
-    draw_transcript_card(frame, &user_block, user_cards, user_cards, 0);
+    if let Some(rect) = draw_transcript_card(frame, &user_block, user_cards, user_cards, 0)
+        && let Some(agent) = &agent
+    {
+        targets.push((
+            HitTarget::AgentMessage {
+                agent: agent.clone(),
+                message: selected_message,
+            },
+            rect,
+        ));
+    }
     for block in &blocks {
         if let Some(rect) = draw_transcript_card(frame, block, cards, viewport, scroll)
             && block.expandable
             && let Some(request) = block.request
         {
-            targets.push((
-                HitTarget::Scheduler(SchedulerHitTarget::ConversationRequest(request)),
-                rect,
-            ));
+            let target = agent.as_ref().map_or_else(
+                || HitTarget::Scheduler(SchedulerHitTarget::ConversationRequest(request)),
+                |agent| HitTarget::AgentPreviewRequest {
+                    agent: agent.clone(),
+                    message: selected_message,
+                    request,
+                },
+            );
+            targets.push((target, rect));
         }
     }
     draw_transcript_progress(

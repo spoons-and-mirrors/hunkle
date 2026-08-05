@@ -451,7 +451,6 @@ pub(crate) enum SchedulerHitTarget {
     Refresh,
     OpenConversation,
     ConversationRequest(usize),
-    CloseConversation,
 }
 
 impl SettingsHitTarget {

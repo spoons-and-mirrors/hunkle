@@ -91,6 +91,7 @@ status: enabled
 frequency: 2h
 title: "Review open changes"
 description: "Inspect the worktree and report risks"
+model: "openai/gpt-5.6-sol"
 destination: "/home/me/code/project"
 repository: "project"
 branch: "main"
@@ -99,7 +100,9 @@ branch: "main"
 Review the current diff. Summarize correctness risks and missing tests.
 ```
 
-The seven frontmatter fields are required. `status` is `enabled` or `disabled`.
+The destination and schedule fields are required; `model` is optional and uses
+OpenCode's `provider/model` syntax. Leave it empty to use OpenCode's configured default.
+`status` is `enabled` or `disabled`.
 `frequency` accepts a positive number of minutes, or a number followed by `m`, `h`,
 or `d`. `destination` is the agent's worktree path; `repository` and `branch` label
 that checkout. The Markdown body is the task prompt.

@@ -34,6 +34,7 @@ pub(crate) struct ScheduledTask {
     pub(crate) title: String,
     pub(crate) description: String,
     pub(crate) prompt: String,
+    pub(crate) model: String,
     pub(crate) destination: PathBuf,
     pub(crate) repository: String,
     pub(crate) branch: String,
@@ -48,6 +49,7 @@ pub(crate) struct ScheduledTaskEdit {
     pub(crate) title: String,
     pub(crate) description: String,
     pub(crate) prompt: String,
+    pub(crate) model: String,
     pub(crate) destination: PathBuf,
     pub(crate) repository: String,
     pub(crate) branch: String,
@@ -384,6 +386,7 @@ struct Claim {
     task_id: i64,
     title: String,
     prompt: String,
+    model: Option<String>,
     destination: PathBuf,
 }
 
@@ -477,15 +480,15 @@ fn save_task(
     if let Some(id) = id {
         return changed(
             db.execute(
-                "UPDATE scheduled_tasks SET title = ?2, description = ?3, prompt = ?4, destination = ?5, repository = ?6, branch = ?7, enabled = ?8, interval_minutes = ?9, next_run_ms = ?10, source_path = ?11 WHERE id = ?1",
-                params![id, task.title, task.description, task.prompt, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next, source],
+                "UPDATE scheduled_tasks SET title = ?2, description = ?3, prompt = ?4, model = ?5, destination = ?6, repository = ?7, branch = ?8, enabled = ?9, interval_minutes = ?10, next_run_ms = ?11, source_path = ?12 WHERE id = ?1",
+                params![id, task.title, task.description, task.prompt, task.model, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next, source],
             ),
             "scheduled task not found",
         );
     }
     db.execute(
-        "INSERT INTO scheduled_tasks (title, description, prompt, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![task.title, task.description, task.prompt, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next, source],
+        "INSERT INTO scheduled_tasks (title, description, prompt, model, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![task.title, task.description, task.prompt, task.model, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next, source],
     )
     .map_err(db_error)?;
     Ok(())
@@ -755,6 +758,7 @@ fn parse_task_file(
                 | "frequency"
                 | "title"
                 | "description"
+                | "model"
                 | "destination"
                 | "repository"
                 | "branch"
@@ -807,11 +811,13 @@ fn parse_task_file(
     let interval_minutes = parse_frequency(&required("frequency")?)?;
     let title = required("title")?;
     let description = required("description")?;
+    let model = fields.remove("model").unwrap_or_default();
     let prompt = content[offset..].trim_matches(['\r', '\n']).to_owned();
     let edit = ScheduledTaskEdit {
         title,
         description,
         prompt,
+        model,
         destination: validate_destination(&destination)?,
         repository,
         branch,
@@ -868,6 +874,7 @@ fn parse_frequency(value: &str) -> Result<u64, String> {
 fn render_task_file(task: &ScheduledTaskEdit) -> String {
     let title = serde_json::to_string(&task.title).expect("strings serialize as JSON");
     let description = serde_json::to_string(&task.description).expect("strings serialize as JSON");
+    let model = serde_json::to_string(&task.model).expect("strings serialize as JSON");
     let destination = task.destination.to_str().map_or_else(
         || format!("base64:{}", STANDARD.encode(encode_path(&task.destination))),
         str::to_owned,
@@ -876,11 +883,12 @@ fn render_task_file(task: &ScheduledTaskEdit) -> String {
     let repository = serde_json::to_string(&task.repository).expect("strings serialize as JSON");
     let branch = serde_json::to_string(&task.branch).expect("strings serialize as JSON");
     format!(
-        "---\nstatus: {}\nfrequency: {}m\ntitle: {}\ndescription: {}\ndestination: {}\nrepository: {}\nbranch: {}\n---\n\n{}\n",
+        "---\nstatus: {}\nfrequency: {}m\ntitle: {}\ndescription: {}\nmodel: {}\ndestination: {}\nrepository: {}\nbranch: {}\n---\n\n{}\n",
         if task.enabled { "enabled" } else { "disabled" },
         task.interval_minutes,
         title,
         description,
+        model,
         destination,
         repository,
         branch,
@@ -908,6 +916,7 @@ impl ScheduledTask {
             title: self.title.clone(),
             description: self.description.clone(),
             prompt: self.prompt.clone(),
+            model: self.model.clone(),
             destination: self.destination.clone(),
             repository: self.repository.clone(),
             branch: self.branch.clone(),
@@ -930,15 +939,15 @@ fn claim(db: &mut Connection, requested: Option<i64>, now: i64) -> Result<Option
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let task: Option<(i64, String, String, Vec<u8>, i64, i64)> = tx
+        let task: Option<(i64, String, String, String, Vec<u8>, i64, i64)> = tx
             .query_row(
-                "SELECT id, title, prompt, destination, interval_minutes, next_run_ms FROM scheduled_tasks WHERE (?1 IS NULL AND enabled = 1 AND next_run_ms <= ?2) OR id = ?1 ORDER BY next_run_ms, id LIMIT 1",
+                "SELECT id, title, prompt, model, destination, interval_minutes, next_run_ms FROM scheduled_tasks WHERE (?1 IS NULL AND enabled = 1 AND next_run_ms <= ?2) OR id = ?1 ORDER BY next_run_ms, id LIMIT 1",
                 params![requested, now],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
             )
             .optional()
             .map_err(db_error)?;
-        let Some((task_id, title, prompt, path, minutes, next)) = task else {
+        let Some((task_id, title, prompt, model, path, minutes, next)) = task else {
             tx.commit().map_err(db_error)?;
             return Ok(None);
         };
@@ -992,6 +1001,7 @@ fn claim(db: &mut Connection, requested: Option<i64>, now: i64) -> Result<Option
             task_id,
             title,
             prompt,
+            model: (!model.trim().is_empty()).then_some(model),
             destination,
         }));
     }
@@ -1019,6 +1029,7 @@ fn execute_claim(
         destination: claim.destination,
         label: format!("Hunkle: {} #{}", claim.title, claim.task_id),
         prompt: claim.prompt,
+        model: claim.model,
     });
     let (status, error) = match result.status {
         Ok(status)
@@ -1203,7 +1214,7 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .map_err(db_error)?;
     let sql = match version {
-        0 => "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0), next_run_ms INTEGER NOT NULL, source_path BLOB);
+        0 => "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0), next_run_ms INTEGER NOT NULL, source_path BLOB);
               CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
               CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id); CREATE UNIQUE INDEX scheduled_tasks_source ON scheduled_tasks(destination, source_path) WHERE source_path IS NOT NULL;",
         1 => "ALTER TABLE scheduled_runs RENAME TO scheduled_runs_v1;
@@ -1213,7 +1224,8 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
         2 => "ALTER TABLE scheduled_runs ADD COLUMN terminal_id TEXT; ALTER TABLE scheduled_runs ADD COLUMN session_id TEXT;",
         3 => "ALTER TABLE scheduled_runs ADD COLUMN session_id TEXT;",
         4 => "ALTER TABLE scheduled_tasks ADD COLUMN source_path BLOB; CREATE UNIQUE INDEX scheduled_tasks_source ON scheduled_tasks(destination, source_path) WHERE source_path IS NOT NULL;",
-        5 => "",
+        5 => "ALTER TABLE scheduled_tasks ADD COLUMN model TEXT NOT NULL DEFAULT '';",
+        6 => "",
         _ => return Err(format!("scheduler database version {version} is newer than supported")),
     };
     tx.execute_batch(sql).map_err(db_error)?;
@@ -1230,8 +1242,23 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
                 .map_err(db_error)?;
         }
     }
-    if version < 5 {
-        tx.execute_batch("PRAGMA user_version = 5;")
+    if version > 0 && version < 5 {
+        let has_tasks = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_tasks')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_error)?;
+        if has_tasks {
+            tx.execute_batch(
+                "ALTER TABLE scheduled_tasks ADD COLUMN model TEXT NOT NULL DEFAULT '';",
+            )
+            .map_err(db_error)?;
+        }
+    }
+    if version < 6 {
+        tx.execute_batch("PRAGMA user_version = 6;")
             .map_err(db_error)?;
     }
     tx.commit().map_err(db_error)
@@ -1284,21 +1311,22 @@ fn decode_path(bytes: Vec<u8>) -> rusqlite::Result<PathBuf> {
 fn load_state(db: &Connection) -> Result<State, String> {
     let tasks = query_all(
         db,
-        "SELECT id, title, description, prompt, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path FROM scheduled_tasks ORDER BY id",
+        "SELECT id, title, description, prompt, model, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path FROM scheduled_tasks ORDER BY id",
         |row| {
             Ok(ScheduledTask {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 description: row.get(2)?,
                 prompt: row.get(3)?,
-                destination: decode_path(row.get(4)?)?,
-                repository: row.get(5)?,
-                branch: row.get(6)?,
-                enabled: row.get(7)?,
-                interval_minutes: row.get(8)?,
-                next_run_ms: row.get(9)?,
+                model: row.get(4)?,
+                destination: decode_path(row.get(5)?)?,
+                repository: row.get(6)?,
+                branch: row.get(7)?,
+                enabled: row.get(8)?,
+                interval_minutes: row.get(9)?,
+                next_run_ms: row.get(10)?,
                 source: row
-                    .get::<_, Option<Vec<u8>>>(10)?
+                    .get::<_, Option<Vec<u8>>>(11)?
                     .map(decode_path)
                     .transpose()?
                     .map(RepoPath::from),
@@ -1364,13 +1392,16 @@ Inspect the diff.
 Summarize risks.
 "#;
 
-        let task = parse_task_file(content, source, Some(destination(directory.path()))).unwrap();
+        let mut task =
+            parse_task_file(content, source, Some(destination(directory.path()))).unwrap();
 
         assert_eq!(task.title, "Nightly: review");
         assert_eq!(task.description, "Review \"open\" changes");
         assert_eq!(task.prompt, "Inspect the diff.\nSummarize risks.");
         assert_eq!(task.interval_minutes, 120);
+        assert_eq!(task.model, "");
         assert!(!task.enabled);
+        task.model = "opencode-go/deepseek-flash-v4".to_owned();
         let reparsed = parse_task_file(
             render_task_file(&task).as_bytes(),
             task.source.clone().unwrap(),
@@ -1378,6 +1409,24 @@ Summarize risks.
         )
         .unwrap();
         assert_eq!(reparsed, task);
+    }
+
+    #[test]
+    fn migrates_v5_tasks_with_an_empty_model() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL, next_run_ms INTEGER NOT NULL, source_path BLOB); PRAGMA user_version = 5;",
+        )
+        .unwrap();
+
+        prepare_database(&mut db).unwrap();
+
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        assert!(db.prepare("SELECT model FROM scheduled_tasks").is_ok());
     }
 
     #[test]
@@ -1429,6 +1478,7 @@ Summarize risks.
                 title: "Legacy Review".to_owned(),
                 description: "Check changes".to_owned(),
                 prompt: "Review the repository.".to_owned(),
+                model: String::new(),
                 destination: directory.path().to_owned(),
                 repository: "repo".to_owned(),
                 branch: "main".to_owned(),
@@ -1568,6 +1618,7 @@ Summarize risks.
                 task_id: 1,
                 title: "Review".to_owned(),
                 prompt: "Review it".to_owned(),
+                model: None,
                 destination: directory.path().to_owned(),
             },
             &mut |_| SchedulerLaunchResult {
@@ -1656,7 +1707,7 @@ Summarize risks.
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         assert!(db.prepare("SELECT terminal_id FROM scheduled_runs").is_ok());
         assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
@@ -1675,7 +1726,7 @@ Summarize risks.
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
     }

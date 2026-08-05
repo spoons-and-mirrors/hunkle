@@ -305,7 +305,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::Scheduler => {
             dim(frame);
             let regions = overlays::draw_scheduler(frame, app, profile);
-            app.scheduler.conversation_scroll_max = regions.conversation_scroll_max;
             for (target, rect) in regions.targets {
                 app.regions.register_hit_target(target, rect);
             }
@@ -316,8 +315,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::AgentPreview => {
             dim(frame);
             let regions = overlays::draw_agent_preview_modal(frame, app, profile);
-            app.regions.agent_preview_scroll_max = regions.scroll_max;
-            app.regions.agent_preview_scroll = regions.scroll;
+            if app.agent_preview_scheduled_run.is_some() {
+                app.scheduler.conversation_scroll_max = regions.scroll_max;
+            } else {
+                app.regions.agent_preview_scroll_max = regions.scroll_max;
+                app.regions.agent_preview_scroll = regions.scroll;
+            }
             for (target, rect) in regions.targets {
                 app.regions.register_hit_target(target, rect);
             }

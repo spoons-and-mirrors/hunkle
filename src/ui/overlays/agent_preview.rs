@@ -75,6 +75,57 @@ pub(in crate::ui) fn draw_agent_preview_modal(
         (HitTarget::AgentPreviewModalClose, close),
     ];
     let Some(index) = app.agent_preview_index() else {
+        if let Some(run) = app
+            .agent_preview_scheduled_run
+            .and_then(|id| app.herdr.scheduled_runs().iter().find(|run| run.id == id))
+        {
+            let messages = run
+                .session_id
+                .as_deref()
+                .and_then(|session| app.herdr.scheduled_conversation(session))
+                .unwrap_or_default();
+            if messages.is_empty() {
+                let text = run
+                    .session_id
+                    .as_deref()
+                    .and_then(|session| app.herdr.scheduled_conversation_error(session))
+                    .or(run.error.as_deref())
+                    .unwrap_or(if run.status.is_active() {
+                        "Waiting for this run's OpenCode session…"
+                    } else {
+                        "No OpenCode conversation was recorded for this run."
+                    });
+                frame.render_widget(
+                    Paragraph::new(text)
+                        .alignment(Alignment::Center)
+                        .wrap(Wrap { trim: true })
+                        .style(Style::default().fg(palette().faint).bg(palette().panel)),
+                    body,
+                );
+                return AgentPreviewModalRegions {
+                    targets,
+                    scroll_target: None,
+                    scroll: 0,
+                    scroll_max: 0,
+                };
+            }
+            let (history_targets, scroll_max, scroll) = agents::draw_scheduled_history(
+                frame,
+                messages,
+                app.scheduler.conversation_message,
+                app.scheduler.conversation_scroll,
+                &app.scheduler.conversation_expanded_requests,
+                app.herdr.spinner_frame(),
+                body,
+            );
+            targets.extend(history_targets);
+            return AgentPreviewModalRegions {
+                targets,
+                scroll_target: Some((ScrollTarget::SchedulerConversation, body)),
+                scroll,
+                scroll_max,
+            };
+        }
         frame.render_widget(
             Paragraph::new("Agent is no longer available")
                 .alignment(Alignment::Center)

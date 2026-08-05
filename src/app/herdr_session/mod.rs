@@ -1072,6 +1072,19 @@ impl HerdrSession {
             .map(|agent| AgentKey(agent.runtime.timing_key.clone()))
     }
 
+    pub(crate) fn scheduled_run_agent_index(&self, run: &ScheduledRun) -> Option<usize> {
+        self.agents.iter().position(|agent| {
+            run.pane_id.as_deref() == Some(agent.pane_id.as_str())
+                || run.terminal_id.as_deref() == agent.terminal_id.as_deref()
+                || run.session_id.as_deref().is_some_and(|session_id| {
+                    matches!(
+                        agent.runtime.session_timing_key.as_ref(),
+                        Some(AgentTimingKey::Session(identity)) if identity.value == session_id
+                    )
+                })
+        })
+    }
+
     fn bind_legacy_scheduled_agents(&mut self) {
         let Some(scheduler) = self.scheduler.as_ref() else {
             return;
@@ -1759,6 +1772,11 @@ impl HerdrSession {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_scheduled_runs_for_test(&mut self, runs: Vec<ScheduledRun>) {
+        self.scheduler.as_mut().unwrap().runs = runs;
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_snapshot_for_test(&mut self, value: &Value) {
         let (mut workspaces, agents) = client::parse_snapshot(value).unwrap();
         populate_workspace_branches(&mut workspaces);
@@ -2193,6 +2211,7 @@ mod latest_user_message_cache_tests {
             title: "Nightly review".to_owned(),
             description: String::new(),
             prompt: "Review".to_owned(),
+            model: String::new(),
             destination: PathBuf::from("/repo"),
             repository: "repo".to_owned(),
             branch: "main".to_owned(),

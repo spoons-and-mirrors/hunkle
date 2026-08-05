@@ -270,6 +270,7 @@ pub(crate) struct SchedulerLaunchRequest {
     pub(crate) destination: PathBuf,
     pub(crate) label: String,
     pub(crate) prompt: String,
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -372,7 +373,7 @@ fn scheduler_launch_with(
         let created_terminal = created
             .pointer("/result/root_pane/terminal_id")
             .and_then(Value::as_str);
-        let start_args = [
+        let mut start_args = vec![
             "agent".into(),
             "start".into(),
             scheduler_run_agent_name(&request.label, request.run_id).into(),
@@ -383,6 +384,9 @@ fn scheduler_launch_with(
             "--timeout".into(),
             "30000".into(),
         ];
+        if let Some(model) = request.model.as_deref() {
+            start_args.extend(["--".into(), "--model".into(), model.into()]);
+        }
         let mut shell_retries = 0;
         let started = loop {
             match runner(&start_args) {
@@ -3755,6 +3759,7 @@ mod tests {
                 destination: destination.clone(),
                 label: "  Nightly\nreview  ".to_owned(),
                 prompt: prompt.clone(),
+                model: Some("openai/gpt-5.6-sol".to_owned()),
             },
             |args| {
                 calls.push(args.to_vec());
@@ -3825,7 +3830,7 @@ mod tests {
         );
         assert_eq!(
             joined(&calls[3]),
-            "agent\0start\0hunkle-nightly-review-r42\0--kind\0opencode\0--pane\0w7:p9\0--timeout\030000"
+            "agent\0start\0hunkle-nightly-review-r42\0--kind\0opencode\0--pane\0w7:p9\0--timeout\030000\0--\0--model\0openai/gpt-5.6-sol"
         );
         assert_eq!(calls[2], calls[3]);
         assert_eq!(calls[4], calls[5]);
