@@ -35,7 +35,6 @@ pub(crate) use scheduler::{ScheduledRun, ScheduledRunStatus, ScheduledTask, Sche
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const AGENT_CHANGE_STATS_INTERVAL: Duration = Duration::from_secs(5);
 const AGENT_MESSAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-const PANE_PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
 const LAYOUT_INDEX_VERSION: u8 = 1;
@@ -111,6 +110,25 @@ struct AgentSessionIdentity {
     value: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OpenCodeConversationIdentity {
+    session_id: String,
+}
+
+impl OpenCodeConversationIdentity {
+    fn from_agent_session(identity: &AgentSessionIdentity) -> Option<Self> {
+        (identity.agent == "opencode").then(|| Self {
+            session_id: identity.value.clone(),
+        })
+    }
+
+    fn from_session_id(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "scope", content = "identity", rename_all = "snake_case")]
 enum AgentTimingKey {
@@ -149,13 +167,6 @@ pub(crate) struct AgentRuntime {
     timing_key: AgentTimingKey,
     session_timing_key: Option<AgentTimingKey>,
     state_change_seq: u64,
-}
-
-fn scheduled_agent_matches(agent: &AgentPane, pane_id: &str, terminal_id: Option<&str>) -> bool {
-    terminal_id.map_or_else(
-        || agent.pane_id == pane_id,
-        |terminal_id| agent.terminal_id.as_deref() == Some(terminal_id),
-    )
 }
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -320,31 +331,17 @@ enum Completion {
     },
     AgentChangeStats(Vec<(PathBuf, Option<(u64, u64)>)>),
     LatestUserMessage {
-        identity: AgentSessionIdentity,
+        identity: OpenCodeConversationIdentity,
         result: Result<Vec<AgentUserMessage>, String>,
-    },
-    PanePreview {
-        pane_id: String,
-        result: Result<String, String>,
-    },
-    PaneScroll {
-        pane_id: String,
-        result: Result<(), String>,
     },
     ScheduledSession {
         run_id: i64,
         result: Result<String, String>,
     },
     ScheduledConversation {
-        identity: AgentSessionIdentity,
+        identity: OpenCodeConversationIdentity,
         result: Result<Vec<AgentUserMessage>, String>,
     },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PanePreview {
-    pub(crate) pane_id: String,
-    pub(crate) ansi: String,
 }
 
 struct PendingAgentStash {
@@ -381,13 +378,8 @@ pub(crate) struct AgentRequestPreview {
     pub(crate) tool_call_count: u64,
 }
 
-fn scheduled_session_identity(session_id: &str) -> AgentSessionIdentity {
-    AgentSessionIdentity {
-        source: "opencode".to_owned(),
-        agent: "opencode".to_owned(),
-        kind: "session_id".to_owned(),
-        value: session_id.to_owned(),
-    }
+fn scheduled_conversation_identity(session_id: &str) -> OpenCodeConversationIdentity {
+    OpenCodeConversationIdentity::from_session_id(session_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,14 +406,15 @@ pub(crate) struct HerdrSession {
     agent_change_stats: HashMap<PathBuf, (u64, u64)>,
     agent_change_stats_loading: bool,
     next_agent_change_stats: Instant,
-    latest_user_messages: HashMap<AgentSessionIdentity, Vec<AgentUserMessage>>,
-    latest_user_message_requests: HashSet<AgentSessionIdentity>,
-    latest_user_message_refreshes: HashMap<AgentSessionIdentity, Instant>,
-    latest_user_message_statuses: HashMap<AgentSessionIdentity, AgentStatus>,
-    scheduled_preview_identity: Option<AgentSessionIdentity>,
+    latest_user_messages: HashMap<OpenCodeConversationIdentity, Vec<AgentUserMessage>>,
+    latest_user_message_requests: HashSet<OpenCodeConversationIdentity>,
+    latest_user_message_refreshes: HashMap<OpenCodeConversationIdentity, Instant>,
+    latest_user_message_statuses: HashMap<OpenCodeConversationIdentity, AgentStatus>,
+    latest_user_message_errors: HashMap<OpenCodeConversationIdentity, String>,
+    scheduled_preview_identity: Option<OpenCodeConversationIdentity>,
     scheduled_session_requests: HashSet<i64>,
     scheduled_session_errors: HashMap<i64, String>,
-    scheduled_conversation_errors: HashMap<AgentSessionIdentity, String>,
+    scheduled_conversation_errors: HashMap<OpenCodeConversationIdentity, String>,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
     next_refresh: Instant,
@@ -442,11 +435,6 @@ pub(crate) struct HerdrSession {
     stashed_pane_ids: HashSet<String>,
     scheduler: Option<scheduler::SchedulerService>,
     scheduler_error: Option<String>,
-    pane_preview_wanted: Option<String>,
-    pane_preview_loading: Option<String>,
-    pane_preview: Option<PanePreview>,
-    pane_preview_error: Option<(String, String)>,
-    next_pane_preview: Instant,
 }
 
 impl HerdrSession {
@@ -511,6 +499,7 @@ impl HerdrSession {
             latest_user_message_requests: HashSet::new(),
             latest_user_message_refreshes: HashMap::new(),
             latest_user_message_statuses: HashMap::new(),
+            latest_user_message_errors: HashMap::new(),
             scheduled_preview_identity: None,
             scheduled_session_requests: HashSet::new(),
             scheduled_session_errors: HashMap::new(),
@@ -537,11 +526,6 @@ impl HerdrSession {
             stashed_pane_ids: HashSet::new(),
             scheduler: None,
             scheduler_error: None,
-            pane_preview_wanted: None,
-            pane_preview_loading: None,
-            pane_preview: None,
-            pane_preview_error: None,
-            next_pane_preview: Instant::now(),
         }
     }
 
@@ -605,7 +589,7 @@ impl HerdrSession {
     }
 
     pub(crate) fn request_scheduled_conversation(&mut self, session_id: &str) {
-        let identity = scheduled_session_identity(session_id);
+        let identity = scheduled_conversation_identity(session_id);
         self.scheduled_preview_identity = Some(identity.clone());
         if self.latest_user_messages.contains_key(&identity)
             || !self.latest_user_message_requests.insert(identity.clone())
@@ -622,48 +606,18 @@ impl HerdrSession {
 
     pub(crate) fn scheduled_conversation(&self, session_id: &str) -> Option<&[AgentUserMessage]> {
         self.latest_user_messages
-            .get(&scheduled_session_identity(session_id))
+            .get(&scheduled_conversation_identity(session_id))
             .map(Vec::as_slice)
     }
 
     pub(crate) fn scheduled_conversation_error(&self, session_id: &str) -> Option<&str> {
         self.scheduled_conversation_errors
-            .get(&scheduled_session_identity(session_id))
+            .get(&scheduled_conversation_identity(session_id))
             .map(String::as_str)
     }
 
     pub(crate) fn clear_scheduled_conversation(&mut self) {
         self.scheduled_preview_identity = None;
-    }
-
-    pub(crate) fn set_pane_preview(&mut self, pane_id: Option<String>) {
-        if self.pane_preview_wanted != pane_id {
-            self.pane_preview = None;
-            self.pane_preview_error = None;
-            self.next_pane_preview = Instant::now();
-        }
-        self.pane_preview_wanted = pane_id;
-    }
-
-    pub(crate) fn pane_preview(&self, pane_id: &str) -> Option<&PanePreview> {
-        self.pane_preview
-            .as_ref()
-            .filter(|preview| preview.pane_id == pane_id)
-    }
-
-    pub(crate) fn pane_preview_error(&self, pane_id: &str) -> Option<&str> {
-        self.pane_preview_error
-            .as_ref()
-            .filter(|(id, _)| id == pane_id)
-            .map(|(_, error)| error.as_str())
-    }
-
-    pub(crate) fn scroll_pane_preview(&mut self, pane_id: String, up: bool, page: bool) {
-        let sender = self.sender.clone();
-        thread::spawn(move || {
-            let result = client::scroll_pane(pane_id.clone(), up, page);
-            let _ = sender.send(Completion::PaneScroll { pane_id, result });
-        });
     }
 
     fn scheduler_service(&self) -> Result<&scheduler::SchedulerService, String> {
@@ -880,35 +834,15 @@ impl HerdrSession {
                 Completion::LatestUserMessage { identity, result } => {
                     self.latest_user_message_requests.remove(&identity);
                     // Snapshot pruning removes this marker to invalidate departed agents' requests.
-                    if self.latest_user_message_refreshes.contains_key(&identity)
-                        && let Ok(message) = result
-                    {
-                        self.latest_user_messages.insert(identity, message);
-                    }
-                }
-                Completion::PanePreview { pane_id, result } => {
-                    if self.pane_preview_loading.as_deref() == Some(&pane_id) {
-                        self.pane_preview_loading = None;
-                    }
-                    if self.pane_preview_wanted.as_deref() == Some(&pane_id) {
+                    if self.latest_user_message_refreshes.contains_key(&identity) {
                         match result {
-                            Ok(ansi) => {
-                                self.pane_preview = Some(PanePreview { pane_id, ansi });
-                                self.pane_preview_error = None;
+                            Ok(message) => {
+                                self.latest_user_message_errors.remove(&identity);
+                                self.latest_user_messages.insert(identity, message);
                             }
-                            Err(error) => self.pane_preview_error = Some((pane_id, error)),
-                        }
-                        self.next_pane_preview = Instant::now() + PANE_PREVIEW_REFRESH_INTERVAL;
-                    }
-                }
-                Completion::PaneScroll { pane_id, result } => {
-                    if self.pane_preview_wanted.as_deref() == Some(&pane_id) {
-                        match result {
-                            Ok(()) => {
-                                self.pane_preview_error = None;
-                                self.next_pane_preview = Instant::now();
+                            Err(error) => {
+                                self.latest_user_message_errors.insert(identity, error);
                             }
-                            Err(error) => self.pane_preview_error = Some((pane_id, error)),
                         }
                     }
                 }
@@ -940,7 +874,6 @@ impl HerdrSession {
                 }
             }
         }
-        self.start_pane_preview_if_due();
         if !self.loading && Instant::now() >= self.next_refresh {
             self.start_snapshot();
             poll.changed = true;
@@ -948,21 +881,6 @@ impl HerdrSession {
         self.start_agent_change_stats_if_due(Instant::now());
         poll.changed |= self.poll_spinner(Instant::now());
         poll
-    }
-
-    fn start_pane_preview_if_due(&mut self) {
-        let Some(pane_id) = self.pane_preview_wanted.clone() else {
-            return;
-        };
-        if self.pane_preview_loading.is_some() || Instant::now() < self.next_pane_preview {
-            return;
-        }
-        self.pane_preview_loading = Some(pane_id.clone());
-        let sender = self.sender.clone();
-        thread::spawn(move || {
-            let result = client::pane_visible_ansi(&pane_id);
-            let _ = sender.send(Completion::PanePreview { pane_id, result });
-        });
     }
 
     fn apply_agent_snapshot_at(&mut self, agents: Vec<AgentPane>, now_ms: u64) {
@@ -996,16 +914,24 @@ impl HerdrSession {
         let active_identities = agents
             .iter()
             .filter_map(|agent| match agent.runtime.session_timing_key.as_ref() {
-                Some(AgentTimingKey::Session(identity)) => Some(identity.clone()),
+                Some(AgentTimingKey::Session(identity)) => {
+                    OpenCodeConversationIdentity::from_agent_session(identity)
+                }
                 _ => None,
             })
             .chain(self.scheduled_preview_identity.iter().cloned())
             .collect::<HashSet<_>>();
         self.latest_user_messages
             .retain(|identity, _| active_identities.contains(identity));
+        self.latest_user_message_requests
+            .retain(|identity| active_identities.contains(identity));
         self.latest_user_message_refreshes
             .retain(|identity, _| active_identities.contains(identity));
         self.latest_user_message_statuses
+            .retain(|identity, _| active_identities.contains(identity));
+        self.latest_user_message_errors
+            .retain(|identity, _| active_identities.contains(identity));
+        self.scheduled_conversation_errors
             .retain(|identity, _| active_identities.contains(identity));
         timings::update_snapshot(&mut self.agent_timings, &agents, now_ms);
         if let Some(persistence) = self.agent_timing_persistence.as_ref()
@@ -1087,17 +1013,6 @@ impl HerdrSession {
         self.agents
             .get(index)
             .map(|agent| AgentKey(agent.runtime.timing_key.clone()))
-    }
-
-    pub(crate) fn scheduled_agent_pane_id(
-        &self,
-        pane_id: &str,
-        terminal_id: Option<&str>,
-    ) -> Option<&str> {
-        self.observed_agents
-            .iter()
-            .find(|agent| scheduled_agent_matches(agent, pane_id, terminal_id))
-            .map(|agent| agent.pane_id.as_str())
     }
 
     fn bind_legacy_scheduled_agents(&mut self) {
@@ -1352,7 +1267,24 @@ impl HerdrSession {
         else {
             return None;
         };
-        self.latest_user_messages.get(identity).map(Vec::as_slice)
+        let identity = OpenCodeConversationIdentity::from_agent_session(identity)?;
+        self.latest_user_messages.get(&identity).map(Vec::as_slice)
+    }
+
+    pub(crate) fn agent_user_message_error(&self, index: usize) -> Option<&str> {
+        let AgentTimingKey::Session(identity) = self
+            .agents
+            .get(index)?
+            .runtime
+            .session_timing_key
+            .as_ref()?
+        else {
+            return None;
+        };
+        let identity = OpenCodeConversationIdentity::from_agent_session(identity)?;
+        self.latest_user_message_errors
+            .get(&identity)
+            .map(String::as_str)
     }
 
     pub(crate) fn request_agent_latest_user_message(&mut self, index: usize) {
@@ -1367,13 +1299,14 @@ impl HerdrSession {
         else {
             return;
         };
-        let identity = identity.clone();
+        let Some(identity) = OpenCodeConversationIdentity::from_agent_session(identity) else {
+            return;
+        };
         let now = Instant::now();
         let needs_refresh = !self.latest_user_messages.contains_key(&identity)
             || self.latest_user_message_statuses.get(&identity) != Some(&status)
             || status == AgentStatus::Working;
-        if identity.agent != "opencode"
-            || !needs_refresh
+        if !needs_refresh
             || self.latest_user_message_requests.contains(&identity)
             || self
                 .latest_user_message_refreshes
@@ -1384,11 +1317,12 @@ impl HerdrSession {
         }
 
         self.latest_user_message_requests.insert(identity.clone());
+        self.latest_user_message_errors.remove(&identity);
         self.latest_user_message_refreshes
             .insert(identity.clone(), now + AGENT_MESSAGE_REFRESH_INTERVAL);
         self.latest_user_message_statuses
             .insert(identity.clone(), status);
-        let session_id = identity.value.clone();
+        let session_id = identity.session_id.clone();
         let sender = self.sender.clone();
         let _ = thread::Builder::new()
             .name("agent-latest-message".to_owned())
@@ -1774,7 +1708,8 @@ impl HerdrSession {
         else {
             panic!("test agent has no session identity");
         };
-        let identity = identity.clone();
+        let identity = OpenCodeConversationIdentity::from_agent_session(identity)
+            .expect("test agent is not OpenCode");
         let status = self.agents[index].runtime.status;
         self.latest_user_messages.insert(
             identity.clone(),
@@ -1837,7 +1772,10 @@ impl HerdrSession {
         };
         let message = &mut self
             .latest_user_messages
-            .get_mut(identity)
+            .get_mut(
+                &OpenCodeConversationIdentity::from_agent_session(identity)
+                    .expect("test agent is not OpenCode"),
+            )
             .expect("test agent has no messages")[message];
         let request = message
             .requests
@@ -1874,7 +1812,10 @@ impl HerdrSession {
             panic!("test agent has no session identity");
         };
         self.latest_user_messages
-            .get_mut(identity)
+            .get_mut(
+                &OpenCodeConversationIdentity::from_agent_session(identity)
+                    .expect("test agent is not OpenCode"),
+            )
             .expect("test agent has no messages")[message]
             .requests[request] = preview;
     }
@@ -2009,6 +1950,10 @@ mod latest_user_message_cache_tests {
         }
     }
 
+    fn conversation_identity(value: &str) -> OpenCodeConversationIdentity {
+        OpenCodeConversationIdentity::from_session_id(value)
+    }
+
     fn agent(pane_id: &str, identity: AgentSessionIdentity) -> AgentPane {
         let terminal_id = format!("term-{pane_id}");
         AgentPane {
@@ -2049,19 +1994,22 @@ mod latest_user_message_cache_tests {
         session
             .apply_agent_snapshot_at(vec![retained_agent.clone(), departed_agent], unix_time_ms());
         for identity in [&retained, &departed] {
+            let conversation_identity = conversation_identity(&identity.value);
             session
                 .latest_user_messages
-                .insert(identity.clone(), message(&identity.value));
+                .insert(conversation_identity.clone(), message(&identity.value));
             session.latest_user_message_refreshes.insert(
-                identity.clone(),
+                conversation_identity.clone(),
                 Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
             );
             session
                 .latest_user_message_statuses
-                .insert(identity.clone(), AgentStatus::Idle);
+                .insert(conversation_identity, AgentStatus::Idle);
         }
 
         session.apply_agent_snapshot_at(vec![retained_agent], unix_time_ms());
+
+        let retained = conversation_identity(&retained.value);
 
         assert_eq!(
             session.latest_user_messages.keys().collect::<Vec<_>>(),
@@ -2098,6 +2046,7 @@ mod latest_user_message_cache_tests {
             branch: "main".to_owned(),
             enabled: true,
             interval_minutes: 60,
+            next_run_ms: 3_600_000,
         });
         scheduler.runs.push(scheduler::ScheduledRun {
             id: 9,
@@ -2125,7 +2074,7 @@ mod latest_user_message_cache_tests {
         let mut session = HerdrSession::new(true, None, None);
         session.next_refresh = Instant::now() + Duration::from_secs(60);
         session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
-        let identity = scheduled_session_identity("ses_scheduled");
+        let identity = scheduled_conversation_identity("ses_scheduled");
         session.scheduled_preview_identity = Some(identity.clone());
         session
             .latest_user_message_requests
@@ -2149,6 +2098,134 @@ mod latest_user_message_cache_tests {
     }
 
     #[test]
+    fn scheduler_history_is_visible_from_a_live_identity_alias() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.cross_workspace_agents = true;
+        session.next_refresh = Instant::now() + Duration::from_secs(60);
+        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
+        let live_identity = identity("ses_shared");
+        session.apply_agent_snapshot_at(vec![agent("w1:p1", live_identity)], unix_time_ms());
+        let scheduled_identity = scheduled_conversation_identity("ses_shared");
+        session
+            .latest_user_message_requests
+            .insert(scheduled_identity.clone());
+        session
+            .sender
+            .send(Completion::ScheduledConversation {
+                identity: scheduled_identity,
+                result: Ok(message("shared history")),
+            })
+            .unwrap();
+
+        session.poll();
+
+        assert_eq!(
+            session.agent_user_messages(0).unwrap()[0].text,
+            "shared history"
+        );
+        assert_eq!(
+            session.scheduled_conversation("ses_shared").unwrap()[0].text,
+            "shared history"
+        );
+    }
+
+    #[test]
+    fn envelope_changes_preserve_in_flight_state_and_departure_prunes_it() {
+        let mut session = HerdrSession::new(true, None, None);
+        session.cross_workspace_agents = true;
+        session.next_refresh = Instant::now() + Duration::from_secs(60);
+        session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
+        let first_identity = identity("ses_stable");
+        let replacement_identity = AgentSessionIdentity {
+            source: "opencode".to_owned(),
+            agent: "opencode".to_owned(),
+            kind: "session_id".to_owned(),
+            value: "ses_stable".to_owned(),
+        };
+        let conversation_identity = conversation_identity("ses_stable");
+        session.apply_agent_snapshot_at(vec![agent("w1:p1", first_identity)], unix_time_ms());
+        session
+            .latest_user_messages
+            .insert(conversation_identity.clone(), message("cached"));
+        session
+            .latest_user_message_requests
+            .insert(conversation_identity.clone());
+        session.latest_user_message_refreshes.insert(
+            conversation_identity.clone(),
+            Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
+        );
+        session
+            .latest_user_message_statuses
+            .insert(conversation_identity.clone(), AgentStatus::Idle);
+        session
+            .scheduled_conversation_errors
+            .insert(conversation_identity.clone(), "old error".to_owned());
+
+        session.apply_agent_snapshot_at(vec![agent("w1:p1", replacement_identity)], unix_time_ms());
+        assert!(
+            session
+                .latest_user_message_requests
+                .contains(&conversation_identity)
+        );
+        session
+            .sender
+            .send(Completion::LatestUserMessage {
+                identity: conversation_identity.clone(),
+                result: Ok(message("completed")),
+            })
+            .unwrap();
+        session.poll();
+
+        assert_eq!(session.agent_user_messages(0).unwrap()[0].text, "completed");
+        assert!(
+            session
+                .latest_user_message_refreshes
+                .contains_key(&conversation_identity)
+        );
+        assert!(
+            session
+                .latest_user_message_statuses
+                .contains_key(&conversation_identity)
+        );
+        assert!(
+            session
+                .scheduled_conversation_errors
+                .contains_key(&conversation_identity)
+        );
+        session
+            .latest_user_message_requests
+            .insert(conversation_identity.clone());
+
+        session.apply_agent_snapshot_at(Vec::new(), unix_time_ms());
+
+        assert!(
+            !session
+                .latest_user_messages
+                .contains_key(&conversation_identity)
+        );
+        assert!(
+            !session
+                .latest_user_message_requests
+                .contains(&conversation_identity)
+        );
+        assert!(
+            !session
+                .latest_user_message_refreshes
+                .contains_key(&conversation_identity)
+        );
+        assert!(
+            !session
+                .latest_user_message_statuses
+                .contains_key(&conversation_identity)
+        );
+        assert!(
+            !session
+                .scheduled_conversation_errors
+                .contains_key(&conversation_identity)
+        );
+    }
+
+    #[test]
     fn departed_agent_completion_does_not_restore_message_state() {
         let mut session = HerdrSession::new(true, None, None);
         session.cross_workspace_agents = true;
@@ -2156,35 +2233,48 @@ mod latest_user_message_cache_tests {
         session.next_agent_change_stats = Instant::now() + Duration::from_secs(60);
         let departed = identity("ses_departed");
         session.apply_agent_snapshot_at(vec![agent("w1:p1", departed.clone())], unix_time_ms());
+        let departed_conversation = conversation_identity(&departed.value);
         session
             .latest_user_message_requests
-            .insert(departed.clone());
+            .insert(departed_conversation.clone());
         session.latest_user_message_refreshes.insert(
-            departed.clone(),
+            departed_conversation.clone(),
             Instant::now() + AGENT_MESSAGE_REFRESH_INTERVAL,
         );
         session
             .latest_user_message_statuses
-            .insert(departed.clone(), AgentStatus::Idle);
+            .insert(departed_conversation.clone(), AgentStatus::Idle);
 
         session.apply_agent_snapshot_at(Vec::new(), unix_time_ms());
         session
             .sender
             .send(Completion::LatestUserMessage {
-                identity: departed.clone(),
+                identity: departed_conversation.clone(),
                 result: Ok(message("stale")),
             })
             .unwrap();
         session.poll();
 
-        assert!(!session.latest_user_messages.contains_key(&departed));
-        assert!(!session.latest_user_message_requests.contains(&departed));
+        assert!(
+            !session
+                .latest_user_messages
+                .contains_key(&departed_conversation)
+        );
+        assert!(
+            !session
+                .latest_user_message_requests
+                .contains(&departed_conversation)
+        );
         assert!(
             !session
                 .latest_user_message_refreshes
-                .contains_key(&departed)
+                .contains_key(&departed_conversation)
         );
-        assert!(!session.latest_user_message_statuses.contains_key(&departed));
+        assert!(
+            !session
+                .latest_user_message_statuses
+                .contains_key(&departed_conversation)
+        );
     }
 }
 

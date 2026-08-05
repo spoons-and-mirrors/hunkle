@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
-ansi-to-tui = "8.0"
 atomic-write-file = "0.3"
 base64 = "0.22"
 crossterm = "0.29"

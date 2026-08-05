@@ -41,6 +41,59 @@ fn agent_key(app: &App, index: usize) -> AgentKey {
 }
 
 #[test]
+fn shift_click_opens_the_live_agent_preview_modal() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_agent_user_messages_for_test(
+        0,
+        &[("Inspect the scheduler", Some("Conversation loaded"), 1, 0)],
+    );
+    let key = agent_key(&app, 0);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(key.clone()))
+        .unwrap();
+    let point = (card.y..card.bottom())
+        .flat_map(|y| (card.x..card.right()).map(move |x| (x, y)))
+        .find(|(x, y)| {
+            app.regions.hit_target_at(Position::new(*x, *y)) == Some(HitTarget::Agent(key.clone()))
+        })
+        .unwrap();
+
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::SHIFT,
+    });
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::SHIFT,
+    });
+    assert_eq!(app.mode, Mode::AgentPreview);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let screen = screen_text(&terminal);
+    assert!(screen.contains("AGENT PREVIEW"));
+    assert!(screen.contains("Inspect the scheduler"));
+    assert!(screen.contains("Conversation loaded"));
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewModalClose)
+            .is_some()
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
 fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

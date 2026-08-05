@@ -1,5 +1,7 @@
 use super::*;
-use crate::app::{SchedulerDestination, SchedulerDestinationCard, SchedulerField};
+use crate::app::{
+    SchedulerDestination, SchedulerDestinationCard, SchedulerField, SchedulerSurface,
+};
 
 fn destination(path: &str, repository: &str, branch: &str, worktree: &str) -> SchedulerDestination {
     SchedulerDestination {
@@ -152,4 +154,19 @@ fn wide_scheduler_reserves_a_full_master_detail_surface() {
     assert!(
         screen_text(&terminal).contains("Select a task to review its schedule and run history.")
     );
+}
+
+#[test]
+fn scheduler_conversation_uses_the_tall_modal() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.open_scheduler();
+    app.scheduler.surface = SchedulerSurface::Conversation;
+    let mut terminal = Terminal::new(TestBackend::new(160, 80)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let back = scheduler_rect(&app, SchedulerHitTarget::CloseConversation).unwrap();
+    assert!(back.y <= 8, "conversation modal started at row {}", back.y);
 }

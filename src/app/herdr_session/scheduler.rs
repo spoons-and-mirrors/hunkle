@@ -28,6 +28,7 @@ pub(crate) struct ScheduledTask {
     pub(crate) branch: String,
     pub(crate) enabled: bool,
     pub(crate) interval_minutes: u64,
+    pub(crate) next_run_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -611,7 +612,7 @@ fn decode_path(bytes: Vec<u8>) -> rusqlite::Result<PathBuf> {
 fn load_state(db: &Connection) -> Result<State, String> {
     let tasks = query_all(
         db,
-        "SELECT id, title, description, prompt, destination, repository, branch, enabled, interval_minutes FROM scheduled_tasks ORDER BY id",
+        "SELECT id, title, description, prompt, destination, repository, branch, enabled, interval_minutes, next_run_ms FROM scheduled_tasks ORDER BY id",
         |row| {
             Ok(ScheduledTask {
                 id: row.get(0)?,
@@ -623,6 +624,7 @@ fn load_state(db: &Connection) -> Result<State, String> {
                 branch: row.get(6)?,
                 enabled: row.get(7)?,
                 interval_minutes: row.get(8)?,
+                next_run_ms: row.get(9)?,
             })
         },
     )?;
@@ -687,6 +689,7 @@ mod tests {
         first.execute("INSERT OR REPLACE INTO scheduled_runs (task_id, scheduled_for_ms, status, created_at_ms) VALUES (1, 99, 'launching', 1)", []).unwrap();
         recover_stale_launches(&first, 500_000).unwrap();
         let state = load_state(&first).unwrap();
+        assert_eq!(state.0[0].next_run_ms, 300_100);
         assert!(state.1.iter().any(|run| {
             run.terminal_id.as_deref() == Some("term-1")
                 && run.session_id.as_deref() == Some("ses-1")

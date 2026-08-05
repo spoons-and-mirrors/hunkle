@@ -326,53 +326,6 @@ pub(crate) fn scheduler_observe(
     scheduler_observe_with(pane_id, terminal_id, run_required_json)
 }
 
-pub(crate) fn pane_visible_ansi(pane_id: &str) -> Result<String, String> {
-    let output = run_output(
-        &[
-            OsString::from("pane"),
-            OsString::from("read"),
-            OsString::from(pane_id),
-            OsString::from("--source"),
-            OsString::from("visible"),
-            OsString::from("--format"),
-            OsString::from("ansi"),
-        ],
-        4 * 1024 * 1024,
-    )
-    .map_err(|error| error.message)?;
-    if !output.status.success() {
-        return Err(decode_response(&output.stdout, &output.stderr, false)
-            .unwrap_err()
-            .message);
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-pub(crate) fn scroll_pane(pane_id: String, up: bool, page: bool) -> Result<(), String> {
-    scroll_pane_with(pane_id, up, page, run)
-}
-
-fn scroll_pane_with(
-    pane_id: String,
-    up: bool,
-    page: bool,
-    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
-) -> Result<(), String> {
-    let input = match (up, page) {
-        (true, true) => "\u{1b}[5~",
-        (false, true) => "\u{1b}[6~",
-        (true, false) => "\u{1b}\u{19}",
-        (false, false) => "\u{1b}\u{5}",
-    };
-    runner(&[
-        "pane".to_owned(),
-        "send-text".to_owned(),
-        pane_id,
-        input.to_owned(),
-    ])
-    .map(|_| ())
-}
-
 fn scheduler_launch_with(
     request: SchedulerLaunchRequest,
     mut runner: impl FnMut(&[OsString]) -> Result<Value, CommandError>,
@@ -3465,26 +3418,6 @@ mod tests {
         assert_eq!(
             calls,
             vec![["pane", "close", "w1:p4"].map(str::to_owned).to_vec()]
-        );
-    }
-
-    #[test]
-    fn scrolls_an_agent_pane_by_line_or_page() {
-        let mut calls = Vec::new();
-        for (up, page) in [(true, false), (false, false), (true, true), (false, true)] {
-            scroll_pane_with("w1:p4".to_owned(), up, page, |args| {
-                calls.push(args.to_vec());
-                Ok(Value::Null)
-            })
-            .unwrap();
-        }
-
-        assert_eq!(
-            calls
-                .iter()
-                .map(|args| args[3].as_str())
-                .collect::<Vec<_>>(),
-            ["\u{1b}\u{19}", "\u{1b}\u{5}", "\u{1b}[5~", "\u{1b}[6~"]
         );
     }
 

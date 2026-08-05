@@ -24,6 +24,8 @@ pub(super) use super::{
 
 mod actions;
 pub(super) use actions::*;
+mod agent_preview;
+pub(super) use agent_preview::*;
 mod editor;
 pub(super) use editor::*;
 mod explorer;

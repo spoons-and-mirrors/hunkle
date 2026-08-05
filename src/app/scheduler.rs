@@ -5,7 +5,6 @@ pub(crate) enum SchedulerSurface {
     #[default]
     Tasks,
     Detail,
-    Pane,
     Conversation,
 }
 
@@ -209,8 +208,6 @@ pub(crate) struct SchedulerState {
     pub(crate) composer: Option<ScheduledTaskComposer>,
     pub(crate) task_scroll: usize,
     pub(crate) run_scroll: usize,
-    pub(crate) pane_scroll_x: usize,
-    pub(crate) pane_scroll_bottom: usize,
     pub(crate) conversation_scroll: Option<usize>,
     pub(crate) conversation_scroll_max: usize,
     pub(crate) conversation_message: Option<usize>,
@@ -391,8 +388,6 @@ impl App {
             SchedulerHitTarget::RunNow => self.run_selected_scheduled_task(),
             SchedulerHitTarget::Delete => self.delete_selected_scheduled_task(),
             SchedulerHitTarget::Refresh => self.refresh_selected_scheduled_run(),
-            SchedulerHitTarget::OpenPane => self.open_selected_scheduled_run_pane(),
-            SchedulerHitTarget::ClosePane => self.scheduler.surface = SchedulerSurface::Detail,
             SchedulerHitTarget::OpenConversation => {
                 self.open_selected_scheduled_run_conversation();
             }
@@ -418,32 +413,6 @@ impl App {
     pub(crate) fn handle_scheduler(&mut self, key: KeyEvent) {
         if self.scheduler.composer.is_some() {
             self.handle_scheduler_composer(key);
-            return;
-        }
-        if self.scheduler.surface == SchedulerSurface::Pane {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('p') => {
-                    self.scheduler.surface = SchedulerSurface::Detail;
-                }
-                KeyCode::Char('v') => self.open_selected_scheduled_run_conversation(),
-                KeyCode::Left | KeyCode::Char('h') => {
-                    self.scheduler.pane_scroll_x = self.scheduler.pane_scroll_x.saturating_sub(3);
-                }
-                KeyCode::Right | KeyCode::Char('l') => self.scheduler.pane_scroll_x += 3,
-                KeyCode::PageUp => self.scroll_scheduled_run_pane(true, true),
-                KeyCode::PageDown => self.scroll_scheduled_run_pane(false, true),
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.scheduler.pane_scroll_bottom += 3;
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.scheduler.pane_scroll_bottom =
-                        self.scheduler.pane_scroll_bottom.saturating_sub(3);
-                }
-                KeyCode::Home => self.scheduler.pane_scroll_x = 0,
-                KeyCode::End => self.scheduler.pane_scroll_bottom = 0,
-                KeyCode::F(4) => self.close_scheduler(),
-                _ => {}
-            }
             return;
         }
         if self.scheduler.surface == SchedulerSurface::Conversation {
@@ -491,7 +460,6 @@ impl App {
             KeyCode::Char('r') => self.run_selected_scheduled_task(),
             KeyCode::Char('d') => self.delete_selected_scheduled_task(),
             KeyCode::Char('o') => self.refresh_selected_scheduled_run(),
-            KeyCode::Char('p') => self.open_selected_scheduled_run_pane(),
             KeyCode::Char('v') => self.open_selected_scheduled_run_conversation(),
             _ => {}
         }
@@ -727,31 +695,6 @@ impl App {
         self.scheduler.error = self.herdr.refresh_scheduled_run(id).err();
     }
 
-    pub(crate) fn selected_scheduled_run_pane_id(&self) -> Option<String> {
-        let run = self
-            .scheduler
-            .selected_run_id
-            .and_then(|id| self.herdr.scheduled_runs().iter().find(|run| run.id == id))?;
-        let pane_id = run.pane_id.as_deref()?;
-        Some(
-            self.herdr
-                .scheduled_agent_pane_id(pane_id, run.terminal_id.as_deref())
-                .unwrap_or(pane_id)
-                .to_owned(),
-        )
-    }
-
-    fn open_selected_scheduled_run_pane(&mut self) {
-        if self.selected_scheduled_run_pane_id().is_none() {
-            self.scheduler.error = Some("This run has no available Herdr pane".to_owned());
-            return;
-        }
-        self.scheduler.surface = SchedulerSurface::Pane;
-        self.scheduler.pane_scroll_x = 0;
-        self.scheduler.pane_scroll_bottom = 0;
-        self.scheduler.error = None;
-    }
-
     fn open_selected_scheduled_run_conversation(&mut self) {
         let Some(run) = self
             .scheduler
@@ -846,12 +789,6 @@ impl App {
             composer.picker.scroll_by(delta);
             return;
         }
-        if target == ScrollTarget::SchedulerPane {
-            if delta != 0 {
-                self.scroll_scheduled_run_pane(delta < 0, false);
-            }
-            return;
-        }
         if target == ScrollTarget::SchedulerConversation {
             self.scroll_scheduler_conversation(delta.saturating_mul(3));
             return;
@@ -896,15 +833,6 @@ impl App {
         );
         self.scheduler.conversation_scroll = None;
         self.scheduler.conversation_expanded_requests.clear();
-    }
-
-    fn scroll_scheduled_run_pane(&mut self, up: bool, page: bool) {
-        let Some(pane_id) = self.selected_scheduled_run_pane_id() else {
-            self.scheduler.error = Some("This run has no available Herdr pane".to_owned());
-            return;
-        };
-        self.scheduler.error = None;
-        self.herdr.scroll_pane_preview(pane_id, up, page);
     }
 
     fn toggle_scheduler_prompt_expansion(&mut self) {

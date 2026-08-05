@@ -1,5 +1,10 @@
-use std::{path::Path, process::Command, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
+use rusqlite::{Connection, OpenFlags, params};
 use serde_json::Value;
 
 use crate::process::{self, Limits};
@@ -18,14 +23,26 @@ pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
     {
         return Err("OpenCode session ID contains unsupported characters".to_owned());
     }
-    let query = format!(
-        "WITH recent AS (\
-             SELECT m.id, m.time_created FROM message m \
-             WHERE m.session_id = '{session_id}' \
-                AND json_extract(m.data, '$.role') = 'user'\
-         ) \
-         SELECT recent.id AS message_id, p.id AS user_part_id, \
-         json_extract(p.data, '$.text') AS text, response.id AS response_id, \
+    let connection = Connection::open_with_flags(
+        database_path()?,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("Could not open the OpenCode database: {error}"))?;
+    let mut statement = connection
+        .prepare(
+            "WITH responses AS (\
+             SELECT m.*, row_number() OVER (\
+                        PARTITION BY json_extract(m.data, '$.parentID') \
+                        ORDER BY m.time_created, m.id) AS response_index \
+             FROM message m \
+             WHERE m.session_id = ?1 \
+               AND json_extract(m.data, '$.role') = 'assistant'\
+           ) \
+         SELECT user.id AS message_id, p.id AS user_part_id, \
+         CASE WHEN response.response_index IS NULL OR response.response_index = 1 \
+              THEN json_extract(p.data, '$.text') \
+              ELSE '' END AS text, \
+                response.id AS response_id, \
                 response.time_created AS response_started_at, \
                 json_extract(response.data, '$.time.completed') AS response_completed_at, \
                  (SELECT json_group_array(json(part_json)) FROM ( \
@@ -33,10 +50,10 @@ pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
                                 'type', json_extract(response_part.data, '$.type'), \
                                 'text', CASE \
                                     WHEN json_extract(response_part.data, '$.type') = 'text' \
-                                    THEN json_extract(response_part.data, '$.text') \
-                                    ELSE NULL END, \
-                                'name', json_extract(response_part.data, '$.tool'), \
-                                 'title', json_extract(response_part.data, '$.state.title'), \
+                                      THEN json_extract(response_part.data, '$.text') \
+                                     ELSE NULL END, \
+                                 'name', json_extract(response_part.data, '$.tool'), \
+                                  'title', json_extract(response_part.data, '$.state.title'), \
                                  'status', json_extract(response_part.data, '$.state.status'), \
                                  'started_at', json_extract(response_part.data, '$.time.start'), \
                                  'completed_at', json_extract(response_part.data, '$.time.end')) \
@@ -47,32 +64,55 @@ pub(super) fn fetch(session_id: &str) -> Result<Vec<AgentUserMessage>, String> {
                             IN ('reasoning', 'tool', 'text') \
                       ORDER BY response_part.time_created, response_part.id \
                  )) AS response_parts \
-         FROM recent \
-         JOIN part p ON p.message_id = recent.id \
-                    AND json_extract(p.data, '$.type') = 'text' \
-         LEFT JOIN message response \
-                ON response.session_id = '{session_id}' \
-               AND json_extract(response.data, '$.role') = 'assistant' \
-               AND json_extract(response.data, '$.parentID') = recent.id \
-         ORDER BY recent.time_created, recent.id, p.time_created, p.id, \
-                  response.time_created, response.id"
-    );
+         FROM message user \
+         JOIN part p ON p.message_id = user.id \
+                     AND json_extract(p.data, '$.type') = 'text' \
+         LEFT JOIN responses response \
+                ON json_extract(response.data, '$.parentID') = user.id \
+         WHERE user.session_id = ?1 \
+           AND json_extract(user.data, '$.role') = 'user' \
+         ORDER BY user.time_created, user.id, p.time_created, p.id, \
+                  response.time_created, response.id",
+        )
+        .map_err(|error| format!("Could not prepare the OpenCode query: {error}"))?;
+    let rows = statement
+        .query_map(params![session_id], |row| {
+            Ok(serde_json::json!({
+                "message_id": row.get::<_, String>(0)?,
+                "user_part_id": row.get::<_, String>(1)?,
+                "text": row.get::<_, String>(2)?,
+                "response_id": row.get::<_, Option<String>>(3)?,
+                "response_started_at": row.get::<_, Option<u64>>(4)?,
+                "response_completed_at": row.get::<_, Option<u64>>(5)?,
+                "response_parts": row.get::<_, Option<String>>(6)?,
+            }))
+        })
+        .map_err(|error| format!("Could not query OpenCode: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Could not read OpenCode query data: {error}"))?;
+    parse_rows(&rows)
+}
+
+fn database_path() -> Result<PathBuf, String> {
     let output = process::run(
-        Command::new("opencode").args(["db", &query, "--format", "json", "--pure"]),
+        Command::new("opencode").args(["db", "path", "--pure"]),
         QUERY_LIMITS,
     )
-    .map_err(|error| format!("Could not query OpenCode: {error}"))?;
+    .map_err(|error| format!("Could not locate the OpenCode database: {error}"))?;
     if output.timed_out {
-        return Err("OpenCode query timed out".to_owned());
+        return Err("OpenCode database lookup timed out".to_owned());
     }
     if output.stdout_truncated {
-        return Err("OpenCode message was too large".to_owned());
+        return Err("OpenCode returned an invalid database path".to_owned());
     }
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
         return Err(error.trim().to_owned());
     }
-    parse(&output.stdout)
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    (!path.as_os_str().is_empty())
+        .then_some(path)
+        .ok_or_else(|| "OpenCode returned an empty database path".to_owned())
 }
 
 pub(super) fn resolve_session_id(directory: &Path, title: &str) -> Result<String, String> {
@@ -155,21 +195,25 @@ fn parse_session_id(output: &[u8]) -> Result<String, String> {
     Ok(id.to_owned())
 }
 
+#[cfg(test)]
 fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
     let rows: Value = serde_json::from_slice(output)
         .map_err(|error| format!("OpenCode returned invalid query data: {error}"))?;
+    parse_rows(rows.as_array().map(Vec::as_slice).unwrap_or_default())
+}
+
+fn parse_rows(rows: &[Value]) -> Result<Vec<AgentUserMessage>, String> {
     let mut messages: Vec<(String, Vec<String>, Vec<String>, AgentUserMessage)> = Vec::new();
     let now_ms = unix_time_ms();
-    for row in rows.as_array().into_iter().flatten() {
+    for row in rows {
         let Some(id) = row.get("message_id").and_then(Value::as_str) else {
             continue;
         };
-        let Some(text) = row.get("text").and_then(Value::as_str).map(str::trim) else {
-            continue;
-        };
-        if text.is_empty() {
-            continue;
-        }
+        let text = row
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
         let Some(user_part_id) = row.get("user_part_id").and_then(Value::as_str) else {
             continue;
         };
@@ -177,7 +221,7 @@ fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
             .last_mut()
             .filter(|(message_id, _, _, _)| message_id == id)
         {
-            if !user_parts.iter().any(|part_id| part_id == user_part_id) {
+            if !text.is_empty() && !user_parts.iter().any(|part_id| part_id == user_part_id) {
                 message.text.push_str("\n\n");
                 message.text.push_str(text);
                 user_parts.push(user_part_id.to_owned());
@@ -188,7 +232,7 @@ fn parse(output: &[u8]) -> Result<Vec<AgentUserMessage>, String> {
                 message.requests.push(request(row, now_ms));
                 response_ids.push(response_id.to_owned());
             }
-        } else {
+        } else if !text.is_empty() {
             let mut response_ids = Vec::new();
             let mut requests = Vec::new();
             if let Some(response_id) = row.get("response_id").and_then(Value::as_str) {

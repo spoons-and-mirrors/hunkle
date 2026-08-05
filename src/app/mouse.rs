@@ -16,6 +16,28 @@ const AGENT_PREVIEW_SWIPE_THRESHOLD: u16 = 4;
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.mode == Mode::AgentPreview {
+            let point = Position::new(mouse.column, mouse.row);
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.handle_agent_preview_modal_click(point)
+                }
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    if let Some(target @ ScrollTarget::AgentTranscript(_)) =
+                        self.regions.scroll_target_at(point)
+                    {
+                        let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                            -1
+                        } else {
+                            1
+                        };
+                        self.scroll_target(target, delta, true);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.mode == Mode::Scheduler {
             let point = Position::new(mouse.column, mouse.row);
             match mouse.kind {
@@ -24,7 +46,6 @@ impl App {
                     if let Some(
                         target @ (ScrollTarget::SchedulerTasks
                         | ScrollTarget::SchedulerRuns
-                        | ScrollTarget::SchedulerPane
                         | ScrollTarget::SchedulerConversation
                         | ScrollTarget::SchedulerPrompt
                         | ScrollTarget::SchedulerDestinations),
@@ -329,7 +350,11 @@ impl App {
                         return;
                     };
                     self.selection.clear();
-                    self.activate_agent_card(key, index);
+                    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.open_agent_preview_modal(index);
+                    } else {
+                        self.activate_agent_card(key, index);
+                    }
                     return;
                 }
                 Some(HitTarget::AgentStashToggle) => {
@@ -635,7 +660,6 @@ impl App {
             }
             ScrollTarget::SchedulerTasks
             | ScrollTarget::SchedulerRuns
-            | ScrollTarget::SchedulerPane
             | ScrollTarget::SchedulerConversation
             | ScrollTarget::SchedulerPrompt
             | ScrollTarget::SchedulerDestinations => self.scroll_scheduler(target, delta),
@@ -839,6 +863,8 @@ impl App {
                 .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Overlay)),
             self.regions
                 .hit_target_rect(HitTarget::Settings(SettingsHitTarget::Overlay)),
+            self.regions
+                .hit_target_rect(HitTarget::AgentPreviewModalOverlay),
             self.regions.action_menu,
             self.regions
                 .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterOverlay)),
@@ -877,6 +903,7 @@ impl App {
                     self.activate_scheduler_target(target);
                 }
             }
+            Mode::AgentPreview => self.handle_agent_preview_modal_click(point),
             Mode::Normal if self.view() == View::RepositorySearch => {
                 let global_navigation = [
                     self.regions.graph,
@@ -1355,6 +1382,29 @@ impl App {
         self.herdr.request_agent_latest_user_message(index);
     }
 
+    fn handle_agent_preview_modal_click(&mut self, point: Position) {
+        match self.regions.hit_target_at(point) {
+            Some(HitTarget::AgentPreviewModalClose) => self.close_agent_preview_modal(),
+            Some(HitTarget::AgentPreviewRequest {
+                agent,
+                message,
+                request,
+            }) => self.toggle_agent_preview_request(agent, message, request),
+            Some(HitTarget::AgentPreviewPicker(key)) => {
+                if self.herdr.agent_index(&key).is_some() {
+                    self.agent_preview_selection = Some(key);
+                    self.agent_preview_picker_open = !self.agent_preview_picker_open;
+                }
+            }
+            Some(HitTarget::AgentPreviewPickerItem(key)) => {
+                if let Some(index) = self.herdr.agent_index(&key) {
+                    self.select_agent_preview(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_action_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
@@ -1631,13 +1681,23 @@ impl App {
     }
 
     pub(super) fn scroll_agent_preview_by(&mut self, delta: isize) {
-        let Some(agent) = self.agents_pane_index() else {
+        let Some(agent) = self.agent_preview_index() else {
             return;
         };
         let Some(key) = self.herdr.agent_key(agent) else {
             return;
         };
         self.set_agent_preview_scroll(key, delta);
+    }
+
+    pub(super) fn scroll_selected_agent_preview_timeline(&mut self, forward: bool) {
+        let Some(index) = self.agent_preview_index() else {
+            return;
+        };
+        let Some(key) = self.herdr.agent_key(index) else {
+            return;
+        };
+        self.scroll_agent_preview_timeline(key, forward);
     }
 
     fn set_agent_preview_scroll(&mut self, key: AgentKey, delta: isize) {

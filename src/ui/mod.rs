@@ -158,6 +158,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             | Mode::Files
             | Mode::Help
             | Mode::Scheduler
+            | Mode::AgentPreview
     ) {
         app.regions.capture_scroll_boundary();
     }
@@ -307,6 +308,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 app.regions.register_hit_target(target, rect);
             }
             for (target, rect) in regions.scrolls {
+                app.regions.register_scroll_target(target, rect);
+            }
+        }
+        Mode::AgentPreview => {
+            dim(frame);
+            let regions = overlays::draw_agent_preview_modal(frame, app, profile);
+            app.regions.agent_preview_scroll_max = regions.scroll_max;
+            app.regions.agent_preview_scroll = regions.scroll;
+            for (target, rect) in regions.targets {
+                app.regions.register_hit_target(target, rect);
+            }
+            if let Some((target, rect)) = regions.scroll_target {
                 app.regions.register_scroll_target(target, rect);
             }
         }

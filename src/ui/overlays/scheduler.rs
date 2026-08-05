@@ -4,7 +4,7 @@ use super::super::location_picker::{
     LocationPickerRow, LocationPickerRowKind, LocationPickerView, draw_location_picker,
 };
 use super::*;
-use ansi_to_tui::IntoText;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type Target = SchedulerHitTarget;
 
@@ -29,9 +29,8 @@ pub(crate) fn draw_scheduler(
     app: &App,
     profile: LayoutProfile,
 ) -> SchedulerRegions {
-    let pane_open = app.scheduler.surface == SchedulerSurface::Pane;
     let conversation_open = app.scheduler.surface == SchedulerSurface::Conversation;
-    let outer = scheduler_area(frame.area(), profile, pane_open);
+    let outer = scheduler_area(frame.area(), profile, conversation_open);
     frame.render_widget(Clear, outer);
     fill(frame, outer, palette().panel);
     fill(
@@ -81,9 +80,7 @@ pub(crate) fn draw_scheduler(
         outer.width.saturating_sub(2),
         outer.height.saturating_sub(4),
     );
-    if pane_open {
-        draw_live_pane(frame, app, content, &mut regions);
-    } else if conversation_open {
+    if conversation_open {
         draw_conversation(frame, app, content, &mut regions);
     } else if profile.is_single() {
         if app.scheduler.surface == SchedulerSurface::Tasks {
@@ -132,15 +129,7 @@ pub(crate) fn draw_scheduler(
             Style::default().fg(palette().red).bg(palette().surface_alt),
         );
     } else {
-        let hints = if pane_open {
-            &[
-                ("←→", "pan"),
-                ("↑↓", "crop"),
-                ("PgUp/PgDn", "pane history"),
-                ("V", "conversation"),
-                ("P/Esc", "back"),
-            ][..]
-        } else if conversation_open {
+        let hints = if conversation_open {
             &[
                 ("↑↓", "scroll"),
                 ("[ ]", "messages"),
@@ -165,7 +154,6 @@ pub(crate) fn draw_scheduler(
                 ("N", "new"),
                 ("Tab", "tasks/runs"),
                 ("R", "run"),
-                ("P", "live pane"),
                 ("V", "conversation"),
                 ("Esc", "close"),
             ][..]
@@ -190,9 +178,9 @@ fn draw_conversation(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut
         palette().cyan,
     );
     let body = Rect::new(
-        area.x + 1,
+        area.x + 3,
         area.y + 2,
-        area.width.saturating_sub(2),
+        area.width.saturating_sub(6),
         area.height.saturating_sub(2),
     );
     let Some(run) = app
@@ -248,146 +236,27 @@ fn draw_conversation(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut
     regions.scroll(ScrollTarget::SchedulerConversation, body);
 }
 
-fn scheduler_area(area: Rect, profile: LayoutProfile, pane_open: bool) -> Rect {
-    let mut outer = if pane_open {
-        centered_min(area, 96, 94, 88, 28)
+fn scheduler_area(area: Rect, profile: LayoutProfile, conversation_open: bool) -> Rect {
+    let mut outer = if conversation_open {
+        centered_min(
+            area,
+            if profile.is_single() { 96 } else { 88 },
+            94,
+            if profile.is_single() { 40 } else { 88 },
+            32,
+        )
     } else if profile.is_single() {
         centered_min(area, 96, 92, 40, 24)
     } else {
         centered_min(area, 88, 82, 88, 28)
     };
-    let height = outer.height.min(if pane_open { 70 } else { 46 });
-    let width = outer.width.min(if pane_open { 220 } else { 132 });
+    let height = outer.height.min(if conversation_open { 70 } else { 46 });
+    let width = outer.width.min(132);
     outer.y = area.y + area.height.saturating_sub(height) / 2;
     outer.x = area.x + area.width.saturating_sub(width) / 2;
     outer.width = width;
     outer.height = height;
     outer
-}
-
-fn draw_live_pane(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut SchedulerRegions) {
-    let inner = Rect::new(
-        area.x + 1,
-        area.y,
-        area.width.saturating_sub(2),
-        area.height,
-    );
-    let back = Rect::new(inner.x, inner.y, 9, 1);
-    button(
-        frame,
-        regions,
-        back,
-        " < BACK ",
-        Target::ClosePane,
-        palette().cyan,
-    );
-    let conversation = Rect::new(inner.right().saturating_sub(20), inner.y, 20, 1);
-    button(
-        frame,
-        regions,
-        conversation,
-        " OPEN CONVERSATION ",
-        Target::OpenConversation,
-        palette().accent,
-    );
-    bold_text(
-        frame,
-        Rect::new(
-            back.right().saturating_add(2),
-            inner.y,
-            conversation.x.saturating_sub(back.right() + 4),
-            1,
-        ),
-        "LIVE PANE",
-    );
-    let Some(pane_id) = app.selected_scheduled_run_pane_id() else {
-        draw_text(
-            frame,
-            Rect::new(inner.x, inner.y + 2, inner.width, 1),
-            "This run has no available Herdr pane.",
-            Style::default().fg(palette().red),
-        );
-        return;
-    };
-    let viewport = Rect::new(
-        inner.x,
-        inner.y + 2,
-        inner.width,
-        inner.height.saturating_sub(2),
-    );
-    fill(frame, viewport, Color::Black);
-    regions.scroll(ScrollTarget::SchedulerPane, viewport);
-    if let Some(error) = app.herdr.pane_preview_error(&pane_id) {
-        draw_text(
-            frame,
-            Rect::new(
-                viewport.x + 2,
-                viewport.y + 1,
-                viewport.width.saturating_sub(4),
-                2,
-            ),
-            format!("Could not read {pane_id}: {error}"),
-            Style::default().fg(palette().red).bg(Color::Black),
-        );
-        return;
-    }
-    let Some(preview) = app.herdr.pane_preview(&pane_id) else {
-        draw_text(
-            frame,
-            Rect::new(
-                viewport.x + 2,
-                viewport.y + 1,
-                viewport.width.saturating_sub(4),
-                1,
-            ),
-            format!("Reading {pane_id}…"),
-            Style::default().fg(palette().faint).bg(Color::Black),
-        );
-        return;
-    };
-    let Ok(text) = preview.ansi.as_bytes().into_text() else {
-        draw_text(
-            frame,
-            Rect::new(
-                viewport.x + 2,
-                viewport.y + 1,
-                viewport.width.saturating_sub(4),
-                1,
-            ),
-            "Herdr returned an ANSI pane snapshot Hunkle could not render.",
-            Style::default().fg(palette().red).bg(Color::Black),
-        );
-        return;
-    };
-    let source_width = text.width();
-    let source_height = text.height();
-    let maximum_x = source_width.saturating_sub(usize::from(viewport.width));
-    let maximum_y = source_height.saturating_sub(usize::from(viewport.height));
-    let scroll_x = app.scheduler.pane_scroll_x.min(maximum_x);
-    let scroll_y = maximum_y.saturating_sub(app.scheduler.pane_scroll_bottom.min(maximum_y));
-    frame.render_widget(
-        Paragraph::new(text).scroll((
-            scroll_y.min(u16::MAX as usize) as u16,
-            scroll_x.min(u16::MAX as usize) as u16,
-        )),
-        viewport,
-    );
-    let dimensions = format!(
-        " {pane_id}  {source_width}×{source_height} → {}×{} ",
-        viewport.width, viewport.height
-    );
-    let width = UnicodeWidthStr::width(dimensions.as_str()) as u16;
-    draw_text(
-        frame,
-        Rect::new(
-            inner.right().saturating_sub(width.min(inner.width)),
-            inner.y + 1,
-            width.min(inner.width),
-            1,
-        ),
-        dimensions,
-        Style::default().fg(palette().cyan).bg(palette().panel),
-    );
 }
 
 fn draw_tasks(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut SchedulerRegions) {
@@ -479,8 +348,10 @@ fn draw_tasks(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Schedu
                 Rect::new(rect.x + 3, rect.y + 1, rect.width.saturating_sub(4), 1),
                 truncate_width(
                     &format!(
-                        "{} / {}  ·  {}m",
-                        task.repository, task.branch, task.interval_minutes
+                        "{} / {}  ·  {}",
+                        task.repository,
+                        task.branch,
+                        next_run_label(task)
                     ),
                     usize::from(rect.width.saturating_sub(4)),
                 ),
@@ -574,6 +445,14 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
                     if task.interval_minutes == 1 { "" } else { "s" }
                 ),
                 Style::default().fg(palette().muted),
+            ),
+            Span::styled(
+                format!("  ·  {}", next_run_label(task)),
+                Style::default().fg(if task.enabled {
+                    palette().cyan
+                } else {
+                    palette().faint
+                }),
             ),
         ]),
         Style::default(),
@@ -698,27 +577,12 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
         Target::OpenConversation,
         palette().accent,
     );
-    let pane_width = 13.min(open.x.saturating_sub(inner.x + 1));
-    let pane = Rect::new(
-        open.x.saturating_sub(pane_width + 1),
-        conversation_y,
-        pane_width,
-        1,
-    );
-    button(
-        frame,
-        regions,
-        pane,
-        " LIVE PANE ",
-        Target::OpenPane,
-        palette().cyan,
-    );
     bold_text(
         frame,
         Rect::new(
             inner.x,
             conversation_y,
-            pane.x.saturating_sub(inner.x + 1),
+            open.x.saturating_sub(inner.x + 1),
             1,
         ),
         "CONVERSATION",
@@ -734,6 +598,32 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
         .selected_run_id
         .and_then(|id| runs.iter().find(|run| run.id == id).copied());
     draw_conversation_handoff(frame, selected_run, conversation);
+}
+
+fn next_run_label(task: &crate::app::ScheduledTask) -> String {
+    if !task.enabled {
+        return "Paused".to_owned();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let remaining = task.next_run_ms.saturating_sub(now).max(0) as u64;
+    if remaining == 0 {
+        return "Due now".to_owned();
+    }
+    let seconds = remaining.saturating_add(999) / 1_000;
+    let hours = seconds / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("Next in {hours}h {minutes:02}m")
+    } else if minutes > 0 {
+        format!("Next in {minutes}m {seconds:02}s")
+    } else {
+        format!("Next in {seconds}s")
+    }
 }
 
 fn draw_conversation_handoff(
@@ -770,8 +660,8 @@ fn draw_conversation_handoff(
         ("RUN ERROR", error)
     } else if run.pane_id.is_some() {
         (
-            "OPEN IN AGENTS",
-            "View the structured OpenCode transcript, reasoning, and tool activity in the existing Agents preview.",
+            "DURABLE CONVERSATION",
+            "View the structured OpenCode transcript, reasoning, and tool activity even after its Herdr pane is closed.",
         )
     } else {
         (

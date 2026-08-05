@@ -496,6 +496,13 @@ impl App {
             .or_else(|| self.default_agent_preview_index())
     }
 
+    pub(crate) fn agent_preview_index(&self) -> Option<usize> {
+        self.agent_preview_selection
+            .as_ref()
+            .and_then(|key| self.herdr.agent_index(key))
+            .or_else(|| self.default_agent_preview_index())
+    }
+
     fn default_agent_preview_index(&self) -> Option<usize> {
         (0..self.herdr.agents.len())
             .find(|index| self.herdr.agent_entry_state(*index).selected)
@@ -751,6 +758,7 @@ impl App {
             Mode::Editor => self.handle_editor(key),
             Mode::Files => self.handle_file_dialog(key),
             Mode::Scheduler => self.handle_scheduler(key),
+            Mode::AgentPreview => self.handle_agent_preview_modal(key),
             Mode::Help => {
                 if key.code == KeyCode::Esc
                     || self
@@ -873,11 +881,6 @@ impl App {
         changed |= self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
         changed |= self.file_search.poll(self.session.data());
         if self.herdr_available() {
-            let pane_preview = (self.mode == Mode::Scheduler
-                && self.scheduler.surface == SchedulerSurface::Pane)
-                .then(|| self.selected_scheduled_run_pane_id())
-                .flatten();
-            self.herdr.set_pane_preview(pane_preview);
             let scheduled_session = (self.mode == Mode::Scheduler
                 && self.scheduler.surface == SchedulerSurface::Conversation)
                 .then(|| {
@@ -2317,6 +2320,34 @@ impl App {
     fn open_agent_detail(&mut self, index: usize) {
         self.select_agent_preview(index);
         self.navigation.show_agent_detail();
+    }
+
+    pub(super) fn open_agent_preview_modal(&mut self, index: usize) {
+        if self.mode == Mode::Commit {
+            self.flush_commit_draft();
+        }
+        self.select_agent_preview(index);
+        self.mode = Mode::AgentPreview;
+    }
+
+    pub(super) fn close_agent_preview_modal(&mut self) {
+        self.agent_preview_picker_open = false;
+        self.mode = Mode::Normal;
+    }
+
+    fn handle_agent_preview_modal(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_agent_preview_modal(),
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_agent_preview_by(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_agent_preview_by(1),
+            KeyCode::PageUp => self.scroll_agent_preview_by(-10),
+            KeyCode::PageDown => self.scroll_agent_preview_by(10),
+            KeyCode::Home => self.scroll_agent_preview_by(isize::MIN),
+            KeyCode::End => self.scroll_agent_preview_by(isize::MAX),
+            KeyCode::Char('[') => self.scroll_selected_agent_preview_timeline(false),
+            KeyCode::Char(']') => self.scroll_selected_agent_preview_timeline(true),
+            _ => {}
+        }
     }
 
     fn show_left_pane(&mut self, pane: LeftPane) {

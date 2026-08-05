@@ -297,6 +297,7 @@ pub enum Mode {
     Editor,
     Files,
     Scheduler,
+    AgentPreview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,6 +381,8 @@ pub(crate) enum HitTarget {
     Settings(SettingsHitTarget),
     Scheduler(SchedulerHitTarget),
     Agent(AgentKey),
+    AgentPreviewModalOverlay,
+    AgentPreviewModalClose,
     AgentPaneId(String),
     AgentStashToggle,
     AgentStash(AgentKey),
@@ -440,8 +443,6 @@ pub(crate) enum SchedulerHitTarget {
     RunNow,
     Delete,
     Refresh,
-    OpenPane,
-    ClosePane,
     OpenConversation,
     ConversationRequest(usize),
     CloseConversation,
@@ -589,7 +590,6 @@ pub(crate) enum ScrollTarget {
     SettingsShortcuts,
     SchedulerTasks,
     SchedulerRuns,
-    SchedulerPane,
     SchedulerConversation,
     SchedulerPrompt,
     SchedulerDestinations,

@@ -423,6 +423,7 @@ pub(super) fn draw_history(
     };
     fill(frame, area, palette().panel);
     let messages = herdr.agent_user_messages(index).unwrap_or_default();
+    let message_error = herdr.agent_user_message_error(index);
     let status = herdr
         .agents
         .get(index)
@@ -472,8 +473,16 @@ pub(super) fn draw_history(
     }
     if messages.is_empty() {
         frame.render_widget(
-            Paragraph::new("Waiting for conversation history…")
-                .style(Style::default().fg(palette().faint).bg(palette().panel))
+            Paragraph::new(message_error.unwrap_or("Waiting for conversation history…"))
+                .style(
+                    Style::default()
+                        .fg(if message_error.is_some() {
+                            palette().red
+                        } else {
+                            palette().faint
+                        })
+                        .bg(palette().panel),
+                )
                 .wrap(Wrap { trim: true }),
             Rect::new(area.x, area.y, area.width, area.height),
         );
@@ -655,18 +664,8 @@ pub(super) fn draw_scheduled_history(
         area.width,
         area.bottom().saturating_sub(user_viewport.bottom()),
     );
-    let user_cards = Rect::new(
-        area.x.saturating_add(1),
-        user_viewport.y,
-        area.width.saturating_sub(1),
-        user_viewport.height,
-    );
-    let cards = Rect::new(
-        area.x.saturating_add(1),
-        viewport.y,
-        area.width.saturating_sub(1),
-        viewport.height,
-    );
+    let user_cards = Rect::new(area.x, user_viewport.y, area.width, user_viewport.height);
+    let cards = Rect::new(area.x, viewport.y, area.width, viewport.height);
     let (blocks, request_height) = build_request_transcript(
         message,
         content_width,
