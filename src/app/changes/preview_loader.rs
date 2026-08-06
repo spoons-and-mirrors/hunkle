@@ -3,6 +3,7 @@ use std::{
     io::{Cursor, Read},
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     sync::mpsc::{self, Receiver, SyncSender},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
@@ -19,7 +20,8 @@ use crate::{
 };
 
 use super::sqlite_browser::{
-    SQLITE_PAGE_SIZE, SqliteColumn, SqliteDatabase, SqliteObject, SqlitePage, SqlitePageKey,
+    SQLITE_PAGE_SIZE, SqliteColumn, SqliteDatabase, SqliteObject, SqlitePage, SqlitePageCursor,
+    SqlitePageKey,
 };
 
 const MAX_IMAGE_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
@@ -52,6 +54,7 @@ pub(super) enum LoadedPreview {
 
 pub(super) struct PreviewLoader {
     generation: u64,
+    cancellation_generation: Arc<AtomicU64>,
     pending: Arc<Mutex<Option<Request>>>,
     wake: Option<SyncSender<()>>,
     receiver: Receiver<Completion>,
@@ -62,6 +65,8 @@ impl PreviewLoader {
     pub(super) fn new() -> Self {
         let pending = Arc::new(Mutex::new(None::<Request>));
         let worker_pending = Arc::clone(&pending);
+        let cancellation_generation = Arc::new(AtomicU64::new(0));
+        let worker_cancellation_generation = Arc::clone(&cancellation_generation);
         let (wake, request_rx) = mpsc::sync_channel::<()>(1);
         let (result_tx, receiver) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -71,7 +76,9 @@ impl PreviewLoader {
                     continue;
                 };
                 let content = match &request.task {
-                    Task::File(path) => load_file_preview(&request.root, path),
+                    Task::File(path) => load_file_preview_cancellable(&request.root, path, &|| {
+                        worker_cancellation_generation.load(Ordering::Relaxed) != request.generation
+                    }),
                     Task::Commit(oid) => git::commit_diff(&request.root, oid)
                         .map(LoadedPreview::Text)
                         .unwrap_or_else(|error| LoadedPreview::Error(error.to_string())),
@@ -108,6 +115,7 @@ impl PreviewLoader {
         });
         Self {
             generation: 0,
+            cancellation_generation,
             pending,
             wake: Some(wake),
             receiver,
@@ -117,6 +125,8 @@ impl PreviewLoader {
 
     pub(super) fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.cancellation_generation
+            .store(self.generation, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -176,6 +186,7 @@ impl PreviewLoader {
     }
 
     pub(super) fn shutdown(&mut self) {
+        self.invalidate();
         if let Ok(mut pending) = self.pending.lock() {
             pending.take();
         }
@@ -213,7 +224,16 @@ struct Completion {
     content: LoadedPreview,
 }
 
+#[cfg(test)]
 fn load_file_preview(root: &Path, path: &RepoPath) -> LoadedPreview {
+    load_file_preview_cancellable(root, path, &|| false)
+}
+
+fn load_file_preview_cancellable(
+    root: &Path,
+    path: &RepoPath,
+    cancelled: &dyn Fn() -> bool,
+) -> LoadedPreview {
     let full_path = root.join(path.as_path());
     match fs::symlink_metadata(&full_path) {
         Ok(metadata) if metadata.is_file() => {}
@@ -235,7 +255,7 @@ fn load_file_preview(root: &Path, path: &RepoPath) -> LoadedPreview {
             });
     }
     if is_video(path.as_path()) {
-        return load_video_frame(&full_path)
+        return load_video_frame(&full_path, cancelled)
             .map(|image| LoadedPreview::Image(Arc::new(image)))
             .unwrap_or_else(LoadedPreview::Error);
     }
@@ -288,9 +308,9 @@ fn load_sqlite_database(path: &Path) -> Result<SqliteDatabase, String> {
     let user_version = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .unwrap_or(0);
-    let first_page = objects
-        .first()
-        .map(|object| load_sqlite_page_with_connection(&connection, &object.name, &object.kind, 0));
+    let first_page = objects.first().map(|object| {
+        load_sqlite_page_with_connection(&connection, &object.name, &object.kind, 0, None)
+    });
     drop(statement);
     Ok(SqliteDatabase {
         file_size,
@@ -314,7 +334,7 @@ fn load_sqlite_page(path: &Path, key: &SqlitePageKey) -> Result<SqlitePage, Stri
             rusqlite::Error::QueryReturnedNoRows => "table or view no longer exists".to_owned(),
             error => error.to_string(),
         })?;
-    load_sqlite_page_with_connection(&connection, &key.object, &kind, key.offset)
+    load_sqlite_page_with_connection(&connection, &key.object, &kind, key.offset, key.cursor)
 }
 
 fn open_sqlite(path: &Path) -> Result<Connection, String> {
@@ -384,6 +404,7 @@ fn load_sqlite_page_with_connection(
     table: &str,
     kind: &str,
     offset: usize,
+    cursor: Option<SqlitePageCursor>,
 ) -> Result<SqlitePage, String> {
     let (columns, columns_truncated) = sqlite_columns(connection, table)?;
     if columns.is_empty() {
@@ -391,11 +412,14 @@ fn load_sqlite_page_with_connection(
             key: SqlitePageKey {
                 object: table.to_owned(),
                 offset,
+                cursor,
             },
             columns: Vec::new(),
             columns_truncated,
             rows: Vec::new(),
             has_next: false,
+            first_cursor: None,
+            last_cursor: None,
         });
     }
     let projection = columns
@@ -404,6 +428,17 @@ fn load_sqlite_page_with_connection(
         .collect::<Vec<_>>()
         .join(", ");
     let primary_key = sqlite_primary_key(connection, table)?;
+    let integer_primary_key = (primary_key.len() == 1)
+        .then(|| {
+            let name = &primary_key[0];
+            columns
+                .iter()
+                .position(|column| {
+                    column.name == *name && column.data_type.eq_ignore_ascii_case("INTEGER")
+                })
+                .map(|index| (name, index))
+        })
+        .flatten();
     let order = if !primary_key.is_empty() {
         format!(
             " ORDER BY {}",
@@ -424,21 +459,44 @@ fn load_sqlite_page_with_connection(
                 .join(", ")
         )
     };
-    let sql = format!(
-        "SELECT {projection} FROM {}{order} LIMIT ?1 OFFSET ?2",
-        quote_identifier(table)
-    );
+    let keyset = cursor.zip(integer_primary_key);
+    let sql = if let Some((cursor, (column, _))) = keyset {
+        let direction = if cursor.reverse { "<" } else { ">" };
+        let order_direction = if cursor.reverse { " DESC" } else { "" };
+        format!(
+            "SELECT {projection} FROM {} WHERE {} {direction} ?1 ORDER BY {}{order_direction} LIMIT ?2",
+            quote_identifier(table),
+            quote_identifier(column),
+            quote_identifier(column)
+        )
+    } else {
+        format!(
+            "SELECT {projection} FROM {}{order} LIMIT ?1 OFFSET ?2",
+            quote_identifier(table)
+        )
+    };
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
-    let mut query = statement
-        .query(rusqlite::params![
-            i64::try_from(SQLITE_PAGE_SIZE + 1).unwrap_or(i64::MAX),
+    let page_limit = i64::try_from(SQLITE_PAGE_SIZE + 1).unwrap_or(i64::MAX);
+    let mut query = if let Some((cursor, _)) = keyset {
+        statement.query(rusqlite::params![cursor.value, page_limit])
+    } else {
+        statement.query(rusqlite::params![
+            page_limit,
             i64::try_from(offset).unwrap_or(i64::MAX)
         ])
-        .map_err(|error| error.to_string())?;
+    }
+    .map_err(|error| error.to_string())?;
     let mut rows = Vec::new();
+    let mut cursors = Vec::new();
     while let Some(row) = query.next().map_err(|error| error.to_string())? {
+        if let Some((_, index)) = integer_primary_key {
+            cursors.push(
+                row.get::<_, i64>(index)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
         let mut values = Vec::with_capacity(columns.len());
         for index in 0..columns.len() {
             values.push(
@@ -449,17 +507,29 @@ fn load_sqlite_page_with_connection(
         }
         rows.push(values);
     }
-    let has_next = rows.len() > SQLITE_PAGE_SIZE;
+    let has_next = cursor.is_some_and(|cursor| cursor.reverse) || rows.len() > SQLITE_PAGE_SIZE;
     rows.truncate(SQLITE_PAGE_SIZE);
+    cursors.truncate(SQLITE_PAGE_SIZE);
+    if cursor.is_some_and(|cursor| cursor.reverse) {
+        rows.reverse();
+        cursors.reverse();
+    }
     Ok(SqlitePage {
         key: SqlitePageKey {
             object: table.to_owned(),
             offset,
+            cursor,
         },
         columns,
         columns_truncated,
         rows,
-        has_next,
+        has_next: if cursor.is_some_and(|cursor| cursor.reverse) {
+            true
+        } else {
+            has_next
+        },
+        first_cursor: cursors.first().copied(),
+        last_cursor: cursors.last().copied(),
     })
 }
 
@@ -596,8 +666,8 @@ fn load_image(path: &Path) -> Result<DynamicImage, String> {
     Ok(bound_preview_dimensions(image))
 }
 
-fn load_video_frame(path: &Path) -> Result<DynamicImage, String> {
-    let output = process::run(
+fn load_video_frame(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<DynamicImage, String> {
+    let output = process::run_cancellable(
         Command::new("ffmpeg")
             .args(["-v", "error", "-i"])
             .arg(path)
@@ -615,6 +685,7 @@ fn load_video_frame(path: &Path) -> Result<DynamicImage, String> {
                 "pipe:1",
             ]),
         Limits::new(MAX_VIDEO_FRAME_BYTES, 64 * 1024, Duration::from_secs(8)),
+        cancelled,
     )
     .map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -729,5 +800,54 @@ mod tests {
         assert_eq!(page.rows[0][1], "Ada");
         assert_eq!(page.rows[0][2], "<blob: 2 bytes>");
         assert!(!page.has_next);
+    }
+
+    #[test]
+    fn keyset_pages_round_trip_without_offset_scans() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT);\
+                 WITH RECURSIVE source(value) AS (\
+                     SELECT 1 UNION ALL SELECT value + 1 FROM source WHERE value < 250\
+                 )\
+                 INSERT INTO records(id, value) SELECT value, printf('row-%03d', value) FROM source;",
+            )
+            .unwrap();
+
+        let first =
+            load_sqlite_page_with_connection(&connection, "records", "table", 0, None).unwrap();
+        assert_eq!(first.rows.first().unwrap()[0], "1");
+        assert_eq!(first.rows.last().unwrap()[0], "100");
+        assert!(first.has_next);
+
+        let second = load_sqlite_page_with_connection(
+            &connection,
+            "records",
+            "table",
+            SQLITE_PAGE_SIZE,
+            Some(SqlitePageCursor {
+                value: first.last_cursor.unwrap(),
+                reverse: false,
+            }),
+        )
+        .unwrap();
+        assert_eq!(second.rows.first().unwrap()[0], "101");
+        assert_eq!(second.rows.last().unwrap()[0], "200");
+        assert!(second.has_next);
+
+        let previous = load_sqlite_page_with_connection(
+            &connection,
+            "records",
+            "table",
+            0,
+            Some(SqlitePageCursor {
+                value: second.first_cursor.unwrap(),
+                reverse: true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(previous.rows, first.rows);
+        assert!(previous.has_next);
     }
 }

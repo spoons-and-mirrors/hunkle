@@ -47,7 +47,15 @@ pub(crate) struct Output {
 }
 
 pub(crate) fn run(command: &mut Command, limits: Limits) -> io::Result<Output> {
-    run_inner(command, None, limits)
+    run_inner(command, None, limits, None)
+}
+
+pub(crate) fn run_cancellable(
+    command: &mut Command,
+    limits: Limits,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Output> {
+    run_inner(command, None, limits, Some(cancelled))
 }
 
 pub(crate) fn run_with_input(
@@ -55,10 +63,15 @@ pub(crate) fn run_with_input(
     input: Vec<u8>,
     limits: Limits,
 ) -> io::Result<Output> {
-    run_inner(command, Some(input), limits)
+    run_inner(command, Some(input), limits, None)
 }
 
-fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> io::Result<Output> {
+fn run_inner(
+    command: &mut Command,
+    input: Option<Vec<u8>>,
+    limits: Limits,
+    cancelled: Option<&dyn Fn() -> bool>,
+) -> io::Result<Output> {
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -109,6 +122,7 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
         let mut stdout_result = None;
         let mut stderr_result = None;
         let mut input_finished = input_receiver.is_none();
+        let mut process_cancelled = false;
         let timed_out = loop {
             if status.is_none() {
                 status = child.try_wait()?;
@@ -135,7 +149,8 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
             {
                 break false;
             }
-            if started.elapsed() >= limits.timeout {
+            let was_cancelled = cancelled.is_some_and(|cancelled| cancelled());
+            if was_cancelled || started.elapsed() >= limits.timeout {
                 match child.start_kill() {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -143,6 +158,9 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
                 }
                 if status.is_none() {
                     status = Some(child.wait()?);
+                }
+                if was_cancelled {
+                    process_cancelled = true;
                 }
                 break true;
             }
@@ -171,6 +189,12 @@ fn run_inner(command: &mut Command, input: Option<Vec<u8>>, limits: Limits) -> i
                 }
                 thread::sleep(Duration::from_millis(10));
             }
+        }
+        if process_cancelled {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "process was cancelled",
+            ));
         }
         let (stdout, stdout_truncated) = stdout_result.ok_or_else(|| {
             io::Error::new(
@@ -293,5 +317,37 @@ mod tests {
 
         assert!(output.timed_out);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_kills_a_running_process_group_promptly() {
+        use std::{
+            process::Command,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            thread,
+            time::Duration,
+        };
+
+        use super::{Limits, run_cancellable};
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&cancelled);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            trigger.store(true, Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let result = run_cancellable(
+            Command::new("sh").args(["-c", "sleep 10"]),
+            Limits::new(1024, 1024, Duration::from_secs(10)),
+            &|| cancelled.load(Ordering::Relaxed),
+        );
+
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

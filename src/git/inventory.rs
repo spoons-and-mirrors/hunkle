@@ -322,10 +322,10 @@ fn expand_directories(
                     continue;
                 }
                 let path = entry.path();
-                let metadata = fs::symlink_metadata(&path).with_context(|| {
+                let file_type = entry.file_type().with_context(|| {
                     format!("could not read inventory metadata for {}", path.display())
                 })?;
-                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                if !file_type.is_dir() || file_type.is_symlink() {
                     continue;
                 }
                 if let Ok(path) = path.strip_prefix(root) {
@@ -399,10 +399,10 @@ pub(super) fn local_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>
     crate::diagnostics::event(format!("local inventory started root={}", root.display()));
     let mut files = Vec::new();
     let mut directory_paths = Vec::new();
-    let mut directories = vec![root.to_owned()];
+    let mut directories = vec![(root.to_owned(), RepoPath::default())];
     let mut truncated = false;
     let mut path_bytes = 0_usize;
-    while let Some(directory) = directories.pop() {
+    while let Some((directory, relative_directory)) = directories.pop() {
         let entries = fs::read_dir(&directory).with_context(|| {
             format!("could not read workspace directory {}", directory.display())
         })?;
@@ -412,25 +412,25 @@ pub(super) fn local_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>
             if entry.file_name() == ".git" {
                 continue;
             }
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).with_context(|| {
-                format!("could not read workspace metadata for {}", path.display())
+            let file_name = entry.file_name();
+            let relative = relative_directory.join(&file_name);
+            let file_type = entry.file_type().with_context(|| {
+                format!(
+                    "could not read workspace metadata for {}",
+                    entry.path().display()
+                )
             })?;
-            if metadata.is_dir() {
-                if let Ok(relative) = path.strip_prefix(root) {
-                    let relative = RepoPath::from(relative);
-                    if files.len().saturating_add(directory_paths.len()) >= MAX_INVENTORY_ENTRIES
-                        || path_bytes.saturating_add(relative.byte_len()) > MAX_INVENTORY_PATH_BYTES
-                    {
-                        truncated = true;
-                        break;
-                    }
-                    path_bytes = path_bytes.saturating_add(relative.byte_len());
-                    directory_paths.push(relative);
+            if file_type.is_dir() {
+                if files.len().saturating_add(directory_paths.len()) >= MAX_INVENTORY_ENTRIES
+                    || path_bytes.saturating_add(relative.byte_len()) > MAX_INVENTORY_PATH_BYTES
+                {
+                    truncated = true;
+                    break;
                 }
-                directories.push(path);
-            } else if let Ok(relative) = path.strip_prefix(root) {
-                let relative = RepoPath::from(relative);
+                path_bytes = path_bytes.saturating_add(relative.byte_len());
+                directory_paths.push(relative.clone());
+                directories.push((entry.path(), relative));
+            } else {
                 if files.len().saturating_add(directory_paths.len()) >= MAX_INVENTORY_ENTRIES
                     || path_bytes.saturating_add(relative.byte_len()) > MAX_INVENTORY_PATH_BYTES
                 {
@@ -445,9 +445,9 @@ pub(super) fn local_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>
             break;
         }
     }
-    files.sort();
+    files.sort_unstable();
     files.dedup();
-    directory_paths.sort();
+    directory_paths.sort_unstable();
     directory_paths.dedup();
     crate::diagnostics::event(format!(
         "local inventory finished root={} files={} directories={} elapsed_ms={}",

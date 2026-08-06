@@ -23,6 +23,7 @@ use known_repositories::KnownRepositoryStore;
 
 const MIN_STATS_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_STATS_INTERVAL: Duration = Duration::from_secs(60);
+const INVENTORY_CACHE_TTL: Duration = Duration::from_secs(5);
 
 type ChangeStats = (u64, u64);
 type StatsLoadResult = Result<(WorktreeSignature, Option<ChangeStats>), String>;
@@ -140,6 +141,8 @@ impl LinkedWorktreeCatalogSnapshot {
 
 struct InventoryCompletion {
     generation: u64,
+    branches_loaded: bool,
+    topology_epoch: u64,
     repositories: Vec<LinkedWorktreeRepository>,
     discovered: Vec<PathBuf>,
     pruned: Vec<PathBuf>,
@@ -228,12 +231,22 @@ struct CatalogRefreshKey {
     candidates: Vec<LinkedWorktreeCandidate>,
     stats_roots: Vec<PathBuf>,
     topology_epoch: u64,
+    load_branches: bool,
 }
 
 #[derive(Clone)]
 struct CatalogRefreshRequest {
     key: CatalogRefreshKey,
     prioritized_stats_roots: Vec<PathBuf>,
+    cached_repositories: HashMap<PathBuf, CachedRepository>,
+}
+
+#[derive(Clone)]
+struct CachedRepository {
+    topology_epoch: u64,
+    branches_loaded: bool,
+    checked_at: Instant,
+    repository: LinkedWorktreeRepository,
 }
 
 struct CatalogRefreshFlight {
@@ -252,6 +265,7 @@ impl CatalogRefreshFlight {
 #[derive(Default)]
 pub(crate) struct LinkedWorktreeCatalogPoll {
     pub(crate) changed: bool,
+    pub(crate) branches_changed: bool,
     pub(crate) notice: Option<String>,
     pub(crate) worktree_creation: Option<Result<PathBuf, String>>,
 }
@@ -263,6 +277,8 @@ pub(crate) struct LinkedWorktreeCatalog {
     store: KnownRepositoryStore,
     generation: u64,
     topology_epoch: u64,
+    branches_requested: bool,
+    inventory_cache: HashMap<PathBuf, CachedRepository>,
     active_refresh: Option<CatalogRefreshFlight>,
     pending_refresh: Option<CatalogRefreshRequest>,
     sender: Sender<InventoryCompletion>,
@@ -311,6 +327,8 @@ impl LinkedWorktreeCatalog {
             store,
             generation: 0,
             topology_epoch: 0,
+            branches_requested: false,
+            inventory_cache: HashMap::new(),
             active_refresh: None,
             pending_refresh: None,
             sender,
@@ -531,6 +549,13 @@ impl LinkedWorktreeCatalog {
         self.refresh();
     }
 
+    pub(crate) fn request_branches(&mut self) {
+        if !self.branches_requested {
+            self.branches_requested = true;
+            self.refresh();
+        }
+    }
+
     fn refresh_request(&self) -> CatalogRefreshRequest {
         let prioritized_stats_roots = recent_git_roots(self.store.recent.clone());
         let mut stats_roots = prioritized_stats_roots.clone();
@@ -541,8 +566,10 @@ impl LinkedWorktreeCatalog {
                 candidates: self.candidates.clone(),
                 stats_roots,
                 topology_epoch: self.topology_epoch,
+                load_branches: self.branches_requested,
             },
             prioritized_stats_roots,
+            cached_repositories: self.inventory_cache.clone(),
         }
     }
 
@@ -552,6 +579,9 @@ impl LinkedWorktreeCatalog {
         let known = request.key.known.clone();
         let candidates = request.key.candidates.clone();
         let stats_roots = request.prioritized_stats_roots;
+        let load_branches = request.key.load_branches;
+        let cached_repositories = request.cached_repositories;
+        let topology_epoch = request.key.topology_epoch;
         self.active_refresh = Some(CatalogRefreshFlight {
             key: request.key,
             generation,
@@ -564,6 +594,7 @@ impl LinkedWorktreeCatalog {
             let mut common_dirs = known;
             let mut seen = common_dirs.iter().cloned().collect::<HashSet<_>>();
             let mut candidate_ranks = HashMap::new();
+            let mut candidate_paths = HashMap::<PathBuf, Vec<PathBuf>>::new();
             let mut relevant = Vec::new();
             let mut discovered = Vec::new();
             for (rank, candidate) in candidates.into_iter().enumerate() {
@@ -574,6 +605,10 @@ impl LinkedWorktreeCatalog {
                     candidate_ranks.insert(common_dir.clone(), rank);
                     relevant.push(common_dir.clone());
                 }
+                candidate_paths
+                    .entry(common_dir.clone())
+                    .or_default()
+                    .push(candidate.path);
                 if seen.insert(common_dir.clone()) {
                     discovered.push(common_dir.clone());
                     common_dirs.push(common_dir);
@@ -591,19 +626,57 @@ impl LinkedWorktreeCatalog {
                 .into_iter()
                 .filter_map(|common_dir| {
                     let is_candidate = candidate_ranks.contains_key(&common_dir);
-                    match git::list_worktrees(&common_dir) {
-                        Ok(worktrees) => {
-                            let branch_root = worktrees
+                    let cached = cached_repositories.get(&common_dir).filter(|cached| {
+                        cached_repository_is_reusable(
+                            cached,
+                            topology_epoch,
+                            load_branches,
+                            candidate_paths.get(&common_dir).map(Vec::as_slice),
+                        )
+                    });
+                    if let Some(cached) = cached {
+                        let mut repository = cached.repository.clone();
+                        if load_branches && !cached.branches_loaded {
+                            let branch_root = repository
+                                .worktrees
                                 .iter()
                                 .find(|worktree| worktree.is_main && !worktree.is_bare)
-                                .or_else(|| worktrees.iter().find(|worktree| !worktree.is_bare));
-                            let (branches, branch_error) = branch_root.map_or_else(
-                                || (Vec::new(), Some("No usable worktree".to_owned())),
-                                |worktree| match git::repository_branches(&worktree.path) {
-                                    Ok(branches) => (branches, None),
-                                    Err(error) => (Vec::new(), Some(error.to_string())),
-                                },
-                            );
+                                .or_else(|| {
+                                    repository
+                                        .worktrees
+                                        .iter()
+                                        .find(|worktree| !worktree.is_bare)
+                                });
+                            (repository.branches, repository.branch_error) = branch_root
+                                .map_or_else(
+                                    || (Vec::new(), Some("No usable worktree".to_owned())),
+                                    |worktree| match git::repository_branches(&worktree.path) {
+                                        Ok(branches) => (branches, None),
+                                        Err(error) => (Vec::new(), Some(error.to_string())),
+                                    },
+                                );
+                        }
+                        return Some(repository);
+                    }
+                    match git::list_worktrees(&common_dir) {
+                        Ok(worktrees) => {
+                            let (branches, branch_error) = if load_branches {
+                                let branch_root = worktrees
+                                    .iter()
+                                    .find(|worktree| worktree.is_main && !worktree.is_bare)
+                                    .or_else(|| {
+                                        worktrees.iter().find(|worktree| !worktree.is_bare)
+                                    });
+                                branch_root.map_or_else(
+                                    || (Vec::new(), Some("No usable worktree".to_owned())),
+                                    |worktree| match git::repository_branches(&worktree.path) {
+                                        Ok(branches) => (branches, None),
+                                        Err(error) => (Vec::new(), Some(error.to_string())),
+                                    },
+                                )
+                            } else {
+                                (Vec::new(), None)
+                            };
                             Some(LinkedWorktreeRepository {
                                 label: repository_label(&common_dir, &worktrees),
                                 common_dir,
@@ -630,6 +703,8 @@ impl LinkedWorktreeCatalog {
                 .collect();
             let _ = sender.send(InventoryCompletion {
                 generation,
+                branches_loaded: load_branches,
+                topology_epoch,
                 repositories,
                 discovered,
                 pruned,
@@ -653,6 +728,21 @@ impl LinkedWorktreeCatalog {
             {
                 continue;
             }
+            if completion.topology_epoch == self.topology_epoch {
+                for repository in &completion.repositories {
+                    if repository.error.is_none() {
+                        self.inventory_cache.insert(
+                            repository.common_dir.clone(),
+                            CachedRepository {
+                                topology_epoch: completion.topology_epoch,
+                                branches_loaded: completion.branches_loaded,
+                                checked_at: Instant::now(),
+                                repository: repository.clone(),
+                            },
+                        );
+                    }
+                }
+            }
             self.active_refresh
                 .as_mut()
                 .expect("matched active catalog refresh")
@@ -661,6 +751,7 @@ impl LinkedWorktreeCatalog {
                 continue;
             }
             self.snapshot.repositories = completion.repositories;
+            result.branches_changed = completion.branches_loaded;
             self.relevant_common_dirs = completion.relevant;
             match self.store.reconcile(
                 completion.discovered,
@@ -1008,6 +1099,26 @@ fn repository_label(common_dir: &Path, worktrees: &[LinkedWorktree]) -> String {
         .or_else(|| common_dir.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| common_dir.display().to_string())
+}
+
+fn cached_repository_is_reusable(
+    cached: &CachedRepository,
+    topology_epoch: u64,
+    load_branches: bool,
+    candidate_paths: Option<&[PathBuf]>,
+) -> bool {
+    cached.topology_epoch == topology_epoch
+        && cached.repository.error.is_none()
+        && (load_branches || cached.checked_at.elapsed() <= INVENTORY_CACHE_TTL)
+        && candidate_paths.is_none_or(|paths| {
+            paths.iter().all(|path| {
+                cached
+                    .repository
+                    .worktrees
+                    .iter()
+                    .any(|worktree| same_path(&worktree.path, path))
+            })
+        })
 }
 
 fn workspace_label(root: &Path) -> String {

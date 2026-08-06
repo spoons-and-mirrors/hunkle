@@ -24,6 +24,13 @@ pub(crate) struct SqliteColumn {
 pub(crate) struct SqlitePageKey {
     pub(crate) object: String,
     pub(crate) offset: usize,
+    pub(crate) cursor: Option<SqlitePageCursor>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SqlitePageCursor {
+    pub(crate) value: i64,
+    pub(crate) reverse: bool,
 }
 
 #[derive(Debug)]
@@ -33,6 +40,8 @@ pub(crate) struct SqlitePage {
     pub(crate) columns_truncated: bool,
     pub(crate) rows: Vec<Vec<String>>,
     pub(crate) has_next: bool,
+    pub(crate) first_cursor: Option<i64>,
+    pub(crate) last_cursor: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -163,6 +172,7 @@ impl SqliteBrowser {
         let key = SqlitePageKey {
             object: self.selected_object()?.name.clone(),
             offset,
+            cursor: None,
         };
         self.page = None;
         self.page_loading = true;
@@ -198,18 +208,32 @@ impl SqliteBrowser {
 
     pub(crate) fn page_by(&mut self, delta: isize) -> Option<SqlitePageKey> {
         let page = self.page.as_ref()?;
-        let offset = if delta > 0 {
+        let (offset, cursor) = if delta > 0 {
             if !page.has_next {
                 return None;
             }
-            page.key.offset.saturating_add(SQLITE_PAGE_SIZE)
+            (
+                page.key.offset.saturating_add(SQLITE_PAGE_SIZE),
+                page.last_cursor.map(|value| SqlitePageCursor {
+                    value,
+                    reverse: false,
+                }),
+            )
         } else {
             if page.key.offset == 0 {
                 return None;
             }
-            page.key.offset.saturating_sub(SQLITE_PAGE_SIZE)
+            (
+                page.key.offset.saturating_sub(SQLITE_PAGE_SIZE),
+                page.first_cursor.map(|value| SqlitePageCursor {
+                    value,
+                    reverse: true,
+                }),
+            )
         };
-        self.begin_page(offset)
+        let mut key = self.begin_page(offset)?;
+        key.cursor = cursor;
+        Some(key)
     }
 
     pub(crate) fn shift_columns(&mut self, delta: isize) {

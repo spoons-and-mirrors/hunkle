@@ -1049,6 +1049,9 @@ impl App {
             let details = self.repository_picker_details();
             self.header_picker.sync_repository_details(&details);
         }
+        if catalog_poll.branches_changed {
+            self.sync_scheduler_catalog();
+        }
         let picker_stats = picker_roots
             .into_iter()
             .filter_map(|root| {

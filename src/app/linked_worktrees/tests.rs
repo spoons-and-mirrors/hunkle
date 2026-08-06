@@ -84,6 +84,54 @@ fn resolves_agent_destination_metadata_from_its_worktree() {
 }
 
 #[test]
+fn defers_branch_discovery_until_scheduler_requests_it() {
+    let mut catalog = LinkedWorktreeCatalog::new(None);
+
+    assert!(!catalog.refresh_request().key.load_branches);
+    catalog.request_branches();
+
+    assert!(catalog.branches_requested);
+    assert!(
+        catalog
+            .active_refresh
+            .as_ref()
+            .is_some_and(|refresh| refresh.key.load_branches)
+    );
+}
+
+#[test]
+fn inventory_cache_reuses_only_fresh_matching_topology() {
+    let cached = CachedRepository {
+        topology_epoch: 3,
+        branches_loaded: false,
+        checked_at: Instant::now(),
+        repository: repository(),
+    };
+    let known_worktree = PathBuf::from("/repo-feature");
+
+    assert!(cached_repository_is_reusable(
+        &cached,
+        3,
+        false,
+        Some(std::slice::from_ref(&known_worktree)),
+    ));
+    assert!(!cached_repository_is_reusable(&cached, 4, false, None,));
+    assert!(!cached_repository_is_reusable(
+        &cached,
+        3,
+        false,
+        Some(&[PathBuf::from("/new-worktree")]),
+    ));
+
+    let stale = CachedRepository {
+        checked_at: Instant::now() - INVENTORY_CACHE_TTL - Duration::from_millis(1),
+        ..cached
+    };
+    assert!(!cached_repository_is_reusable(&stale, 3, false, None));
+    assert!(cached_repository_is_reusable(&stale, 3, true, None));
+}
+
+#[test]
 fn repeated_presented_card_requests_stay_inside_the_backoff_window() {
     let calls = Arc::new(AtomicUsize::new(0));
     let loader_calls = Arc::clone(&calls);
@@ -310,6 +358,8 @@ fn ignores_stale_inventory_completions() {
         .sender
         .send(InventoryCompletion {
             generation: 1,
+            branches_loaded: false,
+            topology_epoch: 0,
             repositories: Vec::new(),
             discovered: Vec::new(),
             pruned: Vec::new(),
@@ -357,6 +407,8 @@ fn changed_in_flight_refreshes_coalesce_to_one_follow_up() {
         .sender
         .send(InventoryCompletion {
             generation: 1,
+            branches_loaded: false,
+            topology_epoch: 0,
             repositories: Vec::new(),
             discovered: Vec::new(),
             pruned: Vec::new(),
@@ -409,6 +461,8 @@ fn reverted_intent_still_follows_a_superseded_flight() {
         .sender
         .send(InventoryCompletion {
             generation: 1,
+            branches_loaded: false,
+            topology_epoch: 0,
             repositories: Vec::new(),
             discovered: Vec::new(),
             pruned: Vec::new(),
@@ -465,6 +519,8 @@ fn superseded_topology_and_stale_stats_completions_cannot_publish() {
         .sender
         .send(InventoryCompletion {
             generation: 7,
+            branches_loaded: false,
+            topology_epoch: 0,
             repositories: Vec::new(),
             discovered: Vec::new(),
             pruned: vec![PathBuf::from("/repo/.git")],

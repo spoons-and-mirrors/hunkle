@@ -279,6 +279,28 @@ impl ScheduledTaskComposer {
         self.destination_picker.close();
     }
 
+    fn sync_destinations(&mut self, mut destinations: Vec<SchedulerDestination>) {
+        let selected = self.destinations.get(self.destination).cloned();
+        self.destination = selected
+            .as_ref()
+            .and_then(|selected| {
+                destinations.iter().position(|destination| {
+                    destination.path == selected.path
+                        && destination.repository_root == selected.repository_root
+                        && destination.branch.name == selected.branch.name
+                })
+            })
+            .or_else(|| {
+                selected.map(|selected| {
+                    destinations.push(selected);
+                    destinations.len() - 1
+                })
+            })
+            .unwrap_or(0);
+        self.destinations = destinations;
+        self.close_destination_picker();
+    }
+
     pub(crate) fn destination_picker_open(&self) -> bool {
         self.destination_picker.is_open()
     }
@@ -467,6 +489,7 @@ impl App {
             return;
         }
         self.header_picker.close();
+        self.linked_worktrees.request_branches();
         self.mode = Mode::Scheduler;
         self.scheduler.surface = SchedulerSurface::Tasks;
         self.scheduler.composer = None;
@@ -495,6 +518,39 @@ impl App {
             self.scheduler.error = Some(error);
         }
         self.sync_scheduler_selection();
+    }
+
+    pub(crate) fn sync_scheduler_catalog(&mut self) {
+        if self.mode != Mode::Scheduler {
+            return;
+        }
+        self.scheduler.error = self
+            .linked_worktrees
+            .snapshot()
+            .repositories
+            .iter()
+            .find_map(|repository| {
+                repository.branch_error.as_ref().map(|error| {
+                    format!("Could not load branches for {}: {error}", repository.label)
+                })
+            });
+        let destinations = self.scheduler_destinations();
+        if let Some(composer) = &mut self.scheduler.composer {
+            composer.sync_destinations(destinations.clone());
+        }
+        let task_destinations = destinations
+            .into_iter()
+            .filter_map(|destination| {
+                Some(ScheduledTaskDestination {
+                    path: destination.path?,
+                    repository: destination.repository,
+                    branch: destination.checkout_branch,
+                })
+            })
+            .collect();
+        if let Err(error) = self.herdr.sync_scheduled_task_files(task_destinations) {
+            self.scheduler.error = Some(error);
+        }
     }
 
     pub(crate) fn sync_scheduler_selection(&mut self) {
@@ -1223,5 +1279,42 @@ impl App {
         self.regions
             .scroll_target_rect(ScrollTarget::SchedulerDestinations)
             .map_or(1, |rect| usize::from(rect.height).max(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{Branch, ScheduledTaskComposer, SchedulerDestination};
+
+    fn destination(path: &str, branch: &str) -> SchedulerDestination {
+        SchedulerDestination {
+            path: Some(PathBuf::from(path)),
+            repository_root: PathBuf::from("/repo"),
+            repository: "repo".to_owned(),
+            branch: Branch {
+                name: branch.to_owned(),
+                upstream: None,
+                remote: false,
+                current: branch == "main",
+                default: branch == "main",
+                last_touched_at: None,
+            },
+            checkout_branch: branch.to_owned(),
+            worktree: Some("worktree".to_owned()),
+        }
+    }
+
+    #[test]
+    fn branch_refresh_preserves_the_composer_destination() {
+        let selected = destination("/repo/feature", "feature");
+        let mut composer = ScheduledTaskComposer::new(vec![selected.clone()]);
+        composer.title.set("Retained task");
+
+        composer.sync_destinations(vec![destination("/repo", "main"), selected.clone()]);
+
+        assert_eq!(composer.destinations[composer.destination], selected);
+        assert_eq!(composer.title.text(), "Retained task");
     }
 }
