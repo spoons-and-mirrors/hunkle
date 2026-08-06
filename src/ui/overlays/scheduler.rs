@@ -649,6 +649,7 @@ fn draw_composer(
             ("Minutes", SchedulerField::Schedule),
             regions,
         );
+        draw_discord_field(frame, composer, inner, &mut y, regions);
         draw_text(
             frame,
             Rect::new(inner.x, y, inner.width, 1),
@@ -710,6 +711,45 @@ fn draw_composer(
         button(frame, regions, rect, label, target, color);
         x = rect.right().saturating_add(1);
     }
+}
+
+fn draw_discord_field(
+    frame: &mut Frame<'_>,
+    composer: &crate::app::ScheduledTaskComposer,
+    area: Rect,
+    y: &mut u16,
+    regions: &mut SchedulerRegions,
+) {
+    draw_text(
+        frame,
+        Rect::new(area.x, *y, 12, 1),
+        "Discord",
+        Style::default().fg(palette().faint),
+    );
+    let rect = Rect::new(area.x + 12, *y, area.width.saturating_sub(12), 1);
+    let active = composer.field == SchedulerField::Discord;
+    frame.render_widget(
+        Paragraph::new(truncate_width(
+            &format!("< {} >", composer.discord_webhook_label()),
+            usize::from(rect.width),
+        ))
+        .style(
+            Style::default()
+                .fg(if active {
+                    palette().ink
+                } else {
+                    palette().muted
+                })
+                .bg(if active {
+                    palette().selected
+                } else {
+                    palette().surface_alt
+                }),
+        ),
+        rect,
+    );
+    regions.target(Target::Field(SchedulerField::Discord), rect);
+    *y += 2;
 }
 
 fn draw_field(

@@ -421,6 +421,10 @@ pub(crate) enum SettingsHitTarget {
     OpenCodeModel,
     OpenCodeReasoning,
     DiscordWebhook,
+    DiscordAdd,
+    DiscordField(usize),
+    DiscordSave,
+    DiscordCancel,
     DiscordTest,
     DiscordRemove,
     AutoFetch,
@@ -493,6 +497,10 @@ impl SettingsHitTarget {
             | Self::OpenCodeModel
             | Self::OpenCodeReasoning
             | Self::DiscordWebhook
+            | Self::DiscordAdd
+            | Self::DiscordField(_)
+            | Self::DiscordSave
+            | Self::DiscordCancel
             | Self::DiscordTest
             | Self::DiscordRemove => None,
         }

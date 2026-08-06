@@ -449,7 +449,10 @@ pub(crate) struct HerdrSession {
 }
 
 impl HerdrSession {
-    pub(crate) fn detect(config_dir: Option<&Path>, discord_webhook_url: Option<String>) -> Self {
+    pub(crate) fn detect(
+        config_dir: Option<&Path>,
+        discord_webhooks: Vec<crate::app::DiscordWebhookConfig>,
+    ) -> Self {
         #[cfg(test)]
         let environment: Option<client::Environment> = None;
         #[cfg(not(test))]
@@ -477,7 +480,7 @@ impl HerdrSession {
                 scheduler::SchedulerService::open(
                     config_dir.map(|path| path.join("scheduler.sqlite3")),
                     Some(files_root),
-                    discord_webhook_url,
+                    discord_webhooks,
                 )
             }) {
                 Ok(scheduler) => session.scheduler = Some(scheduler),
@@ -599,18 +602,18 @@ impl HerdrSession {
         self.scheduler_service()?.refresh_run(id)
     }
 
-    pub(crate) fn configure_discord_webhook(
+    pub(crate) fn configure_discord_webhooks(
         &self,
-        webhook_url: Option<String>,
+        webhooks: Vec<crate::app::DiscordWebhookConfig>,
     ) -> Result<(), String> {
         let Some(scheduler) = self.scheduler.as_ref() else {
             return Ok(());
         };
-        scheduler.configure_discord_webhook(webhook_url)
+        scheduler.configure_discord_webhooks(webhooks)
     }
 
-    pub(crate) fn test_discord_webhook(&self) -> Result<(), String> {
-        self.scheduler_service()?.test_discord_webhook()
+    pub(crate) fn test_discord_webhook(&self, channel: String) -> Result<(), String> {
+        self.scheduler_service()?.test_discord_webhook(channel)
     }
 
     pub(crate) fn resolve_scheduled_run_session(
@@ -1806,7 +1809,7 @@ impl HerdrSession {
 
     #[cfg(test)]
     pub(crate) fn set_scheduled_tasks_for_test(&mut self, tasks: Vec<ScheduledTask>) {
-        let mut scheduler = scheduler::SchedulerService::open(None, None, None).unwrap();
+        let mut scheduler = scheduler::SchedulerService::open(None, None, Vec::new()).unwrap();
         scheduler.tasks = tasks;
         self.scheduler = Some(scheduler);
     }
@@ -2229,7 +2232,8 @@ mod latest_user_message_cache_tests {
     #[test]
     fn binds_a_scheduled_run_to_its_live_terminal_and_session() {
         let mut session = HerdrSession::new(true, None, None);
-        session.scheduler = Some(scheduler::SchedulerService::open(None, None, None).unwrap());
+        session.scheduler =
+            Some(scheduler::SchedulerService::open(None, None, Vec::new()).unwrap());
         let scheduler = session.scheduler.as_mut().unwrap();
         scheduler.tasks.push(scheduler::ScheduledTask {
             id: 7,
@@ -2237,6 +2241,7 @@ mod latest_user_message_cache_tests {
             description: String::new(),
             prompt: "Review".to_owned(),
             model: String::new(),
+            discord_webhook_id: String::new(),
             destination: PathBuf::from("/repo"),
             repository: "repo".to_owned(),
             branch: "main".to_owned(),

@@ -1982,17 +1982,18 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(discord_screen.contains("SCHEDULED TASK DELIVERY"));
-    assert!(discord_screen.contains("Not configured"));
+    assert!(discord_screen.contains("DISCORD WEBHOOKS"));
+    assert!(discord_screen.contains("No webhooks configured"));
     let webhook_row = app
         .regions
         .hit_target_rect(HitTarget::Settings(SettingsHitTarget::DiscordWebhook))
         .unwrap();
     click(&mut app, webhook_row.x + 1, webhook_row.y);
-    assert!(app.discord_webhook_input.is_some());
-    app.discord_webhook_input
+    assert!(app.discord_webhook_editor.is_some());
+    app.discord_webhook_editor
         .as_mut()
         .unwrap()
+        .url
         .set("https://discord.com/api/webhooks/123456/token");
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let masked_screen = terminal
@@ -2004,7 +2005,7 @@ fn renders_every_primary_surface() {
         .collect::<String>();
     assert!(!masked_screen.contains("discord.com"));
     assert!(!masked_screen.contains("token"));
-    app.discord_webhook_input = None;
+    app.discord_webhook_editor = None;
 
     app.settings_page = SettingsPage::Shortcuts;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

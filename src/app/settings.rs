@@ -9,7 +9,7 @@ use crate::{
     media::MediaPreviewProtocol,
 };
 
-use super::{GraphColumn, Shortcuts, explorer::MINIMUM_EXPLORER_PANE_WIDTH};
+use super::{GraphColumn, Shortcuts, TextInput, explorer::MINIMUM_EXPLORER_PANE_WIDTH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTimeDisplay {
@@ -190,6 +190,88 @@ pub(crate) struct DiscordWebhookStore {
     path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DiscordWebhookConfig {
+    pub(crate) id: String,
+    pub(crate) server: String,
+    pub(crate) channel: String,
+    pub(crate) webhook_name: String,
+    pub(crate) url: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct DiscordWebhookEditor {
+    pub(crate) server: TextInput,
+    pub(crate) channel: TextInput,
+    pub(crate) webhook_name: TextInput,
+    pub(crate) url: TextInput,
+    pub(crate) field: usize,
+    pub(crate) original_id: Option<String>,
+}
+
+impl DiscordWebhookEditor {
+    pub(crate) fn new(webhook: Option<&DiscordWebhookConfig>) -> Self {
+        let mut editor = Self {
+            server: TextInput::default(),
+            channel: TextInput::default(),
+            webhook_name: TextInput::default(),
+            url: TextInput::default(),
+            field: 0,
+            original_id: webhook.map(|webhook| webhook.id.clone()),
+        };
+        if let Some(webhook) = webhook {
+            editor.server.set(&webhook.server);
+            editor.channel.set(&webhook.channel);
+            editor.webhook_name.set(&webhook.webhook_name);
+            editor.url.set(&webhook.url);
+        }
+        editor.active_input_mut().focus();
+        editor
+    }
+
+    pub(crate) fn active_input_mut(&mut self) -> &mut TextInput {
+        match self.field {
+            0 => &mut self.server,
+            1 => &mut self.channel,
+            2 => &mut self.webhook_name,
+            3 => &mut self.url,
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn select(&mut self, field: usize) {
+        self.field = field.min(3);
+        self.active_input_mut().focus();
+    }
+
+    pub(crate) fn config(&self) -> Result<DiscordWebhookConfig, String> {
+        let url = self.url.text().trim().to_owned();
+        let id = self
+            .original_id
+            .clone()
+            .unwrap_or_else(|| discord_webhook_id(&url).unwrap_or_default().to_owned());
+        let webhook = DiscordWebhookConfig {
+            id,
+            server: self.server.text().trim().to_owned(),
+            channel: self
+                .channel
+                .text()
+                .trim()
+                .trim_start_matches('#')
+                .to_owned(),
+            webhook_name: self.webhook_name.text().trim().to_owned(),
+            url,
+        };
+        validate_discord_webhooks(std::slice::from_ref(&webhook))?;
+        Ok(webhook)
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DiscordWebhookFile {
+    webhooks: Vec<DiscordWebhookConfig>,
+}
+
 impl DiscordWebhookStore {
     pub(crate) fn new(config_dir: Option<&Path>) -> Self {
         Self {
@@ -202,51 +284,89 @@ impl DiscordWebhookStore {
         Self { path: Some(path) }
     }
 
-    pub(crate) fn load(&self) -> std::io::Result<Option<String>> {
+    pub(crate) fn load(&self) -> std::io::Result<Vec<DiscordWebhookConfig>> {
         let Some(path) = self.path.as_deref() else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let contents = match fs::read_to_string(path) {
             Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
-        let url = contents.trim();
-        if url.is_empty() {
-            return Ok(None);
-        }
-        if !valid_discord_webhook_url(url) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "stored Discord webhook URL is invalid",
-            ));
-        }
-        Ok(Some(url.to_owned()))
+        let contents = contents.trim();
+        let webhooks = if valid_discord_webhook_url(contents) {
+            vec![DiscordWebhookConfig {
+                id: discord_webhook_id(contents).unwrap_or_default().to_owned(),
+                server: "Unknown server".to_owned(),
+                channel: "Unknown channel".to_owned(),
+                webhook_name: "Unnamed webhook".to_owned(),
+                url: contents.to_owned(),
+            }]
+        } else {
+            serde_json::from_str::<DiscordWebhookFile>(contents)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+                .webhooks
+        };
+        validate_discord_webhooks(&webhooks)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok(webhooks)
     }
 
-    pub(crate) fn save(&self, url: Option<&str>) -> std::io::Result<()> {
+    pub(crate) fn save(&self, webhooks: &[DiscordWebhookConfig]) -> std::io::Result<()> {
         let Some(path) = self.path.as_deref() else {
             return Ok(());
         };
-        let Some(url) = url else {
+        if webhooks.is_empty() {
             return match fs::remove_file(path) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(error),
             };
-        };
-        let url = url.trim();
-        if !valid_discord_webhook_url(url) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Discord webhook URL is invalid",
-            ));
         }
+        validate_discord_webhooks(webhooks)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        atomic_write_private(path, url.as_bytes())
+        let contents = serde_json::to_vec_pretty(&DiscordWebhookFile {
+            webhooks: webhooks.to_vec(),
+        })
+        .map_err(std::io::Error::other)?;
+        atomic_write_private(path, &contents)
     }
+}
+
+fn validate_discord_webhooks(webhooks: &[DiscordWebhookConfig]) -> Result<(), String> {
+    for (index, webhook) in webhooks.iter().enumerate() {
+        for (label, value) in [
+            ("server", webhook.server.trim()),
+            ("channel", webhook.channel.trim()),
+            ("webhook name", webhook.webhook_name.trim()),
+        ] {
+            if value.is_empty() || value.len() > 64 || value.chars().any(char::is_control) {
+                return Err(format!("Discord {label} must be 1-64 characters"));
+            }
+        }
+        if !valid_discord_webhook_url(&webhook.url) {
+            return Err(format!(
+                "Discord webhook URL for `{}` is invalid",
+                webhook.webhook_name
+            ));
+        }
+        if webhook.id.is_empty() || !webhook.id.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("Discord webhook ID is invalid".to_owned());
+        }
+        if webhooks[..index]
+            .iter()
+            .any(|existing| existing.id == webhook.id)
+        {
+            return Err(format!(
+                "Discord webhook `{}` is duplicated",
+                webhook.webhook_name
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn valid_discord_webhook_url(value: &str) -> bool {
@@ -261,6 +381,20 @@ pub(crate) fn valid_discord_webhook_url(value: &str) -> bool {
         return false;
     };
     !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) && !token.is_empty()
+}
+
+pub(crate) fn discord_webhook_id(value: &str) -> Option<&str> {
+    value
+        .trim()
+        .strip_prefix("https://discord.com/api/webhooks/")
+        .or_else(|| {
+            value
+                .trim()
+                .strip_prefix("https://discordapp.com/api/webhooks/")
+        })
+        .and_then(|path| path.split_once('/'))
+        .map(|(id, _)| id)
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 impl SettingsStore {
@@ -491,10 +625,23 @@ mod tests {
         let store = DiscordWebhookStore::at(path.clone());
         let webhook = "https://discord.com/api/webhooks/123456/token";
 
-        assert_eq!(store.load().unwrap(), None);
-        assert!(store.save(Some("https://example.com/not-discord")).is_err());
-        store.save(Some(webhook)).unwrap();
-        assert_eq!(store.load().unwrap().as_deref(), Some(webhook));
+        assert!(store.load().unwrap().is_empty());
+        let config = DiscordWebhookConfig {
+            id: "123456".to_owned(),
+            server: "Hunkle".to_owned(),
+            channel: "reports".to_owned(),
+            webhook_name: "Scheduler".to_owned(),
+            url: webhook.to_owned(),
+        };
+        let second = DiscordWebhookConfig {
+            id: "654321".to_owned(),
+            server: "Hunkle".to_owned(),
+            channel: "reports".to_owned(),
+            webhook_name: "Deployments".to_owned(),
+            url: "https://discord.com/api/webhooks/654321/other-token".to_owned(),
+        };
+        store.save(&[config.clone(), second.clone()]).unwrap();
+        assert_eq!(store.load().unwrap(), vec![config, second]);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -503,8 +650,26 @@ mod tests {
                 0o600
             );
         }
-        store.save(None).unwrap();
+        store.save(&[]).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn discord_webhook_store_migrates_the_single_url_format() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("discord-webhook");
+        let store = DiscordWebhookStore::at(path.clone());
+        let webhook = "https://discord.com/api/webhooks/123456/token";
+        atomic_write_private(&path, webhook.as_bytes()).unwrap();
+
+        let loaded = store.load().unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "123456");
+        assert_eq!(loaded[0].server, "Unknown server");
+        assert_eq!(loaded[0].channel, "Unknown channel");
+        assert_eq!(loaded[0].webhook_name, "Unnamed webhook");
+        assert_eq!(loaded[0].url, webhook);
     }
 
     #[test]

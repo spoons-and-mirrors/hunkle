@@ -57,7 +57,8 @@ pub(crate) use scheduler::{
     SchedulerSurface,
 };
 pub(crate) use settings::{
-    DiscordWebhookStore, SettingsStore, valid_discord_webhook_url, valid_opencode_model,
+    DiscordWebhookConfig, DiscordWebhookEditor, DiscordWebhookStore, SettingsStore,
+    valid_discord_webhook_url, valid_opencode_model,
 };
 pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
@@ -186,9 +187,10 @@ pub struct App {
     pub(crate) opencode_model_input: Option<String>,
     pub(crate) opencode_error: Option<String>,
     pub(crate) discord_selection: usize,
-    pub(crate) discord_webhook_input: Option<TextInput>,
+    pub(crate) discord_webhook_index: usize,
+    pub(crate) discord_webhook_editor: Option<DiscordWebhookEditor>,
     pub(crate) discord_webhook_error: Option<String>,
-    pub(crate) discord_webhook_url: Option<String>,
+    pub(crate) discord_webhooks: Vec<DiscordWebhookConfig>,
     pub notice: Option<String>,
     pub regions: Regions,
     pub(crate) selection: SelectionState,
@@ -243,10 +245,10 @@ impl App {
         };
         let workspace_config_dir = settings_store.config_dir();
         let discord_webhook_store = DiscordWebhookStore::new(workspace_config_dir);
-        let (discord_webhook_url, discord_webhook_notice) = match discord_webhook_store.load() {
-            Ok(url) => (url, None),
+        let (discord_webhooks, discord_webhook_notice) = match discord_webhook_store.load() {
+            Ok(webhooks) => (webhooks, None),
             Err(error) => (
-                None,
+                Vec::new(),
                 Some(format!("Could not load Discord webhook: {error}")),
             ),
         };
@@ -297,7 +299,7 @@ impl App {
             let _ = linked_worktrees
                 .remember_workspace(repository.common_dir.as_deref(), &repository.root);
         }
-        let mut herdr = HerdrSession::detect(workspace_config_dir, discord_webhook_url.clone());
+        let mut herdr = HerdrSession::detect(workspace_config_dir, discord_webhooks.clone());
         herdr.set_cross_workspace_agents(settings.cross_workspace_agents);
         linked_worktrees.observe_herdr(herdr.linked_worktree_observation());
         linked_worktrees.refresh();
@@ -365,9 +367,10 @@ impl App {
             opencode_model_input: None,
             opencode_error: None,
             discord_selection: 0,
-            discord_webhook_input: None,
+            discord_webhook_index: 0,
+            discord_webhook_editor: None,
             discord_webhook_error: None,
-            discord_webhook_url,
+            discord_webhooks,
             notice: open_in_background
                 .then(|| "Opening workspace…".to_owned())
                 .or(discord_webhook_notice),
@@ -903,8 +906,8 @@ impl App {
                 self.editor_error = None;
             }
             Mode::Settings => {
-                if let Some(input) = &mut self.discord_webhook_input {
-                    input.insert_single_line(text);
+                if let Some(editor) = &mut self.discord_webhook_editor {
+                    editor.active_input_mut().insert_single_line(text);
                     self.discord_webhook_error = None;
                 } else if let Some(input) = &mut self.opencode_model_input {
                     input.push_str(text);
@@ -1077,8 +1080,8 @@ impl App {
             changed = true;
         }
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
-        if let Some(input) = &mut self.discord_webhook_input {
-            changed |= input.poll_blink(
+        if let Some(editor) = &mut self.discord_webhook_editor {
+            changed |= editor.active_input_mut().poll_blink(
                 self.mode == Mode::Settings && self.settings_page == SettingsPage::Discord,
             );
         }

@@ -92,6 +92,7 @@ frequency: 2h
 title: "Review open changes"
 description: "Inspect the worktree and report risks"
 model: "openai/gpt-5.6-sol"
+discord_webhook: "123456789012345678"
 destination: "/home/me/code/project"
 repository: "project"
 branch: "main"
@@ -102,16 +103,18 @@ Review the current diff. Summarize correctness risks and missing tests.
 
 The destination and schedule fields are required; `model` is optional and uses
 OpenCode's `provider/model` syntax. Leave it empty to use OpenCode's configured default.
+`discord_webhook` is the stable ID of a webhook configured in **Settings > Discord**;
+leave it empty to disable Discord delivery for the task.
 `status` is `enabled` or `disabled`.
 `frequency` accepts a positive number of minutes, or a number followed by `m`, `h`,
 or `d`. `destination` is the agent's worktree path; `repository` and `branch` label
 that checkout. The Markdown body is the task prompt.
 
-Open **Settings > Discord** to save, test, or remove a channel-specific webhook.
-When configured, Hunkle publishes every completed scheduled run's final assistant
-response. Discord mentions are disabled and responses longer than one Discord message
-are truncated. Delivery failures do not fail or rerun the task; they appear on the
-run, and **Refresh** retries the delivery.
+Open **Settings > Discord** to save, test, or remove webhooks identified by server,
+channel, and webhook name. Each scheduled task can independently select one webhook or
+leave Discord delivery off. Mentions are disabled and responses longer than one
+Discord message are truncated. Delivery failures do not fail or rerun the task; they
+appear on the run, and **Refresh** retries the delivery.
 
 ## Keys
 

@@ -12,8 +12,9 @@ pub(crate) struct SettingsView<'a> {
     pub(crate) opencode_model_input: Option<&'a str>,
     pub(crate) opencode_error: Option<&'a str>,
     pub(crate) discord_selection: usize,
-    pub(crate) discord_webhook_input: Option<&'a TextInput>,
-    pub(crate) discord_webhook_configured: bool,
+    pub(crate) discord_webhooks: &'a [DiscordWebhookConfig],
+    pub(crate) discord_webhook_index: usize,
+    pub(crate) discord_webhook_editor: Option<&'a DiscordWebhookEditor>,
     pub(crate) discord_webhook_error: Option<&'a str>,
     pub(crate) herdr_available: bool,
 }
@@ -35,8 +36,9 @@ pub(crate) fn draw_settings(
         opencode_model_input,
         opencode_error,
         discord_selection,
-        discord_webhook_input,
-        discord_webhook_configured,
+        discord_webhooks,
+        discord_webhook_index,
+        discord_webhook_editor,
         discord_webhook_error,
         herdr_available,
     } = view;
@@ -314,102 +316,144 @@ pub(crate) fn draw_settings(
     }
     if page == SettingsPage::Discord {
         let inner = Rect::new(
-            area.x.saturating_add(2),
+            area.x + 2,
             area.y,
             area.width.saturating_sub(4),
             area.height,
         );
-        let webhook_row = Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1);
-        let test_row = Rect::new(inner.x, area.y.saturating_add(11), inner.width, 1);
-        let remove_row = Rect::new(inner.x, area.y.saturating_add(13), inner.width, 1);
         frame.render_widget(
             Paragraph::new(Line::styled(
-                "SCHEDULED TASK DELIVERY",
+                "DISCORD WEBHOOKS",
                 Style::default()
                     .fg(palette().muted)
                     .add_modifier(Modifier::BOLD),
             )),
-            Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
+            Rect::new(inner.x, area.y + 4, inner.width, 1),
         );
         frame.render_widget(
-            Paragraph::new("Publishes every completed scheduled task to one Discord channel.")
+            Paragraph::new("Tasks opt into one configured webhook.")
                 .style(Style::default().fg(palette().faint)),
-            Rect::new(inner.x, area.y.saturating_add(5), inner.width, 1),
+            Rect::new(inner.x, area.y + 5, inner.width, 1),
         );
-
-        let webhook_status = if discord_webhook_input.is_some() {
-            "Editing"
-        } else if discord_webhook_configured {
-            "Configured"
-        } else {
-            "Not configured"
-        };
-        let webhook_padding = usize::from(webhook_row.width)
-            .saturating_sub("Webhook URL".len() + webhook_status.len());
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("Webhook URL", Style::default().fg(palette().ink)),
-                Span::raw(" ".repeat(webhook_padding)),
-                Span::styled(webhook_status, Style::default().fg(palette().accent)),
-            ]))
-            .style(Style::default().bg(if discord_selection == 0 {
-                palette().selected
-            } else {
-                palette().surface_alt
-            })),
-            webhook_row,
-        );
-        let value_row = Rect::new(inner.x, area.y.saturating_add(8), inner.width, 1);
-        if let Some(input) = discord_webhook_input {
-            frame.render_widget(Paragraph::new(masked_input_line(input)), value_row);
-        } else {
+        if let Some(editor) = discord_webhook_editor {
+            for (index, (label, input)) in [
+                ("Server", &editor.server),
+                ("Channel", &editor.channel),
+                ("Webhook name", &editor.webhook_name),
+                ("Webhook URL", &editor.url),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let y = area.y + 7 + u16::try_from(index).unwrap_or(0) * 2;
+                let label_rect = Rect::new(inner.x, y, 14, 1);
+                let input_rect = Rect::new(inner.x + 14, y, inner.width.saturating_sub(14), 1);
+                frame.render_widget(
+                    Paragraph::new(label).style(Style::default().fg(palette().faint)),
+                    label_rect,
+                );
+                frame.render_widget(
+                    Paragraph::new(if index == 3 {
+                        vec![masked_input_line(input)]
+                    } else {
+                        text_input_lines(input, editor.field == index, palette().accent)
+                    })
+                    .style(Style::default().bg(if editor.field == index {
+                        palette().selected
+                    } else {
+                        palette().surface_alt
+                    })),
+                    input_rect,
+                );
+                targets.push((
+                    HitTarget::Settings(SettingsHitTarget::DiscordField(index)),
+                    input_rect,
+                ));
+            }
+            let cancel = Rect::new(inner.x, area.y + 16, 10, 1);
+            let save = Rect::new(cancel.right() + 1, cancel.y, 8, 1);
             frame.render_widget(
-                Paragraph::new(if discord_webhook_configured {
-                    "••••••••••••••••••••••••"
-                } else {
-                    "Select Webhook URL to paste a Discord webhook"
-                })
-                .style(Style::default().fg(palette().faint)),
-                value_row,
+                Paragraph::new(" CANCEL ").style(Style::default().fg(palette().faint)),
+                cancel,
             );
-        }
-
-        for (label, rect, selected, enabled) in [
-            (
-                "Send test message",
-                test_row,
-                discord_selection == 1,
-                discord_webhook_configured,
-            ),
-            (
-                "Remove webhook",
-                remove_row,
-                discord_selection == 2,
-                discord_webhook_configured,
-            ),
-        ] {
             frame.render_widget(
-                Paragraph::new(label).style(
+                Paragraph::new(" SAVE ").style(Style::default().fg(palette().accent)),
+                save,
+            );
+            targets.extend([
+                (
+                    HitTarget::Settings(SettingsHitTarget::DiscordCancel),
+                    cancel,
+                ),
+                (HitTarget::Settings(SettingsHitTarget::DiscordSave), save),
+            ]);
+        } else {
+            let selector = Rect::new(inner.x, area.y + 7, inner.width, 1);
+            let current = discord_webhooks.get(discord_webhook_index);
+            let label = current.map_or_else(
+                || "No webhooks configured".to_owned(),
+                |webhook| {
+                    format!(
+                        "< {} / #{} / {} >",
+                        webhook.server, webhook.channel, webhook.webhook_name
+                    )
+                },
+            );
+            frame.render_widget(
+                Paragraph::new(truncate_width(&label, usize::from(selector.width))).style(
                     Style::default()
-                        .fg(if enabled {
-                            palette().ink
-                        } else {
-                            palette().faint
-                        })
-                        .bg(if selected {
+                        .fg(palette().ink)
+                        .bg(if discord_selection == 0 {
                             palette().selected
                         } else {
                             palette().surface_alt
                         }),
                 ),
-                rect,
+                selector,
             );
+            let add = Rect::new(inner.x, area.y + 10, inner.width, 1);
+            let test = Rect::new(inner.x, area.y + 12, inner.width, 1);
+            let remove = Rect::new(inner.x, area.y + 14, inner.width, 1);
+            for (label, rect, selected) in [
+                ("Add webhook", add, discord_selection == 1),
+                ("Send test message", test, discord_selection == 2),
+                ("Remove webhook", remove, discord_selection == 3),
+            ] {
+                frame.render_widget(
+                    Paragraph::new(label).style(
+                        Style::default()
+                            .fg(if current.is_some() || rect == add {
+                                palette().ink
+                            } else {
+                                palette().faint
+                            })
+                            .bg(if selected {
+                                palette().selected
+                            } else {
+                                palette().surface_alt
+                            }),
+                    ),
+                    rect,
+                );
+            }
+            targets.extend([
+                (
+                    HitTarget::Settings(SettingsHitTarget::DiscordWebhook),
+                    selector,
+                ),
+                (HitTarget::Settings(SettingsHitTarget::DiscordAdd), add),
+                (HitTarget::Settings(SettingsHitTarget::DiscordTest), test),
+                (
+                    HitTarget::Settings(SettingsHitTarget::DiscordRemove),
+                    remove,
+                ),
+            ]);
         }
 
-        let footer = discord_webhook_error.unwrap_or(if discord_webhook_input.is_some() {
-            "Enter save   Ctrl+U clear   Esc cancel"
+        let footer = discord_webhook_error.unwrap_or(if discord_webhook_editor.is_some() {
+            "Enter next/save   Ctrl+S save   Esc cancel"
         } else {
-            "Enter select   Tab next   Esc close"
+            "←/→ webhook   Enter select   Tab next   Esc close"
         });
         frame.render_widget(
             Paragraph::new(truncate_width(
@@ -429,20 +473,6 @@ pub(crate) fn draw_settings(
                 1,
             ),
         );
-        targets.extend([
-            (
-                HitTarget::Settings(SettingsHitTarget::DiscordWebhook),
-                Rect::new(webhook_row.x, webhook_row.y, webhook_row.width, 2),
-            ),
-            (
-                HitTarget::Settings(SettingsHitTarget::DiscordTest),
-                test_row,
-            ),
-            (
-                HitTarget::Settings(SettingsHitTarget::DiscordRemove),
-                remove_row,
-            ),
-        ]);
         return targets;
     }
     frame.render_widget(

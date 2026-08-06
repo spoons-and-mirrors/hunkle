@@ -14,6 +14,7 @@ pub(crate) enum SchedulerField {
     Prompt,
     Model,
     Schedule,
+    Discord,
     Destination,
 }
 
@@ -52,6 +53,7 @@ impl SchedulerField {
                 Self::Prompt,
                 Self::Model,
                 Self::Schedule,
+                Self::Discord,
                 Self::Destination,
             ],
             backwards,
@@ -86,6 +88,8 @@ pub(crate) struct ScheduledTaskComposer {
     pub(crate) prompt_expanded: bool,
     pub(crate) prompt_scroll: usize,
     pub(crate) schedule: TextInput,
+    pub(crate) discord_webhooks: Vec<(String, String)>,
+    pub(crate) discord_webhook: usize,
     pub(crate) destinations: Vec<SchedulerDestination>,
     pub(crate) destination: usize,
     pub(crate) destination_card: SchedulerDestinationCard,
@@ -94,7 +98,10 @@ pub(crate) struct ScheduledTaskComposer {
 }
 
 impl ScheduledTaskComposer {
-    fn new(destinations: Vec<SchedulerDestination>) -> Self {
+    fn new(
+        destinations: Vec<SchedulerDestination>,
+        discord_webhooks: Vec<(String, String)>,
+    ) -> Self {
         let mut schedule = TextInput::default();
         schedule.set("15");
         Self {
@@ -108,6 +115,8 @@ impl ScheduledTaskComposer {
             prompt_expanded: false,
             prompt_scroll: 0,
             schedule,
+            discord_webhooks,
+            discord_webhook: 0,
             destinations,
             destination: 0,
             destination_card: SchedulerDestinationCard::Repository,
@@ -119,6 +128,7 @@ impl ScheduledTaskComposer {
     fn edit(
         task: &ScheduledTask,
         mut destinations: Vec<SchedulerDestination>,
+        mut discord_webhooks: Vec<(String, String)>,
         source: Option<ScheduledTaskSource>,
     ) -> Self {
         let destination = destinations
@@ -153,17 +163,55 @@ impl ScheduledTaskComposer {
                 });
                 destinations.len() - 1
             });
-        let mut composer = Self::new(destinations);
+        let discord_webhook = if task.discord_webhook_id.is_empty() {
+            0
+        } else {
+            discord_webhooks
+                .iter()
+                .position(|(id, _)| id == &task.discord_webhook_id)
+                .map(|index| index + 1)
+                .unwrap_or_else(|| {
+                    discord_webhooks.push((
+                        task.discord_webhook_id.clone(),
+                        "Missing configured webhook".to_owned(),
+                    ));
+                    discord_webhooks.len()
+                })
+        };
+        let mut composer = Self::new(destinations, discord_webhooks);
         composer.task_id = Some(task.id);
         composer.enabled = task.enabled;
         composer.source = source;
         composer.destination = destination;
+        composer.discord_webhook = discord_webhook;
         composer.title.set(&task.title);
         composer.description.set(&task.description);
         composer.prompt.set(&task.prompt);
         composer.model.set(&task.model);
         composer.schedule.set(&task.interval_minutes.to_string());
         composer
+    }
+
+    pub(crate) fn discord_webhook_label(&self) -> &str {
+        self.discord_webhook
+            .checked_sub(1)
+            .and_then(|index| self.discord_webhooks.get(index))
+            .map(|(_, label)| label.as_str())
+            .unwrap_or("Off")
+    }
+
+    fn cycle_discord_webhook(&mut self, backwards: bool) {
+        let count = self.discord_webhooks.len() + 1;
+        self.discord_webhook =
+            (self.discord_webhook + if backwards { count - 1 } else { 1 }) % count;
+    }
+
+    fn discord_webhook_id(&self) -> String {
+        self.discord_webhook
+            .checked_sub(1)
+            .and_then(|index| self.discord_webhooks.get(index))
+            .map(|(id, _)| id.clone())
+            .unwrap_or_default()
     }
 
     fn destination_indices(&self, card: SchedulerDestinationCard) -> Vec<usize> {
@@ -299,7 +347,7 @@ impl ScheduledTaskComposer {
             SchedulerField::Prompt => &self.prompt,
             SchedulerField::Model => &self.model,
             SchedulerField::Schedule => &self.schedule,
-            SchedulerField::Destination => unreachable!(),
+            SchedulerField::Discord | SchedulerField::Destination => unreachable!(),
         }
     }
 
@@ -310,13 +358,13 @@ impl ScheduledTaskComposer {
             SchedulerField::Prompt => &mut self.prompt,
             SchedulerField::Model => &mut self.model,
             SchedulerField::Schedule => &mut self.schedule,
-            SchedulerField::Destination => unreachable!(),
+            SchedulerField::Discord | SchedulerField::Destination => unreachable!(),
         }
     }
 
     fn focus(&mut self, field: SchedulerField) {
         self.field = field;
-        if field != SchedulerField::Destination {
+        if !matches!(field, SchedulerField::Discord | SchedulerField::Destination) {
             self.input_mut(field).focus();
         }
     }
@@ -509,7 +557,9 @@ impl App {
     }
 
     pub(crate) fn begin_scheduled_task(&mut self) {
-        self.scheduler.composer = Some(ScheduledTaskComposer::new(self.scheduler_destinations()));
+        let destinations = self.scheduler_destinations();
+        let webhooks = self.scheduler_discord_webhooks();
+        self.scheduler.composer = Some(ScheduledTaskComposer::new(destinations, webhooks));
         self.scheduler.surface = SchedulerSurface::Detail;
         self.scheduler.error = None;
     }
@@ -525,9 +575,12 @@ impl App {
                 return;
             }
         };
+        let destinations = self.scheduler_destinations();
+        let webhooks = self.scheduler_discord_webhooks();
         self.scheduler.composer = Some(ScheduledTaskComposer::edit(
             &task,
-            self.scheduler_destinations(),
+            destinations,
+            webhooks,
             source,
         ));
         self.scheduler.surface = SchedulerSurface::Detail;
@@ -720,7 +773,10 @@ impl App {
         let field = self.scheduler.composer.as_ref().unwrap().field;
         if (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
             || (key.code == KeyCode::Enter
-                && !matches!(field, SchedulerField::Prompt | SchedulerField::Destination))
+                && !matches!(
+                    field,
+                    SchedulerField::Prompt | SchedulerField::Discord | SchedulerField::Destination
+                ))
         {
             self.save_scheduled_task();
             return;
@@ -731,6 +787,23 @@ impl App {
         }
         if field == SchedulerField::Destination {
             self.handle_scheduler_destination(key);
+            return;
+        }
+        if field == SchedulerField::Discord {
+            if matches!(
+                key.code,
+                KeyCode::Left
+                    | KeyCode::Char('h')
+                    | KeyCode::Right
+                    | KeyCode::Char('l')
+                    | KeyCode::Char(' ')
+            ) {
+                self.scheduler
+                    .composer
+                    .as_mut()
+                    .unwrap()
+                    .cycle_discord_webhook(matches!(key.code, KeyCode::Left | KeyCode::Char('h')));
+            }
             return;
         }
         let prompt_width =
@@ -822,6 +895,7 @@ impl App {
                 composer.destination_picker.apply_filter();
             }
             SchedulerField::Destination => return,
+            SchedulerField::Discord => return,
             _ => composer.input_mut(field).insert_single_line(text),
         }
         self.scheduler.error = None;
@@ -906,6 +980,7 @@ impl App {
             description: composer.description.text().to_owned(),
             prompt: composer.prompt.text().to_owned(),
             model: composer.model.text().trim().to_owned(),
+            discord_webhook_id: composer.discord_webhook_id(),
             destination: destination_path.clone(),
             repository: destination.repository.clone(),
             branch: destination.checkout_branch.clone(),
@@ -928,6 +1003,21 @@ impl App {
             }
             Err(error) => self.scheduler.error = Some(error),
         }
+    }
+
+    fn scheduler_discord_webhooks(&self) -> Vec<(String, String)> {
+        self.discord_webhooks
+            .iter()
+            .map(|webhook| {
+                (
+                    webhook.id.clone(),
+                    format!(
+                        "{} / #{} / {}",
+                        webhook.server, webhook.channel, webhook.webhook_name
+                    ),
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn finish_scheduler_worktree_creation(&mut self, result: Result<PathBuf, String>) {

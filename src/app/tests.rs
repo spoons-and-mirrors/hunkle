@@ -981,6 +981,36 @@ fn scheduler_composer_edits_fields_and_narrow_back_returns_to_tasks() {
 }
 
 #[test]
+fn scheduler_composer_selects_a_named_discord_webhook() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.discord_webhooks.push(DiscordWebhookConfig {
+        id: "123456".to_owned(),
+        server: "Hunkle".to_owned(),
+        channel: "reports".to_owned(),
+        webhook_name: "Scheduler".to_owned(),
+        url: "https://discord.com/api/webhooks/123456/token".to_owned(),
+    });
+    app.open_scheduler();
+    app.begin_scheduled_task();
+    for _ in 0..5 {
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+    let composer = app.scheduler.composer.as_ref().unwrap();
+    assert_eq!(composer.field, SchedulerField::Discord);
+    assert_eq!(composer.discord_webhook, 1);
+    assert_eq!(
+        composer.discord_webhook_label(),
+        "Hunkle / #reports / Scheduler"
+    );
+}
+
+#[test]
 fn scheduler_edits_an_existing_task_in_the_shared_composer() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());
@@ -992,6 +1022,7 @@ fn scheduler_edits_an_existing_task_in_the_shared_composer() {
         description: "Check open changes".to_owned(),
         prompt: "Review the diff and summarize it.".to_owned(),
         model: "openai/gpt-5.6-sol".to_owned(),
+        discord_webhook_id: String::new(),
         destination: directory.path().to_path_buf(),
         repository: "repo".to_owned(),
         branch: "main".to_owned(),
@@ -1028,6 +1059,7 @@ fn scheduler_run_now_opens_the_live_conversation() {
         description: String::new(),
         prompt: "Review the diff.".to_owned(),
         model: String::new(),
+        discord_webhook_id: String::new(),
         destination: directory.path().to_path_buf(),
         repository: "repo".to_owned(),
         branch: "main".to_owned(),
@@ -1060,6 +1092,7 @@ fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
         description: String::new(),
         prompt: "Review the diff.".to_owned(),
         model: String::new(),
+        discord_webhook_id: String::new(),
         destination: directory.path().to_path_buf(),
         repository: "repo".to_owned(),
         branch: "main".to_owned(),
@@ -1217,22 +1250,33 @@ fn discord_settings_paste_save_and_remove_the_webhook() {
     app.mode = Mode::Settings;
     app.settings_page = SettingsPage::Discord;
 
+    app.discord_selection = 1;
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    app.handle_paste("https://discord.com/api/webhooks/123456/token");
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let editor = app.discord_webhook_editor.as_mut().unwrap();
+    editor.server.set("Hunkle");
+    editor.channel.set("reports");
+    editor.webhook_name.set("Scheduler");
+    editor
+        .url
+        .set("https://discord.com/api/webhooks/123456/token");
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
 
     assert!(path.exists());
     assert_eq!(
-        app.discord_webhook_url.as_deref(),
-        Some("https://discord.com/api/webhooks/123456/token")
+        app.discord_webhooks.first().map(|webhook| (
+            webhook.server.as_str(),
+            webhook.channel.as_str(),
+            webhook.webhook_name.as_str(),
+        )),
+        Some(("Hunkle", "reports", "Scheduler"))
     );
-    assert!(app.discord_webhook_input.is_none());
+    assert!(app.discord_webhook_editor.is_none());
 
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(!path.exists());
-    assert!(app.discord_webhook_url.is_none());
+    assert!(app.discord_webhooks.is_empty());
 }
 
 #[test]
