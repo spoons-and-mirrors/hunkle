@@ -15,13 +15,13 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{
     AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey,
     AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript, AgentUserMessage,
-    HerdrSession, HitTarget, LinkedWorktreeCatalog, SchedulerHitTarget, Settings,
+    HerdrSession, HitTarget, LinkedWorktreeCatalog, SchedulerHitTarget, Settings, TextInput,
 };
 use crate::theme::Palette;
 
 use super::{
     fill, palette, preview::hard_wrap_preview_lines, text::styled_markdown_preserving_breaks,
-    truncate_width,
+    text_input_lines, truncate_width,
 };
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -29,6 +29,7 @@ const MAX_AGENT_TRANSCRIPT_PRESENTATIONS: usize = 8;
 
 struct TranscriptBlock {
     user: bool,
+    text_only: bool,
     lines: Arc<[Line<'static>]>,
     animated_rows: Arc<[usize]>,
     start: usize,
@@ -592,16 +593,48 @@ pub(super) fn draw_history(
     expanded_requests: &[usize],
     picker_open: bool,
     hovered: Option<HitTarget>,
+    prompt: &TextInput,
+    prompt_focused: bool,
+    prompt_error: Option<&str>,
     status_area: Rect,
     area: Rect,
 ) -> (Vec<(HitTarget, Rect)>, usize, usize, bool) {
-    if area.width < 24 || area.height < 10 {
+    if area.width < 24 || area.height < 4 {
         return (Vec::new(), 0, 0, false);
     }
     let Some(agent_key) = herdr.agent_key(index) else {
         return (Vec::new(), 0, 0, false);
     };
     fill(frame, area, palette().panel);
+    let prompt_space = 5.min(area.height);
+    let prompt_area = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(3.min(prompt_space)),
+        area.width,
+        1,
+    );
+    draw_agent_prompt(
+        frame,
+        herdr,
+        index,
+        prompt,
+        prompt_focused,
+        prompt_error,
+        prompt_area,
+    );
+    let area = Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        area.height.saturating_sub(prompt_space),
+    );
+    let mut navigation_targets = vec![(
+        HitTarget::AgentPreviewPrompt(agent_key.clone()),
+        prompt_area,
+    )];
+    if area.height < 7 {
+        return (navigation_targets, 0, 0, false);
+    }
     let transcript = herdr.agent_transcript(index);
     let messages = transcript.map_or(&[][..], |transcript| transcript.messages);
     let message_error = herdr.agent_user_message_error(index);
@@ -645,7 +678,6 @@ pub(super) fn draw_history(
             );
         }
     }
-    let mut navigation_targets = Vec::new();
     if repository_area.width >= 3 {
         navigation_targets.push((
             HitTarget::AgentPreviewPicker(agent_key.clone()),
@@ -762,6 +794,7 @@ pub(super) fn draw_history(
     );
     let user_block = TranscriptBlock {
         user: true,
+        text_only: false,
         lines: cached.user_lines.clone(),
         animated_rows: Arc::default(),
         start: 0,
@@ -817,6 +850,55 @@ pub(super) fn draw_history(
         &mut targets,
     );
     (targets, scroll_max, scroll, animation_presented)
+}
+
+fn draw_agent_prompt(
+    frame: &mut Frame<'_>,
+    herdr: &HerdrSession,
+    index: usize,
+    input: &TextInput,
+    focused: bool,
+    local_error: Option<&str>,
+    area: Rect,
+) {
+    let sending = herdr.agent_prompt_sending(index);
+    let active = focused && !sending;
+    let background = if active {
+        palette().selected
+    } else {
+        palette().surface_alt
+    };
+    fill(frame, area, background);
+    if area.is_empty() {
+        return;
+    }
+    let input_area = Rect::new(
+        area.x.saturating_add(2),
+        area.y,
+        area.width.saturating_sub(3),
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new("›").style(Style::default().fg(palette().cyan).bg(background)),
+        Rect::new(area.x, input_area.y, 2.min(area.width), 1),
+    );
+    let error = local_error.or_else(|| herdr.agent_prompt_error(index));
+    if input.text().is_empty() && !active && error.is_some() {
+        frame.render_widget(
+            Paragraph::new(error.unwrap_or_default())
+                .style(Style::default().fg(palette().red).bg(background)),
+            input_area,
+        );
+    } else {
+        let cursor_width = UnicodeWidthStr::width(&input.text()[..input.cursor()]);
+        let scroll = cursor_width.saturating_sub(usize::from(input_area.width).saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new(text_input_lines(input, active, palette().ink))
+                .scroll((0, u16::try_from(scroll).unwrap_or(u16::MAX)))
+                .style(Style::default().bg(background)),
+            input_area,
+        );
+    }
 }
 
 pub(super) fn draw_scheduled_history(
@@ -897,6 +979,7 @@ pub(super) fn draw_scheduled_history(
     );
     let user_block = TranscriptBlock {
         user: true,
+        text_only: false,
         lines: cached.user_lines.clone(),
         animated_rows: Arc::default(),
         start: 0,
@@ -1071,6 +1154,7 @@ fn build_request_transcript_counted(
     let mut document_height = 0usize;
     let request_count = message.requests.len();
     for (request_index, request) in message.requests.iter().enumerate() {
+        let final_request = request_index + 1 == request_count;
         let request_live = live && request_index + 1 == request_count;
         let RequestSummary {
             lines: summary,
@@ -1078,7 +1162,7 @@ fn build_request_transcript_counted(
             hidden,
             animated_rows: summary_animated_rows,
         } = request_summary(request, width, request_live, stats);
-        let expandable = hidden;
+        let expandable = hidden && !final_request;
         let expanded = expanded_requests.contains(&request_index);
         let collapsed = expandable && !expanded;
         let (lines, height, animated_rows) = if collapsed {
@@ -1127,6 +1211,11 @@ fn build_request_transcript_counted(
         document_height = document_height.saturating_add(usize::from(elapsed.is_some()));
         blocks.push(TranscriptBlock {
             user: false,
+            text_only: !request.parts.is_empty()
+                && request
+                    .parts
+                    .iter()
+                    .all(|part| matches!(part, AgentRequestPartPreview::Text(_))),
             lines: lines.into(),
             animated_rows: animated_rows.into(),
             start: document_height,
@@ -1142,6 +1231,7 @@ fn build_request_transcript_counted(
         let (lines, height, animated_rows) = request_content(None, width, live, stats);
         blocks.push(TranscriptBlock {
             user: false,
+            text_only: false,
             lines: lines.into(),
             animated_rows: animated_rows.into(),
             start: 0,
@@ -1345,11 +1435,17 @@ fn draw_transcript_card(
         );
     }
     if local_start == 0 {
-        frame.render_widget(
-            Paragraph::new("▄".repeat(usize::from(cards.width)))
-                .style(Style::default().fg(background).bg(palette().panel)),
-            Rect::new(cards.x, y, cards.width, 1),
-        );
+        if block.text_only {
+            let top = Rect::new(cards.x, y, cards.width, 1);
+            frame.render_widget(Clear, top);
+            fill(frame, top, background);
+        } else {
+            frame.render_widget(
+                Paragraph::new("▄".repeat(usize::from(cards.width)))
+                    .style(Style::default().fg(background).bg(palette().panel)),
+                Rect::new(cards.x, y, cards.width, 1),
+            );
+        }
         let label = if block.user {
             let request_word = if block.request_count == 1 {
                 "request"
@@ -1364,6 +1460,8 @@ fn draw_transcript_card(
             } else {
                 Some(format!(" {} {request_word} ", block.request_count))
             }
+        } else if block.text_only {
+            None
         } else {
             block
                 .elapsed
@@ -1493,6 +1591,31 @@ fn draw_transcript_card(
                         .set_bg(background);
                 }
             }
+        }
+    }
+    if block.text_only
+        && local_start <= 1
+        && local_end > 1
+        && let Some(elapsed) = block.elapsed.as_deref()
+    {
+        let width = u16::try_from(UnicodeWidthStr::width(elapsed)).unwrap_or(u16::MAX);
+        if cards.width > width.saturating_add(2) {
+            frame.render_widget(
+                Paragraph::new(elapsed).style(
+                    Style::default()
+                        .fg(accent)
+                        .bg(palette().panel)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Rect::new(
+                    cards.right().saturating_sub(width).saturating_sub(2),
+                    y.saturating_add(
+                        u16::try_from(1usize.saturating_sub(local_start)).unwrap_or(0),
+                    ),
+                    width,
+                    1,
+                ),
+            );
         }
     }
     if local_end == block.height {
@@ -2286,16 +2409,20 @@ mod tests {
 
     use super::*;
 
+    fn request(parts: Vec<AgentRequestPartPreview>) -> AgentRequestPreview {
+        AgentRequestPreview {
+            parts,
+            reasoning_active: false,
+            duration_ms: Some(1_000),
+            reasoning_duration_ms: Some(500),
+            tool_call_count: 0,
+        }
+    }
+
     fn request_message(parts: Vec<AgentRequestPartPreview>) -> AgentUserMessage {
         AgentUserMessage {
             text: "prompt".to_owned(),
-            requests: vec![AgentRequestPreview {
-                parts,
-                reasoning_active: false,
-                duration_ms: Some(1_000),
-                reasoning_duration_ms: Some(500),
-                tool_call_count: 0,
-            }],
+            requests: vec![request(parts)],
         }
     }
 
@@ -2402,7 +2529,13 @@ mod tests {
             .map(|row| format!("**row {row}** hidden payload"))
             .collect::<Vec<_>>()
             .join("\n");
-        let messages = vec![running_tool_message(&hidden)];
+        let mut message = running_tool_message(&hidden);
+        message
+            .requests
+            .push(request(vec![AgentRequestPartPreview::Text(
+                "latest output".to_owned(),
+            )]));
+        let messages = vec![message];
         let mut presentation = AgentTranscriptPresentation::default();
 
         let cached = presentation.prepare(presentation_input(
@@ -2434,7 +2567,13 @@ mod tests {
     #[test]
     fn collapsed_transcript_bounds_a_single_long_markdown_event() {
         let hidden = format!("**{}**", "word ".repeat(20_000));
-        let messages = vec![running_tool_message(&hidden)];
+        let mut message = running_tool_message(&hidden);
+        message
+            .requests
+            .push(request(vec![AgentRequestPartPreview::Text(
+                "latest output".to_owned(),
+            )]));
+        let messages = vec![message];
         let mut presentation = AgentTranscriptPresentation::default();
 
         let cached = presentation.prepare(presentation_input(
@@ -2537,10 +2676,15 @@ mod tests {
 
     #[test]
     fn separates_cropped_and_completed_text_output() {
-        let cropped = request_message(vec![
+        let mut cropped = request_message(vec![
             AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning),
             AgentRequestPartPreview::Text("one\ntwo\nthree\nfour\nfive".to_owned()),
         ]);
+        cropped
+            .requests
+            .push(request(vec![AgentRequestPartPreview::Text(
+                "latest output".to_owned(),
+            )]));
         let (blocks, _) = build_request_transcript(&cropped, 80, false, 0, &[]);
         let lines = &blocks[0].lines;
         assert_eq!(agent_output_transition_glyph(&lines[1]), Some('▄'));
@@ -2622,7 +2766,7 @@ mod tests {
     }
 
     #[test]
-    fn request_transcript_tracks_only_rendered_active_rows() {
+    fn final_request_is_expanded_by_default_and_tracks_active_rows() {
         let tool = |name: &str, running| {
             AgentRequestPartPreview::Activity(AgentActivityPreview::Tool {
                 name: name.to_owned(),
@@ -2637,10 +2781,13 @@ mod tests {
             tool("hidden", true),
         ]);
 
-        let (collapsed, _) = build_request_transcript(&message, 80, true, 0, &[]);
-        assert!(collapsed[0].animated_rows.is_empty());
-
-        let (expanded, _) = build_request_transcript(&message, 80, true, 0, &[0]);
+        let (expanded, _) = build_request_transcript(&message, 80, true, 0, &[]);
+        assert!(!expanded[0].expandable);
+        assert!(!expanded[0].lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("⌄ more"))
+        }));
         assert_eq!(expanded[0].animated_rows.len(), 1);
         assert_eq!(
             expanded[0].lines[expanded[0].animated_rows[0]].spans[0].content,
@@ -2649,10 +2796,61 @@ mod tests {
     }
 
     #[test]
+    fn text_only_response_omits_header_line_and_lowers_timer() {
+        let message = request_message(vec![AgentRequestPartPreview::Text("response".to_owned())]);
+        let (blocks, _) = build_request_transcript(&message, 40, false, 0, &[]);
+        let block = &blocks[0];
+        let area = Rect::new(0, 0, 40, 6);
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw_transcript_card(frame, block, area, area, 0, 0);
+            })
+            .unwrap();
+
+        let row = |y| {
+            (0..40)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let top = u16::try_from(block.start).unwrap();
+        assert!(!row(top).contains('▄'));
+        assert!(!row(top).contains("1s"));
+        assert!(row(top + 1).contains("1s"));
+    }
+
+    #[test]
+    fn reasoning_response_keeps_header_line_and_timer() {
+        let message = request_message(vec![
+            AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning),
+            AgentRequestPartPreview::Text("response".to_owned()),
+        ]);
+        let (blocks, _) = build_request_transcript(&message, 40, false, 0, &[]);
+        let block = &blocks[0];
+        let area = Rect::new(0, 0, 40, 6);
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw_transcript_card(frame, block, area, area, 0, 0);
+            })
+            .unwrap();
+
+        let top = u16::try_from(block.start).unwrap();
+        let top = (0..40)
+            .map(|x| terminal.backend().buffer()[(x, top)].symbol())
+            .collect::<String>();
+        assert!(top.contains('▄'));
+        assert!(top.contains("1s"));
+    }
+
+    #[test]
     fn transcript_card_reports_only_visible_animated_rows() {
         let animated_row = 15;
         let block = TranscriptBlock {
             user: false,
+            text_only: false,
             lines: (0..20)
                 .map(|row| {
                     if row == animated_row {

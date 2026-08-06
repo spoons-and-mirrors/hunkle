@@ -334,6 +334,10 @@ enum Completion {
         identity: OpenCodeConversationIdentity,
         result: Result<latest_message::TranscriptFetch, String>,
     },
+    AgentPrompt {
+        key: AgentTimingKey,
+        result: Result<(), String>,
+    },
     ScheduledSession {
         run_id: i64,
         result: Result<String, String>,
@@ -421,6 +425,8 @@ pub(crate) struct HerdrSession {
     latest_user_message_refreshes: HashMap<OpenCodeConversationIdentity, Instant>,
     latest_user_message_statuses: HashMap<OpenCodeConversationIdentity, AgentStatus>,
     latest_user_message_errors: HashMap<OpenCodeConversationIdentity, String>,
+    agent_prompt_requests: HashSet<AgentTimingKey>,
+    agent_prompt_errors: HashMap<AgentTimingKey, String>,
     scheduled_preview_identity: Option<OpenCodeConversationIdentity>,
     scheduled_session_requests: HashSet<i64>,
     scheduled_session_refreshes: HashMap<i64, Instant>,
@@ -513,6 +519,8 @@ impl HerdrSession {
             latest_user_message_refreshes: HashMap::new(),
             latest_user_message_statuses: HashMap::new(),
             latest_user_message_errors: HashMap::new(),
+            agent_prompt_requests: HashSet::new(),
+            agent_prompt_errors: HashMap::new(),
             scheduled_preview_identity: None,
             scheduled_session_requests: HashSet::new(),
             scheduled_session_refreshes: HashMap::new(),
@@ -912,6 +920,36 @@ impl HerdrSession {
                         }
                     }
                 }
+                Completion::AgentPrompt { key, result } => {
+                    self.agent_prompt_requests.remove(&key);
+                    self.next_refresh = Instant::now();
+                    poll.notice = Some(match result {
+                        Ok(()) => {
+                            self.agent_prompt_errors.remove(&key);
+                            if let Some(identity) = self.agents.iter().find_map(|agent| {
+                                (agent.runtime.timing_key == key)
+                                    .then_some(agent.runtime.session_timing_key.as_ref())
+                                    .flatten()
+                                    .and_then(|key| match key {
+                                        AgentTimingKey::Session(identity) => {
+                                            OpenCodeConversationIdentity::from_agent_session(
+                                                identity,
+                                            )
+                                        }
+                                        _ => None,
+                                    })
+                            }) {
+                                self.latest_user_message_refreshes.remove(&identity);
+                                self.latest_user_message_statuses.remove(&identity);
+                            }
+                            "Message sent to agent".to_owned()
+                        }
+                        Err(error) => {
+                            self.agent_prompt_errors.insert(key, error.clone());
+                            format!("Could not message agent: {error}")
+                        }
+                    });
+                }
                 Completion::ScheduledSession { run_id, result } => {
                     self.scheduled_session_requests.remove(&run_id);
                     match result {
@@ -1009,6 +1047,12 @@ impl HerdrSession {
             .retain(|identity, _| active_identities.contains(identity));
         self.latest_user_message_errors
             .retain(|identity, _| active_identities.contains(identity));
+        let active_agent_keys = agents
+            .iter()
+            .map(|agent| agent.runtime.timing_key.clone())
+            .collect::<HashSet<_>>();
+        self.agent_prompt_errors
+            .retain(|key, _| active_agent_keys.contains(key));
         self.scheduled_conversation_errors
             .retain(|identity, _| active_identities.contains(identity));
         timings::update_snapshot(&mut self.agent_timings, &agents, now_ms);
@@ -1091,6 +1135,51 @@ impl HerdrSession {
         self.agents
             .get(index)
             .map(|agent| AgentKey(agent.runtime.timing_key.clone()))
+    }
+
+    pub(crate) fn prompt_agent(&mut self, index: usize, prompt: String) -> Result<(), String> {
+        if prompt.trim().is_empty() {
+            return Err("Enter a message".to_owned());
+        }
+        let agent = self
+            .agents
+            .get(index)
+            .ok_or_else(|| "Agent is no longer available".to_owned())?;
+        let key = agent.runtime.timing_key.clone();
+        if self.agent_prompt_requests.contains(&key) {
+            return Err("A message is already being sent to this agent".to_owned());
+        }
+        let pane_id = agent.pane_id.clone();
+        self.agent_prompt_requests.insert(key.clone());
+        self.agent_prompt_errors.remove(&key);
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = client::prompt_agent(pane_id, prompt);
+            let _ = sender.send(Completion::AgentPrompt { key, result });
+        });
+        Ok(())
+    }
+
+    pub(crate) fn agent_prompt_sending(&self, index: usize) -> bool {
+        self.agents.get(index).is_some_and(|agent| {
+            self.agent_prompt_requests
+                .contains(&agent.runtime.timing_key)
+        })
+    }
+
+    pub(crate) fn agent_prompt_error(&self, index: usize) -> Option<&str> {
+        let key = &self.agents.get(index)?.runtime.timing_key;
+        self.agent_prompt_errors.get(key).map(String::as_str)
+    }
+
+    pub(crate) fn clear_agent_prompt_error(&mut self, index: usize) {
+        if let Some(key) = self
+            .agents
+            .get(index)
+            .map(|agent| agent.runtime.timing_key.clone())
+        {
+            self.agent_prompt_errors.remove(&key);
+        }
     }
 
     pub(crate) fn scheduled_run_agent_index(&self, run: &ScheduledRun) -> Option<usize> {

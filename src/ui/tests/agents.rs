@@ -81,6 +81,9 @@ fn control_click_opens_the_live_agent_preview_modal() {
 
     let screen = screen_text(&terminal);
     assert!(screen.contains("AGENT PREVIEW"));
+    assert!(!screen.contains("MESSAGE"));
+    assert!(!screen.contains("Enter send"));
+    assert!(!screen.contains("Esc cancel"));
     assert!(screen.contains("Inspect the scheduler"));
     assert!(screen.contains("Conversation loaded"));
     let overlay = app
@@ -92,6 +95,21 @@ fn control_click_opens_the_live_agent_preview_modal() {
             .hit_target_rect(HitTarget::AgentPreviewModalClose)
             .is_some()
     );
+    let prompt = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPrompt(key))
+        .unwrap();
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: prompt.x,
+        row: prompt.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.agent_preview_prompt_focused);
+    app.handle_paste("Please check the tests");
+    assert_eq!(app.agent_preview_prompt.text(), "Please check the tests");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.agent_preview_prompt_focused);
 
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -893,25 +911,22 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert_eq!(app.regions.agent_preview_scroll_max, 0);
-    let collapsed_screen = terminal
+    assert!(app.regions.agent_preview_scroll_max > 0);
+    assert_eq!(
+        app.regions.agent_preview_scroll,
+        app.regions.agent_preview_scroll_max
+    );
+    let initial_screen = terminal
         .backend()
         .buffer()
         .content
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(collapsed_screen.contains("agent line 00"));
-    assert!(collapsed_screen.contains("agent line 02"));
-    assert!(!collapsed_screen.contains("agent line 03"));
-    assert!(!collapsed_screen.contains("agent line 39"));
-    assert!(collapsed_screen.contains("reasoning  2s"));
-    assert!(collapsed_screen.contains("tool_0"));
-    assert!(collapsed_screen.contains("tool_2"));
-    assert!(!collapsed_screen.contains("tool_3"));
-    assert!(collapsed_screen.contains("⌄ more"));
-    assert!(!collapsed_screen.contains("click to expand"));
-    assert!(collapsed_screen.contains("user line 00"));
+    assert!(initial_screen.contains("agent line 39"));
+    assert!(initial_screen.contains("tool_3"));
+    assert!(!initial_screen.contains("⌄ more"));
+    assert!(initial_screen.contains("user line 00"));
     let preview = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
@@ -919,69 +934,28 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
             message: 0,
         })
         .unwrap();
-    let request = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPreviewRequest {
-            agent: key.clone(),
-            message: 0,
-            request: 0,
-        })
-        .unwrap();
-    assert_eq!(request.height, 14);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewRequest {
+                agent: key.clone(),
+                message: 0,
+                request: 0,
+            })
+            .is_none()
+    );
     let build_counts = app.agent_transcript_presentation.build_counts_for_test();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
         app.agent_transcript_presentation.build_counts_for_test(),
         build_counts
     );
-    let request_row = |row: u16| {
-        let start = usize::from(row) * 49 + usize::from(request.x.saturating_add(1));
-        let end = usize::from(row) * 49 + usize::from(request.right());
-        terminal.backend().buffer().content[start..end]
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-    };
-    assert!(request_row(request.y + 2).contains('▄'));
-    assert!(request_row(request.y + 3).trim().is_empty());
-    assert!(request_row(request.y + 7).trim().is_empty());
-    assert!(request_row(request.y + 8).contains('▀'));
-    let buffer = terminal.backend().buffer();
-    for x in request.x..request.right() {
-        assert_eq!(buffer[(x, request.y + 2)].symbol(), "▄");
-        assert_eq!(buffer[(x, request.y + 2)].fg, super::palette().panel);
-        assert_eq!(buffer[(x, request.y + 2)].bg, super::palette().canvas);
-        assert_eq!(buffer[(x, request.y + 3)].bg, super::palette().panel);
-        assert_eq!(buffer[(x, request.y + 7)].bg, super::palette().panel);
-        assert_eq!(buffer[(x, request.y + 8)].symbol(), "▀");
-        assert_eq!(buffer[(x, request.y + 8)].fg, super::palette().panel);
-        assert_eq!(buffer[(x, request.y + 8)].bg, super::palette().canvas);
+    for _ in 0..10 {
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            preview.x + 2,
+            preview.bottom() - 2,
+        ));
     }
-    for x in request.x + 1..request.right() {
-        assert_eq!(buffer[(x, request.y + 1)].bg, super::palette().canvas);
-        assert_eq!(buffer[(x, request.y + 9)].bg, super::palette().canvas);
-    }
-    assert_eq!(buffer[(request.x, request.y + 1)].symbol(), "┃");
-    assert_eq!(buffer[(request.x, request.y + 2)].symbol(), "▄");
-    assert_eq!(
-        buffer[(request.x, request.y + 2)].fg,
-        super::palette().panel
-    );
-    assert_eq!(buffer[(request.x, request.y + 3)].symbol(), " ");
-    assert_eq!(buffer[(request.x, request.y + 7)].symbol(), " ");
-    assert_eq!(buffer[(request.x, request.y + 8)].symbol(), "▀");
-    assert_eq!(
-        buffer[(request.x, request.y + 8)].fg,
-        super::palette().panel
-    );
-    assert_eq!(buffer[(request.x, request.y + 9)].symbol(), "┃");
-    let request_bottom =
-        usize::from(request.bottom().saturating_sub(1)) * 49 + usize::from(request.x);
-    assert_eq!(
-        terminal.backend().buffer().content[request_bottom].symbol(),
-        "▀"
-    );
-    click(&mut app, request.x + 2, request.y + 2);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agent_preview_scroll_max > 0);
     assert_eq!(
@@ -1008,31 +982,30 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
             })
             .is_some()
     );
-    let request = app
+    let transcript = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewRequest {
+        .hit_target_rect(HitTarget::AgentTooltip {
             agent: key.clone(),
             message: 0,
-            request: 0,
         })
         .unwrap();
-    let drag_start = request.y.saturating_add(2);
-    let drag_end = drag_start.saturating_add(7).min(request.bottom() - 1);
+    let drag_start = transcript.y.saturating_add(2);
+    let drag_end = drag_start.saturating_add(7).min(transcript.bottom() - 1);
 
     for _ in 0..10 {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            request.x + 4,
+            transcript.x + 4,
             drag_start,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            request.x + 4,
+            transcript.x + 4,
             drag_end,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
-            request.x + 4,
+            transcript.x + 4,
             drag_end,
         ));
     }

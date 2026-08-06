@@ -1093,6 +1093,45 @@ fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
 }
 
 #[test]
+fn live_scheduled_agent_preview_can_focus_its_prompt() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE" }],
+            "agents": [{
+                "agent": "opencode",
+                "agent_status": "idle",
+                "pane_id": "w1:p2"
+            }],
+            "panes": [{
+                "pane_id": "w1:p2",
+                "tab_id": "w1:t2",
+                "workspace_id": "w1",
+                "cwd": directory.path()
+            }]
+        } }
+    }));
+    app.herdr.set_scheduled_tasks_for_test(Vec::new());
+    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+        id: 11,
+        task_id: 7,
+        created_at_ms: 1,
+        status: ScheduledRunStatus::Working,
+        pane_id: Some("w1:p2".to_owned()),
+        terminal_id: None,
+        session_id: None,
+        error: None,
+    }]);
+    app.agent_preview_scheduled_run = Some(11);
+
+    app.focus_agent_preview_prompt();
+
+    assert!(app.agent_preview_prompt_focused);
+}
+
+#[test]
 fn scheduler_prompt_follows_the_cursor_and_accepts_wheel_scrolling() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());

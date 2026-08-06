@@ -105,6 +105,7 @@ impl App {
                     HitTarget::AgentPreviewPicker(agent)
                     | HitTarget::AgentPreviewPickerItem(agent)
                     | HitTarget::AgentPreviewMessageTimeline(agent)
+                    | HitTarget::AgentPreviewPrompt(agent)
                     | HitTarget::AgentPreviewRequest { agent, .. }
                     | HitTarget::AgentTooltip { agent, .. }
                     | HitTarget::AgentMessage { agent, .. } => Some(agent),
@@ -384,6 +385,13 @@ impl App {
                     request,
                 }) => {
                     self.toggle_agent_preview_request(agent, message, request);
+                    return;
+                }
+                Some(HitTarget::AgentPreviewPrompt(key)) => {
+                    if self.herdr.agent_index(&key).is_some() {
+                        self.agent_preview_selection = Some(key);
+                        self.focus_agent_preview_prompt();
+                    }
                     return;
                 }
                 _ => {}
@@ -1369,6 +1377,7 @@ impl App {
             current - 1
         };
         self.agent_preview_picker_open = false;
+        self.reset_agent_preview_prompt();
         self.select_agent_preview(index);
     }
 
@@ -1382,6 +1391,7 @@ impl App {
         self.agent_preview_message_selection = None;
         self.agent_preview_expanded_requests = None;
         self.agent_preview_picker_open = false;
+        self.reset_agent_preview_prompt();
         self.hovered_hit_target = self
             .herdr
             .agent_user_messages(index)
@@ -1406,6 +1416,12 @@ impl App {
         }
         match self.regions.hit_target_at(point) {
             Some(HitTarget::AgentPreviewModalClose) => self.close_agent_preview_modal(),
+            Some(HitTarget::AgentPreviewPrompt(key)) => {
+                if self.herdr.agent_index(&key).is_some() {
+                    self.agent_preview_selection = Some(key);
+                    self.focus_agent_preview_prompt();
+                }
+            }
             Some(HitTarget::AgentPreviewRequest {
                 agent,
                 message,

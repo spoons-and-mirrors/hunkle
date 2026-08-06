@@ -395,6 +395,7 @@ pub(crate) enum HitTarget {
     AgentPreviewPicker(AgentKey),
     AgentPreviewPickerItem(AgentKey),
     AgentPreviewMessageTimeline(AgentKey),
+    AgentPreviewPrompt(AgentKey),
     AgentPreviewRequest {
         agent: AgentKey,
         message: usize,

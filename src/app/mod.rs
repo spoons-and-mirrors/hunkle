@@ -170,6 +170,9 @@ pub struct App {
     agent_preview_expanded_requests: Option<AgentPreviewExpandedRequests>,
     pub(crate) agent_transcript_presentation: crate::ui::AgentTranscriptPresentation,
     agent_preview_picker_open: bool,
+    pub(crate) agent_preview_prompt: TextInput,
+    pub(crate) agent_preview_prompt_focused: bool,
+    pub(crate) agent_preview_prompt_error: Option<String>,
     pub(crate) agent_preview_scheduled_run: Option<i64>,
     agent_preview_return_mode: Mode,
     pub(crate) hovered_hit_target: Option<HitTarget>,
@@ -336,6 +339,9 @@ impl App {
             agent_preview_expanded_requests: None,
             agent_transcript_presentation: crate::ui::AgentTranscriptPresentation::default(),
             agent_preview_picker_open: false,
+            agent_preview_prompt: TextInput::default(),
+            agent_preview_prompt_focused: false,
+            agent_preview_prompt_error: None,
             agent_preview_scheduled_run: None,
             agent_preview_return_mode: Mode::Normal,
             hovered_hit_target: None,
@@ -734,6 +740,10 @@ impl App {
             self.should_quit = true;
             return;
         }
+        if self.agent_preview_prompt_focused {
+            self.handle_agent_preview_prompt_key(key);
+            return;
+        }
         if self.mode == Mode::Normal
             && self.herdr_available()
             && key.code == KeyCode::F(4)
@@ -828,6 +838,11 @@ impl App {
             self.header_picker.query.insert_single_line(text);
             self.header_picker.message = None;
             self.header_picker.apply_filter();
+            return;
+        }
+        if self.agent_preview_prompt_focused {
+            self.agent_preview_prompt.insert_single_line(text);
+            self.clear_agent_preview_prompt_error();
             return;
         }
         if self.mode == Mode::Normal && self.view() == View::RepositorySearch {
@@ -1052,6 +1067,9 @@ impl App {
             changed = true;
         }
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        changed |= self
+            .agent_preview_prompt
+            .poll_blink(self.agent_preview_prompt_focused);
         changed |= self.poll_scheduler_inputs();
         changed |= self
             .file_search
@@ -1666,6 +1684,13 @@ impl App {
             return;
         }
         if self.handle_normal_shortcut(key) {
+            return;
+        }
+        if self.agents_pane_visible()
+            && key.code == KeyCode::Enter
+            && (!self.layout_profile().is_single() || self.navigation.agent_detail_open())
+        {
+            self.focus_agent_preview_prompt();
             return;
         }
         if self.single_panel_detail_visible()
@@ -2454,6 +2479,7 @@ impl App {
                 self.agent_preview_transcript_scroll = None;
                 self.agent_preview_message_selection = None;
                 self.agent_preview_expanded_requests = None;
+                self.reset_agent_preview_prompt();
             }
         }
     }
@@ -2491,6 +2517,7 @@ impl App {
         self.agent_preview_picker_open = false;
         self.agent_preview_scheduled_run = None;
         self.herdr.clear_scheduled_conversation();
+        self.reset_agent_preview_prompt();
         self.mode = self.agent_preview_return_mode;
         self.agent_preview_return_mode = Mode::Normal;
     }
@@ -2513,6 +2540,7 @@ impl App {
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('v') => self.close_agent_preview_modal(),
+            KeyCode::Enter => self.focus_agent_preview_prompt(),
             KeyCode::Up | KeyCode::Char('k') => self.scroll_agent_preview_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.scroll_agent_preview_by(1),
             KeyCode::PageUp => self.scroll_agent_preview_by(-10),
@@ -2546,6 +2574,7 @@ impl App {
         self.agent_preview_message_selection = None;
         self.agent_preview_expanded_requests = None;
         self.agent_preview_picker_open = false;
+        self.reset_agent_preview_prompt();
         if matches!(
             self.hovered_hit_target,
             Some(
@@ -2557,6 +2586,7 @@ impl App {
                     | HitTarget::AgentPreviewPicker(_)
                     | HitTarget::AgentPreviewPickerItem(_)
                     | HitTarget::AgentPreviewMessageTimeline(_)
+                    | HitTarget::AgentPreviewPrompt(_)
                     | HitTarget::AgentPreviewRequest { .. }
                     | HitTarget::AgentTooltip { .. }
                     | HitTarget::AgentMessage { .. }
@@ -2615,6 +2645,71 @@ impl App {
 
     pub(crate) fn agent_preview_picker_open(&self) -> bool {
         self.agent_preview_picker_open
+    }
+
+    pub(super) fn focus_agent_preview_prompt(&mut self) {
+        let Some(index) = self.agent_preview_index() else {
+            return;
+        };
+        if self.herdr.agent_prompt_sending(index) {
+            return;
+        }
+        self.agent_preview_prompt_focused = true;
+        self.agent_preview_prompt.focus();
+        self.clear_agent_preview_prompt_error();
+    }
+
+    fn handle_agent_preview_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.agent_preview_prompt_focused = false,
+            KeyCode::Enter => self.submit_agent_preview_prompt(),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agent_preview_prompt.clear();
+                self.clear_agent_preview_prompt_error();
+            }
+            KeyCode::Backspace
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.agent_preview_prompt.delete_word();
+                self.clear_agent_preview_prompt_error();
+            }
+            _ => {
+                if self.agent_preview_prompt.handle_edit_key(key) == EditOutcome::Edited {
+                    self.clear_agent_preview_prompt_error();
+                }
+            }
+        }
+    }
+
+    fn submit_agent_preview_prompt(&mut self) {
+        let Some(index) = self.agent_preview_index() else {
+            self.agent_preview_prompt_error = Some("Agent is no longer available".to_owned());
+            return;
+        };
+        let prompt = self.agent_preview_prompt.text().trim().to_owned();
+        match self.herdr.prompt_agent(index, prompt) {
+            Ok(()) => {
+                self.agent_preview_prompt.clear();
+                self.agent_preview_prompt_error = None;
+                self.agent_preview_prompt_focused = false;
+            }
+            Err(error) => self.agent_preview_prompt_error = Some(error),
+        }
+    }
+
+    fn clear_agent_preview_prompt_error(&mut self) {
+        self.agent_preview_prompt_error = None;
+        if let Some(index) = self.agent_preview_index() {
+            self.herdr.clear_agent_prompt_error(index);
+        }
+    }
+
+    fn reset_agent_preview_prompt(&mut self) {
+        self.agent_preview_prompt.clear();
+        self.agent_preview_prompt_focused = false;
+        self.agent_preview_prompt_error = None;
     }
 
     pub(crate) fn agent_preview_transcript_scroll(&self, index: usize) -> Option<usize> {
