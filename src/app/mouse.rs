@@ -397,6 +397,22 @@ impl App {
                     self.toggle_agent_preview_request(agent, message, request);
                     return;
                 }
+                Some(
+                    HitTarget::AgentMessage { agent, message }
+                    | HitTarget::AgentExpandedMessage { agent, message },
+                ) => {
+                    self.toggle_agent_preview_user_message(agent, message);
+                    return;
+                }
+                Some(HitTarget::AgentScheduledMessage { run_id, .. }) => {
+                    if self.agent_preview_scheduled_run == Some(run_id) {
+                        self.scheduler.conversation_user_expanded =
+                            !self.scheduler.conversation_user_expanded;
+                        self.scheduler.conversation_scroll =
+                            self.scheduler.conversation_user_expanded.then_some(0);
+                    }
+                    return;
+                }
                 Some(HitTarget::AgentPreviewPrompt(key)) => {
                     if self.herdr.agent_index(&key).is_some() {
                         self.agent_preview_selection = Some(key);
@@ -652,6 +668,7 @@ impl App {
             Some(
                 HitTarget::AgentTooltip { agent, .. }
                 | HitTarget::AgentMessage { agent, .. }
+                | HitTarget::AgentExpandedMessage { agent, .. }
                 | HitTarget::AgentPreviewMessageTimeline(agent)
                 | HitTarget::AgentPreviewRequest { agent, .. },
             ) => Some(agent),
@@ -1039,7 +1056,12 @@ impl App {
                 }
                 return;
             }
-            Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => return,
+            Some(
+                HitTarget::AgentTooltip { .. }
+                | HitTarget::AgentMessage { .. }
+                | HitTarget::AgentExpandedMessage { .. }
+                | HitTarget::AgentScheduledMessage { .. },
+            ) => return,
             _ => {}
         }
         if self
@@ -1419,6 +1441,7 @@ impl App {
         self.agent_preview_transcript_scroll = None;
         self.agent_preview_message_selection = None;
         self.agent_preview_expanded_requests = None;
+        self.agent_preview_expanded_user_message = None;
         self.agent_preview_picker_open = false;
         self.reset_agent_preview_prompt();
         self.hovered_hit_target = self
@@ -1467,6 +1490,18 @@ impl App {
                 message,
                 request,
             }) => self.toggle_agent_preview_request(agent, message, request),
+            Some(
+                HitTarget::AgentMessage { agent, message }
+                | HitTarget::AgentExpandedMessage { agent, message },
+            ) => self.toggle_agent_preview_user_message(agent, message),
+            Some(HitTarget::AgentScheduledMessage { run_id, .. }) => {
+                if self.agent_preview_scheduled_run == Some(run_id) {
+                    self.scheduler.conversation_user_expanded =
+                        !self.scheduler.conversation_user_expanded;
+                    self.scheduler.conversation_scroll =
+                        self.scheduler.conversation_user_expanded.then_some(0);
+                }
+            }
             Some(HitTarget::AgentPreviewPicker(key)) => {
                 if self.herdr.agent_index(&key).is_some() {
                     self.agent_preview_selection = Some(key);
@@ -1760,6 +1795,28 @@ impl App {
         }
     }
 
+    fn toggle_agent_preview_user_message(&mut self, agent: AgentKey, message: usize) {
+        let expanded = self
+            .agent_preview_expanded_user_message
+            .as_ref()
+            .is_some_and(|expanded| expanded.agent == agent && expanded.message == message);
+        if expanded {
+            self.agent_preview_expanded_user_message = None;
+            self.agent_preview_transcript_scroll = None;
+        } else {
+            self.agent_preview_expanded_user_message =
+                Some(super::AgentPreviewExpandedUserMessage {
+                    agent: agent.clone(),
+                    message,
+                });
+            self.agent_preview_transcript_scroll = Some(super::AgentPreviewTranscriptScroll {
+                agent,
+                message,
+                offset: 0,
+            });
+        }
+    }
+
     pub(super) fn scroll_agent_preview_by(&mut self, delta: isize) {
         let Some(agent) = self.agent_preview_index() else {
             return;
@@ -1800,7 +1857,12 @@ impl App {
             })
             .saturating_add_signed(delta)
             .min(self.regions.agent_preview_scroll_max);
-        self.agent_preview_transcript_scroll = (offset < self.regions.agent_preview_scroll_max)
+        let user_message_expanded = self
+            .agent_preview_expanded_user_message
+            .as_ref()
+            .is_some_and(|expanded| expanded.agent == key && expanded.message == message);
+        self.agent_preview_transcript_scroll = (user_message_expanded
+            || offset < self.regions.agent_preview_scroll_max)
             .then_some(AgentPreviewTranscriptScroll {
                 agent: key,
                 message,

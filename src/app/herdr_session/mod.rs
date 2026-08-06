@@ -35,7 +35,7 @@ pub(crate) use scheduler::{
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const AGENT_MESSAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const AGENT_MESSAGE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
 const LAYOUT_INDEX_VERSION: u8 = 1;
@@ -2513,6 +2513,11 @@ mod presentation_interest_tests {
         assert_eq!(session.spinner_frame, 0);
         assert!(session.poll(true).changed);
         assert_eq!(session.spinner_frame, 1);
+    }
+
+    #[test]
+    fn active_agent_messages_refresh_four_times_per_second() {
+        assert_eq!(AGENT_MESSAGE_REFRESH_INTERVAL, Duration::from_millis(250));
     }
 }
 

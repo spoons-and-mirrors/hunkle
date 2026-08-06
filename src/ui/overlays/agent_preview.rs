@@ -113,6 +113,7 @@ pub(in crate::ui) fn draw_agent_preview_modal(
                 app.scheduler.conversation_message,
                 app.scheduler.conversation_scroll,
                 &app.scheduler.conversation_expanded_requests,
+                app.scheduler.conversation_user_expanded,
                 &app.agent_preview_prompt,
                 app.agent_preview_prompt_focused,
                 prompt_error,
@@ -172,6 +173,7 @@ pub(in crate::ui) fn draw_agent_preview_modal(
     let selected_message = app.agent_preview_message(index);
     let transcript_scroll = app.agent_preview_transcript_scroll(index);
     let expanded_requests = app.agent_preview_expanded_requests(index).to_vec();
+    let user_message_expanded = app.agent_preview_user_message_expanded(index);
     let picker_open = app.agent_preview_picker_open();
     let hovered = app.hovered_hit_target.clone();
     let (history_targets, scroll_max, scroll, animation_presented) = agents::draw_history(
@@ -182,6 +184,7 @@ pub(in crate::ui) fn draw_agent_preview_modal(
         selected_message,
         transcript_scroll,
         &expanded_requests,
+        user_message_expanded,
         picker_open,
         hovered,
         &app.agent_preview_prompt,

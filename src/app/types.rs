@@ -415,6 +415,14 @@ pub(crate) enum HitTarget {
         agent: AgentKey,
         message: usize,
     },
+    AgentExpandedMessage {
+        agent: AgentKey,
+        message: usize,
+    },
+    AgentScheduledMessage {
+        run_id: i64,
+        message: usize,
+    },
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -863,9 +871,11 @@ impl Regions {
                 ExplorerHitTarget::SurroundingsPane | ExplorerHitTarget::Surrounding { .. },
             ) => Some(ScrollTarget::WorkspaceExplorerSurroundings),
             HitTarget::AgentTooltip { agent, .. }
-            | HitTarget::AgentPreviewRequest { agent, .. } => {
+            | HitTarget::AgentPreviewRequest { agent, .. }
+            | HitTarget::AgentExpandedMessage { agent, .. } => {
                 Some(ScrollTarget::AgentTranscript(agent.clone()))
             }
+            HitTarget::AgentScheduledMessage { .. } => Some(ScrollTarget::SchedulerConversation),
             _ => None,
         }
     }

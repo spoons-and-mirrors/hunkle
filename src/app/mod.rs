@@ -101,6 +101,12 @@ struct AgentPreviewExpandedRequests {
     requests: Vec<usize>,
 }
 
+#[derive(Debug)]
+struct AgentPreviewExpandedUserMessage {
+    agent: AgentKey,
+    message: usize,
+}
+
 pub(super) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) use ratatui::{
     layout::{Position, Rect},
@@ -175,6 +181,7 @@ pub struct App {
     agent_preview_transcript_scroll: Option<AgentPreviewTranscriptScroll>,
     agent_preview_message_selection: Option<AgentPreviewMessageSelection>,
     agent_preview_expanded_requests: Option<AgentPreviewExpandedRequests>,
+    agent_preview_expanded_user_message: Option<AgentPreviewExpandedUserMessage>,
     pub(crate) agent_transcript_presentation: crate::ui::AgentTranscriptPresentation,
     agent_preview_picker_open: bool,
     pub(crate) agent_preview_prompt: TextInput,
@@ -359,6 +366,7 @@ impl App {
             agent_preview_transcript_scroll: None,
             agent_preview_message_selection: None,
             agent_preview_expanded_requests: None,
+            agent_preview_expanded_user_message: None,
             agent_transcript_presentation: crate::ui::AgentTranscriptPresentation::default(),
             agent_preview_picker_open: false,
             agent_preview_prompt: TextInput::default(),
@@ -2638,6 +2646,7 @@ impl App {
         self.agent_preview_transcript_scroll = None;
         self.agent_preview_message_selection = None;
         self.agent_preview_expanded_requests = None;
+        self.agent_preview_expanded_user_message = None;
         self.agent_preview_picker_open = false;
         self.reset_agent_preview_prompt();
         if matches!(
@@ -2658,6 +2667,8 @@ impl App {
                     | HitTarget::AgentPreviewRequest { .. }
                     | HitTarget::AgentTooltip { .. }
                     | HitTarget::AgentMessage { .. }
+                    | HitTarget::AgentExpandedMessage { .. }
+                    | HitTarget::AgentScheduledMessage { .. }
             )
         ) {
             self.hovered_hit_target = None;
@@ -2943,6 +2954,22 @@ impl App {
         } else {
             &[]
         }
+    }
+
+    pub(crate) fn agent_preview_user_message_expanded(&self, index: usize) -> bool {
+        let Some(agent) = self.herdr.agent_key(index) else {
+            return false;
+        };
+        let Some(message) = self.agent_preview_message(index).or_else(|| {
+            self.herdr
+                .agent_user_messages(index)
+                .and_then(|messages| messages.len().checked_sub(1))
+        }) else {
+            return false;
+        };
+        self.agent_preview_expanded_user_message
+            .as_ref()
+            .is_some_and(|expanded| expanded.agent == agent && expanded.message == message)
     }
 
     pub(super) fn show_agents_pane(&mut self) {

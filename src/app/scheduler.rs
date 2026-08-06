@@ -409,6 +409,7 @@ pub(crate) struct SchedulerState {
     pub(crate) conversation_scroll_max: usize,
     pub(crate) conversation_message: Option<usize>,
     pub(crate) conversation_expanded_requests: Vec<usize>,
+    pub(crate) conversation_user_expanded: bool,
     pub(crate) runs_focused: bool,
     pub(crate) error: Option<String>,
     pub(crate) pending_worktree: Option<usize>,
@@ -1201,6 +1202,7 @@ impl App {
             self.scheduler.conversation_scroll = None;
             self.scheduler.conversation_message = None;
             self.scheduler.conversation_expanded_requests.clear();
+            self.scheduler.conversation_user_expanded = false;
             self.herdr.clear_scheduled_conversation();
         }
     }
@@ -1308,6 +1310,7 @@ impl App {
         self.scheduler.conversation_scroll = None;
         self.scheduler.conversation_message = None;
         self.scheduler.conversation_expanded_requests.clear();
+        self.scheduler.conversation_user_expanded = false;
         self.scheduler.error = None;
         self.agent_preview_scheduled_run = Some(run.id);
         self.agent_preview_return_mode = return_mode;
@@ -1422,6 +1425,7 @@ impl App {
         );
         self.scheduler.conversation_scroll = None;
         self.scheduler.conversation_expanded_requests.clear();
+        self.scheduler.conversation_user_expanded = false;
     }
 
     fn toggle_scheduler_prompt_expansion(&mut self) {
