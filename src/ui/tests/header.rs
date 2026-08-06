@@ -34,6 +34,12 @@ fn mobile_header_cards_scroll_horizontally_without_losing_taps() {
         .hit_target_rect(HitTarget::HeaderRepository)
         .unwrap();
     assert!(app.regions.header_scroll_max > 0);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderSchedule)
+            .is_none()
+    );
+    assert!(!screen_text(&terminal).contains("SCHEDULE F4"));
 
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
@@ -58,12 +64,7 @@ fn mobile_header_cards_scroll_horizontally_without_losing_taps() {
         .regions
         .hit_target_rect(HitTarget::HeaderRepository)
         .unwrap();
-    let drag_start = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderSchedule)
-        .unwrap()
-        .x
-        .saturating_sub(2);
+    let drag_start = 48;
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
         drag_start,

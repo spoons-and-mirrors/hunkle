@@ -40,35 +40,9 @@ pub(super) fn draw_header(
         }
         rect
     });
-    let controls_right = fullscreen_rect
+    let header_right = fullscreen_rect
         .map(|rect| rect.x.saturating_sub(1))
         .unwrap_or_else(|| area.right());
-    let schedule_rect = (herdr_available && profile.is_single()).then(|| {
-        let label = " SCHEDULE F4 ";
-        let width = UnicodeWidthStr::width(label) as u16;
-        let rect = Rect::new(controls_right.saturating_sub(width), content_y, width, 1);
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderSchedule);
-        frame.render_widget(
-            Paragraph::new(label).alignment(Alignment::Center).style(
-                Style::default()
-                    .fg(if hovered || app.mode == Mode::Scheduler {
-                        palette().accent
-                    } else {
-                        palette().cyan
-                    })
-                    .bg(palette().canvas)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            rect,
-        );
-        app.regions
-            .register_hit_target(HitTarget::HeaderSchedule, rect);
-        rect
-    });
-    let controls_right = schedule_rect
-        .map(|rect| rect.x.saturating_sub(1))
-        .unwrap_or(controls_right);
-    let header_right = controls_right;
     let Some(repo) = app.repository() else {
         frame.render_widget(
             Paragraph::new("  No workspace selected").style(Style::default().fg(palette().muted)),
