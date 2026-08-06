@@ -17,6 +17,29 @@ fn enable_herdr(app: &mut App) {
 }
 
 #[test]
+fn control_c_clears_a_raw_text_field_instead_of_quitting() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.mode = Mode::Command;
+    app.actions.input = "draft command".to_owned();
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert!(app.actions.input.is_empty());
+    assert!(!app.should_quit);
+}
+
+#[test]
+fn control_c_still_quits_outside_a_text_field() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert!(app.should_quit);
+}
+
+#[test]
 fn clearing_targets_removes_overlaps_but_keeps_adjacent_targets() {
     let mut regions = Regions::default();
     regions.register_hit_target(HitTarget::CommitMessageGenerate, Rect::new(0, 0, 4, 1));

@@ -36,6 +36,10 @@ impl Default for TextInput {
 impl TextInput {
     pub(crate) fn handle_edit_key(&mut self, key: KeyEvent) -> EditOutcome {
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.clear();
+                EditOutcome::Edited
+            }
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.select_all();
                 EditOutcome::Navigated
@@ -458,4 +462,15 @@ mod tests {
         input.insert_single_line(" one\r\ntwo");
         assert_eq!(input.text(), " onetwoé");
     }
+}
+#[test]
+fn control_c_clears_the_input() {
+    let mut input = TextInput::default();
+    input.insert("draft");
+
+    assert_eq!(
+        input.handle_edit_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        EditOutcome::Edited
+    );
+    assert!(input.text().is_empty());
 }

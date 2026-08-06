@@ -106,6 +106,7 @@ impl App {
                     | HitTarget::AgentPreviewPickerItem(agent)
                     | HitTarget::AgentPreviewMessageTimeline(agent)
                     | HitTarget::AgentPreviewPrompt(agent)
+                    | HitTarget::AgentPreviewPromptDelivery(agent)
                     | HitTarget::AgentPreviewRequest { agent, .. }
                     | HitTarget::AgentTooltip { agent, .. }
                     | HitTarget::AgentMessage { agent, .. } => Some(agent),
@@ -391,6 +392,13 @@ impl App {
                     if self.herdr.agent_index(&key).is_some() {
                         self.agent_preview_selection = Some(key);
                         self.focus_agent_preview_prompt();
+                    }
+                    return;
+                }
+                Some(HitTarget::AgentPreviewPromptDelivery(key)) => {
+                    if self.herdr.agent_index(&key).is_some() {
+                        self.agent_preview_selection = Some(key);
+                        self.toggle_agent_preview_prompt_delivery();
                     }
                     return;
                 }
@@ -1420,6 +1428,12 @@ impl App {
                 if self.herdr.agent_index(&key).is_some() {
                     self.agent_preview_selection = Some(key);
                     self.focus_agent_preview_prompt();
+                }
+            }
+            Some(HitTarget::AgentPreviewPromptDelivery(key)) => {
+                if self.herdr.agent_index(&key).is_some() {
+                    self.agent_preview_selection = Some(key);
+                    self.toggle_agent_preview_prompt_delivery();
                 }
             }
             Some(HitTarget::AgentPreviewRequest {

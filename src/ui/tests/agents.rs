@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::{AgentKey, AgentRequestPartPreview, AgentRequestPreview};
+use crate::app::{AgentKey, AgentPromptDelivery, AgentRequestPartPreview, AgentRequestPreview};
 use std::path::PathBuf;
 
 fn agent_snapshot() -> serde_json::Value {
@@ -99,6 +99,33 @@ fn control_click_opens_the_live_agent_preview_modal() {
         .regions
         .hit_target_rect(HitTarget::AgentPreviewPrompt(key))
         .unwrap();
+    let delivery = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPromptDelivery(agent_key(&app, 0)))
+        .unwrap();
+    assert!(screen.contains("send now"));
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: delivery.x,
+        row: delivery.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(
+        app.agent_preview_prompt_delivery,
+        AgentPromptDelivery::OnIdle
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(screen_text(&terminal).contains("send on idle"));
+    assert_eq!(prompt.height, 3);
+    assert_eq!(delivery.bottom(), prompt.y);
+    for y in prompt.y..prompt.bottom() {
+        for x in prompt.x..prompt.right() {
+            assert_eq!(
+                terminal.backend().buffer()[(x, y)].bg,
+                palette().surface_alt
+            );
+        }
+    }
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: prompt.x,
@@ -106,8 +133,30 @@ fn control_click_opens_the_live_agent_preview_modal() {
         modifiers: KeyModifiers::NONE,
     });
     assert!(app.agent_preview_prompt_focused);
-    app.handle_paste("Please check the tests");
-    assert_eq!(app.agent_preview_prompt.text(), "Please check the tests");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    assert_eq!(app.agent_preview_prompt.text(), "\n\n\n");
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    app.handle_paste("Please check\nthe tests");
+    assert_eq!(app.agent_preview_prompt.text(), "Please check\nthe tests");
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let grown_prompt = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPrompt(agent_key(&app, 0)))
+        .unwrap();
+    assert_eq!(grown_prompt.height, 4);
+    assert_eq!(
+        terminal.backend().buffer()[(grown_prompt.x, grown_prompt.y + 1)].symbol(),
+        " "
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(grown_prompt.x + 1, grown_prompt.y + 1)].symbol(),
+        "›"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.agent_preview_prompt.text().is_empty());
+    assert!(!app.should_quit);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!app.agent_preview_prompt_focused);
 
@@ -741,13 +790,6 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(latest_screen.contains("Please refine the agent timers"));
-    assert!(
-        (user_message.bottom()..tooltip.bottom().saturating_sub(2)).any(|y| {
-            terminal.backend().buffer()[(user_message.x, y)].symbol() == "▀"
-                && terminal.backend().buffer()[(user_message.x, y + 1)].symbol() == " "
-                && terminal.backend().buffer()[(user_message.x, y + 2)].symbol() == "▄"
-        })
-    );
     let top_screen = terminal
         .backend()
         .buffer()

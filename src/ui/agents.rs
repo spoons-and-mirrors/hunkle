@@ -13,7 +13,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey,
+    AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey, AgentPromptDelivery,
     AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript, AgentUserMessage,
     HerdrSession, HitTarget, LinkedWorktreeCatalog, SchedulerHitTarget, Settings, TextInput,
 };
@@ -596,6 +596,7 @@ pub(super) fn draw_history(
     prompt: &TextInput,
     prompt_focused: bool,
     prompt_error: Option<&str>,
+    prompt_delivery: AgentPromptDelivery,
     status_area: Rect,
     area: Rect,
 ) -> (Vec<(HitTarget, Rect)>, usize, usize, bool) {
@@ -606,12 +607,22 @@ pub(super) fn draw_history(
         return (Vec::new(), 0, 0, false);
     };
     fill(frame, area, palette().panel);
-    let prompt_space = 5.min(area.height);
+    let prompt_text_width = usize::from(area.width.saturating_sub(4)).max(1);
+    let desired_prompt_height = u16::try_from(prompt.visual_height(prompt_text_width))
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .max(3);
+    let maximum_prompt_height = area.height.saturating_sub(11).max(3).min(area.height);
+    let prompt_height = desired_prompt_height.min(maximum_prompt_height);
+    let prompt_space = prompt_height.saturating_add(4).min(area.height);
+    let prompt_bottom_padding = prompt_space.saturating_sub(prompt_height) / 2;
     let prompt_area = Rect::new(
         area.x,
-        area.bottom().saturating_sub(3.min(prompt_space)),
+        area.bottom()
+            .saturating_sub(prompt_bottom_padding)
+            .saturating_sub(prompt_height),
         area.width,
-        1,
+        prompt_height,
     );
     draw_agent_prompt(
         frame,
@@ -621,6 +632,22 @@ pub(super) fn draw_history(
         prompt_focused,
         prompt_error,
         prompt_area,
+    );
+    let delivery_width = badge_width(prompt_delivery.label()).min(area.width.saturating_sub(2));
+    let delivery_area = Rect::new(
+        area.right()
+            .saturating_sub(delivery_width)
+            .saturating_sub(1),
+        prompt_area.y.saturating_sub(1),
+        delivery_width,
+        1,
+    );
+    draw_badge(
+        frame,
+        delivery_area,
+        prompt_delivery.label(),
+        palette().cyan,
+        palette().panel,
     );
     let area = Rect::new(
         area.x,
@@ -632,6 +659,12 @@ pub(super) fn draw_history(
         HitTarget::AgentPreviewPrompt(agent_key.clone()),
         prompt_area,
     )];
+    if !delivery_area.is_empty() {
+        navigation_targets.push((
+            HitTarget::AgentPreviewPromptDelivery(agent_key.clone()),
+            delivery_area,
+        ));
+    }
     if area.height < 7 {
         return (navigation_targets, 0, 0, false);
     }
@@ -873,14 +906,19 @@ fn draw_agent_prompt(
         return;
     }
     let input_area = Rect::new(
-        area.x.saturating_add(2),
-        area.y,
-        area.width.saturating_sub(3),
-        1,
+        area.x.saturating_add(3),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(2),
     );
     frame.render_widget(
         Paragraph::new("›").style(Style::default().fg(palette().cyan).bg(background)),
-        Rect::new(area.x, input_area.y, 2.min(area.width), 1),
+        Rect::new(
+            area.x.saturating_add(1),
+            input_area.y,
+            2.min(area.width.saturating_sub(1)),
+            1,
+        ),
     );
     let error = local_error.or_else(|| herdr.agent_prompt_error(index));
     if input.text().is_empty() && !active && error.is_some() {
@@ -890,11 +928,16 @@ fn draw_agent_prompt(
             input_area,
         );
     } else {
-        let cursor_width = UnicodeWidthStr::width(&input.text()[..input.cursor()]);
-        let scroll = cursor_width.saturating_sub(usize::from(input_area.width).saturating_sub(1));
+        let width = usize::from(input_area.width).max(1);
+        let height = usize::from(input_area.height).max(1);
+        let scroll = input
+            .visual_cursor_row(width)
+            .saturating_sub(height.saturating_sub(1))
+            .min(input.visual_height(width).saturating_sub(height));
         frame.render_widget(
             Paragraph::new(text_input_lines(input, active, palette().ink))
-                .scroll((0, u16::try_from(scroll).unwrap_or(u16::MAX)))
+                .wrap(Wrap { trim: false })
+                .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
                 .style(Style::default().bg(background)),
             input_area,
         );

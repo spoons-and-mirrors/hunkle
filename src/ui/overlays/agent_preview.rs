@@ -167,6 +167,7 @@ pub(in crate::ui) fn draw_agent_preview_modal(
         &app.agent_preview_prompt,
         app.agent_preview_prompt_focused,
         app.agent_preview_prompt_error.as_deref(),
+        app.agent_preview_prompt_delivery,
         status_area,
         body,
     );

@@ -867,6 +867,7 @@ pub(super) fn draw_agent_history_pane(
         &app.agent_preview_prompt,
         app.agent_preview_prompt_focused,
         app.agent_preview_prompt_error.as_deref(),
+        app.agent_preview_prompt_delivery,
         tabs_trailing,
         history,
     );

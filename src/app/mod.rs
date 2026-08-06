@@ -38,10 +38,10 @@ pub(crate) use header_picker::{
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
-    AgentActivityPreview, AgentEntryState, AgentKey, AgentRequestPartPreview, AgentRequestPreview,
-    AgentStatus, AgentTranscript, AgentUserMessage, HerdrPaneLayout, HerdrSession, ScheduledRun,
-    ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit,
-    ScheduledTaskSource,
+    AgentActivityPreview, AgentEntryState, AgentKey, AgentPromptOutcome, AgentRequestPartPreview,
+    AgentRequestPreview, AgentStatus, AgentTranscript, AgentUserMessage, HerdrPaneLayout,
+    HerdrSession, ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination,
+    ScheduledTaskEdit, ScheduledTaskSource,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -173,6 +173,7 @@ pub struct App {
     pub(crate) agent_preview_prompt: TextInput,
     pub(crate) agent_preview_prompt_focused: bool,
     pub(crate) agent_preview_prompt_error: Option<String>,
+    pub(crate) agent_preview_prompt_delivery: AgentPromptDelivery,
     pub(crate) agent_preview_scheduled_run: Option<i64>,
     agent_preview_return_mode: Mode,
     pub(crate) hovered_hit_target: Option<HitTarget>,
@@ -342,6 +343,7 @@ impl App {
             agent_preview_prompt: TextInput::default(),
             agent_preview_prompt_focused: false,
             agent_preview_prompt_error: None,
+            agent_preview_prompt_delivery: AgentPromptDelivery::default(),
             agent_preview_scheduled_run: None,
             agent_preview_return_mode: Mode::Normal,
             hovered_hit_target: None,
@@ -736,7 +738,10 @@ impl App {
                 return;
             }
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('c')
+            && !self.text_field_focused()
+        {
             self.should_quit = true;
             return;
         }
@@ -841,7 +846,7 @@ impl App {
             return;
         }
         if self.agent_preview_prompt_focused {
-            self.agent_preview_prompt.insert_single_line(text);
+            self.agent_preview_prompt.insert(text);
             self.clear_agent_preview_prompt_error();
             return;
         }
@@ -2085,6 +2090,10 @@ impl App {
 
     fn handle_editor(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.editor_input.clear();
+                self.editor_error = None;
+            }
             KeyCode::Esc => {
                 self.editor_error = None;
                 self.mode = if self.editor_configure_only {
@@ -2587,6 +2596,7 @@ impl App {
                     | HitTarget::AgentPreviewPickerItem(_)
                     | HitTarget::AgentPreviewMessageTimeline(_)
                     | HitTarget::AgentPreviewPrompt(_)
+                    | HitTarget::AgentPreviewPromptDelivery(_)
                     | HitTarget::AgentPreviewRequest { .. }
                     | HitTarget::AgentTooltip { .. }
                     | HitTarget::AgentMessage { .. }
@@ -2660,9 +2670,31 @@ impl App {
     }
 
     fn handle_agent_preview_prompt_key(&mut self, key: KeyEvent) {
+        let input_width = self
+            .agent_preview_index()
+            .and_then(|index| self.herdr.agent_key(index))
+            .and_then(|key| {
+                self.regions
+                    .hit_target_rect(HitTarget::AgentPreviewPrompt(key))
+            })
+            .map_or(1, |area| usize::from(area.width.saturating_sub(4)).max(1));
         match key.code {
             KeyCode::Esc => self.agent_preview_prompt_focused = false,
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+            {
+                self.agent_preview_prompt.insert_char('\n');
+                self.clear_agent_preview_prompt_error();
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agent_preview_prompt.insert_char('\n');
+                self.clear_agent_preview_prompt_error();
+            }
             KeyCode::Enter => self.submit_agent_preview_prompt(),
+            KeyCode::Up => self.agent_preview_prompt.move_up(input_width),
+            KeyCode::Down => self.agent_preview_prompt.move_down(input_width),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.agent_preview_prompt.clear();
                 self.clear_agent_preview_prompt_error();
@@ -2683,20 +2715,57 @@ impl App {
         }
     }
 
+    fn text_field_focused(&self) -> bool {
+        self.agent_preview_prompt_focused
+            || (self.mode == Mode::Normal
+                && (self.view() == View::RepositorySearch
+                    || (self.visible_view() == View::Graph && self.graph_search_focused)))
+            || self.mode == Mode::Commit
+            || (self.mode == Mode::Command && self.actions.status != CommandStatus::Running)
+            || (self.mode == Mode::HerdrPrompt && !self.herdr_prompt.sending)
+            || self.mode == Mode::Editor
+            || (self.mode == Mode::Files
+                && self.file_dialog.as_ref().is_some_and(|dialog| {
+                    matches!(
+                        dialog.kind,
+                        FileDialogKind::Add { .. } | FileDialogKind::Name { .. }
+                    )
+                }))
+            || (self.mode == Mode::Scheduler
+                && self.scheduler.composer.as_ref().is_some_and(|composer| {
+                    composer.field != SchedulerField::Destination
+                        || composer.destination_picker_open()
+                }))
+            || (self.mode == Mode::Explorer
+                && (self.workspace_explorer.editing_path
+                    || self.workspace_explorer.naming_favorite))
+            || (self.mode == Mode::Settings && self.opencode_model_input.is_some())
+    }
+
     fn submit_agent_preview_prompt(&mut self) {
         let Some(index) = self.agent_preview_index() else {
             self.agent_preview_prompt_error = Some("Agent is no longer available".to_owned());
             return;
         };
         let prompt = self.agent_preview_prompt.text().trim().to_owned();
-        match self.herdr.prompt_agent(index, prompt) {
-            Ok(()) => {
+        match self
+            .herdr
+            .prompt_agent(index, prompt, self.agent_preview_prompt_delivery)
+        {
+            Ok(outcome) => {
                 self.agent_preview_prompt.clear();
                 self.agent_preview_prompt_error = None;
                 self.agent_preview_prompt_focused = false;
+                if outcome == AgentPromptOutcome::Queued {
+                    self.notice = Some("Message queued until agent is idle".to_owned());
+                }
             }
             Err(error) => self.agent_preview_prompt_error = Some(error),
         }
+    }
+
+    pub(super) fn toggle_agent_preview_prompt_delivery(&mut self) {
+        self.agent_preview_prompt_delivery = self.agent_preview_prompt_delivery.toggle();
     }
 
     fn clear_agent_preview_prompt_error(&mut self) {

@@ -396,6 +396,7 @@ pub(crate) enum HitTarget {
     AgentPreviewPickerItem(AgentKey),
     AgentPreviewMessageTimeline(AgentKey),
     AgentPreviewPrompt(AgentKey),
+    AgentPreviewPromptDelivery(AgentKey),
     AgentPreviewRequest {
         agent: AgentKey,
         message: usize,
@@ -409,6 +410,29 @@ pub(crate) enum HitTarget {
         agent: AgentKey,
         message: usize,
     },
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentPromptDelivery {
+    #[default]
+    NextRequest,
+    OnIdle,
+}
+
+impl AgentPromptDelivery {
+    pub(crate) fn toggle(self) -> Self {
+        match self {
+            Self::NextRequest => Self::OnIdle,
+            Self::OnIdle => Self::NextRequest,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NextRequest => "send now",
+            Self::OnIdle => "send on idle",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
