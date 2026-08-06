@@ -116,6 +116,10 @@ impl ScheduledRunStatus {
         )
     }
 
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+
     fn parse(value: &str) -> rusqlite::Result<Self> {
         match value {
             "launching" => Ok(Self::Launching),
@@ -134,6 +138,7 @@ pub(crate) struct ScheduledRun {
     pub(crate) id: i64,
     pub(crate) task_id: i64,
     pub(crate) created_at_ms: i64,
+    pub(crate) completed_at_ms: Option<i64>,
     pub(crate) status: ScheduledRunStatus,
     pub(crate) pane_id: Option<String>,
     pub(crate) terminal_id: Option<String>,
@@ -1447,14 +1452,15 @@ fn execute_claim(
         Err(error) => (ScheduledRunStatus::Failed, Some(error)),
     };
     db.execute(
-        "UPDATE scheduled_runs SET status = ?2, pane_id = ?3, terminal_id = ?4, session_id = ?5, error = ?6 WHERE id = ?1",
+        "UPDATE scheduled_runs SET status = ?2, pane_id = ?3, terminal_id = ?4, session_id = ?5, error = ?6, completed_at_ms = ?7 WHERE id = ?1",
         params![
             claim.run_id,
             status.text(),
             result.pane_id,
             result.terminal_id,
             result.session_id,
-            error
+            error,
+            status.is_terminal().then(now_ms)
         ],
     )
     .map_err(db_error)?;
@@ -1559,8 +1565,14 @@ fn apply_observation(
         SchedulerObserveResult::Observed(status) => (agent_status(status), None, delivery_error),
     };
     db.execute(
-        "UPDATE scheduled_runs SET status = ?2, output = COALESCE(?3, output), error = ?4 WHERE id = ?1",
-        params![run_id, status.text(), output, error],
+        "UPDATE scheduled_runs SET status = ?2, output = COALESCE(?3, output), error = ?4, completed_at_ms = ?5 WHERE id = ?1",
+        params![
+            run_id,
+            status.text(),
+            output,
+            error,
+            status.is_terminal().then(now_ms)
+        ],
     )
     .map_err(db_error)?;
     if status == ScheduledRunStatus::Completed {
@@ -1702,8 +1714,8 @@ fn agent_status(status: AgentStatus) -> ScheduledRunStatus {
 
 fn fail_run(db: &Connection, id: i64, error: &str) -> Result<(), String> {
     db.execute(
-        "UPDATE scheduled_runs SET status = 'failed', error = ?2 WHERE id = ?1",
-        params![id, error],
+        "UPDATE scheduled_runs SET status = 'failed', error = ?2, completed_at_ms = ?3 WHERE id = ?1",
+        params![id, error, now_ms()],
     )
     .map_err(db_error)?;
     Ok(())
@@ -1758,7 +1770,7 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
         .map_err(db_error)?;
     let sql = match version {
         0 => "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', discord_webhook_id TEXT NOT NULL DEFAULT '', destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0), next_run_ms INTEGER NOT NULL, source_path BLOB, source_kind TEXT NOT NULL DEFAULT 'local', project_key TEXT NOT NULL DEFAULT '', source_content BLOB, approved_content BLOB, source_missing INTEGER NOT NULL DEFAULT 0, project_repository BLOB);
-              CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, discord_webhook_id TEXT NOT NULL DEFAULT '', UNIQUE (task_id, scheduled_for_ms));
+              CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, completed_at_ms INTEGER, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, discord_webhook_id TEXT NOT NULL DEFAULT '', UNIQUE (task_id, scheduled_for_ms));
               CREATE TABLE scheduler_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id); CREATE UNIQUE INDEX scheduled_project_tasks ON scheduled_tasks(project_repository, project_key) WHERE source_kind = 'project';",
         1 => "ALTER TABLE scheduled_runs RENAME TO scheduled_runs_v1;
@@ -1773,6 +1785,7 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
         7 => "",
         8 => "",
         9 => "",
+        10 => "",
         _ => return Err(format!("scheduler database version {version} is newer than supported")),
     };
     tx.execute_batch(sql).map_err(db_error)?;
@@ -1860,12 +1873,25 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
             .map_err(db_error)?;
         }
     }
+    if version > 0 && version < 10 {
+        let has_runs = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_runs')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_error)?;
+        if has_runs {
+            tx.execute_batch("ALTER TABLE scheduled_runs ADD COLUMN completed_at_ms INTEGER;")
+                .map_err(db_error)?;
+        }
+    }
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS scheduler_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )
     .map_err(db_error)?;
-    if version < 9 {
-        tx.execute_batch("PRAGMA user_version = 9;")
+    if version < 10 {
+        tx.execute_batch("PRAGMA user_version = 10;")
             .map_err(db_error)?;
     }
     tx.commit().map_err(db_error)
@@ -1873,8 +1899,8 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
 
 fn recover_stale_launches(db: &Connection, now: i64) -> Result<(), String> {
     db.execute(
-        "UPDATE scheduled_runs SET status = 'failed', error = 'Hunkle stopped while launching this run' WHERE status = 'launching' AND created_at_ms <= ?1",
-        [now.saturating_sub(5 * 60 * 1_000)],
+        "UPDATE scheduled_runs SET status = 'failed', error = 'Hunkle stopped while launching this run', completed_at_ms = ?2 WHERE status = 'launching' AND created_at_ms <= ?1",
+        params![now.saturating_sub(5 * 60 * 1_000), now],
     )
     .map_err(db_error)?;
     Ok(())
@@ -1958,17 +1984,18 @@ fn load_state(db: &Connection) -> Result<State, String> {
     )?;
     let runs = query_all(
         db,
-        "SELECT id, task_id, created_at_ms, status, pane_id, terminal_id, session_id, error FROM scheduled_runs ORDER BY created_at_ms DESC, id DESC",
+        "SELECT id, task_id, created_at_ms, completed_at_ms, status, pane_id, terminal_id, session_id, error FROM scheduled_runs ORDER BY created_at_ms DESC, id DESC",
         |row| {
             Ok(ScheduledRun {
                 id: row.get(0)?,
                 task_id: row.get(1)?,
                 created_at_ms: row.get(2)?,
-                status: ScheduledRunStatus::parse(&row.get::<_, String>(3)?)?,
-                pane_id: row.get(4)?,
-                terminal_id: row.get(5)?,
-                session_id: row.get(6)?,
-                error: row.get(7)?,
+                completed_at_ms: row.get(3)?,
+                status: ScheduledRunStatus::parse(&row.get::<_, String>(4)?)?,
+                pane_id: row.get(5)?,
+                terminal_id: row.get(6)?,
+                session_id: row.get(7)?,
+                error: row.get(8)?,
             })
         },
     )?;
@@ -2059,7 +2086,7 @@ Summarize risks.
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            9
+            10
         );
         assert!(db.prepare("SELECT model FROM scheduled_tasks").is_ok());
     }
@@ -2294,6 +2321,7 @@ Summarize risks.
             .find(|run| run.id == missing_session_run_id)
             .unwrap();
         assert_eq!(missing_session.status, ScheduledRunStatus::Failed);
+        assert!(missing_session.completed_at_ms.is_some());
         assert!(
             missing_session
                 .error
@@ -2313,6 +2341,9 @@ Summarize risks.
             .iter()
             .any(|run| run.status == ScheduledRunStatus::Failed);
         assert!(failed);
+        assert!(state.1.iter().any(|run| {
+            run.status == ScheduledRunStatus::Failed && run.completed_at_ms.is_some()
+        }));
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStringExt;
@@ -2519,7 +2550,7 @@ Summarize risks.
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            9
+            10
         );
         assert!(db.prepare("SELECT terminal_id FROM scheduled_runs").is_ok());
         assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
@@ -2538,7 +2569,7 @@ Summarize risks.
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            9
+            10
         );
         assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
     }

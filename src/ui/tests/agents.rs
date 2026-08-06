@@ -439,12 +439,18 @@ fn scheduled_run_cards_cap_automatic_height_and_open_preview_on_any_click() {
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
     app.herdr.set_scheduled_tasks_for_test(Vec::new());
+    let completed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .saturating_sub(120_000) as i64;
     app.herdr.set_scheduled_runs_for_test(
         (1..=12)
             .map(|id| ScheduledRun {
                 id,
                 task_id: 7,
                 created_at_ms: id,
+                completed_at_ms: Some(completed_at_ms),
                 status: ScheduledRunStatus::Completed,
                 pane_id: None,
                 terminal_id: None,
@@ -469,6 +475,14 @@ fn scheduled_run_cards_cap_automatic_height_and_open_preview_on_any_click() {
         .collect::<Vec<_>>();
     assert_eq!(visible_runs.len(), 10);
     let (run_id, card) = visible_runs[0];
+    let detail = (card.x..card.right())
+        .map(|x| terminal.backend().buffer()[(x, card.y + 1)].symbol())
+        .collect::<String>();
+    assert!(detail.contains("finished 2m ago"));
+    assert!((card.x..card.right()).any(|x| {
+        let cell = &terminal.backend().buffer()[(x, card.y)];
+        cell.symbol() == "⠋" && cell.fg == palette().green
+    }));
     click(&mut app, card.x, card.y);
     assert_eq!(app.mode, Mode::AgentPreview);
     assert_eq!(app.agent_preview_scheduled_run, Some(run_id));
@@ -488,6 +502,61 @@ fn scheduled_run_cards_cap_automatic_height_and_open_preview_on_any_click() {
     });
     assert_eq!(app.mode, Mode::AgentPreview);
     assert_eq!(app.agent_preview_scheduled_run, Some(run_id));
+}
+
+#[test]
+fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_scheduled_tasks_for_test(Vec::new());
+    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+        id: 17,
+        task_id: 7,
+        created_at_ms: 1,
+        completed_at_ms: None,
+        status: ScheduledRunStatus::Working,
+        pane_id: Some("w1:p1".to_owned()),
+        terminal_id: None,
+        session_id: Some("ses_test".to_owned()),
+        error: None,
+    }]);
+    app.herdr.set_scheduled_conversation_for_test(
+        "ses_test",
+        "one user message",
+        &(0..100)
+            .map(|line| format!("response line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    // Exercise the scheduled fallback while retaining the authoritative observed agent.
+    app.herdr.agents.clear();
+    app.agent_preview_scheduled_run = Some(17);
+    app.mode = Mode::AgentPreview;
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewScheduledPrompt(17))
+            .is_some()
+    );
+    assert!(app.scheduler.conversation_scroll_max > 0);
+    assert_eq!(app.scheduler.conversation_scroll, None);
+    let transcript = app
+        .regions
+        .scroll_target_rect(ScrollTarget::SchedulerConversation)
+        .unwrap();
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: transcript.x,
+        row: transcript.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.scheduler.conversation_scroll.is_some());
 }
 
 #[test]

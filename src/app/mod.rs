@@ -2588,6 +2588,7 @@ impl App {
         if self.agent_preview_scheduled_run.is_some() && self.agent_preview_index().is_none() {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('v') => self.close_agent_preview_modal(),
+                KeyCode::Enter => self.focus_agent_preview_prompt(),
                 KeyCode::Up | KeyCode::Char('k') => self.scroll_scheduler_conversation(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.scroll_scheduler_conversation(1),
                 KeyCode::PageUp => self.scroll_scheduler_conversation(-10),
@@ -2651,6 +2652,7 @@ impl App {
                     | HitTarget::AgentPreviewMessageTimeline(_)
                     | HitTarget::AgentPreviewPrompt(_)
                     | HitTarget::AgentPreviewPromptDelivery(_)
+                    | HitTarget::AgentPreviewScheduledPrompt(_)
                     | HitTarget::AgentPreviewRequest { .. }
                     | HitTarget::AgentTooltip { .. }
                     | HitTarget::AgentMessage { .. }
@@ -2712,6 +2714,18 @@ impl App {
     }
 
     pub(super) fn focus_agent_preview_prompt(&mut self) {
+        if let Some(run_id) = self.agent_preview_scheduled_run
+            && self.agent_preview_index().is_none()
+        {
+            let available = self.herdr.scheduled_prompt_available(run_id);
+            if !available || self.herdr.scheduled_prompt_sending(run_id) {
+                return;
+            }
+            self.agent_preview_prompt_focused = true;
+            self.agent_preview_prompt.focus();
+            self.clear_agent_preview_prompt_error();
+            return;
+        }
         let Some(index) = self.agent_preview_index() else {
             return;
         };
@@ -2730,6 +2744,12 @@ impl App {
             .and_then(|key| {
                 self.regions
                     .hit_target_rect(HitTarget::AgentPreviewPrompt(key))
+            })
+            .or_else(|| {
+                self.agent_preview_scheduled_run.and_then(|run_id| {
+                    self.regions
+                        .hit_target_rect(HitTarget::AgentPreviewScheduledPrompt(run_id))
+                })
             })
             .map_or(1, |area| usize::from(area.width.saturating_sub(4)).max(1));
         match key.code {
@@ -2795,6 +2815,20 @@ impl App {
     }
 
     fn submit_agent_preview_prompt(&mut self) {
+        if let Some(run_id) = self.agent_preview_scheduled_run
+            && self.agent_preview_index().is_none()
+        {
+            let prompt = self.agent_preview_prompt.text().trim().to_owned();
+            match self.herdr.prompt_scheduled_run(run_id, prompt) {
+                Ok(()) => {
+                    self.agent_preview_prompt.clear();
+                    self.agent_preview_prompt_error = None;
+                    self.agent_preview_prompt_focused = false;
+                }
+                Err(error) => self.agent_preview_prompt_error = Some(error),
+            }
+            return;
+        }
         let Some(index) = self.agent_preview_index() else {
             self.agent_preview_prompt_error = Some("Agent is no longer available".to_owned());
             return;
@@ -2828,6 +2862,9 @@ impl App {
 
     fn clear_agent_preview_prompt_error(&mut self) {
         self.agent_preview_prompt_error = None;
+        if let Some(run_id) = self.agent_preview_scheduled_run {
+            self.herdr.clear_scheduled_prompt_error(run_id);
+        }
         if let Some(index) = self.agent_preview_index() {
             self.herdr.clear_agent_prompt_error(index);
         }

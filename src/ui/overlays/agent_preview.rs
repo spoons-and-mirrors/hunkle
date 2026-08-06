@@ -80,46 +80,66 @@ pub(in crate::ui) fn draw_agent_preview_modal(
             .agent_preview_scheduled_run
             .and_then(|id| app.herdr.scheduled_runs().iter().find(|run| run.id == id))
         {
+            let run_id = run.id;
+            let prompt_available = app.herdr.scheduled_prompt_available(run_id);
+            let prompt_sending = app.herdr.scheduled_prompt_sending(run_id);
+            let prompt_error = app
+                .agent_preview_prompt_error
+                .as_deref()
+                .or_else(|| app.herdr.scheduled_prompt_error(run_id));
             let transcript = run
                 .session_id
                 .as_deref()
                 .and_then(|session| app.herdr.scheduled_transcript(session));
-            if transcript.is_none_or(|transcript| transcript.messages.is_empty()) {
-                let text = run
-                    .session_id
-                    .as_deref()
-                    .and_then(|session| app.herdr.scheduled_conversation_error(session))
-                    .or(run.error.as_deref())
-                    .unwrap_or(if run.status.is_active() {
-                        "Waiting for this run's OpenCode session…"
-                    } else {
-                        "No OpenCode conversation was recorded for this run."
-                    });
-                frame.render_widget(
-                    Paragraph::new(text)
-                        .alignment(Alignment::Center)
-                        .wrap(Wrap { trim: true })
-                        .style(Style::default().fg(palette().faint).bg(palette().panel)),
-                    body,
-                );
-                return AgentPreviewModalRegions {
-                    targets,
-                    scroll_target: None,
-                    scroll: 0,
-                    scroll_max: 0,
-                    animation_presented: false,
-                };
-            }
+            let conversation_message = run
+                .session_id
+                .as_deref()
+                .and_then(|session| app.herdr.scheduled_conversation_error(session))
+                .or(run.error.as_deref())
+                .or_else(|| {
+                    transcript
+                        .is_none_or(|transcript| transcript.messages.is_empty())
+                        .then_some(if run.status.is_active() {
+                            "Waiting for this run's OpenCode session…"
+                        } else {
+                            "No OpenCode conversation was recorded for this run."
+                        })
+                });
             let (history_targets, scroll_max, scroll) = agents::draw_scheduled_history(
                 frame,
+                run_id,
                 transcript,
                 &mut app.agent_transcript_presentation,
                 app.scheduler.conversation_message,
                 app.scheduler.conversation_scroll,
                 &app.scheduler.conversation_expanded_requests,
+                &app.agent_preview_prompt,
+                app.agent_preview_prompt_focused,
+                prompt_error,
+                prompt_sending,
+                prompt_available,
+                conversation_message,
                 body,
             );
             targets.extend(history_targets);
+            if footer_height > 0 {
+                let footer = Rect::new(
+                    outer.x.saturating_add(2),
+                    outer.bottom().saturating_sub(2),
+                    outer.width.saturating_sub(4),
+                    1,
+                );
+                let help = if prompt_available {
+                    "Enter message   ↑↓ scroll   [ ] messages   Esc close"
+                } else {
+                    "↑↓ scroll   [ ] messages   Esc close"
+                };
+                frame.render_widget(
+                    Paragraph::new(help)
+                        .style(Style::default().fg(palette().faint).bg(palette().panel)),
+                    footer,
+                );
+            }
             return AgentPreviewModalRegions {
                 targets,
                 scroll_target: Some((ScrollTarget::SchedulerConversation, body)),

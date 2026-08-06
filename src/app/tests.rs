@@ -203,6 +203,12 @@ fn fullscreen_agent_app(source: &Path, destination: &Path) -> App {
             "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE" }],
             "agents": [{
                 "agent": "opencode",
+                "agent_session": {
+                    "source": "env",
+                    "agent": "opencode",
+                    "kind": "session_id",
+                    "value": "ses-live"
+                },
                 "agent_status": "idle",
                 "pane_id": "w1:p2"
             }],
@@ -1145,10 +1151,11 @@ fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
         id: 11,
         task_id: 7,
         created_at_ms: 1,
+        completed_at_ms: Some(2),
         status: ScheduledRunStatus::Completed,
         pane_id: None,
         terminal_id: None,
-        session_id: None,
+        session_id: Some("ses-live".to_owned()),
         error: Some("No session".to_owned()),
     }]);
     app.mode = Mode::Scheduler;
@@ -1175,6 +1182,12 @@ fn live_scheduled_agent_preview_can_focus_its_prompt() {
             "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE" }],
             "agents": [{
                 "agent": "opencode",
+                "agent_session": {
+                    "source": "env",
+                    "agent": "opencode",
+                    "kind": "session_id",
+                    "value": "ses-live"
+                },
                 "agent_status": "idle",
                 "pane_id": "w1:p2"
             }],
@@ -1191,10 +1204,11 @@ fn live_scheduled_agent_preview_can_focus_its_prompt() {
         id: 11,
         task_id: 7,
         created_at_ms: 1,
+        completed_at_ms: None,
         status: ScheduledRunStatus::Working,
         pane_id: Some("w1:p2".to_owned()),
         terminal_id: None,
-        session_id: None,
+        session_id: Some("ses-live".to_owned()),
         error: None,
     }]);
     app.agent_preview_scheduled_run = Some(11);
@@ -1202,6 +1216,23 @@ fn live_scheduled_agent_preview_can_focus_its_prompt() {
     app.focus_agent_preview_prompt();
 
     assert!(app.agent_preview_prompt_focused);
+
+    app.agent_preview_prompt_focused = false;
+    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+        id: 11,
+        task_id: 7,
+        created_at_ms: 1,
+        completed_at_ms: None,
+        status: ScheduledRunStatus::Working,
+        pane_id: Some("w1:p2".to_owned()),
+        terminal_id: None,
+        session_id: Some("ses-stale".to_owned()),
+        error: None,
+    }]);
+    assert!(app.agent_preview_index().is_none());
+    assert!(!app.herdr.scheduled_prompt_available(11));
+    app.focus_agent_preview_prompt();
+    assert!(!app.agent_preview_prompt_focused);
 }
 
 #[test]

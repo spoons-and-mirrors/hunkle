@@ -1253,8 +1253,7 @@ impl App {
             return;
         };
         if let Some(session_id) = run.session_id.as_deref() {
-            self.herdr
-                .request_scheduled_conversation(session_id, run.status.is_active());
+            self.herdr.refresh_scheduled_conversation(session_id);
         } else if let Some(task) = self
             .herdr
             .scheduled_tasks()

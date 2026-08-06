@@ -24,8 +24,9 @@ impl App {
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                     if let Some(
-                        target
-                        @ (ScrollTarget::AgentTimeline(_) | ScrollTarget::AgentTranscript(_)),
+                        target @ (ScrollTarget::AgentTimeline(_)
+                        | ScrollTarget::AgentTranscript(_)
+                        | ScrollTarget::SchedulerConversation),
                     ) = self.regions.scroll_target_at(point)
                     {
                         let delta = if mouse.kind == MouseEventKind::ScrollUp {
@@ -1435,6 +1436,11 @@ impl App {
             Some(HitTarget::AgentPreviewPrompt(key)) => {
                 if self.herdr.agent_index(&key).is_some() {
                     self.agent_preview_selection = Some(key);
+                    self.focus_agent_preview_prompt();
+                }
+            }
+            Some(HitTarget::AgentPreviewScheduledPrompt(run_id)) => {
+                if self.agent_preview_scheduled_run == Some(run_id) {
                     self.focus_agent_preview_prompt();
                 }
             }

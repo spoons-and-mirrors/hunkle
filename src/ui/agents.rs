@@ -290,8 +290,9 @@ pub(super) fn draw(
     match mode {
         AgentListMode::Agents => {}
         AgentListMode::Scheduled => {
-            draw_scheduled_runs(frame, herdr, list, hovered, &mut targets);
-            return (targets, false);
+            let animation_presented =
+                draw_scheduled_runs(frame, herdr, list, hovered, &mut targets);
+            return (targets, animation_presented);
         }
         AgentListMode::Stash => {
             draw_stashed_agents(frame, herdr, list, hovered, &mut targets);
@@ -475,7 +476,7 @@ fn draw_scheduled_runs(
     list: Rect,
     hovered: Option<HitTarget>,
     targets: &mut Vec<(HitTarget, Rect)>,
-) {
+) -> bool {
     if herdr.scheduled_runs().is_empty() {
         frame.render_widget(
             Paragraph::new("  No scheduled runs").style(
@@ -485,7 +486,7 @@ fn draw_scheduled_runs(
             ),
             list,
         );
-        return;
+        return false;
     }
     let card_height = if list.height >= 2 { 2 } else { 1 };
     let card_gap = 1;
@@ -506,6 +507,7 @@ fn draw_scheduled_runs(
         _ => None,
     };
     let mut last_card = None;
+    let mut animation_presented = false;
     for (screen_row, run) in herdr
         .scheduled_runs()
         .iter()
@@ -544,8 +546,13 @@ fn draw_scheduled_runs(
             || format!("Scheduled run #{}", run.id),
             |task| task.title.clone(),
         );
-        let status = run.status.text().to_uppercase();
-        let status_width = u16::try_from(UnicodeWidthStr::width(status.as_str())).unwrap_or(0);
+        let active = run.status.is_active();
+        let status = if active {
+            SPINNER_FRAMES[herdr.spinner_frame() % SPINNER_FRAMES.len()]
+        } else {
+            SPINNER_FRAMES[0]
+        };
+        let status_width = u16::try_from(UnicodeWidthStr::width(status)).unwrap_or(0);
         let title_width = row_area
             .width
             .saturating_sub(status_width.saturating_add(3));
@@ -573,10 +580,14 @@ fn draw_scheduled_runs(
             ),
         );
         if row_area.height > 1 {
-            let detail = task.map_or_else(
+            let mut detail = task.map_or_else(
                 || format!("Run #{}", run.id),
                 |task| format!("Run #{}  {} / {}", run.id, task.repository, task.branch),
             );
+            if let Some(completed_at_ms) = run.completed_at_ms {
+                detail.push_str("  finished ");
+                detail.push_str(&relative_completion_time(completed_at_ms));
+            }
             frame.render_widget(
                 Paragraph::new(truncate_width(
                     &detail,
@@ -593,6 +604,7 @@ fn draw_scheduled_runs(
         }
         targets.push((HitTarget::AgentScheduledRun(run.id), full_row_area));
         last_card = Some((full_row_area, background));
+        animation_presented |= active;
     }
     if let Some((card, background)) = last_card {
         let gap = Rect::new(card.x, card.bottom(), card.width, 1);
@@ -600,16 +612,32 @@ fn draw_scheduled_runs(
             draw_agent_gap(frame, gap, background, palette().panel);
         }
     }
+    animation_presented
 }
 
 fn scheduled_run_status_color(status: ScheduledRunStatus) -> Color {
     match status {
-        ScheduledRunStatus::Launching => palette().cyan,
-        ScheduledRunStatus::Working => palette().accent,
-        ScheduledRunStatus::Blocked => palette().yellow,
-        ScheduledRunStatus::Unknown => palette().faint,
+        ScheduledRunStatus::Launching
+        | ScheduledRunStatus::Working
+        | ScheduledRunStatus::Blocked
+        | ScheduledRunStatus::Unknown => palette().accent,
         ScheduledRunStatus::Completed => palette().green,
         ScheduledRunStatus::Failed => palette().red,
+    }
+}
+
+fn relative_completion_time(completed_at_ms: i64) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        });
+    let age_seconds = now_ms.saturating_sub(completed_at_ms).max(0) / 1_000;
+    match age_seconds {
+        0..=59 => "now".to_owned(),
+        60..=3_599 => format!("{}m ago", age_seconds / 60),
+        3_600..=86_399 => format!("{}h ago", age_seconds / 3_600),
+        _ => format!("{}d ago", age_seconds / 86_400),
     }
 }
 
@@ -1047,6 +1075,30 @@ fn draw_agent_prompt(
     area: Rect,
 ) {
     let sending = herdr.agent_prompt_sending(index);
+    let error = local_error.or_else(|| herdr.agent_prompt_error(index));
+    draw_preview_prompt(
+        frame,
+        input,
+        focused,
+        error,
+        sending,
+        cursor_row,
+        visual_height,
+        area,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_preview_prompt(
+    frame: &mut Frame<'_>,
+    input: &TextInput,
+    focused: bool,
+    error: Option<&str>,
+    sending: bool,
+    cursor_row: usize,
+    visual_height: usize,
+    area: Rect,
+) {
     let active = focused && !sending;
     let background = if active {
         palette().selected
@@ -1072,7 +1124,6 @@ fn draw_agent_prompt(
             1,
         ),
     );
-    let error = local_error.or_else(|| herdr.agent_prompt_error(index));
     if input.text().is_empty() && !active && error.is_some() {
         frame.render_widget(
             Paragraph::new(error.unwrap_or_default())
@@ -1096,22 +1147,77 @@ fn draw_agent_prompt(
 
 pub(super) fn draw_scheduled_history(
     frame: &mut Frame<'_>,
+    run_id: i64,
     transcript: Option<AgentTranscript<'_>>,
     presentation: &mut AgentTranscriptPresentation,
     selected_message: Option<usize>,
     transcript_scroll: Option<usize>,
     expanded_requests: &[usize],
-    area: Rect,
+    prompt: &TextInput,
+    prompt_focused: bool,
+    prompt_error: Option<&str>,
+    prompt_sending: bool,
+    prompt_available: bool,
+    conversation_message: Option<&str>,
+    mut area: Rect,
 ) -> (Vec<(HitTarget, Rect)>, usize, usize) {
     fill(frame, area, palette().panel);
+    let mut targets = Vec::new();
+    if prompt_available {
+        let prompt_text_width = usize::from(area.width.saturating_sub(4)).max(1);
+        let (prompt_cursor_row, prompt_visual_height) = prompt.visual_metrics(prompt_text_width);
+        let desired_prompt_height = u16::try_from(prompt_visual_height)
+            .unwrap_or(u16::MAX)
+            .saturating_add(2)
+            .max(3);
+        let prompt_height =
+            desired_prompt_height.min(area.height.saturating_sub(11).max(3).min(area.height));
+        let prompt_space = prompt_height.saturating_add(4).min(area.height);
+        let prompt_area = Rect::new(
+            area.x,
+            area.bottom()
+                .saturating_sub(prompt_space.saturating_sub(prompt_height) / 2)
+                .saturating_sub(prompt_height),
+            area.width,
+            prompt_height,
+        );
+        draw_preview_prompt(
+            frame,
+            prompt,
+            prompt_focused,
+            prompt_error,
+            prompt_sending,
+            prompt_cursor_row,
+            prompt_visual_height,
+            prompt_area,
+        );
+        let delivery_label = if prompt_sending { "sending" } else { "now" };
+        let delivery_width = badge_width(delivery_label).min(area.width.saturating_sub(2));
+        draw_badge(
+            frame,
+            Rect::new(
+                area.right()
+                    .saturating_sub(delivery_width)
+                    .saturating_sub(1),
+                prompt_area.y.saturating_sub(1),
+                delivery_width,
+                1,
+            ),
+            delivery_label,
+            palette().cyan,
+            palette().panel,
+        );
+        targets.push((HitTarget::AgentPreviewScheduledPrompt(run_id), prompt_area));
+        area.height = area.height.saturating_sub(prompt_space);
+    }
     let messages = transcript.map_or(&[][..], |transcript| transcript.messages);
     if messages.is_empty() {
         frame.render_widget(
-            Paragraph::new("Loading conversation history…")
+            Paragraph::new(conversation_message.unwrap_or("Loading conversation history…"))
                 .style(Style::default().fg(palette().faint).bg(palette().panel)),
             area,
         );
-        return (Vec::new(), 0, 0);
+        return (targets, 0, 0);
     }
     let selected_message = selected_message
         .unwrap_or_else(|| messages.len().saturating_sub(1))
@@ -1161,7 +1267,6 @@ pub(super) fn draw_scheduled_history(
         .request_height
         .saturating_sub(usize::from(viewport.height));
     let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
-    let mut targets = Vec::new();
     draw_message_timeline(
         frame,
         selector,
@@ -1194,17 +1299,6 @@ pub(super) fn draw_scheduled_history(
             ));
         }
     }
-    draw_transcript_progress(
-        frame,
-        Rect::new(
-            area.x.saturating_sub(1),
-            user_viewport.y,
-            area.width,
-            area.bottom().saturating_sub(user_viewport.y),
-        ),
-        scroll,
-        scroll_max,
-    );
     (targets, scroll_max, scroll)
 }
 
@@ -2156,31 +2250,6 @@ fn draw_message_timeline(
     if let Some(agent) = agent {
         targets.push((HitTarget::AgentPreviewMessageTimeline(agent), area));
     }
-}
-
-fn draw_transcript_progress(frame: &mut Frame<'_>, area: Rect, scroll: usize, scroll_max: usize) {
-    if area.height == 0 {
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new("│\n".repeat(usize::from(area.height)))
-            .style(Style::default().fg(palette().faint).bg(palette().panel)),
-        Rect::new(area.x, area.y, 1, area.height),
-    );
-    let extent = area.height.saturating_sub(1);
-    let offset = if scroll_max == 0 {
-        0
-    } else {
-        scroll
-            .saturating_mul(usize::from(extent))
-            .checked_div(scroll_max)
-            .and_then(|offset| u16::try_from(offset).ok())
-            .unwrap_or(extent)
-    };
-    frame.render_widget(
-        Paragraph::new("●").style(Style::default().fg(palette().yellow).bg(palette().panel)),
-        Rect::new(area.x, area.y.saturating_add(offset), 1, 1),
-    );
 }
 
 fn message_total_duration(message: &AgentUserMessage) -> Option<u64> {

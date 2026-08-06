@@ -76,6 +76,19 @@ fn unix_time_ms() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
+fn agent_has_opencode_session(agent: &AgentPane, session_id: &str) -> bool {
+    [&agent.runtime.timing_key]
+        .into_iter()
+        .chain(agent.runtime.session_timing_key.as_ref())
+        .any(|key| {
+            matches!(
+                key,
+                AgentTimingKey::Session(identity)
+                    if identity.agent == "opencode" && identity.value == session_id
+            )
+        })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AgentStatus {
@@ -344,6 +357,11 @@ enum Completion {
         key: AgentTimingKey,
         result: Result<(), String>,
     },
+    ScheduledPrompt {
+        run_id: i64,
+        session_id: Option<String>,
+        result: Result<(), String>,
+    },
     ScheduledSession {
         run_id: i64,
         result: Result<String, String>,
@@ -451,6 +469,8 @@ pub(crate) struct HerdrSession {
     agent_prompt_requests: HashSet<AgentTimingKey>,
     agent_prompts_on_idle: HashMap<AgentTimingKey, String>,
     agent_prompt_errors: HashMap<AgentTimingKey, String>,
+    scheduled_prompt_requests: HashSet<i64>,
+    scheduled_prompt_errors: HashMap<i64, String>,
     agent_prompt_notice: Option<String>,
     scheduled_preview_identity: Option<OpenCodeConversationIdentity>,
     scheduled_session_requests: HashSet<i64>,
@@ -552,6 +572,8 @@ impl HerdrSession {
             agent_prompt_requests: HashSet::new(),
             agent_prompts_on_idle: HashMap::new(),
             agent_prompt_errors: HashMap::new(),
+            scheduled_prompt_requests: HashSet::new(),
+            scheduled_prompt_errors: HashMap::new(),
             agent_prompt_notice: None,
             scheduled_preview_identity: None,
             scheduled_session_requests: HashSet::new(),
@@ -709,6 +731,23 @@ impl HerdrSession {
         self.latest_user_message_requests.insert(identity.clone());
         self.latest_user_message_refreshes
             .insert(identity.clone(), now + AGENT_MESSAGE_REFRESH_INTERVAL);
+        self.scheduled_conversation_errors.remove(&identity);
+        let session_id = session_id.to_owned();
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = latest_message::fetch(&session_id, false);
+            let _ = sender.send(Completion::ScheduledConversation { identity, result });
+        });
+    }
+
+    pub(crate) fn refresh_scheduled_conversation(&mut self, session_id: &str) {
+        let identity = scheduled_conversation_identity(session_id);
+        self.scheduled_preview_identity = Some(identity.clone());
+        if self.latest_user_message_requests.contains(&identity) {
+            return;
+        }
+        self.latest_user_message_requests.insert(identity.clone());
+        self.latest_user_message_refreshes.remove(&identity);
         self.scheduled_conversation_errors.remove(&identity);
         let session_id = session_id.to_owned();
         let sender = self.sender.clone();
@@ -1003,6 +1042,26 @@ impl HerdrSession {
                         }
                     });
                 }
+                Completion::ScheduledPrompt {
+                    run_id,
+                    session_id,
+                    result,
+                } => {
+                    self.scheduled_prompt_requests.remove(&run_id);
+                    poll.notice = Some(match result {
+                        Ok(()) => {
+                            self.scheduled_prompt_errors.remove(&run_id);
+                            if let Some(session_id) = session_id {
+                                self.refresh_scheduled_conversation(&session_id);
+                            }
+                            "Message sent to scheduled agent".to_owned()
+                        }
+                        Err(error) => {
+                            self.scheduled_prompt_errors.insert(run_id, error.clone());
+                            format!("Could not message scheduled agent: {error}")
+                        }
+                    });
+                }
                 Completion::ScheduledSession { run_id, result } => {
                     self.scheduled_session_requests.remove(&run_id);
                     match result {
@@ -1233,6 +1292,76 @@ impl HerdrSession {
         Ok(AgentPromptOutcome::Sending)
     }
 
+    pub(crate) fn prompt_scheduled_run(
+        &mut self,
+        run_id: i64,
+        prompt: String,
+    ) -> Result<(), String> {
+        if prompt.trim().is_empty() {
+            return Err("Enter a message".to_owned());
+        }
+        if self.scheduled_prompt_requests.contains(&run_id) {
+            return Err("A message is already being sent to this run".to_owned());
+        }
+        let run = self
+            .scheduled_runs()
+            .iter()
+            .find(|run| run.id == run_id)
+            .ok_or_else(|| "Scheduled run is no longer available".to_owned())?;
+        let pane_id = self
+            .scheduled_run_prompt_pane(run)
+            .ok_or_else(|| "Scheduled run is no longer attached to its Herdr agent".to_owned())?;
+        let session_id = run.session_id.clone();
+        self.scheduled_prompt_requests.insert(run_id);
+        self.scheduled_prompt_errors.remove(&run_id);
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = client::prompt_agent(pane_id, prompt);
+            let _ = sender.send(Completion::ScheduledPrompt {
+                run_id,
+                session_id,
+                result,
+            });
+        });
+        Ok(())
+    }
+
+    pub(crate) fn scheduled_prompt_sending(&self, run_id: i64) -> bool {
+        self.scheduled_prompt_requests.contains(&run_id)
+    }
+
+    pub(crate) fn scheduled_prompt_available(&self, run_id: i64) -> bool {
+        self.scheduled_runs()
+            .iter()
+            .find(|run| run.id == run_id)
+            .and_then(|run| self.scheduled_run_prompt_pane(run))
+            .is_some()
+    }
+
+    pub(crate) fn scheduled_prompt_error(&self, run_id: i64) -> Option<&str> {
+        self.scheduled_prompt_errors
+            .get(&run_id)
+            .map(String::as_str)
+    }
+
+    pub(crate) fn clear_scheduled_prompt_error(&mut self, run_id: i64) {
+        self.scheduled_prompt_errors.remove(&run_id);
+    }
+
+    fn scheduled_run_prompt_pane(&self, run: &ScheduledRun) -> Option<String> {
+        let pane_id = run.pane_id.as_deref()?;
+        self.observed_agents
+            .iter()
+            .find(|agent| {
+                agent.pane_id == pane_id
+                    && run
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|session_id| agent_has_opencode_session(agent, session_id))
+            })
+            .map(|agent| agent.pane_id.clone())
+    }
+
     fn start_agent_prompt(&mut self, key: AgentTimingKey, pane_id: String, prompt: String) {
         self.agent_prompt_requests.insert(key.clone());
         self.agent_prompt_errors.remove(&key);
@@ -1302,14 +1431,13 @@ impl HerdrSession {
 
     pub(crate) fn scheduled_run_agent_index(&self, run: &ScheduledRun) -> Option<usize> {
         self.agents.iter().position(|agent| {
+            if let Some(session_id) = run.session_id.as_deref() {
+                return agent_has_opencode_session(agent, session_id);
+            }
+            if let Some(terminal_id) = run.terminal_id.as_deref() {
+                return agent.terminal_id.as_deref() == Some(terminal_id);
+            }
             run.pane_id.as_deref() == Some(agent.pane_id.as_str())
-                || run.terminal_id.as_deref() == agent.terminal_id.as_deref()
-                || run.session_id.as_deref().is_some_and(|session_id| {
-                    matches!(
-                        agent.runtime.session_timing_key.as_ref(),
-                        Some(AgentTimingKey::Session(identity)) if identity.value == session_id
-                    )
-                })
         })
     }
 
@@ -2031,6 +2159,28 @@ impl HerdrSession {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_scheduled_conversation_for_test(
+        &mut self,
+        session_id: &str,
+        user: &str,
+        response: &str,
+    ) {
+        self.update_transcript(
+            scheduled_conversation_identity(session_id),
+            vec![AgentUserMessage {
+                text: user.to_owned(),
+                requests: vec![AgentRequestPreview {
+                    parts: vec![AgentRequestPartPreview::Text(response.to_owned())],
+                    reasoning_active: false,
+                    duration_ms: None,
+                    reasoning_duration_ms: None,
+                    tool_call_count: 0,
+                }],
+            }],
+        );
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_snapshot_for_test(&mut self, value: &Value) {
         let (mut workspaces, agents) = client::parse_snapshot(value).unwrap();
         populate_workspace_branches(&mut workspaces);
@@ -2552,6 +2702,7 @@ mod latest_user_message_cache_tests {
             id: 9,
             task_id: 7,
             created_at_ms: 1,
+            completed_at_ms: Some(2),
             status: scheduler::ScheduledRunStatus::Completed,
             pane_id: Some("departed:pane".to_owned()),
             terminal_id: None,
