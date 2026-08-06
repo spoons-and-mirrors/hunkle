@@ -388,12 +388,37 @@ impl DiscordWebhook {
         if !valid_discord_webhook_url(&self.url) {
             return Err("Discord webhook URL is invalid".to_owned());
         }
-        self.agent
-            .post(&self.url)
-            .send_json(serde_json::json!({
-                "content": discord_message(title, output),
-                "allowed_mentions": { "parse": [] },
-            }))
+        let result = match discord_delivery(title, output) {
+            DiscordDelivery::Message(content) => {
+                self.agent.post(&self.url).send_json(serde_json::json!({
+                    "content": content,
+                    "allowed_mentions": { "parse": [] },
+                }))
+            }
+            DiscordDelivery::Attachment { content, report } => {
+                use ureq::unversioned::multipart::{Form, Part};
+
+                let payload = serde_json::json!({
+                    "content": content,
+                    "allowed_mentions": { "parse": [] },
+                    "attachments": [{
+                        "id": 0,
+                        "filename": "hunkle-report.md",
+                    }],
+                })
+                .to_string();
+                let file = Part::bytes(report.as_bytes())
+                    .file_name("hunkle-report.md")
+                    .mime_str("text/markdown")
+                    .map_err(|_| "Could not prepare Discord report attachment".to_owned())?;
+                self.agent.post(&self.url).send(
+                    Form::new()
+                        .text("payload_json", &payload)
+                        .part("files[0]", file),
+                )
+            }
+        };
+        result
             .map(|_| ())
             .map_err(|_| "Discord webhook request failed".to_owned())
     }
@@ -1640,17 +1665,22 @@ fn record_delivery_error(
     Ok(())
 }
 
-fn discord_message(title: &str, output: &str) -> String {
+enum DiscordDelivery<'a> {
+    Message(String),
+    Attachment { content: String, report: &'a str },
+}
+
+fn discord_delivery<'a>(title: &str, output: &'a str) -> DiscordDelivery<'a> {
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     let title = truncate_utf8(&title, 160);
     let prefix = format!("Hunkle scheduled task: {title}\n\n");
-    let output = output.trim();
-    if prefix.len().saturating_add(output.len()) <= DISCORD_MESSAGE_BYTES {
-        return format!("{prefix}{output}");
+    if prefix.len().saturating_add(output.trim().len()) <= DISCORD_MESSAGE_BYTES {
+        return DiscordDelivery::Message(format!("{prefix}{}", output.trim()));
     }
-    let suffix = "\n\n[Result truncated by Hunkle]";
-    let available = DISCORD_MESSAGE_BYTES.saturating_sub(prefix.len() + suffix.len());
-    format!("{prefix}{}{suffix}", truncate_utf8(output, available))
+    DiscordDelivery::Attachment {
+        content: format!("Hunkle scheduled task: {title}\n\nFull report attached."),
+        report: output,
+    }
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
@@ -2374,12 +2404,22 @@ Summarize risks.
     }
 
     #[test]
-    fn discord_message_is_bounded_and_collapses_title_whitespace() {
-        let message = discord_message("  Nightly\n review  ", &"é".repeat(2_000));
+    fn discord_delivery_attaches_the_complete_large_report() {
+        let report = "é".repeat(2_000);
+        let delivery = discord_delivery("  Nightly\n review  ", &report);
 
-        assert!(message.starts_with("Hunkle scheduled task: Nightly review\n\n"));
-        assert!(message.ends_with("\n\n[Result truncated by Hunkle]"));
-        assert!(message.len() <= DISCORD_MESSAGE_BYTES);
+        let DiscordDelivery::Attachment {
+            content,
+            report: attached,
+        } = delivery
+        else {
+            panic!("large reports should be attached");
+        };
+        assert_eq!(
+            content,
+            "Hunkle scheduled task: Nightly review\n\nFull report attached."
+        );
+        assert_eq!(attached, report);
     }
 
     #[test]

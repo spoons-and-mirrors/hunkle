@@ -113,7 +113,7 @@ local settings and are never written into the repository file.
 Open **Settings > Discord** to save, test, or remove webhooks identified by server,
 channel, and webhook name. Each scheduled task can independently select one webhook or
 leave Discord delivery off. Mentions are disabled and responses longer than one
-Discord message are truncated. Delivery failures do not fail or rerun the task; they
+Discord message are delivered in full as Markdown attachments. Delivery failures do not fail or rerun the task; they
 appear on the run, and **Refresh** retries the delivery.
 
 ## Keys
