@@ -1212,7 +1212,7 @@ impl HerdrSession {
 
     fn take_idle_agent_prompts(&mut self) -> Vec<(AgentTimingKey, String, String)> {
         let ready = self
-            .agents
+            .observed_agents
             .iter()
             .filter(|agent| matches!(agent.runtime.status, AgentStatus::Idle | AgentStatus::Done))
             .filter_map(|agent| {
@@ -1231,13 +1231,18 @@ impl HerdrSession {
     }
 
     pub(crate) fn agent_prompt_sending(&self, index: usize) -> bool {
-        self.agents.get(index).is_some_and(|agent| {
-            self.agent_prompt_requests
-                .contains(&agent.runtime.timing_key)
-                || self
-                    .agent_prompts_on_idle
-                    .contains_key(&agent.runtime.timing_key)
-        })
+        self.agent_prompt_pending(index).is_some()
+    }
+
+    pub(crate) fn agent_prompt_pending(&self, index: usize) -> Option<AgentPromptOutcome> {
+        let key = &self.agents.get(index)?.runtime.timing_key;
+        if self.agent_prompts_on_idle.contains_key(key) {
+            Some(AgentPromptOutcome::Queued)
+        } else if self.agent_prompt_requests.contains(key) {
+            Some(AgentPromptOutcome::Sending)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn agent_prompt_error(&self, index: usize) -> Option<&str> {
@@ -1894,6 +1899,16 @@ impl HerdrSession {
     }
 
     fn apply_agent_status_event_at(&mut self, event: client::AgentStatusEvent, now_ms: u64) {
+        self.observe_agent_status_event_at(event, now_ms);
+        self.dispatch_idle_agent_prompts();
+    }
+
+    fn observe_agent_status_event_at(&mut self, event: client::AgentStatusEvent, now_ms: u64) {
+        if let Some(agent) = self.observed_agents.iter_mut().find(|agent| {
+            agent.workspace_id == event.workspace_id && agent.pane_id == event.pane_id
+        }) {
+            agent.runtime.status = event.status;
+        }
         let Some(agent) = self.agents.iter_mut().find(|agent| {
             agent.workspace_id == event.workspace_id && agent.pane_id == event.pane_id
         }) else {
@@ -2275,6 +2290,7 @@ mod presentation_interest_tests {
         let mut session = session_without_snapshot();
         let agent = working_agent(None);
         let key = agent.runtime.timing_key.clone();
+        session.observed_agents = vec![agent.clone()];
         session.agents = vec![agent];
 
         assert_eq!(
@@ -2284,7 +2300,7 @@ mod presentation_interest_tests {
         assert!(session.agent_prompt_sending(0));
         assert!(session.take_idle_agent_prompts().is_empty());
 
-        session.agents[0].runtime.status = AgentStatus::Idle;
+        session.observed_agents[0].runtime.status = AgentStatus::Idle;
         assert_eq!(
             session.take_idle_agent_prompts(),
             vec![(key, "w1:p1".to_owned(), "later".to_owned())]
@@ -2295,7 +2311,9 @@ mod presentation_interest_tests {
     #[test]
     fn on_idle_prompt_is_cancelled_when_agent_departs() {
         let mut session = session_without_snapshot();
-        session.agents = vec![working_agent(None)];
+        let agent = working_agent(None);
+        session.observed_agents = vec![agent.clone()];
+        session.agents = vec![agent];
         assert_eq!(
             session.prompt_agent(0, "later".to_owned(), AgentPromptDelivery::OnIdle),
             Ok(AgentPromptOutcome::Queued)
@@ -2307,6 +2325,49 @@ mod presentation_interest_tests {
         assert_eq!(
             session.poll(false).notice.as_deref(),
             Some("Queued message cancelled because the agent departed")
+        );
+    }
+
+    #[test]
+    fn on_idle_prompt_uses_the_authoritative_observed_inventory() {
+        let mut session = session_without_snapshot();
+        let mut agent = working_agent(None);
+        agent.runtime.status = AgentStatus::Idle;
+        let key = agent.runtime.timing_key.clone();
+        session.observed_agents = vec![agent];
+        session
+            .agent_prompts_on_idle
+            .insert(key.clone(), "later".to_owned());
+
+        assert_eq!(
+            session.take_idle_agent_prompts(),
+            vec![(key, "w1:p1".to_owned(), "later".to_owned())]
+        );
+    }
+
+    #[test]
+    fn idle_status_event_makes_a_queued_prompt_dispatchable_without_a_snapshot() {
+        let mut session = session_without_snapshot();
+        let agent = working_agent(None);
+        let key = agent.runtime.timing_key.clone();
+        session.observed_agents = vec![agent.clone()];
+        session.agents = vec![agent];
+        session
+            .agent_prompts_on_idle
+            .insert(key.clone(), "later".to_owned());
+
+        session.observe_agent_status_event_at(
+            client::AgentStatusEvent {
+                workspace_id: "w1".to_owned(),
+                pane_id: "w1:p1".to_owned(),
+                status: AgentStatus::Idle,
+            },
+            10,
+        );
+
+        assert_eq!(
+            session.take_idle_agent_prompts(),
+            vec![(key, "w1:p1".to_owned(), "later".to_owned())]
         );
     }
 

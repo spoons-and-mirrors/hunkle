@@ -157,8 +157,16 @@ fn control_click_opens_the_live_agent_preview_modal() {
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(app.agent_preview_prompt.text().is_empty());
     assert!(!app.should_quit);
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.handle_paste("Wait for idle");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(!app.agent_preview_prompt_focused);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(screen_text(&terminal).contains("waiting for idle"));
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPromptDelivery(agent_key(&app, 0)))
+            .is_none()
+    );
 
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),

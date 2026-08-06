@@ -40,6 +40,17 @@ fn control_c_still_quits_outside_a_text_field() {
 }
 
 #[test]
+fn control_c_quits_from_the_non_editable_add_file_choice() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.open_add_dialog();
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert!(app.should_quit);
+}
+
+#[test]
 fn clearing_targets_removes_overlaps_but_keeps_adjacent_targets() {
     let mut regions = Regions::default();
     regions.register_hit_target(HitTarget::CommitMessageGenerate, Rect::new(0, 0, 4, 1));

@@ -2725,12 +2725,10 @@ impl App {
             || (self.mode == Mode::HerdrPrompt && !self.herdr_prompt.sending)
             || self.mode == Mode::Editor
             || (self.mode == Mode::Files
-                && self.file_dialog.as_ref().is_some_and(|dialog| {
-                    matches!(
-                        dialog.kind,
-                        FileDialogKind::Add { .. } | FileDialogKind::Name { .. }
-                    )
-                }))
+                && self
+                    .file_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| matches!(dialog.kind, FileDialogKind::Name { .. })))
             || (self.mode == Mode::Scheduler
                 && self.scheduler.composer.as_ref().is_some_and(|composer| {
                     composer.field != SchedulerField::Destination
@@ -2765,6 +2763,12 @@ impl App {
     }
 
     pub(super) fn toggle_agent_preview_prompt_delivery(&mut self) {
+        if self
+            .agent_preview_index()
+            .is_some_and(|index| self.herdr.agent_prompt_sending(index))
+        {
+            return;
+        }
         self.agent_preview_prompt_delivery = self.agent_preview_prompt_delivery.toggle();
     }
 

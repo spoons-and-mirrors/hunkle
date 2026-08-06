@@ -14,8 +14,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey, AgentPromptDelivery,
-    AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript, AgentUserMessage,
-    HerdrSession, HitTarget, LinkedWorktreeCatalog, SchedulerHitTarget, Settings, TextInput,
+    AgentPromptOutcome, AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript,
+    AgentUserMessage, HerdrSession, HitTarget, LinkedWorktreeCatalog, SchedulerHitTarget, Settings,
+    TextInput,
 };
 use crate::theme::Palette;
 
@@ -608,7 +609,8 @@ pub(super) fn draw_history(
     };
     fill(frame, area, palette().panel);
     let prompt_text_width = usize::from(area.width.saturating_sub(4)).max(1);
-    let desired_prompt_height = u16::try_from(prompt.visual_height(prompt_text_width))
+    let (prompt_cursor_row, prompt_visual_height) = prompt.visual_metrics(prompt_text_width);
+    let desired_prompt_height = u16::try_from(prompt_visual_height)
         .unwrap_or(u16::MAX)
         .saturating_add(2)
         .max(3);
@@ -631,9 +633,17 @@ pub(super) fn draw_history(
         prompt,
         prompt_focused,
         prompt_error,
+        prompt_cursor_row,
+        prompt_visual_height,
         prompt_area,
     );
-    let delivery_width = badge_width(prompt_delivery.label()).min(area.width.saturating_sub(2));
+    let prompt_pending = herdr.agent_prompt_pending(index);
+    let delivery_label = match prompt_pending {
+        Some(AgentPromptOutcome::Queued) => "waiting for idle",
+        Some(AgentPromptOutcome::Sending) => "sending",
+        None => prompt_delivery.label(),
+    };
+    let delivery_width = badge_width(delivery_label).min(area.width.saturating_sub(2));
     let delivery_area = Rect::new(
         area.right()
             .saturating_sub(delivery_width)
@@ -645,7 +655,7 @@ pub(super) fn draw_history(
     draw_badge(
         frame,
         delivery_area,
-        prompt_delivery.label(),
+        delivery_label,
         palette().cyan,
         palette().panel,
     );
@@ -659,7 +669,7 @@ pub(super) fn draw_history(
         HitTarget::AgentPreviewPrompt(agent_key.clone()),
         prompt_area,
     )];
-    if !delivery_area.is_empty() {
+    if !delivery_area.is_empty() && prompt_pending.is_none() {
         navigation_targets.push((
             HitTarget::AgentPreviewPromptDelivery(agent_key.clone()),
             delivery_area,
@@ -892,6 +902,8 @@ fn draw_agent_prompt(
     input: &TextInput,
     focused: bool,
     local_error: Option<&str>,
+    cursor_row: usize,
+    visual_height: usize,
     area: Rect,
 ) {
     let sending = herdr.agent_prompt_sending(index);
@@ -928,12 +940,10 @@ fn draw_agent_prompt(
             input_area,
         );
     } else {
-        let width = usize::from(input_area.width).max(1);
         let height = usize::from(input_area.height).max(1);
-        let scroll = input
-            .visual_cursor_row(width)
+        let scroll = cursor_row
             .saturating_sub(height.saturating_sub(1))
-            .min(input.visual_height(width).saturating_sub(height));
+            .min(visual_height.saturating_sub(height));
         frame.render_widget(
             Paragraph::new(text_input_lines(input, active, palette().ink))
                 .wrap(Wrap { trim: false })
@@ -1199,47 +1209,8 @@ fn build_request_transcript_counted(
     for (request_index, request) in message.requests.iter().enumerate() {
         let final_request = request_index + 1 == request_count;
         let request_live = live && request_index + 1 == request_count;
-        let RequestSummary {
-            lines: summary,
-            reasoning,
-            hidden,
-            animated_rows: summary_animated_rows,
-        } = request_summary(request, width, request_live, stats);
-        let expandable = hidden && !final_request;
         let expanded = expanded_requests.contains(&request_index);
-        let collapsed = expandable && !expanded;
-        let (lines, height, animated_rows) = if collapsed {
-            let mut lines = Vec::new();
-            let mut animated_rows = Vec::new();
-            if let Some((reasoning, animated)) = reasoning {
-                if animated {
-                    animated_rows.push(lines.len());
-                }
-                lines.push(reasoning);
-                if request
-                    .parts
-                    .iter()
-                    .any(|part| matches!(part, AgentRequestPartPreview::Text(_)))
-                {
-                    lines.push(agent_output_transition_line('▄'));
-                }
-            }
-            let summary_offset = lines.len();
-            animated_rows.extend(
-                summary_animated_rows
-                    .into_iter()
-                    .map(|row| summary_offset.saturating_add(row)),
-            );
-            lines.extend(summary);
-            lines.push(Line::styled(
-                "⌄ more",
-                Style::default()
-                    .fg(palette().cyan)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            let height = lines.len().saturating_add(REQUEST_CARD_EXTRA_ROWS);
-            (lines, height, animated_rows)
-        } else {
+        let (lines, height, animated_rows, expandable) = if final_request {
             let (lines, content_height, animated_rows) =
                 request_content(Some(request), width, request_live, stats);
             (
@@ -1248,7 +1219,58 @@ fn build_request_transcript_counted(
                     .max(1)
                     .saturating_add(REQUEST_CARD_EXTRA_ROWS),
                 animated_rows,
+                false,
             )
+        } else {
+            let RequestSummary {
+                lines: summary,
+                reasoning,
+                hidden,
+                animated_rows: summary_animated_rows,
+            } = request_summary(request, width, request_live, stats);
+            if hidden && !expanded {
+                let mut lines = Vec::new();
+                let mut animated_rows = Vec::new();
+                if let Some((reasoning, animated)) = reasoning {
+                    if animated {
+                        animated_rows.push(lines.len());
+                    }
+                    lines.push(reasoning);
+                    if request
+                        .parts
+                        .iter()
+                        .any(|part| matches!(part, AgentRequestPartPreview::Text(_)))
+                    {
+                        lines.push(agent_output_transition_line('▄'));
+                    }
+                }
+                let summary_offset = lines.len();
+                animated_rows.extend(
+                    summary_animated_rows
+                        .into_iter()
+                        .map(|row| summary_offset.saturating_add(row)),
+                );
+                lines.extend(summary);
+                lines.push(Line::styled(
+                    "⌄ more",
+                    Style::default()
+                        .fg(palette().cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                let height = lines.len().saturating_add(REQUEST_CARD_EXTRA_ROWS);
+                (lines, height, animated_rows, true)
+            } else {
+                let (lines, content_height, animated_rows) =
+                    request_content(Some(request), width, request_live, stats);
+                (
+                    lines,
+                    content_height
+                        .max(1)
+                        .saturating_add(REQUEST_CARD_EXTRA_ROWS),
+                    animated_rows,
+                    hidden,
+                )
+            }
         };
         let elapsed = request.duration_ms.map(format_preview_duration);
         document_height = document_height.saturating_add(usize::from(elapsed.is_some()));
@@ -2836,6 +2858,20 @@ mod tests {
             expanded[0].lines[expanded[0].animated_rows[0]].spans[0].content,
             SPINNER_FRAMES[0]
         );
+    }
+
+    #[test]
+    fn final_request_skips_collapsed_summary_parsing() {
+        let output = "**complete** response";
+        let messages = vec![request_message(vec![AgentRequestPartPreview::Text(
+            output.to_owned(),
+        )])];
+        let mut stats = AgentTranscriptBuildStats::default();
+
+        build_request_transcript_counted(&messages[0], 40, false, &[], &mut stats);
+
+        assert_eq!(stats.markdown_parses, 1);
+        assert_eq!(stats.markdown_input_bytes, output.len());
     }
 
     #[test]
