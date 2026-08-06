@@ -1030,6 +1030,7 @@ fn scheduler_edits_an_existing_task_in_the_shared_composer() {
         interval_minutes: 90,
         next_run_ms: 1,
         source: None,
+        project_status: None,
     }]);
     app.mode = Mode::Scheduler;
     app.scheduler.surface = SchedulerSurface::Detail;
@@ -1067,6 +1068,7 @@ fn scheduler_run_now_opens_the_live_conversation() {
         interval_minutes: 90,
         next_run_ms: 1,
         source: None,
+        project_status: None,
     }]);
     app.mode = Mode::Scheduler;
     app.scheduler.surface = SchedulerSurface::Detail;
@@ -1100,6 +1102,7 @@ fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
         interval_minutes: 90,
         next_run_ms: 1,
         source: None,
+        project_status: None,
     }]);
     app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
         id: 11,

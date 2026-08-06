@@ -80,7 +80,7 @@ pub(crate) struct SchedulerDestination {
 pub(crate) struct ScheduledTaskComposer {
     pub(crate) task_id: Option<i64>,
     pub(crate) enabled: bool,
-    pub(crate) source: Option<ScheduledTaskSource>,
+    pub(crate) project: bool,
     pub(crate) title: TextInput,
     pub(crate) description: TextInput,
     pub(crate) prompt: TextInput,
@@ -107,7 +107,7 @@ impl ScheduledTaskComposer {
         Self {
             task_id: None,
             enabled: true,
-            source: None,
+            project: false,
             title: TextInput::default(),
             description: TextInput::default(),
             prompt: TextInput::default(),
@@ -129,7 +129,6 @@ impl ScheduledTaskComposer {
         task: &ScheduledTask,
         mut destinations: Vec<SchedulerDestination>,
         mut discord_webhooks: Vec<(String, String)>,
-        source: Option<ScheduledTaskSource>,
     ) -> Self {
         let destination = destinations
             .iter()
@@ -181,7 +180,7 @@ impl ScheduledTaskComposer {
         let mut composer = Self::new(destinations, discord_webhooks);
         composer.task_id = Some(task.id);
         composer.enabled = task.enabled;
-        composer.source = source;
+        composer.project = task.project_status.is_some();
         composer.destination = destination;
         composer.discord_webhook = discord_webhook;
         composer.title.set(&task.title);
@@ -189,6 +188,9 @@ impl ScheduledTaskComposer {
         composer.prompt.set(&task.prompt);
         composer.model.set(&task.model);
         composer.schedule.set(&task.interval_minutes.to_string());
+        if composer.project {
+            composer.field = SchedulerField::Discord;
+        }
         composer
     }
 
@@ -513,21 +515,49 @@ impl App {
                     format!("Could not load branches for {}: {error}", repository.label)
                 })
             });
-        let destinations = self
+        self.discover_active_project_tasks();
+        self.sync_scheduler_selection();
+    }
+
+    pub(crate) fn discover_active_project_tasks(&mut self) {
+        if !self.herdr.is_enabled() {
+            return;
+        }
+        let Some(repository) = self.repository() else {
+            return;
+        };
+        let root = repository.root.clone();
+        let repository_identity = repository
+            .common_dir
+            .clone()
+            .unwrap_or_else(|| root.clone());
+        let branch = repository.branch.clone();
+        let repository = self
             .scheduler_destinations()
             .into_iter()
-            .filter_map(|destination| {
-                Some(ScheduledTaskDestination {
-                    path: destination.path?,
-                    repository: destination.repository,
-                    branch: destination.checkout_branch,
-                })
+            .find(|destination| {
+                destination
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| same_path(path, &root))
             })
-            .collect();
-        if let Err(error) = self.herdr.sync_scheduled_task_files(destinations) {
+            .map(|destination| destination.repository)
+            .unwrap_or_else(|| {
+                root.file_name()
+                    .unwrap_or(root.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        if let Err(error) = self.herdr.discover_project_tasks(
+            ScheduledTaskDestination {
+                path: root,
+                repository,
+                branch,
+            },
+            repository_identity,
+        ) {
             self.scheduler.error = Some(error);
         }
-        self.sync_scheduler_selection();
     }
 
     pub(crate) fn sync_scheduler_selection(&mut self) {
@@ -568,21 +598,9 @@ impl App {
         let Some(task) = self.selected_scheduled_task().cloned() else {
             return;
         };
-        let source = match self.herdr.scheduled_task_source(&task) {
-            Ok(source) => source,
-            Err(error) => {
-                self.scheduler.error = Some(error);
-                return;
-            }
-        };
         let destinations = self.scheduler_destinations();
         let webhooks = self.scheduler_discord_webhooks();
-        self.scheduler.composer = Some(ScheduledTaskComposer::edit(
-            &task,
-            destinations,
-            webhooks,
-            source,
-        ));
+        self.scheduler.composer = Some(ScheduledTaskComposer::edit(&task, destinations, webhooks));
         self.scheduler.surface = SchedulerSurface::Detail;
         self.scheduler.error = None;
     }
@@ -751,6 +769,38 @@ impl App {
     }
 
     fn handle_scheduler_composer(&mut self, key: KeyEvent) {
+        if self
+            .scheduler
+            .composer
+            .as_ref()
+            .is_some_and(|composer| composer.project)
+        {
+            match key.code {
+                KeyCode::Esc => self.cancel_scheduled_task(),
+                KeyCode::Enter | KeyCode::Char('s')
+                    if key.code == KeyCode::Enter
+                        || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.save_scheduled_task()
+                }
+                KeyCode::Left
+                | KeyCode::Char('h')
+                | KeyCode::Right
+                | KeyCode::Char('l')
+                | KeyCode::Char(' ') => {
+                    self.scheduler
+                        .composer
+                        .as_mut()
+                        .unwrap()
+                        .cycle_discord_webhook(matches!(
+                            key.code,
+                            KeyCode::Left | KeyCode::Char('h')
+                        ));
+                }
+                _ => {}
+            }
+            return;
+        }
         if key.code == KeyCode::Esc {
             let composer = self.scheduler.composer.as_mut().unwrap();
             if composer.destination_picker_open() {
@@ -952,6 +1002,21 @@ impl App {
         let Some(composer) = self.scheduler.composer.as_ref() else {
             return;
         };
+        if composer.project {
+            let task_id = composer.task_id.unwrap();
+            match self
+                .herdr
+                .configure_project_task(task_id, composer.discord_webhook_id())
+            {
+                Ok(()) => {
+                    self.scheduler.composer = None;
+                    self.scheduler.error = None;
+                    self.notice = Some("Project task configuration saved".to_owned());
+                }
+                Err(error) => self.scheduler.error = Some(error),
+            }
+            return;
+        }
         let destination_index = composer.destination;
         let Some(destination) = composer.destinations.get(destination_index).cloned() else {
             self.scheduler.error = Some("Select a branch destination".to_owned());
@@ -986,11 +1051,9 @@ impl App {
             branch: destination.checkout_branch.clone(),
             enabled: composer.enabled,
             interval_minutes: composer.schedule.text().parse().unwrap_or(0),
-            source: composer.source.as_ref().map(|source| source.path.clone()),
         };
         let task_id = composer.task_id;
-        let source = composer.source.clone();
-        match self.herdr.save_scheduled_task(task_id, edit, source) {
+        match self.herdr.save_scheduled_task(task_id, edit) {
             Ok(()) => {
                 self.scheduler.composer = None;
                 self.scheduler.error = None;

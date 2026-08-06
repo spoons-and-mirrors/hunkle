@@ -39,9 +39,9 @@ pub(crate) use header_picker::{
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
     AgentActivityPreview, AgentEntryState, AgentKey, AgentRequestPartPreview, AgentRequestPreview,
-    AgentStatus, AgentTranscript, AgentUserMessage, HerdrPaneLayout, HerdrSession, ScheduledRun,
-    ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit,
-    ScheduledTaskSource,
+    AgentStatus, AgentTranscript, AgentUserMessage, HerdrPaneLayout, HerdrSession,
+    ProjectTaskStatus, ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination,
+    ScheduledTaskEdit,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -407,6 +407,7 @@ impl App {
             footer_marquee: None,
         };
         app.restore_commit_draft();
+        app.discover_active_project_tasks();
         app.queue_local_build_restart();
         app
     }
@@ -1425,6 +1426,7 @@ impl App {
                             .then_some(0),
                     );
                     self.restore_commit_draft();
+                    self.discover_active_project_tasks();
                     if let Some(request) = follow_up_refresh {
                         self.track_refresh_request(request, false);
                     }
@@ -1515,6 +1517,9 @@ impl App {
                                 Some(repo.files_fingerprint),
                             );
                         }
+                    }
+                    if refresh_scope.includes_worktree() || refresh_scope.includes_inventory() {
+                        self.discover_active_project_tasks();
                     }
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());

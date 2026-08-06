@@ -257,9 +257,12 @@ fn draw_tasks(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Schedu
                 Rect::new(rect.x + 3, rect.y + 1, rect.width.saturating_sub(4), 1),
                 truncate_width(
                     &format!(
-                        "{} / {}  ·  {}",
+                        "{} / {}{}  ·  {}",
                         task.repository,
                         task.branch,
+                        task.project_status
+                            .map(|status| format!("  ·  PROJECT {}", status.text().to_uppercase()))
+                            .unwrap_or_default(),
                         next_run_label(task)
                     ),
                     usize::from(rect.width.saturating_sub(4)),
@@ -291,8 +294,11 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
         area.width.saturating_sub(4),
         area.height,
     );
-    let status = if task.enabled { "ENABLED" } else { "PAUSED" };
-    let status_width = UnicodeWidthStr::width(status) as u16;
+    let status = task.project_status.map_or_else(
+        || if task.enabled { "ENABLED" } else { "PAUSED" }.to_owned(),
+        |status| format!("PROJECT {}", status.text().to_uppercase()),
+    );
+    let status_width = UnicodeWidthStr::width(status.as_str()) as u16;
     bold_text(
         frame,
         Rect::new(
@@ -324,16 +330,42 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut Sched
             .add_modifier(Modifier::BOLD),
     );
     let action_y = inner.y + 2;
-    let actions = [
-        (" RUN NOW ", Target::RunNow, palette().accent),
-        (" EDIT ", Target::Edit, palette().yellow),
-        (
-            if task.enabled { " PAUSE " } else { " ENABLE " },
+    let mut actions = Vec::new();
+    if task.project_status.is_none()
+        || task.project_status == Some(crate::app::ProjectTaskStatus::Current)
+    {
+        actions.push((" RUN NOW ", Target::RunNow, palette().accent));
+    }
+    actions.push((
+        if task.project_status.is_some() {
+            " CONFIGURE "
+        } else {
+            " EDIT "
+        },
+        Target::Edit,
+        palette().yellow,
+    ));
+    if task.project_status != Some(crate::app::ProjectTaskStatus::Missing) {
+        actions.push((
+            if task.project_status.is_some_and(|status| {
+                matches!(
+                    status,
+                    crate::app::ProjectTaskStatus::Pending | crate::app::ProjectTaskStatus::Changed
+                )
+            }) {
+                " APPROVE "
+            } else if task.enabled {
+                " PAUSE "
+            } else {
+                " ENABLE "
+            },
             Target::Toggle,
             palette().cyan,
-        ),
-        (" DELETE ", Target::Delete, palette().red),
-    ];
+        ));
+    }
+    if task.project_status.is_none() {
+        actions.push((" DELETE ", Target::Delete, palette().red));
+    }
     let mut x = inner.x;
     for (label, target, color) in actions {
         let width = UnicodeWidthStr::width(label) as u16;
@@ -613,12 +645,42 @@ fn draw_composer(
     bold_text(
         frame,
         Rect::new(inner.x, inner.y, inner.width, 1),
-        if composer.task_id.is_some() {
+        if composer.project {
+            "CONFIGURE PROJECT TASK"
+        } else if composer.task_id.is_some() {
             "EDIT SCHEDULED TASK"
         } else {
             "NEW SCHEDULED TASK"
         },
     );
+    if composer.project {
+        draw_text(
+            frame,
+            Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            truncate_width(composer.title.text(), usize::from(inner.width)),
+            Style::default()
+                .fg(palette().ink)
+                .add_modifier(Modifier::BOLD),
+        );
+        draw_text(
+            frame,
+            Rect::new(inner.x, inner.y + 4, inner.width, 2),
+            "The repository owns this task definition. Hunkle stores only its local activation and delivery settings.",
+            Style::default().fg(palette().muted),
+        );
+        let mut y = inner.y + 7;
+        draw_discord_field(frame, composer, inner, &mut y, regions);
+        let mut x = inner.x;
+        for (label, width, target, color) in [
+            (" CANCEL ", 9, Target::Cancel, palette().faint),
+            (" SAVE ", 8, Target::Save, palette().accent),
+        ] {
+            let rect = Rect::new(x, inner.bottom().saturating_sub(1), width, 1);
+            button(frame, regions, rect, label, target, color);
+            x = rect.right().saturating_add(1);
+        }
+        return;
+    }
     let mut y = inner.y + 2;
     if !composer.prompt_expanded {
         for field in [

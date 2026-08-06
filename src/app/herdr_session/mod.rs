@@ -30,8 +30,8 @@ pub(crate) use client::HerdrPaneLayout;
 #[cfg(test)]
 pub(crate) use client::HerdrPaneRect;
 pub(crate) use scheduler::{
-    ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit,
-    ScheduledTaskSource,
+    ProjectTaskStatus, ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination,
+    ScheduledTaskEdit,
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -567,23 +567,26 @@ impl HerdrSession {
         &self,
         id: Option<i64>,
         edit: ScheduledTaskEdit,
-        source: Option<ScheduledTaskSource>,
     ) -> Result<(), String> {
-        self.scheduler_service()?.save_task(id, edit, source)
+        self.scheduler_service()?.save_task(id, edit)
     }
 
-    pub(crate) fn scheduled_task_source(
+    pub(crate) fn configure_project_task(
         &self,
-        task: &ScheduledTask,
-    ) -> Result<Option<ScheduledTaskSource>, String> {
-        self.scheduler_service()?.task_source(task)
+        id: i64,
+        discord_webhook_id: String,
+    ) -> Result<(), String> {
+        self.scheduler_service()?
+            .configure_project_task(id, discord_webhook_id)
     }
 
-    pub(crate) fn sync_scheduled_task_files(
+    pub(crate) fn discover_project_tasks(
         &self,
-        destinations: Vec<ScheduledTaskDestination>,
+        destination: ScheduledTaskDestination,
+        repository_identity: PathBuf,
     ) -> Result<(), String> {
-        self.scheduler_service()?.sync_task_files(destinations)
+        self.scheduler_service()?
+            .discover_project_tasks(destination, repository_identity)
     }
 
     pub(crate) fn toggle_scheduled_task(&self, id: i64, enabled: bool) -> Result<(), String> {
@@ -2249,6 +2252,7 @@ mod latest_user_message_cache_tests {
             interval_minutes: 60,
             next_run_ms: 3_600_000,
             source: None,
+            project_status: None,
         });
         scheduler.runs.push(scheduler::ScheduledRun {
             id: 9,
