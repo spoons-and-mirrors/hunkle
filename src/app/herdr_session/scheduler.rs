@@ -899,13 +899,13 @@ fn run_headless(
     opencode_program: &Path,
 ) -> HeadlessRunCompletion {
     let mut command = ProcessCommand::new(opencode_program);
-    command.current_dir(&request.destination).args([
-        "run",
-        "--format",
-        "json",
-        "--title",
-        &request.label,
-    ]);
+    command
+        .current_dir(&request.destination)
+        .env_remove("OPENCODE")
+        .env_remove("OPENCODE_PID")
+        .arg("run")
+        .args(["--format", "json", "--title", &request.label, "--dir"])
+        .arg(&request.destination);
     if let Some(model) = request.model.as_deref() {
         command.args(["--model", model]);
     }
@@ -2473,7 +2473,8 @@ mod tests {
         std::fs::write(
             &program,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncat >> '{}'\nprintf '\\n' >> '{}'\nprintf '%s\\n' '{{\"type\":\"text\",\"sessionID\":\"ses_headless\",\"part\":{{\"type\":\"text\",\"text\":\"ok\"}}}}'\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nprintf 'env:%s:%s\\n' \"${{OPENCODE-unset}}\" \"${{OPENCODE_PID-unset}}\" >> '{}'\ncat >> '{}'\nprintf '\\n' >> '{}'\nprintf '%s\\n' '{{\"type\":\"text\",\"sessionID\":\"ses_headless\",\"part\":{{\"type\":\"text\",\"text\":\"ok\"}}}}'\n",
+                arguments.display(),
                 arguments.display(),
                 arguments.display(),
                 arguments.display()
@@ -2517,6 +2518,9 @@ mod tests {
         assert_eq!(followup.session_id.as_deref(), Some("ses_headless"));
         assert_eq!(followup.error, None);
         let arguments = std::fs::read_to_string(arguments).unwrap();
+        assert!(arguments.contains("--dir\n"));
+        assert!(arguments.contains(&directory.path().to_string_lossy().to_string()));
+        assert!(arguments.contains("env:unset:unset"));
         assert!(arguments.contains("--model\nprovider/model"));
         assert!(arguments.contains("first question"));
         assert!(arguments.contains("--session\nses_headless"));
@@ -2568,7 +2572,8 @@ mod tests {
         std::fs::write(
             &program,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = db ]; then printf '%s\\n' '[{{\"id\":\"ses_service\"}}]'; exit 0; fi\nprintf '%s\\n' \"$@\" >> '{}'\ncat >> '{}'\nprintf '\\n' >> '{}'\nsleep 0.3\nprintf '%s\\n' '{{\"type\":\"text\",\"sessionID\":\"ses_service\",\"part\":{{\"type\":\"text\",\"text\":\"ok\"}}}}'\n",
+                "#!/bin/sh\nif [ \"$1\" = db ]; then printf 'db-env:%s:%s\\n' \"${{OPENCODE-unset}}\" \"${{OPENCODE_PID-unset}}\" >> '{}'; printf '%s\\n' '[{{\"id\":\"ses_service\"}}]'; exit 0; fi\nprintf '%s\\n' \"$@\" >> '{}'\ncat >> '{}'\nprintf '\\n' >> '{}'\nsleep 0.3\nprintf '%s\\n' '{{\"type\":\"text\",\"sessionID\":\"ses_service\",\"part\":{{\"type\":\"text\",\"text\":\"ok\"}}}}'\n",
+                arguments.display(),
                 arguments.display(),
                 arguments.display(),
                 arguments.display()
@@ -2637,6 +2642,7 @@ mod tests {
                 .is_some_and(|run| run.status == ScheduledRunStatus::Completed)
         });
         let arguments = std::fs::read_to_string(arguments).unwrap();
+        assert!(arguments.contains("db-env:unset:unset"));
         assert!(arguments.contains("initial"));
         assert!(arguments.contains("--session\nses_service"));
         assert!(arguments.contains("follow-up"));

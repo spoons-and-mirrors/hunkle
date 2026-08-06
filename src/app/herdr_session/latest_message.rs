@@ -336,7 +336,10 @@ pub(super) fn resolve_scheduled_session_id_with_program(
           LIMIT 1"
     );
     let output = process::run_cancellable(
-        Command::new(program).args(["db", &query, "--format", "json", "--pure"]),
+        Command::new(program)
+            .env_remove("OPENCODE")
+            .env_remove("OPENCODE_PID")
+            .args(["db", &query, "--format", "json", "--pure"]),
         QUERY_LIMITS,
         cancelled,
     )
