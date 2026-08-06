@@ -43,6 +43,20 @@ fn agent_key(app: &App, index: usize) -> AgentKey {
     app.herdr.agent_key(index).unwrap()
 }
 
+fn agent_preview_scroll(app: &App) -> (usize, usize) {
+    let target = if let Some(run_id) = app.agent_preview.scheduled_run {
+        ScrollTarget::AgentScheduledTranscript(run_id)
+    } else {
+        let index = app.agent_preview_index().unwrap();
+        ScrollTarget::AgentTranscript(agent_key(app, index))
+    };
+    let state = app
+        .regions
+        .scroll_state(&target)
+        .expect("agent preview should register semantic scroll state");
+    (state.offset, state.maximum)
+}
+
 #[test]
 fn control_click_opens_the_live_agent_preview_modal() {
     let directory = tempfile::tempdir().unwrap();
@@ -627,7 +641,7 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
             .hit_target_rect(HitTarget::AgentPreviewScheduledPrompt(17))
             .is_some()
     );
-    assert!(app.agent_preview.scheduled_scroll_max() > 0);
+    assert!(agent_preview_scroll(&app).1 > 0);
     assert_eq!(app.agent_preview.scheduled_scroll(), None);
     let user_message = app
         .regions
@@ -641,7 +655,7 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
     assert!(screen_text(&terminal).contains("scheduled user line 19"));
     let transcript = app
         .regions
-        .scroll_target_rect(ScrollTarget::SchedulerConversation)
+        .scroll_target_rect(ScrollTarget::AgentScheduledTranscript(17))
         .unwrap();
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::ScrollUp,
@@ -903,7 +917,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         message_timeline.y,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.agent_preview_scroll, 0);
+    assert_eq!(agent_preview_scroll(&app).0, 0);
 
     let user_message = app
         .regions
@@ -913,14 +927,14 @@ fn renders_and_targets_agents_in_the_normal_view() {
         })
         .unwrap();
     let transcript_row = user_message.bottom().saturating_add(1);
-    let scroll_before = app.regions.agent_preview_scroll;
+    let scroll_before = agent_preview_scroll(&app).0;
     app.handle_mouse(mouse(
         MouseEventKind::ScrollDown,
         user_message.x + 2,
         transcript_row,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.agent_preview_scroll > scroll_before);
+    assert!(agent_preview_scroll(&app).0 > scroll_before);
 
     let tooltip = app
         .regions
@@ -948,7 +962,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.agent_preview_scroll, 0);
+    assert_eq!(agent_preview_scroll(&app).0, 0);
     let user_message = app
         .regions
         .hit_target_rect(HitTarget::AgentMessage {
@@ -956,7 +970,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
             message: 4,
         })
         .unwrap();
-    assert_eq!(app.regions.agent_preview_scroll, 0);
+    assert_eq!(agent_preview_scroll(&app).0, 0);
     assert_eq!(user_message.x, tooltip.x + 1);
     assert_eq!(user_message.y, message_timeline.y + 3);
     assert_eq!(
@@ -1048,10 +1062,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(
-        app.regions.agent_preview_scroll,
-        app.regions.agent_preview_scroll_max
-    );
+    let (scroll, maximum) = agent_preview_scroll(&app);
+    assert_eq!(scroll, maximum);
 
     click(&mut app, card_x, area.y);
     assert_eq!(app.mode, Mode::Normal);
@@ -1194,11 +1206,9 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert!(app.regions.agent_preview_scroll_max > 0);
-    assert_eq!(
-        app.regions.agent_preview_scroll,
-        app.regions.agent_preview_scroll_max
-    );
+    let (scroll, maximum) = agent_preview_scroll(&app);
+    assert!(maximum > 0);
+    assert_eq!(scroll, maximum);
     let initial_screen = terminal
         .backend()
         .buffer()
@@ -1243,10 +1253,8 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(
-        app.regions.agent_preview_scroll,
-        app.regions.agent_preview_scroll_max
-    );
+    let (scroll, maximum) = agent_preview_scroll(&app);
+    assert_eq!(scroll, maximum);
     assert!(screen_text(&terminal).contains("user line 39"));
     click(&mut app, expanded_message.x + 1, expanded_message.y + 1);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1280,11 +1288,9 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.agent_preview_scroll_max > 0);
-    assert_eq!(
-        app.regions.agent_preview_scroll,
-        app.regions.agent_preview_scroll_max
-    );
+    let (scroll, maximum) = agent_preview_scroll(&app);
+    assert!(maximum > 0);
+    assert_eq!(scroll, maximum);
     let expanded_screen = terminal
         .backend()
         .buffer()
@@ -1351,7 +1357,7 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
     assert_eq!(user.right(), preview.right());
     assert!(user.height <= 8);
     assert_eq!(terminal.backend().buffer()[(user.x, user.y)].symbol(), "▄");
-    assert_eq!(app.regions.agent_preview_scroll, 0);
+    assert_eq!(agent_preview_scroll(&app).0, 0);
 }
 
 #[test]
@@ -2077,7 +2083,7 @@ fn conversation_preview_scopes_requests_to_the_selected_user_message() {
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.agent_preview_scroll, 0);
+    assert_eq!(agent_preview_scroll(&app).0, 0);
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentMessage {

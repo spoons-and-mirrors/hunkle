@@ -193,34 +193,42 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Settings => {
             dim(frame);
-            let targets = overlays::draw_settings(
+            let settings_regions = overlays::draw_settings(
                 frame,
                 overlays::SettingsView {
                     settings: &app.settings,
-                    page: app.settings_page,
-                    selection: app.settings_selection,
-                    shortcut_selection: app.shortcut_selection,
-                    shortcut_scroll: app.shortcut_scroll,
-                    shortcut_capture: app.shortcut_capture,
-                    shortcut_error: app.shortcut_error.as_deref(),
-                    opencode_selection: app.opencode_selection,
-                    opencode_model_input: app.opencode_model_input.as_deref(),
-                    opencode_error: app.opencode_error.as_deref(),
-                    discord_selection: app.discord_selection,
+                    page: app.settings_state.page,
+                    selection: app.settings_state.selection,
+                    shortcut_selection: app.settings_state.shortcut_selection,
+                    shortcut_scroll: app.settings_state.shortcut_scroll,
+                    shortcut_capture: app.settings_state.shortcut_capture,
+                    shortcut_error: app.settings_state.shortcut_error.as_deref(),
+                    opencode_selection: app.settings_state.opencode_selection,
+                    opencode_model_input: app.settings_state.opencode_model_input.as_deref(),
+                    opencode_error: app.settings_state.opencode_error.as_deref(),
+                    discord_selection: app.settings_state.discord_selection,
                     discord_webhooks: &app.discord_webhooks,
-                    discord_webhook_index: app.discord_webhook_index,
-                    discord_webhook_editor: app.discord_webhook_editor.as_ref(),
-                    discord_webhook_error: app.discord_webhook_error.as_deref(),
+                    discord_webhook_index: app.settings_state.discord_webhook_index,
+                    discord_webhook_editor: app.settings_state.discord_webhook_editor.as_ref(),
+                    discord_webhook_error: app.settings_state.discord_webhook_error.as_deref(),
                     herdr_available: app.herdr_available(),
                 },
                 app.fetch_running(),
             );
-            for (target, rect) in targets {
-                if app.settings_page == crate::app::SettingsPage::Shortcuts
+            for (target, rect) in settings_regions.targets {
+                if app.settings_state.page == crate::app::SettingsPage::Shortcuts
                     && target == HitTarget::Settings(crate::app::SettingsHitTarget::Overlay)
                 {
-                    app.regions
-                        .register_scroll_target(ScrollTarget::SettingsShortcuts, rect);
+                    let viewport = settings_regions.shortcut_viewport.unwrap_or(1);
+                    let maximum = crate::app::Shortcuts::definitions(app.herdr_available())
+                        .count()
+                        .saturating_sub(viewport);
+                    app.regions.register_scroll_target_with_state(
+                        ScrollTarget::SettingsShortcuts,
+                        rect,
+                        app.settings_state.shortcut_scroll,
+                        maximum,
+                    );
                 }
                 app.regions.register_hit_target(target, rect);
             }
@@ -321,19 +329,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::AgentPreview => {
             dim(frame);
             let regions = overlays::draw_agent_preview_modal(frame, app, profile);
-            if app.agent_preview.scheduled_run.is_some() && app.agent_preview_index().is_none() {
-                app.agent_preview
-                    .set_scheduled_scroll_max(regions.scroll_max);
-            } else {
-                app.regions.agent_preview_scroll_max = regions.scroll_max;
-                app.regions.agent_preview_scroll = regions.scroll;
-            }
             app.regions.agent_animation_presented |= regions.animation_presented;
             for (target, rect) in regions.targets {
                 app.regions.register_hit_target(target, rect);
             }
-            if let Some((target, rect)) = regions.scroll_target {
-                app.regions.register_scroll_target(target, rect);
+            if let Some((target, rect, scroll, scroll_max)) = regions.scroll_target {
+                app.regions
+                    .register_scroll_target_with_state(target, rect, scroll, scroll_max);
             }
         }
         Mode::Normal | Mode::Commit => {}

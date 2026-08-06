@@ -6,9 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 use super::{
-    AgentKey, AgentPromptDelivery, AgentTranscript, AgentUserMessage, Mode, TextInput,
-    opencode_session,
+    AgentKey, AgentPromptDelivery, AgentTranscript, AgentUserMessage, EditOutcome, HitTarget, Mode,
+    ScrollTarget, TextInput, opencode_session,
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -42,7 +44,6 @@ struct ExpandedUserMessage {
 #[derive(Default)]
 struct ScheduledConversationState {
     scroll: Option<usize>,
-    scroll_max: usize,
     message: Option<usize>,
     expanded_requests: Vec<usize>,
     user_expanded: bool,
@@ -51,15 +52,14 @@ struct ScheduledConversationState {
 impl ScheduledConversationState {
     fn reset(&mut self) {
         self.scroll = None;
-        self.scroll_max = 0;
         self.message = None;
         self.expanded_requests.clear();
         self.user_expanded = false;
     }
 
-    fn scroll_by(&mut self, delta: isize) {
-        let current = self.scroll.unwrap_or(self.scroll_max);
-        self.scroll = Some(current.saturating_add_signed(delta).min(self.scroll_max));
+    fn scroll_by(&mut self, delta: isize, maximum: usize) {
+        let current = self.scroll.unwrap_or(maximum);
+        self.scroll = Some(current.saturating_add_signed(delta).min(maximum));
     }
 
     fn move_message(&mut self, count: usize, delta: isize) {
@@ -111,6 +111,27 @@ enum Completion {
 pub(crate) struct AgentPreviewPoll {
     pub(crate) changed: bool,
     pub(crate) resolved_sessions: Vec<(i64, String)>,
+}
+
+#[derive(Clone)]
+pub(crate) struct LiveAgentPreviewContext {
+    pub(crate) key: AgentKey,
+    pub(crate) message: usize,
+    pub(crate) message_count: usize,
+    pub(crate) scroll_max: usize,
+}
+
+pub(crate) enum AgentPreviewEffect {
+    Handled,
+    Close(Mode),
+    FocusPrompt(Option<AgentKey>),
+    SubmitPrompt,
+    PromptEdited,
+    SelectAgent(AgentKey),
+    CycleAgent { current: AgentKey, forward: bool },
+    TogglePromptDelivery(AgentKey),
+    MessageSelected { agent: AgentKey, message: usize },
+    TogglePicker(AgentKey),
 }
 
 pub(crate) struct ScheduledPreviewRenderState<'a> {
@@ -188,6 +209,247 @@ impl Default for AgentPreview {
 }
 
 impl AgentPreview {
+    pub(crate) fn handle_prompt_key(
+        &mut self,
+        key: KeyEvent,
+        input_width: usize,
+    ) -> AgentPreviewEffect {
+        match key.code {
+            KeyCode::Esc => {
+                self.blur_prompt();
+                AgentPreviewEffect::Handled
+            }
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+            {
+                self.prompt.insert_char('\n');
+                self.clear_prompt_error();
+                AgentPreviewEffect::PromptEdited
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.prompt.insert_char('\n');
+                self.clear_prompt_error();
+                AgentPreviewEffect::PromptEdited
+            }
+            KeyCode::Enter => AgentPreviewEffect::SubmitPrompt,
+            KeyCode::Up => {
+                self.prompt.move_up(input_width);
+                AgentPreviewEffect::Handled
+            }
+            KeyCode::Down => {
+                self.prompt.move_down(input_width);
+                AgentPreviewEffect::Handled
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.prompt.clear();
+                self.clear_prompt_error();
+                AgentPreviewEffect::PromptEdited
+            }
+            KeyCode::Backspace
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.prompt.delete_word();
+                self.clear_prompt_error();
+                AgentPreviewEffect::PromptEdited
+            }
+            _ if self.prompt.handle_edit_key(key) == EditOutcome::Edited => {
+                self.clear_prompt_error();
+                AgentPreviewEffect::PromptEdited
+            }
+            _ => AgentPreviewEffect::Handled,
+        }
+    }
+
+    pub(crate) fn paste_prompt(&mut self, text: &str) -> AgentPreviewEffect {
+        self.prompt.insert(text);
+        self.clear_prompt_error();
+        AgentPreviewEffect::PromptEdited
+    }
+
+    pub(crate) fn handle_modal_key(
+        &mut self,
+        key: KeyEvent,
+        live: Option<LiveAgentPreviewContext>,
+        scheduled_scroll_max: usize,
+    ) -> AgentPreviewEffect {
+        if self.prompt_focused {
+            return AgentPreviewEffect::Handled;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('v') => AgentPreviewEffect::Close(self.close()),
+            KeyCode::Enter => AgentPreviewEffect::FocusPrompt(None),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll_context(live.as_ref(), -1, scheduled_scroll_max)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll_context(live.as_ref(), 1, scheduled_scroll_max)
+            }
+            KeyCode::PageUp => self.scroll_context(live.as_ref(), -10, scheduled_scroll_max),
+            KeyCode::PageDown => self.scroll_context(live.as_ref(), 10, scheduled_scroll_max),
+            KeyCode::Home => self.scroll_context(live.as_ref(), isize::MIN, scheduled_scroll_max),
+            KeyCode::End => self.scroll_context(live.as_ref(), isize::MAX, scheduled_scroll_max),
+            KeyCode::Char('[') => self.move_context_message(live.as_ref(), false),
+            KeyCode::Char(']') => self.move_context_message(live.as_ref(), true),
+            _ => AgentPreviewEffect::Handled,
+        }
+    }
+
+    pub(crate) fn activate_target(&mut self, target: &HitTarget) -> AgentPreviewEffect {
+        match target {
+            HitTarget::AgentPreviewModalBackdrop | HitTarget::AgentPreviewModalClose => {
+                AgentPreviewEffect::Close(self.close())
+            }
+            HitTarget::AgentPreviewPrompt(key) => {
+                AgentPreviewEffect::FocusPrompt(Some(key.clone()))
+            }
+            HitTarget::AgentPreviewScheduledPrompt(run_id)
+                if self.scheduled_run == Some(*run_id) =>
+            {
+                AgentPreviewEffect::FocusPrompt(None)
+            }
+            HitTarget::AgentPreviewPromptDelivery(key) => {
+                AgentPreviewEffect::TogglePromptDelivery(key.clone())
+            }
+            HitTarget::AgentPreviewRequest {
+                agent,
+                message,
+                request,
+            } => {
+                self.toggle_request(agent.clone(), *message, *request);
+                AgentPreviewEffect::Handled
+            }
+            HitTarget::AgentPreviewScheduledRequest { run_id, request }
+                if self.scheduled_run == Some(*run_id) =>
+            {
+                self.toggle_scheduled_request(*request);
+                AgentPreviewEffect::Handled
+            }
+            HitTarget::AgentMessage { agent, message }
+            | HitTarget::AgentExpandedMessage { agent, message } => {
+                self.toggle_user_message(agent.clone(), *message);
+                AgentPreviewEffect::Handled
+            }
+            HitTarget::AgentScheduledMessage { run_id, .. }
+                if self.scheduled_run == Some(*run_id) =>
+            {
+                self.toggle_scheduled_user_message();
+                AgentPreviewEffect::Handled
+            }
+            HitTarget::AgentPreviewPicker(key) => AgentPreviewEffect::TogglePicker(key.clone()),
+            HitTarget::AgentPreviewPickerItem(key) => AgentPreviewEffect::SelectAgent(key.clone()),
+            _ => AgentPreviewEffect::Handled,
+        }
+    }
+
+    pub(crate) fn owns_target(target: &HitTarget) -> bool {
+        matches!(
+            target,
+            HitTarget::AgentPreviewModalBackdrop
+                | HitTarget::AgentPreviewModalOverlay
+                | HitTarget::AgentPreviewModalClose
+                | HitTarget::AgentPreviewPrompt(_)
+                | HitTarget::AgentPreviewScheduledPrompt(_)
+                | HitTarget::AgentPreviewPromptDelivery(_)
+                | HitTarget::AgentPreviewRequest { .. }
+                | HitTarget::AgentPreviewScheduledRequest { .. }
+                | HitTarget::AgentMessage { .. }
+                | HitTarget::AgentExpandedMessage { .. }
+                | HitTarget::AgentScheduledMessage { .. }
+                | HitTarget::AgentPreviewPicker(_)
+                | HitTarget::AgentPreviewPickerItem(_)
+        )
+    }
+
+    pub(crate) fn handle_scroll(
+        &mut self,
+        target: &ScrollTarget,
+        delta: isize,
+        live: Option<LiveAgentPreviewContext>,
+        maximum: usize,
+    ) -> AgentPreviewEffect {
+        match (target, live.as_ref()) {
+            (ScrollTarget::AgentTimeline(target), Some(live)) if target == &live.key => {
+                self.move_live_message(live, delta > 0)
+            }
+            (ScrollTarget::AgentTranscript(target), Some(live)) if target == &live.key => {
+                self.scroll_transcript(live.key.clone(), live.message, delta, maximum);
+                AgentPreviewEffect::Handled
+            }
+            (ScrollTarget::AgentScheduledTranscript(run_id), _)
+                if self.scheduled_run == Some(*run_id) =>
+            {
+                self.scroll_scheduled(delta, maximum);
+                AgentPreviewEffect::Handled
+            }
+            _ => AgentPreviewEffect::Handled,
+        }
+    }
+
+    pub(crate) fn handle_horizontal_scroll(
+        &self,
+        target: &ScrollTarget,
+        forward: bool,
+    ) -> AgentPreviewEffect {
+        match target {
+            ScrollTarget::AgentTimeline(current) | ScrollTarget::AgentTranscript(current) => {
+                AgentPreviewEffect::CycleAgent {
+                    current: current.clone(),
+                    forward,
+                }
+            }
+            _ => AgentPreviewEffect::Handled,
+        }
+    }
+
+    fn scroll_context(
+        &mut self,
+        live: Option<&LiveAgentPreviewContext>,
+        delta: isize,
+        scheduled_scroll_max: usize,
+    ) -> AgentPreviewEffect {
+        if let Some(live) = live {
+            self.scroll_transcript(live.key.clone(), live.message, delta, live.scroll_max);
+        } else if self.scheduled_run.is_some() {
+            self.scroll_scheduled(delta, scheduled_scroll_max);
+        }
+        AgentPreviewEffect::Handled
+    }
+
+    fn move_context_message(
+        &mut self,
+        live: Option<&LiveAgentPreviewContext>,
+        forward: bool,
+    ) -> AgentPreviewEffect {
+        if let Some(live) = live {
+            return self.move_live_message(live, forward);
+        }
+        if self.scheduled_run.is_some() {
+            self.move_scheduled_message(
+                if forward { 1 } else { -1 },
+                self.scheduled_message_count(),
+            );
+        }
+        AgentPreviewEffect::Handled
+    }
+
+    fn move_live_message(
+        &mut self,
+        live: &LiveAgentPreviewContext,
+        forward: bool,
+    ) -> AgentPreviewEffect {
+        self.select_message(live.key.clone(), live.message_count, live.message, forward)
+            .map_or(AgentPreviewEffect::Handled, |message| {
+                AgentPreviewEffect::MessageSelected {
+                    agent: live.key.clone(),
+                    message,
+                }
+            })
+    }
+
     pub(crate) fn select_agent(&mut self, key: AgentKey) {
         self.selection = Some(key);
         self.scheduled_run = None;
@@ -413,23 +675,8 @@ impl AgentPreview {
             });
     }
 
-    pub(crate) fn set_scheduled_scroll_max(&mut self, maximum: usize) {
-        self.scheduled.scroll_max = maximum;
-        if let Some(scroll) = self.scheduled.scroll.as_mut() {
-            *scroll = (*scroll).min(maximum);
-        }
-    }
-
-    pub(crate) fn scroll_scheduled_to_start(&mut self) {
-        self.scheduled.scroll = Some(0);
-    }
-
-    pub(crate) fn scroll_scheduled_to_end(&mut self) {
-        self.scheduled.scroll = None;
-    }
-
-    pub(crate) fn scroll_scheduled(&mut self, delta: isize) {
-        self.scheduled.scroll_by(delta);
+    pub(crate) fn scroll_scheduled(&mut self, delta: isize, maximum: usize) {
+        self.scheduled.scroll_by(delta, maximum);
     }
 
     pub(crate) fn move_scheduled_message(&mut self, delta: isize, count: usize) {
@@ -454,11 +701,6 @@ impl AgentPreview {
     #[cfg(test)]
     pub(crate) fn scheduled_scroll(&self) -> Option<usize> {
         self.scheduled.scroll
-    }
-
-    #[cfg(test)]
-    pub(crate) fn scheduled_scroll_max(&self) -> usize {
-        self.scheduled.scroll_max
     }
 
     pub(crate) fn request_scheduled_session(

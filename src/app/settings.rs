@@ -11,6 +11,228 @@ use crate::{
 
 use super::{GraphColumn, Shortcuts, TextInput, explorer::MINIMUM_EXPLORER_PANE_WIDTH};
 
+fn wrapped_index(current: usize, count: usize, delta: isize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    if delta >= 0 {
+        (current + delta as usize % count) % count
+    } else {
+        (current + count - delta.unsigned_abs() % count) % count
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SettingsState {
+    pub(crate) selection: usize,
+    pub(crate) page: super::SettingsPage,
+    pub(crate) shortcut_selection: usize,
+    pub(crate) shortcut_scroll: usize,
+    pub(crate) shortcut_capture: bool,
+    pub(crate) shortcut_error: Option<String>,
+    pub(crate) opencode_selection: usize,
+    pub(crate) opencode_model_input: Option<String>,
+    pub(crate) opencode_error: Option<String>,
+    pub(crate) discord_selection: usize,
+    pub(crate) discord_webhook_index: usize,
+    pub(crate) discord_webhook_editor: Option<DiscordWebhookEditor>,
+    pub(crate) discord_webhook_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsEffect {
+    Handled,
+    BeginOpenCodeModel,
+    ChangeOpenCodeReasoning,
+    EditDiscordWebhook,
+    AddDiscordWebhook,
+    SaveDiscordWebhook,
+    TestDiscordWebhook,
+    RemoveDiscordWebhook,
+    ToggleAutoFetch,
+    DecreaseFetchInterval,
+    IncreaseFetchInterval,
+    ToggleFormatOnSave,
+    ToggleCrossWorkspaceAgents,
+    ToggleAgentHarness,
+    ToggleAgentCardClick,
+    ToggleAgentTime,
+    ClearAgentTimings,
+    ToggleMediaPreview,
+    OpenEditor,
+}
+
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self {
+            selection: 0,
+            page: super::SettingsPage::General,
+            shortcut_selection: 0,
+            shortcut_scroll: 0,
+            shortcut_capture: false,
+            shortcut_error: None,
+            opencode_selection: 0,
+            opencode_model_input: None,
+            opencode_error: None,
+            discord_selection: 0,
+            discord_webhook_index: 0,
+            discord_webhook_editor: None,
+            discord_webhook_error: None,
+        }
+    }
+}
+
+impl SettingsState {
+    pub(crate) fn open(&mut self) {
+        self.page = super::SettingsPage::General;
+        self.reset_input();
+    }
+
+    pub(crate) fn set_page(&mut self, page: super::SettingsPage) {
+        self.page = page;
+        self.reset_input();
+    }
+
+    pub(crate) fn reset_input(&mut self) {
+        self.shortcut_capture = false;
+        self.shortcut_error = None;
+        self.opencode_model_input = None;
+        self.opencode_error = None;
+        self.discord_webhook_editor = None;
+        self.discord_webhook_error = None;
+    }
+
+    pub(crate) fn keep_shortcut_visible(&mut self, viewport: usize) {
+        let viewport = viewport.max(1);
+        if self.shortcut_selection < self.shortcut_scroll {
+            self.shortcut_scroll = self.shortcut_selection;
+        } else if self.shortcut_selection >= self.shortcut_scroll + viewport {
+            self.shortcut_scroll = self.shortcut_selection + 1 - viewport;
+        }
+    }
+
+    pub(crate) fn cycle_page(&mut self, backward: bool) {
+        let page = if backward {
+            self.page.previous()
+        } else {
+            self.page.next()
+        };
+        self.set_page(page);
+    }
+
+    pub(crate) fn move_general_selection(&mut self, settings: &[usize], delta: isize) {
+        let current = settings
+            .iter()
+            .position(|index| *index == self.selection)
+            .unwrap_or_default();
+        let next = wrapped_index(current, settings.len(), delta);
+        self.selection = settings[next];
+    }
+
+    pub(crate) fn move_opencode_selection(&mut self) {
+        self.opencode_selection = (self.opencode_selection + 1) % 2;
+    }
+
+    pub(crate) fn move_discord_selection(&mut self, delta: isize) {
+        self.discord_selection = wrapped_index(self.discord_selection, 4, delta);
+    }
+
+    pub(crate) fn move_discord_webhook(&mut self, delta: isize, count: usize) {
+        if count > 0 {
+            self.discord_webhook_index = wrapped_index(self.discord_webhook_index, count, delta);
+        }
+    }
+
+    pub(crate) fn move_shortcut_selection(&mut self, delta: isize, count: usize) {
+        self.shortcut_selection = wrapped_index(self.shortcut_selection, count, delta);
+    }
+
+    pub(crate) fn select_shortcut_boundary(&mut self, end: bool, count: usize) {
+        self.shortcut_selection = if end { count.saturating_sub(1) } else { 0 };
+    }
+
+    pub(crate) fn begin_shortcut_capture(&mut self) {
+        self.shortcut_capture = true;
+        self.shortcut_error = None;
+    }
+
+    pub(crate) fn activate_target(
+        &mut self,
+        target: super::SettingsHitTarget,
+        shortcut_index: Option<usize>,
+    ) -> SettingsEffect {
+        if let Some(index) = target.general_index() {
+            self.selection = index;
+        }
+        match target {
+            super::SettingsHitTarget::Overlay | super::SettingsHitTarget::FetchInterval => {
+                SettingsEffect::Handled
+            }
+            super::SettingsHitTarget::Page(page) => {
+                self.set_page(page);
+                SettingsEffect::Handled
+            }
+            super::SettingsHitTarget::Shortcut(_) => {
+                if let Some(index) = shortcut_index {
+                    self.shortcut_selection = index;
+                    self.shortcut_capture = true;
+                    self.shortcut_error = None;
+                }
+                SettingsEffect::Handled
+            }
+            super::SettingsHitTarget::OpenCodeModel => {
+                self.opencode_selection = 0;
+                SettingsEffect::BeginOpenCodeModel
+            }
+            super::SettingsHitTarget::OpenCodeReasoning => {
+                self.opencode_selection = 1;
+                SettingsEffect::ChangeOpenCodeReasoning
+            }
+            super::SettingsHitTarget::DiscordWebhook => {
+                self.discord_selection = 0;
+                SettingsEffect::EditDiscordWebhook
+            }
+            super::SettingsHitTarget::DiscordAdd => {
+                self.discord_selection = 1;
+                SettingsEffect::AddDiscordWebhook
+            }
+            super::SettingsHitTarget::DiscordField(field) => {
+                if let Some(editor) = self.discord_webhook_editor.as_mut() {
+                    editor.select(field);
+                }
+                SettingsEffect::Handled
+            }
+            super::SettingsHitTarget::DiscordSave => SettingsEffect::SaveDiscordWebhook,
+            super::SettingsHitTarget::DiscordCancel => {
+                self.discord_webhook_editor = None;
+                self.discord_webhook_error = None;
+                SettingsEffect::Handled
+            }
+            super::SettingsHitTarget::DiscordTest => {
+                self.discord_selection = 2;
+                SettingsEffect::TestDiscordWebhook
+            }
+            super::SettingsHitTarget::DiscordRemove => {
+                self.discord_selection = 3;
+                SettingsEffect::RemoveDiscordWebhook
+            }
+            super::SettingsHitTarget::AutoFetch => SettingsEffect::ToggleAutoFetch,
+            super::SettingsHitTarget::FetchIntervalDown => SettingsEffect::DecreaseFetchInterval,
+            super::SettingsHitTarget::FetchIntervalUp => SettingsEffect::IncreaseFetchInterval,
+            super::SettingsHitTarget::FormatOnSave => SettingsEffect::ToggleFormatOnSave,
+            super::SettingsHitTarget::CrossWorkspaceAgents => {
+                SettingsEffect::ToggleCrossWorkspaceAgents
+            }
+            super::SettingsHitTarget::AgentHarness => SettingsEffect::ToggleAgentHarness,
+            super::SettingsHitTarget::AgentCardClick => SettingsEffect::ToggleAgentCardClick,
+            super::SettingsHitTarget::AgentTime => SettingsEffect::ToggleAgentTime,
+            super::SettingsHitTarget::ClearAgentTimings => SettingsEffect::ClearAgentTimings,
+            super::SettingsHitTarget::MediaPreview => SettingsEffect::ToggleMediaPreview,
+            super::SettingsHitTarget::Editor => SettingsEffect::OpenEditor,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTimeDisplay {
     LatestLoop,
@@ -658,7 +880,23 @@ pub(crate) fn valid_opencode_model(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{KeyChord, ShortcutAction};
+    use crate::app::{KeyChord, SettingsHitTarget, SettingsPage, ShortcutAction};
+
+    #[test]
+    fn settings_state_owns_navigation_and_page_resets() {
+        let mut state = SettingsState::default();
+        state.move_general_selection(&[0, 2, 4], -1);
+        assert_eq!(state.selection, 4);
+        state.move_shortcut_selection(-1, 5);
+        assert_eq!(state.shortcut_selection, 4);
+        state.opencode_model_input = Some("provider/model".to_owned());
+
+        let effect = state.activate_target(SettingsHitTarget::Page(SettingsPage::Discord), None);
+
+        assert_eq!(effect, SettingsEffect::Handled);
+        assert_eq!(state.page, SettingsPage::Discord);
+        assert!(state.opencode_model_input.is_none());
+    }
 
     #[test]
     fn discord_webhook_store_validates_and_removes_the_secret() {

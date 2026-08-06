@@ -3,9 +3,7 @@ use super::*;
 
 pub(in crate::ui) struct AgentPreviewModalRegions {
     pub(in crate::ui) targets: Vec<(HitTarget, Rect)>,
-    pub(in crate::ui) scroll_target: Option<(ScrollTarget, Rect)>,
-    pub(in crate::ui) scroll: usize,
-    pub(in crate::ui) scroll_max: usize,
+    pub(in crate::ui) scroll_target: Option<(ScrollTarget, Rect, usize, usize)>,
     pub(in crate::ui) animation_presented: bool,
 }
 
@@ -72,6 +70,7 @@ pub(in crate::ui) fn draw_agent_preview_modal(
             .saturating_sub(footer_height),
     );
     let mut targets = vec![
+        (HitTarget::AgentPreviewModalBackdrop, frame.area()),
         (HitTarget::AgentPreviewModalOverlay, outer),
         (HitTarget::AgentPreviewModalClose, close),
     ];
@@ -140,9 +139,12 @@ pub(in crate::ui) fn draw_agent_preview_modal(
             }
             return AgentPreviewModalRegions {
                 targets,
-                scroll_target: Some((ScrollTarget::SchedulerConversation, body)),
-                scroll,
-                scroll_max,
+                scroll_target: Some((
+                    ScrollTarget::AgentScheduledTranscript(run_id),
+                    body,
+                    scroll,
+                    scroll_max,
+                )),
                 animation_presented: false,
             };
         }
@@ -155,12 +157,9 @@ pub(in crate::ui) fn draw_agent_preview_modal(
         return AgentPreviewModalRegions {
             targets,
             scroll_target: None,
-            scroll: 0,
-            scroll_max: 0,
             animation_presented: false,
         };
     };
-    app.herdr.request_agent_latest_user_message(index);
     let status_area = Rect::new(
         header.x,
         header.y.saturating_add(1),
@@ -193,7 +192,8 @@ pub(in crate::ui) fn draw_agent_preview_modal(
     );
     targets.extend(history_targets);
     let key = app.herdr.agent_key(index);
-    let scroll_target = key.map(|key| (ScrollTarget::AgentTranscript(key), body));
+    let scroll_target =
+        key.map(|key| (ScrollTarget::AgentTranscript(key), body, scroll, scroll_max));
 
     if footer_height > 0 {
         let footer = Rect::new(
@@ -211,8 +211,6 @@ pub(in crate::ui) fn draw_agent_preview_modal(
     AgentPreviewModalRegions {
         targets,
         scroll_target,
-        scroll,
-        scroll_max,
         animation_presented,
     }
 }

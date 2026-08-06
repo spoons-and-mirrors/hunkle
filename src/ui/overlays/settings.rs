@@ -19,11 +19,16 @@ pub(crate) struct SettingsView<'a> {
     pub(crate) herdr_available: bool,
 }
 
+pub(crate) struct SettingsRegions {
+    pub(crate) targets: Vec<(HitTarget, Rect)>,
+    pub(crate) shortcut_viewport: Option<usize>,
+}
+
 pub(crate) fn draw_settings(
     frame: &mut Frame<'_>,
     view: SettingsView<'_>,
     fetch_running: bool,
-) -> Vec<(HitTarget, Rect)> {
+) -> SettingsRegions {
     let SettingsView {
         settings,
         page,
@@ -201,7 +206,10 @@ pub(crate) fn draw_settings(
                 1,
             ),
         );
-        return targets;
+        return SettingsRegions {
+            targets,
+            shortcut_viewport: Some(usize::from(body.height)),
+        };
     }
     if page == SettingsPage::OpenCode {
         let inner = Rect::new(
@@ -312,7 +320,10 @@ pub(crate) fn draw_settings(
                 reasoning_row,
             ),
         ]);
-        return targets;
+        return SettingsRegions {
+            targets,
+            shortcut_viewport: None,
+        };
     }
     if page == SettingsPage::Discord {
         let inner = Rect::new(
@@ -473,7 +484,10 @@ pub(crate) fn draw_settings(
                 1,
             ),
         );
-        return targets;
+        return SettingsRegions {
+            targets,
+            shortcut_viewport: None,
+        };
     }
     frame.render_widget(
         Paragraph::new("Space toggle   ←/→ interval   Enter edit   Esc close")
@@ -881,7 +895,10 @@ pub(crate) fn draw_settings(
             ),
         ]);
     }
-    targets
+    SettingsRegions {
+        targets,
+        shortcut_viewport: None,
+    }
 }
 
 fn masked_input_line(input: &TextInput) -> Line<'static> {

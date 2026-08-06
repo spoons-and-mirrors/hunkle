@@ -25,7 +25,7 @@ mod text_input;
 pub(crate) use actions::{
     ACTION_ITEMS, ActionsState, CommandLayout, CommandLineSource, CommandStatus,
 };
-pub(crate) use agent_preview::AgentPreview;
+pub(crate) use agent_preview::{AgentPreview, AgentPreviewEffect, LiveAgentPreviewContext};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub(crate) use changes::{ChangesHitTarget, PreviewOrigin, SqliteFocus, SqlitePage};
 pub use changes::{ChangesState, LeftPane};
@@ -63,8 +63,8 @@ pub(crate) use scheduler::{
 #[cfg(test)]
 pub use settings::AgentCardClickAction;
 pub(crate) use settings::{
-    DiscordWebhookConfig, DiscordWebhookEditor, DiscordWebhookStore, SettingsStore,
-    valid_discord_webhook_url, valid_opencode_model,
+    DiscordWebhookConfig, DiscordWebhookEditor, DiscordWebhookStore, SettingsEffect, SettingsState,
+    SettingsStore, valid_discord_webhook_url, valid_opencode_model,
 };
 pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
@@ -158,19 +158,7 @@ pub struct App {
     pub(crate) agent_preview: AgentPreview,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
-    pub settings_selection: usize,
-    pub(crate) settings_page: SettingsPage,
-    pub(crate) shortcut_selection: usize,
-    pub(crate) shortcut_scroll: usize,
-    pub(crate) shortcut_capture: bool,
-    pub(crate) shortcut_error: Option<String>,
-    pub(crate) opencode_selection: usize,
-    pub(crate) opencode_model_input: Option<String>,
-    pub(crate) opencode_error: Option<String>,
-    pub(crate) discord_selection: usize,
-    pub(crate) discord_webhook_index: usize,
-    pub(crate) discord_webhook_editor: Option<DiscordWebhookEditor>,
-    pub(crate) discord_webhook_error: Option<String>,
+    pub(crate) settings_state: SettingsState,
     pub(crate) discord_webhooks: Vec<DiscordWebhookConfig>,
     pub notice: Option<String>,
     pub regions: Regions,
@@ -337,19 +325,7 @@ impl App {
             agent_preview: AgentPreview::default(),
             hovered_hit_target: None,
             settings,
-            settings_selection: 0,
-            settings_page: SettingsPage::General,
-            shortcut_selection: 0,
-            shortcut_scroll: 0,
-            shortcut_capture: false,
-            shortcut_error: None,
-            opencode_selection: 0,
-            opencode_model_input: None,
-            opencode_error: None,
-            discord_selection: 0,
-            discord_webhook_index: 0,
-            discord_webhook_editor: None,
-            discord_webhook_error: None,
+            settings_state: SettingsState::default(),
             discord_webhooks,
             notice: open_in_background
                 .then(|| "Opening workspace…".to_owned())
@@ -747,7 +723,9 @@ impl App {
             return;
         }
         if self.agent_preview.prompt_focused {
-            self.handle_agent_preview_prompt_key(key);
+            let input_width = self.agent_preview_prompt_width();
+            let effect = self.agent_preview.handle_prompt_key(key, input_width);
+            self.apply_agent_preview_effect(effect);
             return;
         }
         if self.mode == Mode::Normal
@@ -847,8 +825,8 @@ impl App {
             return;
         }
         if self.agent_preview.prompt_focused {
-            self.agent_preview.prompt.insert(text);
-            self.clear_agent_preview_prompt_error();
+            let effect = self.agent_preview.paste_prompt(text);
+            self.apply_agent_preview_effect(effect);
             return;
         }
         if self.mode == Mode::Normal && self.view() == View::RepositorySearch {
@@ -900,12 +878,12 @@ impl App {
                 self.editor_error = None;
             }
             Mode::Settings => {
-                if let Some(editor) = &mut self.discord_webhook_editor {
+                if let Some(editor) = &mut self.settings_state.discord_webhook_editor {
                     editor.active_input_mut().insert_single_line(text);
-                    self.discord_webhook_error = None;
-                } else if let Some(input) = &mut self.opencode_model_input {
+                    self.settings_state.discord_webhook_error = None;
+                } else if let Some(input) = &mut self.settings_state.opencode_model_input {
                     input.push_str(text);
-                    self.opencode_error = None;
+                    self.settings_state.opencode_error = None;
                 }
             }
             Mode::Scheduler => self.paste_scheduler(text),
@@ -986,6 +964,9 @@ impl App {
         }
         let mut herdr_changed = false;
         if self.herdr_available() {
+            for index in self.visible_agent_message_indices() {
+                self.herdr.request_agent_latest_user_message(index);
+            }
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
                 self.herdr.poll(self.regions.agent_animation_presented)
@@ -1098,9 +1079,9 @@ impl App {
             .agent_preview
             .prompt
             .poll_blink(self.agent_preview.prompt_focused);
-        if let Some(editor) = &mut self.discord_webhook_editor {
+        if let Some(editor) = &mut self.settings_state.discord_webhook_editor {
             changed |= editor.active_input_mut().poll_blink(
-                self.mode == Mode::Settings && self.settings_page == SettingsPage::Discord,
+                self.mode == Mode::Settings && self.settings_state.page == SettingsPage::Discord,
             );
         }
         changed |= self.poll_scheduler_inputs();
@@ -1739,11 +1720,11 @@ impl App {
         if self.single_panel_detail_visible() && self.agents_pane_visible() {
             match key.code {
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.scroll_agent_preview_by(1);
+                    self.scroll_current_agent_preview(1);
                     return;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.scroll_agent_preview_by(-1);
+                    self.scroll_current_agent_preview(-1);
                     return;
                 }
                 _ => {}
@@ -2567,40 +2548,20 @@ impl App {
         self.mode = Mode::AgentPreview;
     }
 
-    pub(super) fn close_agent_preview_modal(&mut self) {
-        self.mode = self.agent_preview.close();
-    }
-
     fn handle_agent_preview_modal(&mut self, key: KeyEvent) {
-        if self.agent_preview.scheduled_run.is_some() && self.agent_preview_index().is_none() {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('v') => self.close_agent_preview_modal(),
-                KeyCode::Enter => self.focus_agent_preview_prompt(),
-                KeyCode::Up | KeyCode::Char('k') => self.scroll_scheduler_conversation(-1),
-                KeyCode::Down | KeyCode::Char('j') => self.scroll_scheduler_conversation(1),
-                KeyCode::PageUp => self.scroll_scheduler_conversation(-10),
-                KeyCode::PageDown => self.scroll_scheduler_conversation(10),
-                KeyCode::Home => self.agent_preview.scroll_scheduled_to_start(),
-                KeyCode::End => self.agent_preview.scroll_scheduled_to_end(),
-                KeyCode::Char('[') => self.move_scheduler_conversation_message(-1),
-                KeyCode::Char(']') => self.move_scheduler_conversation_message(1),
-                _ => {}
-            }
-            return;
-        }
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('v') => self.close_agent_preview_modal(),
-            KeyCode::Enter => self.focus_agent_preview_prompt(),
-            KeyCode::Up | KeyCode::Char('k') => self.scroll_agent_preview_by(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.scroll_agent_preview_by(1),
-            KeyCode::PageUp => self.scroll_agent_preview_by(-10),
-            KeyCode::PageDown => self.scroll_agent_preview_by(10),
-            KeyCode::Home => self.scroll_agent_preview_by(isize::MIN),
-            KeyCode::End => self.scroll_agent_preview_by(isize::MAX),
-            KeyCode::Char('[') => self.scroll_selected_agent_preview_timeline(false),
-            KeyCode::Char(']') => self.scroll_selected_agent_preview_timeline(true),
-            _ => {}
-        }
+        let live = self.agent_preview_live_context();
+        let scheduled_scroll_max = self
+            .agent_preview
+            .scheduled_run
+            .and_then(|run_id| {
+                self.regions
+                    .scroll_state(&ScrollTarget::AgentScheduledTranscript(run_id))
+            })
+            .map_or(0, |state| state.maximum);
+        let effect = self
+            .agent_preview
+            .handle_modal_key(key, live, scheduled_scroll_max);
+        self.apply_agent_preview_effect(effect);
     }
 
     fn show_left_pane(&mut self, pane: LeftPane) {
@@ -2726,9 +2687,8 @@ impl App {
         self.clear_agent_preview_prompt_error();
     }
 
-    fn handle_agent_preview_prompt_key(&mut self, key: KeyEvent) {
-        let input_width = self
-            .agent_preview_index()
+    fn agent_preview_prompt_width(&self) -> usize {
+        self.agent_preview_index()
             .and_then(|index| self.herdr.agent_key(index))
             .and_then(|key| {
                 self.regions
@@ -2740,42 +2700,127 @@ impl App {
                         .hit_target_rect(HitTarget::AgentPreviewScheduledPrompt(run_id))
                 })
             })
-            .map_or(1, |area| usize::from(area.width.saturating_sub(4)).max(1));
-        match key.code {
-            KeyCode::Esc => self.agent_preview.blur_prompt(),
-            KeyCode::Enter
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
-            {
-                self.agent_preview.prompt.insert_char('\n');
-                self.clear_agent_preview_prompt_error();
+            .map_or(1, |area| usize::from(area.width.saturating_sub(4)).max(1))
+    }
+
+    pub(super) fn agent_preview_live_context_for_key(
+        &self,
+        key: &AgentKey,
+    ) -> Option<LiveAgentPreviewContext> {
+        let index = self.herdr.agent_index(key)?;
+        let message_count = self.herdr.agent_user_messages(index)?.len();
+        let last = message_count.checked_sub(1)?;
+        let message = self
+            .agent_preview
+            .selected_message(key, last)
+            .unwrap_or(last);
+        let scroll_max = self
+            .regions
+            .scroll_state(&ScrollTarget::AgentTranscript(key.clone()))
+            .map_or(0, |state| state.maximum);
+        Some(LiveAgentPreviewContext {
+            key: key.clone(),
+            message,
+            message_count,
+            scroll_max,
+        })
+    }
+
+    fn agent_preview_live_context(&self) -> Option<LiveAgentPreviewContext> {
+        let index = self.agent_preview_index()?;
+        let key = self.herdr.agent_key(index)?;
+        self.agent_preview_live_context_for_key(&key)
+    }
+
+    fn scroll_current_agent_preview(&mut self, delta: isize) {
+        let Some(live) = self.agent_preview_live_context() else {
+            return;
+        };
+        let target = ScrollTarget::AgentTranscript(live.key.clone());
+        let maximum = live.scroll_max;
+        let effect = self
+            .agent_preview
+            .handle_scroll(&target, delta, Some(live), maximum);
+        self.apply_agent_preview_effect(effect);
+    }
+
+    pub(super) fn apply_agent_preview_effect(&mut self, effect: AgentPreviewEffect) {
+        match effect {
+            AgentPreviewEffect::Handled => {}
+            AgentPreviewEffect::Close(mode) => self.mode = mode,
+            AgentPreviewEffect::FocusPrompt(agent) => {
+                if let Some(agent) = agent {
+                    if self.herdr.agent_index(&agent).is_none() {
+                        return;
+                    }
+                    self.agent_preview.focus_agent(agent);
+                }
+                self.focus_agent_preview_prompt();
             }
-            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.agent_preview.prompt.insert_char('\n');
-                self.clear_agent_preview_prompt_error();
+            AgentPreviewEffect::SubmitPrompt => self.submit_agent_preview_prompt(),
+            AgentPreviewEffect::PromptEdited => self.clear_agent_preview_prompt_error(),
+            AgentPreviewEffect::SelectAgent(key) => {
+                if let Some(index) = self.herdr.agent_index(&key) {
+                    self.select_agent_preview(index);
+                }
             }
-            KeyCode::Enter => self.submit_agent_preview_prompt(),
-            KeyCode::Up => self.agent_preview.prompt.move_up(input_width),
-            KeyCode::Down => self.agent_preview.prompt.move_down(input_width),
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.agent_preview.prompt.clear();
-                self.clear_agent_preview_prompt_error();
+            AgentPreviewEffect::CycleAgent { current, forward } => {
+                let count = self.herdr.agents.len();
+                if let Some(current) = self.herdr.agent_index(&current)
+                    && count > 0
+                {
+                    let index = if forward {
+                        (current + 1) % count
+                    } else {
+                        (current + count - 1) % count
+                    };
+                    self.select_agent_preview(index);
+                }
             }
-            KeyCode::Backspace
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.agent_preview.prompt.delete_word();
-                self.clear_agent_preview_prompt_error();
+            AgentPreviewEffect::TogglePromptDelivery(key) => {
+                if self.herdr.agent_index(&key).is_some() {
+                    self.agent_preview.focus_agent(key);
+                    self.toggle_agent_preview_prompt_delivery();
+                }
             }
-            _ => {
-                if self.agent_preview.prompt.handle_edit_key(key) == EditOutcome::Edited {
-                    self.clear_agent_preview_prompt_error();
+            AgentPreviewEffect::MessageSelected { agent, message } => {
+                self.hovered_hit_target = Some(HitTarget::AgentTooltip { agent, message });
+            }
+            AgentPreviewEffect::TogglePicker(key) => {
+                if self.herdr.agent_index(&key).is_some() {
+                    self.agent_preview.toggle_picker(key);
                 }
             }
         }
+    }
+
+    fn visible_agent_message_indices(&self) -> Vec<usize> {
+        let mut keys = Vec::new();
+        for key in self
+            .regions
+            .hit_targets()
+            .filter_map(|target| match target {
+                HitTarget::Agent(key)
+                | HitTarget::AgentStash(key)
+                | HitTarget::AgentPreviewPicker(key)
+                | HitTarget::AgentPreviewPickerItem(key)
+                | HitTarget::AgentPreviewMessageTimeline(key)
+                | HitTarget::AgentPreviewPrompt(key)
+                | HitTarget::AgentPreviewPromptDelivery(key)
+                | HitTarget::AgentPreviewRequest { agent: key, .. }
+                | HitTarget::AgentTooltip { agent: key, .. }
+                | HitTarget::AgentMessage { agent: key, .. }
+                | HitTarget::AgentExpandedMessage { agent: key, .. } => Some(key.clone()),
+                _ => None,
+            })
+        {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        keys.into_iter()
+            .filter_map(|key| self.herdr.agent_index(&key))
+            .collect()
     }
 
     fn text_field_focused(&self) -> bool {
@@ -2800,7 +2845,7 @@ impl App {
             || (self.mode == Mode::Explorer
                 && (self.workspace_explorer.editing_path
                     || self.workspace_explorer.naming_favorite))
-            || (self.mode == Mode::Settings && self.opencode_model_input.is_some())
+            || (self.mode == Mode::Settings && self.settings_state.opencode_model_input.is_some())
     }
 
     fn submit_agent_preview_prompt(&mut self) {

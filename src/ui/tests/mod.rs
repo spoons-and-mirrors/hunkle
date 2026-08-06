@@ -304,7 +304,7 @@ fn standalone_hides_herdr_surfaces() {
     }
 
     app.mode = Mode::Settings;
-    app.settings_page = SettingsPage::General;
+    app.settings_state.page = SettingsPage::General;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen = screen_text(&terminal);
     assert!(screen.contains("Media protocol"));
@@ -332,7 +332,7 @@ fn standalone_hides_herdr_surfaces() {
         );
     }
 
-    app.settings_page = SettingsPage::Shortcuts;
+    app.settings_state.page = SettingsPage::Shortcuts;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen = screen_text(&terminal);
     assert!(screen.contains("Show Changes"));
@@ -1968,7 +1968,7 @@ fn renders_every_primary_surface() {
             .all(|x| buffer[(x, agent_harness_setting.y)].bg == super::palette().faint)
     );
 
-    app.settings_page = SettingsPage::OpenCode;
+    app.settings_state.page = SettingsPage::OpenCode;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let opencode_screen = terminal
         .backend()
@@ -1986,10 +1986,10 @@ fn renders_every_primary_surface() {
         .hit_target_rect(HitTarget::Settings(SettingsHitTarget::OpenCodeModel))
         .unwrap();
     click(&mut app, model_row.x + 1, model_row.y);
-    assert!(app.opencode_model_input.is_some());
-    app.opencode_model_input = None;
+    assert!(app.settings_state.opencode_model_input.is_some());
+    app.settings_state.opencode_model_input = None;
 
-    app.settings_page = SettingsPage::Discord;
+    app.settings_state.page = SettingsPage::Discord;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let discord_screen = terminal
         .backend()
@@ -2005,8 +2005,9 @@ fn renders_every_primary_surface() {
         .hit_target_rect(HitTarget::Settings(SettingsHitTarget::DiscordWebhook))
         .unwrap();
     click(&mut app, webhook_row.x + 1, webhook_row.y);
-    assert!(app.discord_webhook_editor.is_some());
-    app.discord_webhook_editor
+    assert!(app.settings_state.discord_webhook_editor.is_some());
+    app.settings_state
+        .discord_webhook_editor
         .as_mut()
         .unwrap()
         .url
@@ -2021,9 +2022,9 @@ fn renders_every_primary_surface() {
         .collect::<String>();
     assert!(!masked_screen.contains("discord.com"));
     assert!(!masked_screen.contains("token"));
-    app.discord_webhook_editor = None;
+    app.settings_state.discord_webhook_editor = None;
 
-    app.settings_page = SettingsPage::Shortcuts;
+    app.settings_state.page = SettingsPage::Shortcuts;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let shortcuts_screen = terminal
         .backend()
@@ -2035,7 +2036,11 @@ fn renders_every_primary_surface() {
     assert!(shortcuts_screen.contains("Shortcuts"));
     assert!(shortcuts_screen.contains("Changes / files"));
     assert!(shortcuts_screen.contains("Show / hide Git graph"));
-    assert!(app.regions.settings_shortcut_rows() > 0);
+    assert!(
+        app.regions
+            .scroll_state(&ScrollTarget::SettingsShortcuts)
+            .is_some()
+    );
     let explorer_row = app
         .regions
         .hit_target_rect(HitTarget::Settings(SettingsHitTarget::Shortcut(
@@ -2048,9 +2053,9 @@ fn renders_every_primary_surface() {
         Some(ScrollTarget::SettingsShortcuts)
     );
     click(&mut app, explorer_row.x + 1, explorer_row.y);
-    assert!(app.shortcut_capture);
-    app.shortcut_capture = false;
-    app.settings_page = SettingsPage::General;
+    assert!(app.settings_state.shortcut_capture);
+    app.settings_state.shortcut_capture = false;
+    app.settings_state.page = SettingsPage::General;
 
     app.mode = Mode::Editor;
     app.editor_input = "nvim".to_owned();

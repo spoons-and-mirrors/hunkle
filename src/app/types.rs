@@ -389,6 +389,7 @@ pub(crate) enum HitTarget {
     Settings(SettingsHitTarget),
     Scheduler(SchedulerHitTarget),
     Agent(AgentKey),
+    AgentPreviewModalBackdrop,
     AgentPreviewModalOverlay,
     AgentPreviewModalClose,
     AgentPaneId(String),
@@ -405,6 +406,10 @@ pub(crate) enum HitTarget {
     AgentPreviewRequest {
         agent: AgentKey,
         message: usize,
+        request: usize,
+    },
+    AgentPreviewScheduledRequest {
+        run_id: i64,
         request: usize,
     },
     AgentTooltip {
@@ -496,7 +501,6 @@ pub(crate) enum SchedulerHitTarget {
     Delete,
     Refresh,
     OpenConversation,
-    ConversationRequest(usize),
 }
 
 impl SettingsHitTarget {
@@ -651,7 +655,6 @@ pub(crate) enum ScrollTarget {
     SettingsShortcuts,
     SchedulerTasks,
     SchedulerRuns,
-    SchedulerConversation,
     SchedulerPrompt,
     SchedulerDestinations,
     Commit,
@@ -665,12 +668,20 @@ pub(crate) enum ScrollTarget {
     RepositorySearch,
     AgentTimeline(AgentKey),
     AgentTranscript(AgentKey),
+    AgentScheduledTranscript(i64),
 }
 
 #[derive(Clone, Debug)]
 struct ScrollRegion {
     target: ScrollTarget,
     rect: Rect,
+    state: Option<ScrollState>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScrollState {
+    pub(crate) offset: usize,
+    pub(crate) maximum: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -739,8 +750,6 @@ pub struct Regions {
     pub commit: Option<Rect>,
     pub commit_scroll: usize,
     pub commit_scroll_max: usize,
-    pub(crate) agent_preview_scroll: usize,
-    pub(crate) agent_preview_scroll_max: usize,
     pub(crate) header_scroll_max: usize,
     pub graph_table: Option<Rect>,
     pub(crate) graph_columns: Vec<GraphColumnRegion>,
@@ -794,7 +803,25 @@ impl Regions {
     }
 
     pub(crate) fn register_scroll_target(&mut self, target: ScrollTarget, rect: Rect) {
-        self.scroll_regions.push(ScrollRegion { target, rect });
+        self.scroll_regions.push(ScrollRegion {
+            target,
+            rect,
+            state: None,
+        });
+    }
+
+    pub(crate) fn register_scroll_target_with_state(
+        &mut self,
+        target: ScrollTarget,
+        rect: Rect,
+        offset: usize,
+        maximum: usize,
+    ) {
+        self.scroll_regions.push(ScrollRegion {
+            target,
+            rect,
+            state: Some(ScrollState { offset, maximum }),
+        });
     }
 
     pub(crate) fn scroll_target_rect(&self, target: ScrollTarget) -> Option<Rect> {
@@ -803,6 +830,18 @@ impl Regions {
             .rev()
             .find(|region| region.target == target)
             .map(|region| region.rect)
+    }
+
+    pub(crate) fn scroll_state(&self, target: &ScrollTarget) -> Option<ScrollState> {
+        self.scroll_regions
+            .iter()
+            .rev()
+            .find(|region| &region.target == target)
+            .and_then(|region| region.state)
+    }
+
+    pub(crate) fn hit_targets(&self) -> impl Iterator<Item = &HitTarget> {
+        self.hit_regions.iter().map(|region| &region.target)
     }
 
     pub(crate) fn capture_scroll_target(&mut self, target: ScrollTarget) {
@@ -877,7 +916,10 @@ impl Regions {
             | HitTarget::AgentExpandedMessage { agent, .. } => {
                 Some(ScrollTarget::AgentTranscript(agent.clone()))
             }
-            HitTarget::AgentScheduledMessage { .. } => Some(ScrollTarget::SchedulerConversation),
+            HitTarget::AgentScheduledMessage { run_id, .. }
+            | HitTarget::AgentPreviewScheduledRequest { run_id, .. } => {
+                Some(ScrollTarget::AgentScheduledTranscript(*run_id))
+            }
             _ => None,
         }
     }
@@ -888,18 +930,6 @@ impl Regions {
             .rev()
             .find(|region| region.rect.contains(point))
             .map(|region| region.target.clone())
-    }
-
-    pub(crate) fn settings_shortcut_rows(&self) -> usize {
-        self.hit_regions
-            .iter()
-            .filter(|region| {
-                matches!(
-                    &region.target,
-                    HitTarget::Settings(SettingsHitTarget::Shortcut(_))
-                )
-            })
-            .count()
     }
 
     pub(crate) fn hit_target_rect(&self, target: HitTarget) -> Option<Rect> {

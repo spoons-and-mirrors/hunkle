@@ -22,7 +22,7 @@ impl SchedulerRegions {
 
 pub(crate) fn draw_scheduler(
     frame: &mut Frame<'_>,
-    app: &mut App,
+    app: &App,
     profile: LayoutProfile,
 ) -> SchedulerRegions {
     let outer = scheduler_area(frame.area(), profile);

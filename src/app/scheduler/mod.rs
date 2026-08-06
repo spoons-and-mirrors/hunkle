@@ -608,6 +608,125 @@ pub(crate) struct SchedulerState {
     pub(crate) preview_pending: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchedulerEffect {
+    Handled,
+    Close,
+    Cancel,
+    New,
+    Edit,
+    Save,
+    SelectTask(i64),
+    SelectRun(i64),
+    MoveSelection(isize),
+    Toggle,
+    RunNow,
+    Delete,
+    Refresh,
+    OpenConversation,
+}
+
+impl SchedulerState {
+    fn activate_target(
+        &mut self,
+        target: SchedulerHitTarget,
+        prompt_width: usize,
+    ) -> SchedulerEffect {
+        match target {
+            SchedulerHitTarget::Close => SchedulerEffect::Close,
+            SchedulerHitTarget::Back | SchedulerHitTarget::Cancel => SchedulerEffect::Cancel,
+            SchedulerHitTarget::New => SchedulerEffect::New,
+            SchedulerHitTarget::Edit => SchedulerEffect::Edit,
+            SchedulerHitTarget::Save => SchedulerEffect::Save,
+            SchedulerHitTarget::Task(id) => SchedulerEffect::SelectTask(id),
+            SchedulerHitTarget::Run(id) => SchedulerEffect::SelectRun(id),
+            SchedulerHitTarget::Field(field) => {
+                if let Some(composer) = self.composer.as_mut() {
+                    composer.focus(field);
+                }
+                SchedulerEffect::Handled
+            }
+            SchedulerHitTarget::PromptExpand => {
+                self.toggle_prompt_expansion(prompt_width);
+                SchedulerEffect::Handled
+            }
+            SchedulerHitTarget::DestinationPickerOverlay => SchedulerEffect::Handled,
+            SchedulerHitTarget::DestinationCard(card) => {
+                if let Some(composer) = self.composer.as_mut() {
+                    composer.field = SchedulerField::Destination;
+                    if composer.destination_picker_open() && composer.destination_card == card {
+                        composer.close_destination_picker();
+                    } else {
+                        composer.open_destination_picker(card);
+                    }
+                }
+                SchedulerEffect::Handled
+            }
+            SchedulerHitTarget::Destination(index) => {
+                if let Some(composer) = self.composer.as_mut()
+                    && index < composer.destinations.len()
+                {
+                    composer.destination = index;
+                    composer.close_destination_picker();
+                }
+                SchedulerEffect::Handled
+            }
+            SchedulerHitTarget::Toggle => SchedulerEffect::Toggle,
+            SchedulerHitTarget::RunNow => SchedulerEffect::RunNow,
+            SchedulerHitTarget::Delete => SchedulerEffect::Delete,
+            SchedulerHitTarget::Refresh => SchedulerEffect::Refresh,
+            SchedulerHitTarget::OpenConversation => SchedulerEffect::OpenConversation,
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, single_layout: bool) -> SchedulerEffect {
+        match key.code {
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h')
+                if single_layout && self.surface == SchedulerSurface::Detail =>
+            {
+                self.surface = SchedulerSurface::Tasks;
+                SchedulerEffect::Handled
+            }
+            KeyCode::Esc | KeyCode::F(4) => SchedulerEffect::Close,
+            KeyCode::Char('n') => SchedulerEffect::New,
+            KeyCode::Char('e') => SchedulerEffect::Edit,
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.runs_focused = !self.runs_focused;
+                SchedulerEffect::Handled
+            }
+            KeyCode::Down | KeyCode::Char('j') => SchedulerEffect::MoveSelection(1),
+            KeyCode::Up | KeyCode::Char('k') => SchedulerEffect::MoveSelection(-1),
+            KeyCode::Enter if self.runs_focused => SchedulerEffect::OpenConversation,
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                if single_layout {
+                    self.surface = SchedulerSurface::Detail;
+                }
+                SchedulerEffect::Handled
+            }
+            KeyCode::Char(' ') => SchedulerEffect::Toggle,
+            KeyCode::Char('r') => SchedulerEffect::RunNow,
+            KeyCode::Char('d') => SchedulerEffect::Delete,
+            KeyCode::Char('o') => SchedulerEffect::Refresh,
+            KeyCode::Char('v') => SchedulerEffect::OpenConversation,
+            _ => SchedulerEffect::Handled,
+        }
+    }
+
+    fn toggle_prompt_expansion(&mut self, width: usize) {
+        let Some(composer) = self.composer.as_mut() else {
+            return;
+        };
+        composer.field = SchedulerField::Prompt;
+        composer.prompt_expanded = !composer.prompt_expanded;
+        composer.prompt.focus();
+        let height = if composer.prompt_expanded { 20 } else { 5 };
+        composer.prompt_scroll = composer
+            .prompt
+            .visual_cursor_row(width)
+            .saturating_sub(height - 1);
+    }
+}
+
 fn worktree_label(worktree: &crate::git::LinkedWorktree) -> String {
     if worktree.is_main {
         "basetree".to_owned()
@@ -925,51 +1044,9 @@ impl App {
     }
 
     pub(crate) fn activate_scheduler_target(&mut self, target: SchedulerHitTarget) {
-        match target {
-            SchedulerHitTarget::Close => self.close_scheduler(),
-            SchedulerHitTarget::Back => self.cancel_scheduled_task(),
-            SchedulerHitTarget::New => self.begin_scheduled_task(),
-            SchedulerHitTarget::Edit => self.edit_selected_scheduled_task(),
-            SchedulerHitTarget::Save => self.save_scheduled_task(),
-            SchedulerHitTarget::Cancel => self.cancel_scheduled_task(),
-            SchedulerHitTarget::Task(id) => self.select_scheduled_task(id),
-            SchedulerHitTarget::Run(id) => self.select_scheduled_run(id),
-            SchedulerHitTarget::Field(field) => {
-                if let Some(composer) = self.scheduler.composer.as_mut() {
-                    composer.focus(field);
-                }
-            }
-            SchedulerHitTarget::PromptExpand => self.toggle_scheduler_prompt_expansion(),
-            SchedulerHitTarget::DestinationPickerOverlay => {}
-            SchedulerHitTarget::DestinationCard(card) => {
-                if let Some(composer) = self.scheduler.composer.as_mut() {
-                    composer.field = SchedulerField::Destination;
-                    if composer.destination_picker_open() && composer.destination_card == card {
-                        composer.close_destination_picker();
-                    } else {
-                        composer.open_destination_picker(card);
-                    }
-                }
-            }
-            SchedulerHitTarget::Destination(index) => {
-                if let Some(composer) = self.scheduler.composer.as_mut()
-                    && index < composer.destinations.len()
-                {
-                    composer.destination = index;
-                    composer.close_destination_picker();
-                }
-            }
-            SchedulerHitTarget::Toggle => self.toggle_selected_scheduled_task(),
-            SchedulerHitTarget::RunNow => self.run_selected_scheduled_task(),
-            SchedulerHitTarget::Delete => self.delete_selected_scheduled_task(),
-            SchedulerHitTarget::Refresh => self.refresh_selected_scheduled_run(),
-            SchedulerHitTarget::OpenConversation => {
-                self.open_selected_scheduled_run_conversation();
-            }
-            SchedulerHitTarget::ConversationRequest(request) => {
-                self.agent_preview.toggle_scheduled_request(request);
-            }
-        }
+        let prompt_width = self.scheduler_prompt_size(5).0;
+        let effect = self.scheduler.activate_target(target, prompt_width);
+        self.apply_scheduler_effect(effect);
     }
 
     pub(crate) fn handle_scheduler(&mut self, key: KeyEvent) {
@@ -977,35 +1054,27 @@ impl App {
             self.handle_scheduler_composer(key);
             return;
         }
-        match key.code {
-            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h')
-                if self.layout_profile().is_single()
-                    && self.scheduler.surface == SchedulerSurface::Detail =>
-            {
-                self.scheduler.surface = SchedulerSurface::Tasks;
-            }
-            KeyCode::Esc | KeyCode::F(4) => self.close_scheduler(),
-            KeyCode::Char('n') => self.begin_scheduled_task(),
-            KeyCode::Char('e') => self.edit_selected_scheduled_task(),
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.scheduler.runs_focused = !self.scheduler.runs_focused;
-            }
-            KeyCode::Down | KeyCode::Char('j') => self.move_scheduler_selection(1),
-            KeyCode::Up | KeyCode::Char('k') => self.move_scheduler_selection(-1),
-            KeyCode::Enter if self.scheduler.runs_focused => {
-                self.open_selected_scheduled_run_conversation();
-            }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                if self.layout_profile().is_single() {
-                    self.scheduler.surface = SchedulerSurface::Detail;
-                }
-            }
-            KeyCode::Char(' ') => self.toggle_selected_scheduled_task(),
-            KeyCode::Char('r') => self.run_selected_scheduled_task(),
-            KeyCode::Char('d') => self.delete_selected_scheduled_task(),
-            KeyCode::Char('o') => self.refresh_selected_scheduled_run(),
-            KeyCode::Char('v') => self.open_selected_scheduled_run_conversation(),
-            _ => {}
+        let single_layout = self.layout_profile().is_single();
+        let effect = self.scheduler.handle_key(key, single_layout);
+        self.apply_scheduler_effect(effect);
+    }
+
+    fn apply_scheduler_effect(&mut self, effect: SchedulerEffect) {
+        match effect {
+            SchedulerEffect::Handled => {}
+            SchedulerEffect::Close => self.close_scheduler(),
+            SchedulerEffect::Cancel => self.cancel_scheduled_task(),
+            SchedulerEffect::New => self.begin_scheduled_task(),
+            SchedulerEffect::Edit => self.edit_selected_scheduled_task(),
+            SchedulerEffect::Save => self.save_scheduled_task(),
+            SchedulerEffect::SelectTask(id) => self.select_scheduled_task(id),
+            SchedulerEffect::SelectRun(id) => self.select_scheduled_run(id),
+            SchedulerEffect::MoveSelection(delta) => self.move_scheduler_selection(delta),
+            SchedulerEffect::Toggle => self.toggle_selected_scheduled_task(),
+            SchedulerEffect::RunNow => self.run_selected_scheduled_task(),
+            SchedulerEffect::Delete => self.delete_selected_scheduled_task(),
+            SchedulerEffect::Refresh => self.refresh_selected_scheduled_run(),
+            SchedulerEffect::OpenConversation => self.open_selected_scheduled_run_conversation(),
         }
     }
 
@@ -1049,7 +1118,8 @@ impl App {
                 return;
             }
             if composer.prompt_expanded {
-                self.toggle_scheduler_prompt_expansion();
+                let width = self.scheduler_prompt_size(5).0;
+                self.scheduler.toggle_prompt_expansion(width);
             } else {
                 self.cancel_scheduled_task();
             }
@@ -1073,7 +1143,8 @@ impl App {
             return;
         }
         if key.code == KeyCode::Char('e') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.toggle_scheduler_prompt_expansion();
+            let width = self.scheduler_prompt_size(5).0;
+            self.scheduler.toggle_prompt_expansion(width);
             return;
         }
         if field == SchedulerField::Destination {
@@ -1554,40 +1625,12 @@ impl App {
             composer.destination_picker.scroll_by(delta);
             return;
         }
-        if target == ScrollTarget::SchedulerConversation {
-            self.scroll_scheduler_conversation(delta.saturating_mul(3));
-            return;
-        }
         let scroll = match target {
             ScrollTarget::SchedulerTasks => &mut self.scheduler.task_scroll,
             ScrollTarget::SchedulerRuns => &mut self.scheduler.run_scroll,
             _ => return,
         };
         *scroll = scroll.saturating_add_signed(delta.saturating_mul(3));
-    }
-
-    pub(crate) fn scroll_scheduler_conversation(&mut self, delta: isize) {
-        self.agent_preview.scroll_scheduled(delta);
-    }
-
-    pub(crate) fn move_scheduler_conversation_message(&mut self, delta: isize) {
-        let count = self.agent_preview.scheduled_message_count();
-        self.agent_preview.move_scheduled_message(delta, count);
-    }
-
-    fn toggle_scheduler_prompt_expansion(&mut self) {
-        let width = self.scheduler_prompt_size(5).0;
-        let Some(composer) = self.scheduler.composer.as_mut() else {
-            return;
-        };
-        composer.field = SchedulerField::Prompt;
-        composer.prompt_expanded = !composer.prompt_expanded;
-        composer.prompt.focus();
-        let height = if composer.prompt_expanded { 20 } else { 5 };
-        composer.prompt_scroll = composer
-            .prompt
-            .visual_cursor_row(width)
-            .saturating_sub(height - 1);
     }
 
     fn sync_scheduler_prompt_scroll(&mut self) {
@@ -1629,7 +1672,28 @@ impl App {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Branch, ScheduledTaskComposer, SchedulerDestination};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{
+        Branch, ScheduledTaskComposer, SchedulerDestination, SchedulerEffect, SchedulerHitTarget,
+        SchedulerState, SchedulerSurface,
+    };
+
+    #[test]
+    fn scheduler_state_owns_navigation_and_semantic_targets() {
+        let mut state = SchedulerState {
+            surface: SchedulerSurface::Detail,
+            ..SchedulerState::default()
+        };
+
+        let effect = state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), true);
+        assert_eq!(effect, SchedulerEffect::Handled);
+        assert_eq!(state.surface, SchedulerSurface::Tasks);
+        assert_eq!(
+            state.activate_target(SchedulerHitTarget::Run(17), 1),
+            SchedulerEffect::SelectRun(17)
+        );
+    }
 
     fn destination(path: &str, branch: &str) -> SchedulerDestination {
         SchedulerDestination {

@@ -818,7 +818,6 @@ pub(super) fn draw_agent_history_pane(
         );
         return;
     };
-    app.herdr.request_agent_latest_user_message(index);
     let selected_message = app.agent_preview_message(index);
     let transcript_scroll = app.agent_preview_transcript_scroll(index);
     let expanded_requests = app.agent_preview_expanded_requests(index).to_vec();
@@ -843,11 +842,17 @@ pub(super) fn draw_agent_history_pane(
         tabs_trailing,
         history,
     );
-    app.regions.agent_preview_scroll = scroll;
-    app.regions.agent_preview_scroll_max = scroll_max;
     app.regions.agent_animation_presented |= animation_presented;
     for (target, rect) in targets {
         app.regions.register_hit_target(target, rect);
+    }
+    if let Some(key) = app.herdr.agent_key(index) {
+        app.regions.register_scroll_target_with_state(
+            ScrollTarget::AgentTranscript(key),
+            history,
+            scroll,
+            scroll_max,
+        );
     }
     if let Some((offset, neighbor)) = app.agent_preview_swipe(index) {
         let repository = app.herdr.agent_repository_name(neighbor).unwrap_or("agent");

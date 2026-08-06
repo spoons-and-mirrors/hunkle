@@ -1340,8 +1340,8 @@ fn shortcut_settings_rebind_reset_and_persist_commands() {
     app.settings = Settings::default();
     app.settings_store = SettingsStore::at(path);
     app.mode = Mode::Settings;
-    app.settings_page = SettingsPage::Shortcuts;
-    app.shortcut_selection = Shortcuts::definitions(app.herdr_available())
+    app.settings_state.page = SettingsPage::Shortcuts;
+    app.settings_state.shortcut_selection = Shortcuts::definitions(app.herdr_available())
         .position(|definition| definition.action == ShortcutAction::OpenExplorer)
         .unwrap();
 
@@ -1360,7 +1360,7 @@ fn shortcut_settings_rebind_reset_and_persist_commands() {
     assert_eq!(app.mode, Mode::Explorer);
 
     app.mode = Mode::Settings;
-    app.settings_page = SettingsPage::Shortcuts;
+    app.settings_state.page = SettingsPage::Shortcuts;
     app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
     assert_eq!(
         app.settings.shortcuts.label(ShortcutAction::OpenExplorer),
@@ -1377,7 +1377,7 @@ fn opencode_settings_edit_model_reasoning_and_persist() {
     app.settings = Settings::default();
     app.settings_store = SettingsStore::at(path);
     app.mode = Mode::Settings;
-    app.settings_page = SettingsPage::OpenCode;
+    app.settings_state.page = SettingsPage::OpenCode;
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
@@ -1397,7 +1397,7 @@ fn opencode_settings_edit_model_reasoning_and_persist() {
     app.handle_paste("not a model");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.settings.opencode_model, "provider/model");
-    assert!(app.opencode_error.is_some());
+    assert!(app.settings_state.opencode_error.is_some());
 }
 
 #[test]
@@ -1407,11 +1407,11 @@ fn discord_settings_paste_save_and_remove_the_webhook() {
     let mut app = App::new(directory.path().to_path_buf());
     app.discord_webhook_store = DiscordWebhookStore::at(path.clone());
     app.mode = Mode::Settings;
-    app.settings_page = SettingsPage::Discord;
+    app.settings_state.page = SettingsPage::Discord;
 
-    app.discord_selection = 1;
+    app.settings_state.discord_selection = 1;
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    let editor = app.discord_webhook_editor.as_mut().unwrap();
+    let editor = app.settings_state.discord_webhook_editor.as_mut().unwrap();
     editor.server.set("Hunkle");
     editor.channel.set("reports");
     editor.webhook_name.set("Scheduler");
@@ -1429,7 +1429,7 @@ fn discord_settings_paste_save_and_remove_the_webhook() {
         )),
         Some(("Hunkle", "reports", "Scheduler"))
     );
-    assert!(app.discord_webhook_editor.is_none());
+    assert!(app.settings_state.discord_webhook_editor.is_none());
 
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));

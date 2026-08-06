@@ -16,7 +16,7 @@ use crate::app::{
     AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey, AgentListMode,
     AgentPromptDelivery, AgentPromptOutcome, AgentRequestPartPreview, AgentRequestPreview,
     AgentStatus, AgentTranscript, AgentUserMessage, HerdrSession, HitTarget, LinkedWorktreeCatalog,
-    ScheduledRun, ScheduledRunStatus, ScheduledTask, SchedulerHitTarget, Settings, TextInput,
+    ScheduledRun, ScheduledRunStatus, ScheduledTask, Settings, TextInput,
 };
 use crate::theme::Palette;
 
@@ -379,7 +379,6 @@ pub(super) fn draw(
             card_height.min(card_list.height.saturating_sub(offset)),
         );
         let full_row_area = Rect::new(list.x, row_area.y, list.width, row_area.height);
-        herdr.request_agent_latest_user_message(index);
         let agent = &herdr.agents[index];
         let Some(agent_key) = herdr.agent_key(index) else {
             continue;
@@ -1352,7 +1351,7 @@ pub(super) fn draw_scheduled_history(
             && let Some(request) = block.request
         {
             targets.push((
-                HitTarget::Scheduler(SchedulerHitTarget::ConversationRequest(request)),
+                HitTarget::AgentPreviewScheduledRequest { run_id, request },
                 rect,
             ));
         }

@@ -5,9 +5,9 @@ use std::time::Instant;
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, AgentKey, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget,
-    FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane,
-    MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, SchedulerHitTarget, ScrollTarget,
+    ACTION_ITEMS, AgentKey, AgentPreview, App, CloneField, DOUBLE_CLICK_INTERVAL,
+    ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind,
+    HitTarget, LeftPane, MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, ScrollTarget,
     SettingsHitTarget, View, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
@@ -26,7 +26,7 @@ impl App {
                     if let Some(
                         target @ (ScrollTarget::AgentTimeline(_)
                         | ScrollTarget::AgentTranscript(_)
-                        | ScrollTarget::SchedulerConversation),
+                        | ScrollTarget::AgentScheduledTranscript(_)),
                     ) = self.regions.scroll_target_at(point)
                     {
                         let delta = if mouse.kind == MouseEventKind::ScrollUp {
@@ -38,11 +38,19 @@ impl App {
                     }
                 }
                 MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
-                    if let Some(
-                        ScrollTarget::AgentTimeline(agent) | ScrollTarget::AgentTranscript(agent),
-                    ) = self.regions.scroll_target_at(point)
+                    if let Some(target) = self.regions.scroll_target_at(point)
+                        && matches!(
+                            target,
+                            ScrollTarget::AgentTimeline(_)
+                                | ScrollTarget::AgentTranscript(_)
+                                | ScrollTarget::AgentScheduledTranscript(_)
+                        )
                     {
-                        self.cycle_agent_preview(&agent, mouse.kind == MouseEventKind::ScrollRight);
+                        let effect = self.agent_preview.handle_horizontal_scroll(
+                            &target,
+                            mouse.kind == MouseEventKind::ScrollRight,
+                        );
+                        self.apply_agent_preview_effect(effect);
                     }
                 }
                 _ => {}
@@ -57,7 +65,6 @@ impl App {
                     if let Some(
                         target @ (ScrollTarget::SchedulerTasks
                         | ScrollTarget::SchedulerRuns
-                        | ScrollTarget::SchedulerConversation
                         | ScrollTarget::SchedulerPrompt
                         | ScrollTarget::SchedulerDestinations),
                     ) = self.regions.scroll_target_at(point)
@@ -341,8 +348,18 @@ impl App {
                 self.scroll_target(ScrollTarget::Header, delta, true);
                 return;
             }
-            if let Some(agent) = self.agent_preview_at(point) {
-                self.cycle_agent_preview(&agent, mouse.kind == MouseEventKind::ScrollRight);
+            if let Some(target) = self.regions.scroll_target_at(point)
+                && matches!(
+                    target,
+                    ScrollTarget::AgentTimeline(_)
+                        | ScrollTarget::AgentTranscript(_)
+                        | ScrollTarget::AgentScheduledTranscript(_)
+                )
+            {
+                let effect = self
+                    .agent_preview
+                    .handle_horizontal_scroll(&target, mouse.kind == MouseEventKind::ScrollRight);
+                self.apply_agent_preview_effect(effect);
                 return;
             }
         }
@@ -399,39 +416,9 @@ impl App {
                     self.restore_stashed_agent(index);
                     return;
                 }
-                Some(HitTarget::AgentPreviewRequest {
-                    agent,
-                    message,
-                    request,
-                }) => {
-                    self.toggle_agent_preview_request(agent, message, request);
-                    return;
-                }
-                Some(
-                    HitTarget::AgentMessage { agent, message }
-                    | HitTarget::AgentExpandedMessage { agent, message },
-                ) => {
-                    self.toggle_agent_preview_user_message(agent, message);
-                    return;
-                }
-                Some(HitTarget::AgentScheduledMessage { run_id, .. }) => {
-                    if self.agent_preview.scheduled_run == Some(run_id) {
-                        self.agent_preview.toggle_scheduled_user_message();
-                    }
-                    return;
-                }
-                Some(HitTarget::AgentPreviewPrompt(key)) => {
-                    if self.herdr.agent_index(&key).is_some() {
-                        self.agent_preview.focus_agent(key);
-                        self.focus_agent_preview_prompt();
-                    }
-                    return;
-                }
-                Some(HitTarget::AgentPreviewPromptDelivery(key)) => {
-                    if self.herdr.agent_index(&key).is_some() {
-                        self.agent_preview.focus_agent(key);
-                        self.toggle_agent_preview_prompt_delivery();
-                    }
+                Some(target) if AgentPreview::owns_target(&target) => {
+                    let effect = self.agent_preview.activate_target(&target);
+                    self.apply_agent_preview_effect(effect);
                     return;
                 }
                 _ => {}
@@ -638,7 +625,11 @@ impl App {
                                 && horizontal > vertical
                                 && let Some(agent) = drag.agent_preview.as_ref()
                             {
-                                self.cycle_agent_preview(agent, point.x < drag.start.x);
+                                let target = ScrollTarget::AgentTimeline(agent.clone());
+                                let effect = self
+                                    .agent_preview
+                                    .handle_horizontal_scroll(&target, point.x < drag.start.x);
+                                self.apply_agent_preview_effect(effect);
                             }
                         } else if !drag.moved {
                             self.handle_mouse_inner(MouseEvent {
@@ -744,7 +735,6 @@ impl App {
             }
             ScrollTarget::SchedulerTasks
             | ScrollTarget::SchedulerRuns
-            | ScrollTarget::SchedulerConversation
             | ScrollTarget::SchedulerPrompt
             | ScrollTarget::SchedulerDestinations => self.scroll_scheduler(target, delta),
             ScrollTarget::Commit => self.scroll_commit(delta, wheel),
@@ -770,11 +760,23 @@ impl App {
             }
             ScrollTarget::Graph => self.scroll_graph(wheel_amount(delta)),
             ScrollTarget::RepositorySearch => self.file_search.move_selection(delta),
-            ScrollTarget::AgentTimeline(agent) => {
-                self.scroll_agent_preview_timeline(agent, delta > 0);
-            }
-            ScrollTarget::AgentTranscript(agent) => {
-                self.set_agent_preview_scroll(agent, wheel_amount(delta));
+            target @ (ScrollTarget::AgentTimeline(_)
+            | ScrollTarget::AgentTranscript(_)
+            | ScrollTarget::AgentScheduledTranscript(_)) => {
+                let live = match &target {
+                    ScrollTarget::AgentTimeline(key) | ScrollTarget::AgentTranscript(key) => {
+                        self.agent_preview_live_context_for_key(key)
+                    }
+                    _ => None,
+                };
+                let maximum = self
+                    .regions
+                    .scroll_state(&target)
+                    .map_or(0, |state| state.maximum);
+                let effect =
+                    self.agent_preview
+                        .handle_scroll(&target, wheel_amount(delta), live, maximum);
+                self.apply_agent_preview_effect(effect);
             }
         }
     }
@@ -1078,17 +1080,9 @@ impl App {
                 self.restore_stashed_agent(index);
                 return;
             }
-            Some(HitTarget::AgentPreviewPicker(key)) => {
-                if self.herdr.agent_index(&key).is_none() {
-                    return;
-                }
-                self.agent_preview.toggle_picker(key);
-                return;
-            }
-            Some(HitTarget::AgentPreviewPickerItem(key)) => {
-                if let Some(index) = self.herdr.agent_index(&key) {
-                    self.select_agent_preview(index);
-                }
+            Some(target) if AgentPreview::owns_target(&target) => {
+                let effect = self.agent_preview.activate_target(&target);
+                self.apply_agent_preview_effect(effect);
                 return;
             }
             Some(
@@ -1447,24 +1441,6 @@ impl App {
         }
     }
 
-    fn cycle_agent_preview(&mut self, current: &AgentKey, forward: bool) {
-        let count = self.herdr.agents.len();
-        if count == 0 {
-            return;
-        }
-        let Some(current) = self.herdr.agent_index(current) else {
-            return;
-        };
-        let index = if forward {
-            (current + 1) % count
-        } else if current == 0 {
-            count - 1
-        } else {
-            current - 1
-        };
-        self.select_agent_preview(index);
-    }
-
     pub(super) fn select_agent_preview(&mut self, index: usize) {
         let Some(key) = self.herdr.agent_key(index) else {
             return;
@@ -1484,61 +1460,12 @@ impl App {
     }
 
     fn handle_agent_preview_modal_click(&mut self, point: Position) {
-        if !self
-            .regions
-            .hit_target_rect(HitTarget::AgentPreviewModalOverlay)
-            .is_some_and(|overlay| overlay.contains(point))
-        {
-            self.close_agent_preview_modal();
+        let Some(target) = self.regions.hit_target_at(point) else {
             return;
-        }
-        match self.regions.hit_target_at(point) {
-            Some(HitTarget::AgentPreviewModalClose) => self.close_agent_preview_modal(),
-            Some(HitTarget::AgentPreviewPrompt(key)) => {
-                if self.herdr.agent_index(&key).is_some() {
-                    self.agent_preview.focus_agent(key);
-                    self.focus_agent_preview_prompt();
-                }
-            }
-            Some(HitTarget::AgentPreviewScheduledPrompt(run_id)) => {
-                if self.agent_preview.scheduled_run == Some(run_id) {
-                    self.focus_agent_preview_prompt();
-                }
-            }
-            Some(HitTarget::AgentPreviewPromptDelivery(key)) => {
-                if self.herdr.agent_index(&key).is_some() {
-                    self.agent_preview.focus_agent(key);
-                    self.toggle_agent_preview_prompt_delivery();
-                }
-            }
-            Some(HitTarget::AgentPreviewRequest {
-                agent,
-                message,
-                request,
-            }) => self.toggle_agent_preview_request(agent, message, request),
-            Some(
-                HitTarget::AgentMessage { agent, message }
-                | HitTarget::AgentExpandedMessage { agent, message },
-            ) => self.toggle_agent_preview_user_message(agent, message),
-            Some(HitTarget::AgentScheduledMessage { run_id, .. }) => {
-                if self.agent_preview.scheduled_run == Some(run_id) {
-                    self.agent_preview.toggle_scheduled_user_message();
-                }
-            }
-            Some(HitTarget::AgentPreviewPicker(key)) => {
-                if self.herdr.agent_index(&key).is_some() {
-                    self.agent_preview.toggle_picker(key);
-                }
-            }
-            Some(HitTarget::AgentPreviewPickerItem(key)) => {
-                if let Some(index) = self.herdr.agent_index(&key) {
-                    self.select_agent_preview(index);
-                }
-            }
-            Some(HitTarget::Scheduler(SchedulerHitTarget::ConversationRequest(request))) => {
-                self.activate_scheduler_target(SchedulerHitTarget::ConversationRequest(request));
-            }
-            _ => {}
+        };
+        if AgentPreview::owns_target(&target) {
+            let effect = self.agent_preview.activate_target(&target);
+            self.apply_agent_preview_effect(effect);
         }
     }
 
@@ -1737,91 +1664,6 @@ impl App {
         self.graph_state.select(Some(index));
         self.graph_scroll_to_selection = false;
         true
-    }
-
-    fn select_agent_preview_message(&mut self, key: AgentKey, message: usize, forward: bool) {
-        let Some(agent) = self.herdr.agent_index(&key) else {
-            return;
-        };
-        let Some(message_count) = self
-            .herdr
-            .agent_user_messages(agent)
-            .filter(|messages| !messages.is_empty())
-            .map(<[_]>::len)
-        else {
-            return;
-        };
-        let Some(selected) =
-            self.agent_preview
-                .select_message(key.clone(), message_count, message, forward)
-        else {
-            return;
-        };
-        self.hovered_hit_target = Some(HitTarget::AgentTooltip {
-            agent: key,
-            message: selected,
-        });
-    }
-
-    fn scroll_agent_preview_timeline(&mut self, key: AgentKey, forward: bool) {
-        let Some(agent) = self.herdr.agent_index(&key) else {
-            return;
-        };
-        let Some(message) = self.agent_preview_message(agent).or_else(|| {
-            self.herdr
-                .agent_user_messages(agent)
-                .and_then(|messages| messages.len().checked_sub(1))
-        }) else {
-            return;
-        };
-        self.select_agent_preview_message(key, message, forward);
-    }
-
-    fn toggle_agent_preview_request(&mut self, key: AgentKey, message: usize, request: usize) {
-        self.agent_preview.toggle_request(key, message, request);
-    }
-
-    fn toggle_agent_preview_user_message(&mut self, agent: AgentKey, message: usize) {
-        self.agent_preview.toggle_user_message(agent, message);
-    }
-
-    pub(super) fn scroll_agent_preview_by(&mut self, delta: isize) {
-        let Some(agent) = self.agent_preview_index() else {
-            return;
-        };
-        let Some(key) = self.herdr.agent_key(agent) else {
-            return;
-        };
-        self.set_agent_preview_scroll(key, delta);
-    }
-
-    pub(super) fn scroll_selected_agent_preview_timeline(&mut self, forward: bool) {
-        let Some(index) = self.agent_preview_index() else {
-            return;
-        };
-        let Some(key) = self.herdr.agent_key(index) else {
-            return;
-        };
-        self.scroll_agent_preview_timeline(key, forward);
-    }
-
-    fn set_agent_preview_scroll(&mut self, key: AgentKey, delta: isize) {
-        let Some(agent) = self.herdr.agent_index(&key) else {
-            return;
-        };
-        let Some(message) = self.agent_preview_message(agent).or_else(|| {
-            self.herdr
-                .agent_user_messages(agent)
-                .and_then(|messages| messages.len().checked_sub(1))
-        }) else {
-            return;
-        };
-        self.agent_preview.scroll_transcript(
-            key,
-            message,
-            delta,
-            self.regions.agent_preview_scroll_max,
-        );
     }
 
     fn scroll_commit(&mut self, delta: isize, wheel: bool) {
