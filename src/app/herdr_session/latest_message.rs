@@ -230,6 +230,7 @@ pub(super) fn resolve_session_id(directory: &Path, title: &str) -> Result<String
 pub(super) fn resolve_scheduled_session_id(
     directory: &Path,
     prompt: &str,
+    run_created_at_ms: i64,
 ) -> Result<String, String> {
     let directory = sql_string(&directory.to_string_lossy());
     let prompt = sql_string(prompt);
@@ -238,10 +239,12 @@ pub(super) fn resolve_scheduled_session_id(
          JOIN message ON message.session_id = session.id \
          JOIN part ON part.message_id = message.id \
          WHERE session.directory = {directory} \
-           AND session.parent_id IS NULL \
-           AND json_extract(message.data, '$.role') = 'user' \
-           AND json_extract(part.data, '$.type') = 'text' \
-            AND trim(json_extract(part.data, '$.text')) = trim({prompt})"
+            AND session.parent_id IS NULL \
+            AND json_extract(message.data, '$.role') = 'user' \
+            AND json_extract(part.data, '$.type') = 'text' \
+            AND trim(json_extract(part.data, '$.text')) = trim({prompt}) \
+          ORDER BY abs(session.time_created - {run_created_at_ms}) \
+          LIMIT 1"
     );
     let output = process::run(
         Command::new("opencode").args(["db", &query, "--format", "json", "--pure"]),

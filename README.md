@@ -72,14 +72,15 @@ it never climbs into an enclosing repository.
 
 ## Scheduled tasks
 
-Scheduled task definitions live in `.hunkle/scheduled/*.md` in their destination
-repository or worktree. Open the scheduler with `F4` to discover files in known
-repositories and linked worktrees. Existing database-backed task definitions are
-migrated to this directory; run history remains in Hunkle's scheduler database.
+Scheduled task definitions are Hunkle-owned files under
+`$XDG_DATA_HOME/hunkle/scheduled/*.md` (normally
+`~/.local/share/hunkle/scheduled/*.md`). Existing database-backed definitions and
+legacy repository-local `.hunkle/scheduled/*.md` files are migrated there; run
+history remains in Hunkle's scheduler database.
 Tasks can also be created, edited, enabled, disabled, or deleted in the scheduler,
 which updates the corresponding Markdown file.
-Changing the destination while editing moves the Markdown definition to the selected
-repository or worktree while preserving the task's run history.
+Changing the destination while editing updates the file's destination metadata while
+preserving its location and the task's run history.
 The branch picker includes the repository's local and remote branches. Saving a
 task reuses an existing checkout or creates a managed linked worktree for a branch
 that is not checked out yet.
@@ -90,14 +91,21 @@ status: enabled
 frequency: 2h
 title: "Review open changes"
 description: "Inspect the worktree and report risks"
+model: "openai/gpt-5.6-sol"
+destination: "/home/me/code/project"
+repository: "project"
+branch: "main"
 ---
 
 Review the current diff. Summarize correctness risks and missing tests.
 ```
 
-The four frontmatter fields are required. `status` is `enabled` or `disabled`.
-`frequency` accepts a positive number of minutes, or a number followed by `m`,
-`h`, or `d`. The Markdown body is the task prompt.
+The destination and schedule fields are required; `model` is optional and uses
+OpenCode's `provider/model` syntax. Leave it empty to use OpenCode's configured default.
+`status` is `enabled` or `disabled`.
+`frequency` accepts a positive number of minutes, or a number followed by `m`, `h`,
+or `d`. `destination` is the agent's worktree path; `repository` and `branch` label
+that checkout. The Markdown body is the task prompt.
 
 ## Keys
 

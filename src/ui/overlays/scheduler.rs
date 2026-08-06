@@ -1,4 +1,3 @@
-use super::super::agents::draw_scheduled_history;
 use super::super::header_card::draw_header_card;
 use super::super::location_picker::{LocationPickerView, draw_location_picker};
 use super::*;
@@ -9,7 +8,6 @@ type Target = SchedulerHitTarget;
 pub(crate) struct SchedulerRegions {
     pub(crate) targets: Vec<(HitTarget, Rect)>,
     pub(crate) scrolls: Vec<(ScrollTarget, Rect)>,
-    pub(crate) conversation_scroll_max: usize,
 }
 
 impl SchedulerRegions {
@@ -27,8 +25,7 @@ pub(crate) fn draw_scheduler(
     app: &mut App,
     profile: LayoutProfile,
 ) -> SchedulerRegions {
-    let conversation_open = app.scheduler.surface == SchedulerSurface::Conversation;
-    let outer = scheduler_area(frame.area(), profile, conversation_open);
+    let outer = scheduler_area(frame.area(), profile);
     frame.render_widget(Clear, outer);
     fill(frame, outer, palette().panel);
     fill(
@@ -61,7 +58,6 @@ pub(crate) fn draw_scheduler(
     let mut regions = SchedulerRegions {
         targets: Vec::new(),
         scrolls: Vec::new(),
-        conversation_scroll_max: 0,
     };
     button(
         frame,
@@ -78,9 +74,7 @@ pub(crate) fn draw_scheduler(
         outer.width.saturating_sub(2),
         outer.height.saturating_sub(4),
     );
-    if conversation_open {
-        draw_conversation(frame, app, content, &mut regions);
-    } else if profile.is_single() {
+    if profile.is_single() {
         if app.scheduler.surface == SchedulerSurface::Tasks {
             draw_tasks(frame, app, content, &mut regions);
         } else {
@@ -127,14 +121,7 @@ pub(crate) fn draw_scheduler(
             Style::default().fg(palette().red).bg(palette().surface_alt),
         );
     } else {
-        let hints = if conversation_open {
-            &[
-                ("↑↓", "scroll"),
-                ("[ ]", "messages"),
-                ("PgUp/PgDn", "page"),
-                ("V/Esc", "back"),
-            ][..]
-        } else if app.scheduler.composer.is_some() {
+        let hints = if app.scheduler.composer.is_some() {
             &[
                 ("Ctrl+S", "save"),
                 ("Ctrl+E", "expand prompt"),
@@ -166,95 +153,13 @@ pub(crate) fn draw_scheduler(
     regions
 }
 
-fn draw_conversation(
-    frame: &mut Frame<'_>,
-    app: &mut App,
-    area: Rect,
-    regions: &mut SchedulerRegions,
-) {
-    let back = Rect::new(area.x + 1, area.y, 8, 1);
-    button(
-        frame,
-        regions,
-        back,
-        " < BACK ",
-        Target::CloseConversation,
-        palette().cyan,
-    );
-    let body = Rect::new(
-        area.x + 3,
-        area.y + 2,
-        area.width.saturating_sub(6),
-        area.height.saturating_sub(2),
-    );
-    let Some(run) = app
-        .scheduler
-        .selected_run_id
-        .and_then(|id| app.herdr.scheduled_runs().iter().find(|run| run.id == id))
-    else {
-        draw_text(
-            frame,
-            body,
-            "Select a run to view its conversation",
-            Style::default().fg(palette().faint).bg(palette().panel),
-        );
-        return;
-    };
-    let Some(session_id) = run.session_id.as_deref() else {
-        let message = app
-            .herdr
-            .scheduled_session_error(run.id)
-            .unwrap_or("Finding this run's OpenCode session…");
-        draw_text(
-            frame,
-            body,
-            message,
-            Style::default().fg(palette().faint).bg(palette().panel),
-        );
-        return;
-    };
-    if let Some(error) = app.herdr.scheduled_conversation_error(session_id) {
-        draw_text(
-            frame,
-            body,
-            error,
-            Style::default().fg(palette().red).bg(palette().panel),
-        );
-        return;
-    }
-    let selected_message = app.scheduler.conversation_message;
-    let transcript_scroll = app.scheduler.conversation_scroll;
-    let expanded_requests = app.scheduler.conversation_expanded_requests.clone();
-    let transcript = app.herdr.scheduled_transcript(session_id);
-    let (targets, maximum, _) = draw_scheduled_history(
-        frame,
-        transcript,
-        &mut app.agent_transcript_presentation,
-        selected_message,
-        transcript_scroll,
-        &expanded_requests,
-        body,
-    );
-    regions.targets.extend(targets);
-    regions.conversation_scroll_max = maximum;
-    regions.scroll(ScrollTarget::SchedulerConversation, body);
-}
-
-fn scheduler_area(area: Rect, profile: LayoutProfile, conversation_open: bool) -> Rect {
-    let mut outer = if conversation_open {
-        centered_min(
-            area,
-            if profile.is_single() { 96 } else { 88 },
-            94,
-            if profile.is_single() { 40 } else { 88 },
-            32,
-        )
-    } else if profile.is_single() {
+fn scheduler_area(area: Rect, profile: LayoutProfile) -> Rect {
+    let mut outer = if profile.is_single() {
         centered_min(area, 96, 92, 40, 24)
     } else {
         centered_min(area, 88, 82, 88, 28)
     };
-    let height = outer.height.min(if conversation_open { 70 } else { 46 });
+    let height = outer.height.min(46);
     let width = outer.width.min(132);
     outer.y = area.y + area.height.saturating_sub(height) / 2;
     outer.x = area.x + area.width.saturating_sub(width) / 2;
@@ -719,6 +624,7 @@ fn draw_composer(
         for field in [
             ("Title", SchedulerField::Title),
             ("Description", SchedulerField::Description),
+            ("Model", SchedulerField::Model),
         ] {
             draw_field(frame, composer, inner, &mut y, field, regions);
         }

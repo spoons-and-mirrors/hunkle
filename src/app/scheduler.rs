@@ -5,7 +5,6 @@ pub(crate) enum SchedulerSurface {
     #[default]
     Tasks,
     Detail,
-    Conversation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +12,7 @@ pub(crate) enum SchedulerField {
     Title,
     Description,
     Prompt,
+    Model,
     Schedule,
     Destination,
 }
@@ -50,6 +50,7 @@ impl SchedulerField {
                 Self::Title,
                 Self::Description,
                 Self::Prompt,
+                Self::Model,
                 Self::Schedule,
                 Self::Destination,
             ],
@@ -81,6 +82,7 @@ pub(crate) struct ScheduledTaskComposer {
     pub(crate) title: TextInput,
     pub(crate) description: TextInput,
     pub(crate) prompt: TextInput,
+    pub(crate) model: TextInput,
     pub(crate) prompt_expanded: bool,
     pub(crate) prompt_scroll: usize,
     pub(crate) schedule: TextInput,
@@ -102,6 +104,7 @@ impl ScheduledTaskComposer {
             title: TextInput::default(),
             description: TextInput::default(),
             prompt: TextInput::default(),
+            model: TextInput::default(),
             prompt_expanded: false,
             prompt_scroll: 0,
             schedule,
@@ -158,6 +161,7 @@ impl ScheduledTaskComposer {
         composer.title.set(&task.title);
         composer.description.set(&task.description);
         composer.prompt.set(&task.prompt);
+        composer.model.set(&task.model);
         composer.schedule.set(&task.interval_minutes.to_string());
         composer
     }
@@ -293,6 +297,7 @@ impl ScheduledTaskComposer {
             SchedulerField::Title => &self.title,
             SchedulerField::Description => &self.description,
             SchedulerField::Prompt => &self.prompt,
+            SchedulerField::Model => &self.model,
             SchedulerField::Schedule => &self.schedule,
             SchedulerField::Destination => unreachable!(),
         }
@@ -303,6 +308,7 @@ impl ScheduledTaskComposer {
             SchedulerField::Title => &mut self.title,
             SchedulerField::Description => &mut self.description,
             SchedulerField::Prompt => &mut self.prompt,
+            SchedulerField::Model => &mut self.model,
             SchedulerField::Schedule => &mut self.schedule,
             SchedulerField::Destination => unreachable!(),
         }
@@ -331,6 +337,7 @@ pub(crate) struct SchedulerState {
     pub(crate) runs_focused: bool,
     pub(crate) error: Option<String>,
     pub(crate) pending_worktree: Option<usize>,
+    pub(crate) preview_pending: bool,
 }
 
 fn worktree_label(worktree: &crate::git::LinkedWorktree) -> String {
@@ -484,6 +491,10 @@ impl App {
             self.scheduler.selected_task_id = tasks.first().map(|task| task.id);
         }
         self.select_default_scheduled_run();
+        if self.scheduler.preview_pending && self.scheduler.selected_run_id.is_some() {
+            self.scheduler.preview_pending = false;
+            self.open_selected_scheduled_run_conversation();
+        }
     }
 
     pub(crate) fn close_scheduler(&mut self) {
@@ -646,35 +657,12 @@ impl App {
                     self.scheduler.conversation_expanded_requests.push(request);
                 }
             }
-            SchedulerHitTarget::CloseConversation => {
-                self.scheduler.surface = SchedulerSurface::Detail;
-                self.herdr.clear_scheduled_conversation();
-            }
         }
     }
 
     pub(crate) fn handle_scheduler(&mut self, key: KeyEvent) {
         if self.scheduler.composer.is_some() {
             self.handle_scheduler_composer(key);
-            return;
-        }
-        if self.scheduler.surface == SchedulerSurface::Conversation {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('v') | KeyCode::Left | KeyCode::Char('h') => {
-                    self.scheduler.surface = SchedulerSurface::Detail;
-                    self.herdr.clear_scheduled_conversation();
-                }
-                KeyCode::Up | KeyCode::Char('k') => self.scroll_scheduler_conversation(-3),
-                KeyCode::Down | KeyCode::Char('j') => self.scroll_scheduler_conversation(3),
-                KeyCode::PageUp => self.scroll_scheduler_conversation(-12),
-                KeyCode::PageDown => self.scroll_scheduler_conversation(12),
-                KeyCode::Home => self.scheduler.conversation_scroll = Some(0),
-                KeyCode::End => self.scheduler.conversation_scroll = None,
-                KeyCode::Char('[') => self.move_scheduler_conversation_message(-1),
-                KeyCode::Char(']') => self.move_scheduler_conversation_message(1),
-                KeyCode::F(4) => self.close_scheduler(),
-                _ => {}
-            }
             return;
         }
         match key.code {
@@ -874,6 +862,7 @@ impl App {
             SchedulerField::Title,
             SchedulerField::Description,
             SchedulerField::Prompt,
+            SchedulerField::Model,
             SchedulerField::Schedule,
         ] {
             let focused = scheduler_active && field == input_field;
@@ -916,6 +905,7 @@ impl App {
             title: composer.title.text().to_owned(),
             description: composer.description.text().to_owned(),
             prompt: composer.prompt.text().to_owned(),
+            model: composer.model.text().trim().to_owned(),
             destination: destination_path.clone(),
             repository: destination.repository.clone(),
             branch: destination.checkout_branch.clone(),
@@ -925,12 +915,6 @@ impl App {
         };
         let task_id = composer.task_id;
         let source = composer.source.clone();
-        let refresh_open_workspace = self.repository().is_some_and(|repository| {
-            same_path(&repository.root, &destination_path)
-                || source
-                    .as_ref()
-                    .is_some_and(|source| same_path(&repository.root, &source.destination))
-        });
         match self.herdr.save_scheduled_task(task_id, edit, source) {
             Ok(()) => {
                 self.scheduler.composer = None;
@@ -941,9 +925,6 @@ impl App {
                     SchedulerSurface::Tasks
                 };
                 self.notice = Some("Scheduled task saved".to_owned());
-                if refresh_open_workspace {
-                    self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
-                }
             }
             Err(error) => self.scheduler.error = Some(error),
         }
@@ -986,24 +967,13 @@ impl App {
     }
 
     fn toggle_selected_scheduled_task(&mut self) {
-        let Some((id, enabled, refresh_open_workspace)) =
-            self.selected_scheduled_task().map(|task| {
-                (
-                    task.id,
-                    !task.enabled,
-                    task.source.is_some()
-                        && self.repository().is_some_and(|repository| {
-                            same_path(&repository.root, &task.destination)
-                        }),
-                )
-            })
+        let Some((id, enabled)) = self
+            .selected_scheduled_task()
+            .map(|task| (task.id, !task.enabled))
         else {
             return;
         };
         self.scheduler.error = self.herdr.toggle_scheduled_task(id, enabled).err();
-        if self.scheduler.error.is_none() && refresh_open_workspace {
-            self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
-        }
     }
 
     fn run_selected_scheduled_task(&mut self) {
@@ -1011,18 +981,21 @@ impl App {
             return;
         };
         self.scheduler.error = self.herdr.run_scheduled_task_now(id).err();
+        if self.scheduler.error.is_none() {
+            // The next scheduler update contains the newly claimed run at the front.
+            self.scheduler.selected_run_id = None;
+            self.scheduler.run_scroll = 0;
+            self.scheduler.surface = SchedulerSurface::Detail;
+            self.scheduler.preview_pending = true;
+            self.scheduler.conversation_scroll = None;
+            self.scheduler.conversation_message = None;
+            self.scheduler.conversation_expanded_requests.clear();
+            self.herdr.clear_scheduled_conversation();
+        }
     }
 
     fn delete_selected_scheduled_task(&mut self) {
-        let Some((id, refresh_open_workspace)) = self.selected_scheduled_task().map(|task| {
-            (
-                task.id,
-                task.source.is_some()
-                    && self
-                        .repository()
-                        .is_some_and(|repository| same_path(&repository.root, &task.destination)),
-            )
-        }) else {
+        let Some(id) = self.selected_scheduled_task().map(|task| task.id) else {
             return;
         };
         if let Err(error) = self.herdr.delete_scheduled_task(id) {
@@ -1033,9 +1006,6 @@ impl App {
         self.scheduler.selected_run_id = None;
         self.scheduler.surface = SchedulerSurface::Tasks;
         self.scheduler.error = None;
-        if refresh_open_workspace {
-            self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
-        }
     }
 
     fn refresh_selected_scheduled_run(&mut self) {
@@ -1056,7 +1026,8 @@ impl App {
             return;
         };
         if let Some(session_id) = run.session_id.as_deref() {
-            self.herdr.request_scheduled_conversation(session_id);
+            self.herdr
+                .request_scheduled_conversation(session_id, run.status.is_active());
         } else if let Some(task) = self
             .herdr
             .scheduled_tasks()
@@ -1067,13 +1038,18 @@ impl App {
                 run.id,
                 task.destination.clone(),
                 task.prompt.clone(),
+                run.created_at_ms,
             );
         }
-        self.scheduler.surface = SchedulerSurface::Conversation;
+        self.scheduler.surface = SchedulerSurface::Detail;
         self.scheduler.conversation_scroll = None;
         self.scheduler.conversation_message = None;
         self.scheduler.conversation_expanded_requests.clear();
         self.scheduler.error = None;
+        self.agent_preview_scheduled_run = Some(run.id);
+        self.agent_preview_return_mode = Mode::Scheduler;
+        self.agent_preview_picker_open = false;
+        self.mode = Mode::AgentPreview;
     }
 
     fn move_scheduler_selection(&mut self, delta: isize) {
@@ -1151,7 +1127,7 @@ impl App {
         *scroll = scroll.saturating_add_signed(delta.saturating_mul(3));
     }
 
-    fn scroll_scheduler_conversation(&mut self, delta: isize) {
+    pub(crate) fn scroll_scheduler_conversation(&mut self, delta: isize) {
         let current = self
             .scheduler
             .conversation_scroll
@@ -1163,7 +1139,7 @@ impl App {
         );
     }
 
-    fn move_scheduler_conversation_message(&mut self, delta: isize) {
+    pub(crate) fn move_scheduler_conversation_message(&mut self, delta: isize) {
         let count = self
             .scheduler
             .selected_run_id

@@ -170,6 +170,8 @@ pub struct App {
     agent_preview_expanded_requests: Option<AgentPreviewExpandedRequests>,
     pub(crate) agent_transcript_presentation: crate::ui::AgentTranscriptPresentation,
     agent_preview_picker_open: bool,
+    pub(crate) agent_preview_scheduled_run: Option<i64>,
+    agent_preview_return_mode: Mode,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
     pub settings_selection: usize,
@@ -334,6 +336,8 @@ impl App {
             agent_preview_expanded_requests: None,
             agent_transcript_presentation: crate::ui::AgentTranscriptPresentation::default(),
             agent_preview_picker_open: false,
+            agent_preview_scheduled_run: None,
+            agent_preview_return_mode: Mode::Normal,
             hovered_hit_target: None,
             settings,
             settings_selection: 0,
@@ -497,6 +501,14 @@ impl App {
     }
 
     pub(crate) fn agent_preview_index(&self) -> Option<usize> {
+        if let Some(run_id) = self.agent_preview_scheduled_run {
+            let run = self
+                .herdr
+                .scheduled_runs()
+                .iter()
+                .find(|run| run.id == run_id)?;
+            return self.herdr.scheduled_run_agent_index(run);
+        }
         self.agent_preview_selection
             .as_ref()
             .and_then(|key| self.herdr.agent_index(key))
@@ -904,20 +916,40 @@ impl App {
         changed |= self.mode == Mode::Explorer && explorer_changed;
         changed |= self.file_search.poll(self.session.data());
         if self.herdr_available() {
-            let scheduled_session = (self.mode == Mode::Scheduler
-                && self.scheduler.surface == SchedulerSurface::Conversation)
-                .then(|| {
-                    self.scheduler.selected_run_id.and_then(|id| {
-                        self.herdr
-                            .scheduled_runs()
-                            .iter()
-                            .find(|run| run.id == id)
-                            .and_then(|run| run.session_id.clone())
-                    })
+            let scheduled_run = (self.mode == Mode::AgentPreview
+                && self.agent_preview_scheduled_run.is_some())
+            .then(|| {
+                self.agent_preview_scheduled_run.and_then(|id| {
+                    self.herdr
+                        .scheduled_runs()
+                        .iter()
+                        .find(|run| run.id == id)
+                        .cloned()
                 })
-                .flatten();
-            if let Some(session_id) = scheduled_session {
-                self.herdr.request_scheduled_conversation(&session_id);
+            })
+            .flatten();
+            if let Some(run) = scheduled_run {
+                if let Some(session_id) = run.session_id.as_deref() {
+                    self.herdr
+                        .request_scheduled_conversation(session_id, run.status.is_active());
+                } else if let Some(task) = self
+                    .herdr
+                    .scheduled_tasks()
+                    .iter()
+                    .find(|task| task.id == run.task_id)
+                    .cloned()
+                {
+                    if run.status.is_active()
+                        || self.herdr.scheduled_session_error(run.id).is_none()
+                    {
+                        self.herdr.resolve_scheduled_run_session(
+                            run.id,
+                            task.destination,
+                            task.prompt,
+                            run.created_at_ms,
+                        );
+                    }
+                }
             }
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
@@ -2451,17 +2483,36 @@ impl App {
             self.flush_commit_draft();
         }
         self.select_agent_preview(index);
+        self.agent_preview_return_mode = Mode::Normal;
         self.mode = Mode::AgentPreview;
     }
 
     pub(super) fn close_agent_preview_modal(&mut self) {
         self.agent_preview_picker_open = false;
-        self.mode = Mode::Normal;
+        self.agent_preview_scheduled_run = None;
+        self.herdr.clear_scheduled_conversation();
+        self.mode = self.agent_preview_return_mode;
+        self.agent_preview_return_mode = Mode::Normal;
     }
 
     fn handle_agent_preview_modal(&mut self, key: KeyEvent) {
+        if self.agent_preview_scheduled_run.is_some() && self.agent_preview_index().is_none() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('v') => self.close_agent_preview_modal(),
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_scheduler_conversation(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_scheduler_conversation(1),
+                KeyCode::PageUp => self.scroll_scheduler_conversation(-10),
+                KeyCode::PageDown => self.scroll_scheduler_conversation(10),
+                KeyCode::Home => self.scheduler.conversation_scroll = Some(0),
+                KeyCode::End => self.scheduler.conversation_scroll = None,
+                KeyCode::Char('[') => self.move_scheduler_conversation_message(-1),
+                KeyCode::Char(']') => self.move_scheduler_conversation_message(1),
+                _ => {}
+            }
+            return;
+        }
         match key.code {
-            KeyCode::Esc => self.close_agent_preview_modal(),
+            KeyCode::Esc | KeyCode::Char('v') => self.close_agent_preview_modal(),
             KeyCode::Up | KeyCode::Char('k') => self.scroll_agent_preview_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.scroll_agent_preview_by(1),
             KeyCode::PageUp => self.scroll_agent_preview_by(-10),

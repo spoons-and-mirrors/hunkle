@@ -266,9 +266,11 @@ struct ParsedWorkspace {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SchedulerLaunchRequest {
+    pub(crate) run_id: i64,
     pub(crate) destination: PathBuf,
     pub(crate) label: String,
     pub(crate) prompt: String,
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -371,10 +373,10 @@ fn scheduler_launch_with(
         let created_terminal = created
             .pointer("/result/root_pane/terminal_id")
             .and_then(Value::as_str);
-        let start_args = [
+        let mut start_args = vec![
             "agent".into(),
             "start".into(),
-            scheduler_agent_name(&request.label).into(),
+            scheduler_run_agent_name(&request.label, request.run_id).into(),
             "--kind".into(),
             "opencode".into(),
             "--pane".into(),
@@ -382,6 +384,9 @@ fn scheduler_launch_with(
             "--timeout".into(),
             "30000".into(),
         ];
+        if let Some(model) = request.model.as_deref() {
+            start_args.extend(["--".into(), "--model".into(), model.into()]);
+        }
         let mut shell_retries = 0;
         let started = loop {
             match runner(&start_args) {
@@ -537,6 +542,14 @@ pub(super) fn scheduler_agent_name(value: &str) -> String {
     } else {
         format!("hunkle-{suffix}")
     }
+}
+
+pub(super) fn scheduler_run_agent_name(value: &str, run_id: i64) -> String {
+    let suffix = format!("-r{run_id}");
+    let mut name = scheduler_agent_name(value);
+    name.truncate(32_usize.saturating_sub(suffix.len()));
+    name.push_str(&suffix);
+    name
 }
 
 fn scheduler_observe_with(
@@ -3718,6 +3731,18 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_agent_names_keep_the_run_id_after_truncation() {
+        let label = "Hunkle: spy on dan and jorgen #8";
+        let third = scheduler_run_agent_name(label, 3);
+        let fourth = scheduler_run_agent_name(label, 4);
+
+        assert_ne!(third, fourth);
+        assert!(third.ends_with("-r3"));
+        assert!(fourth.ends_with("-r4"));
+        assert!(third.len() <= 32);
+    }
+
+    #[test]
     fn scheduler_launches_in_matching_workspace_with_literal_arguments() {
         fn joined(args: &[OsString]) -> String {
             args.iter()
@@ -3730,9 +3755,11 @@ mod tests {
         let mut calls = Vec::new();
         let result = scheduler_launch_with(
             SchedulerLaunchRequest {
+                run_id: 42,
                 destination: destination.clone(),
                 label: "  Nightly\nreview  ".to_owned(),
                 prompt: prompt.clone(),
+                model: Some("openai/gpt-5.6-sol".to_owned()),
             },
             |args| {
                 calls.push(args.to_vec());
@@ -3803,7 +3830,7 @@ mod tests {
         );
         assert_eq!(
             joined(&calls[3]),
-            "agent\0start\0hunkle-nightly-review\0--kind\0opencode\0--pane\0w7:p9\0--timeout\030000"
+            "agent\0start\0hunkle-nightly-review-r42\0--kind\0opencode\0--pane\0w7:p9\0--timeout\030000\0--\0--model\0openai/gpt-5.6-sol"
         );
         assert_eq!(calls[2], calls[3]);
         assert_eq!(calls[4], calls[5]);

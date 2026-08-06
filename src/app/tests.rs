@@ -991,6 +991,7 @@ fn scheduler_edits_an_existing_task_in_the_shared_composer() {
         title: "Nightly review".to_owned(),
         description: "Check open changes".to_owned(),
         prompt: "Review the diff and summarize it.".to_owned(),
+        model: "openai/gpt-5.6-sol".to_owned(),
         destination: directory.path().to_path_buf(),
         repository: "repo".to_owned(),
         branch: "main".to_owned(),
@@ -1010,8 +1011,85 @@ fn scheduler_edits_an_existing_task_in_the_shared_composer() {
     assert_eq!(composer.title.text(), "Nightly review");
     assert_eq!(composer.description.text(), "Check open changes");
     assert_eq!(composer.prompt.text(), "Review the diff and summarize it.");
+    assert_eq!(composer.model.text(), "openai/gpt-5.6-sol");
     assert_eq!(composer.schedule.text(), "90");
     assert!(!composer.enabled);
+}
+
+#[test]
+fn scheduler_run_now_opens_the_live_conversation() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+        id: 7,
+        title: "Nightly review".to_owned(),
+        description: String::new(),
+        prompt: "Review the diff.".to_owned(),
+        model: String::new(),
+        destination: directory.path().to_path_buf(),
+        repository: "repo".to_owned(),
+        branch: "main".to_owned(),
+        enabled: true,
+        interval_minutes: 90,
+        next_run_ms: 1,
+        source: None,
+    }]);
+    app.mode = Mode::Scheduler;
+    app.scheduler.surface = SchedulerSurface::Detail;
+    app.scheduler.selected_task_id = Some(7);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+
+    assert_eq!(app.scheduler.surface, SchedulerSurface::Detail);
+    assert!(app.scheduler.preview_pending);
+    assert_eq!(app.scheduler.selected_run_id, None);
+    assert_eq!(app.scheduler.run_scroll, 0);
+}
+
+#[test]
+fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+        id: 7,
+        title: "Nightly review".to_owned(),
+        description: String::new(),
+        prompt: "Review the diff.".to_owned(),
+        model: String::new(),
+        destination: directory.path().to_path_buf(),
+        repository: "repo".to_owned(),
+        branch: "main".to_owned(),
+        enabled: true,
+        interval_minutes: 90,
+        next_run_ms: 1,
+        source: None,
+    }]);
+    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+        id: 11,
+        task_id: 7,
+        created_at_ms: 1,
+        status: ScheduledRunStatus::Completed,
+        pane_id: None,
+        terminal_id: None,
+        session_id: None,
+        error: Some("No session".to_owned()),
+    }]);
+    app.mode = Mode::Scheduler;
+    app.scheduler.surface = SchedulerSurface::Detail;
+    app.scheduler.selected_task_id = Some(7);
+    app.scheduler.selected_run_id = Some(11);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::AgentPreview);
+    assert_eq!(app.agent_preview_scheduled_run, Some(11));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Scheduler);
+    assert_eq!(app.agent_preview_scheduled_run, None);
 }
 
 #[test]

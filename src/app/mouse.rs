@@ -8,8 +8,8 @@ use super::{
     ACTION_ITEMS, AgentKey, AgentPreviewExpandedRequests, AgentPreviewMessageSelection,
     AgentPreviewTranscriptScroll, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget,
     FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane,
-    MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, ScrollTarget, SettingsHitTarget, View,
-    changes::ChangesEffect, file_editor::FileEditor, scroll_table,
+    MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, SchedulerHitTarget, ScrollTarget,
+    SettingsHitTarget, View, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
 const AGENT_PREVIEW_SWIPE_THRESHOLD: u16 = 4;
@@ -1377,6 +1377,7 @@ impl App {
             return;
         };
         self.agent_preview_selection = Some(key.clone());
+        self.agent_preview_scheduled_run = None;
         self.agent_preview_transcript_scroll = None;
         self.agent_preview_message_selection = None;
         self.agent_preview_expanded_requests = None;
@@ -1420,6 +1421,9 @@ impl App {
                 if let Some(index) = self.herdr.agent_index(&key) {
                     self.select_agent_preview(index);
                 }
+            }
+            Some(HitTarget::Scheduler(SchedulerHitTarget::ConversationRequest(request))) => {
+                self.activate_scheduler_target(SchedulerHitTarget::ConversationRequest(request));
             }
             _ => {}
         }
