@@ -610,11 +610,11 @@ fn inline_editor_gutter_shows_live_changed_lines() {
 #[test]
 fn inline_editor_selection_width_accounts_for_tabs() {
     assert_eq!(
-        super::selected_display_range("\tvalue\n", 0, (0, 1)),
+        super::selected_display_range("\tvalue\n", &[0, 7], 0, (0, 1)),
         Some((0, 4))
     );
     assert_eq!(
-        super::selected_display_range("\tvalue\n", 0, (0, 2)),
+        super::selected_display_range("\tvalue\n", &[0, 7], 0, (0, 2)),
         Some((0, 5))
     );
 }

@@ -33,6 +33,11 @@ pub(crate) struct FileEditor {
     path: RepoPath,
     original: Vec<u8>,
     text: String,
+    line_starts: Vec<usize>,
+    revision: u64,
+    presented_revision: u64,
+    revision_changed_from_line: usize,
+    dirty: bool,
     line_ending: &'static str,
     cursor: usize,
     selection_anchor: Option<usize>,
@@ -71,11 +76,17 @@ impl FileEditor {
         let text = String::from_utf8(original.clone())
             .with_context(|| format!("{} is not valid UTF-8", path.display()))?;
         let line_ending = preferred_line_ending(&text);
+        let line_starts = source_line_starts(&text);
         let mut editor = Self {
             root: root.to_owned(),
             path,
             original,
             text,
+            line_starts,
+            revision: 1,
+            presented_revision: 1,
+            revision_changed_from_line: 0,
+            dirty: false,
             line_ending,
             cursor: 0,
             selection_anchor: None,
@@ -106,8 +117,24 @@ impl FileEditor {
         &self.text
     }
 
+    pub(crate) fn line_starts(&self) -> &[usize] {
+        &self.line_starts
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(crate) fn revision_changed_from_line(&self) -> usize {
+        self.revision_changed_from_line
+    }
+
+    pub(crate) fn mark_revision_presented(&mut self) {
+        self.presented_revision = self.revision;
+    }
+
     pub(crate) fn dirty(&self) -> bool {
-        self.text.as_bytes() != self.original
+        self.dirty
     }
 
     pub(crate) fn has_selection(&self) -> bool {
@@ -126,8 +153,8 @@ impl FileEditor {
     pub(crate) fn selected_line_range(&self) -> Option<(usize, usize)> {
         let (start, end) = self.selection_range()?;
         Some((
-            line_number_at(&self.text, start),
-            line_number_at(&self.text, end.saturating_sub(1)),
+            self.line_number_at(start),
+            self.line_number_at(end.saturating_sub(1)),
         ))
     }
 
@@ -195,6 +222,7 @@ impl FileEditor {
 
     pub(crate) fn mark_saved(&mut self) {
         self.original = self.text.as_bytes().to_vec();
+        self.dirty = false;
         self.changed_lines.clear();
         self.discard_armed = false;
     }
@@ -219,6 +247,9 @@ impl FileEditor {
         let (line, column) = self.cursor_position();
         self.original = bytes;
         self.text = text;
+        self.rebuild_line_starts();
+        self.advance_revision_from_line(0);
+        self.dirty = false;
         self.line_ending = preferred_line_ending(&self.text);
         self.changed_lines.clear();
         self.set_cursor(line, column);
@@ -230,18 +261,13 @@ impl FileEditor {
     }
 
     pub(crate) fn cursor_position(&self) -> (usize, usize) {
-        let start = line_start(&self.text, self.cursor);
-        (
-            self.text[..start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count(),
-            display_width(&self.text[start..self.cursor]),
-        )
+        let line = self.line_number_at(self.cursor);
+        let start = self.line_start_at(line);
+        (line, display_width(&self.text[start..self.cursor]))
     }
 
     pub(crate) fn visible_line_count(&self) -> usize {
-        self.text.bytes().filter(|byte| *byte == b'\n').count() + 1
+        self.line_starts.len()
     }
 
     pub(crate) fn should_follow_cursor(&self) -> bool {
@@ -249,8 +275,8 @@ impl FileEditor {
     }
 
     pub(crate) fn set_cursor(&mut self, line: usize, column: usize) {
-        let start = line_start_at(&self.text, line);
-        let end = line_content_end(&self.text, start);
+        let start = self.line_start_at(line);
+        let end = self.line_content_end_at(line);
         self.cursor = closest_column(&self.text, start, end, column);
         self.selection_anchor = None;
         self.preferred_column = None;
@@ -262,8 +288,8 @@ impl FileEditor {
         if self.selection_anchor.is_none() {
             self.selection_anchor = Some(self.cursor);
         }
-        let start = line_start_at(&self.text, line);
-        let end = line_content_end(&self.text, start);
+        let start = self.line_start_at(line);
+        let end = self.line_content_end_at(line);
         self.cursor = closest_column(&self.text, start, end, column);
         self.preferred_column = None;
         self.cursor_follow = true;
@@ -372,8 +398,8 @@ impl FileEditor {
         let last_line = last_line.min(self.visible_line_count().saturating_sub(1));
         let mut lines = Vec::new();
         for line in first_line.min(last_line)..=last_line {
-            let start = line_start_at(&self.text, line);
-            let end = line_content_end(&self.text, start);
+            let start = self.line_start_at(line);
+            let end = self.line_content_end_at(line);
             let indent = self.text[start..end]
                 .bytes()
                 .take_while(|byte| matches!(byte, b' ' | b'\t'))
@@ -410,9 +436,10 @@ impl FileEditor {
                 }
             }
         }
+        self.rebuild_line_starts();
         self.selection_anchor = None;
         self.mark_changed_lines(first_line, last_line);
-        self.changed();
+        self.changed_from_line(first_line);
         Ok(())
     }
 
@@ -425,8 +452,8 @@ impl FileEditor {
         let last_line = last_line.min(self.visible_line_count().saturating_sub(1));
         let mut edits = Vec::new();
         for line in first_line.min(last_line)..=last_line {
-            let start = line_start_at(&self.text, line);
-            let end = line_content_end(&self.text, start);
+            let start = self.line_start_at(line);
+            let end = self.line_content_end_at(line);
             if start == end {
                 continue;
             }
@@ -474,8 +501,9 @@ impl FileEditor {
                 adjust_offset(anchor, start, end, inserted);
             }
         }
+        self.rebuild_line_starts();
         self.mark_changed_lines(first_line, last_line);
-        self.changed();
+        self.changed_from_line(first_line);
         Ok(())
     }
 
@@ -502,13 +530,13 @@ impl FileEditor {
     }
 
     pub(crate) fn move_home_with_selection(&mut self, extend: bool) {
-        let target = line_start(&self.text, self.cursor);
+        let target = self.line_start_at(self.line_number_at(self.cursor));
         self.move_to(target, extend);
         self.moved_horizontally();
     }
 
     pub(crate) fn move_end_with_selection(&mut self, extend: bool) {
-        let target = line_content_end(&self.text, line_start(&self.text, self.cursor));
+        let target = self.line_content_end_at(self.line_number_at(self.cursor));
         self.move_to(target, extend);
         self.moved_horizontally();
     }
@@ -568,8 +596,8 @@ impl FileEditor {
     }
 
     fn set_cursor_preserving_column(&mut self, line: usize, column: usize) {
-        let start = line_start_at(&self.text, line);
-        let end = line_content_end(&self.text, start);
+        let start = self.line_start_at(line);
+        let end = self.line_content_end_at(line);
         self.cursor = closest_column(&self.text, start, end, column);
         self.preferred_column = None;
         self.cursor_follow = true;
@@ -597,13 +625,14 @@ impl FileEditor {
     }
 
     fn replace_range(&mut self, start: usize, end: usize, value: &str) {
-        let first_line = line_number_at(&self.text, start);
+        let first_line = self.line_number_at(start);
         self.record_edit();
         self.text.replace_range(start..end, value);
+        update_line_starts_after_replace(&mut self.line_starts, start, end, value);
         self.cursor = start.saturating_add(value.len());
         self.selection_anchor = None;
-        self.mark_changed_lines(first_line, line_number_at(&self.text, self.cursor));
-        self.changed();
+        self.mark_changed_lines(first_line, self.line_number_at(self.cursor));
+        self.changed_from_line(first_line);
     }
 
     fn validate_replacement(&self, start: usize, end: usize, value: &str) -> Result<()> {
@@ -651,6 +680,9 @@ impl FileEditor {
 
     fn restore_snapshot(&mut self, snapshot: Snapshot) {
         self.text = snapshot.text;
+        self.rebuild_line_starts();
+        self.advance_revision_from_line(0);
+        self.dirty = self.text.as_bytes() != self.original;
         self.cursor = snapshot.cursor.min(self.text.len());
         self.selection_anchor = snapshot
             .selection_anchor
@@ -682,9 +714,20 @@ impl FileEditor {
         }
     }
 
-    fn changed(&mut self) {
+    fn changed_from_line(&mut self, line: usize) {
+        self.advance_revision_from_line(line);
+        self.dirty = self.text.as_bytes() != self.original;
         self.preferred_column = None;
         self.discard_armed = false;
+    }
+
+    fn advance_revision_from_line(&mut self, line: usize) {
+        if self.presented_revision == self.revision {
+            self.revision_changed_from_line = line;
+        } else {
+            self.revision_changed_from_line = self.revision_changed_from_line.min(line);
+        }
+        self.revision = self.revision.wrapping_add(1);
     }
 
     fn mark_changed_lines(&mut self, first_line: usize, last_line: usize) {
@@ -696,6 +739,39 @@ impl FileEditor {
     fn moved_horizontally(&mut self) {
         self.preferred_column = None;
         self.discard_armed = false;
+    }
+
+    fn line_number_at(&self, cursor: usize) -> usize {
+        self.line_starts
+            .partition_point(|start| *start <= cursor.min(self.text.len()))
+            .saturating_sub(1)
+    }
+
+    fn line_start_at(&self, line: usize) -> usize {
+        self.line_starts
+            .get(line)
+            .copied()
+            .unwrap_or(self.text.len())
+    }
+
+    fn line_content_end_at(&self, line: usize) -> usize {
+        let start = self.line_start_at(line);
+        let mut end = self
+            .line_starts
+            .get(line.saturating_add(1))
+            .copied()
+            .unwrap_or(self.text.len());
+        if end > start && self.text.as_bytes().get(end - 1) == Some(&b'\n') {
+            end -= 1;
+            if end > start && self.text.as_bytes().get(end - 1) == Some(&b'\r') {
+                end -= 1;
+            }
+        }
+        end
+    }
+
+    fn rebuild_line_starts(&mut self) {
+        self.line_starts = source_line_starts(&self.text);
     }
 }
 
@@ -730,14 +806,6 @@ fn line_comment_marker(path: &Path) -> Option<&'static str> {
     }
 }
 
-fn line_start(text: &str, cursor: usize) -> usize {
-    text[..cursor].rfind('\n').map_or(0, |index| index + 1)
-}
-
-fn line_number_at(text: &str, cursor: usize) -> usize {
-    text[..cursor].bytes().filter(|byte| *byte == b'\n').count()
-}
-
 fn adjust_scroll(value: usize, delta: isize) -> usize {
     if delta.is_negative() {
         value.saturating_sub(delta.unsigned_abs())
@@ -756,24 +824,31 @@ fn adjust_offset(offset: &mut usize, start: usize, end: usize, inserted: usize) 
     }
 }
 
-fn line_start_at(text: &str, line: usize) -> usize {
-    if line == 0 {
-        return 0;
-    }
-    text.match_indices('\n')
-        .nth(line - 1)
-        .map_or(text.len(), |(index, _)| index + 1)
+fn source_line_starts(text: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(offset, _)| offset + 1))
+        .collect()
 }
 
-fn line_content_end(text: &str, start: usize) -> usize {
-    let newline = text[start..]
-        .find('\n')
-        .map_or(text.len(), |index| start + index);
-    if newline > start && text.as_bytes()[newline - 1] == b'\r' {
-        newline - 1
-    } else {
-        newline
+fn update_line_starts_after_replace(
+    line_starts: &mut Vec<usize>,
+    start: usize,
+    end: usize,
+    value: &str,
+) {
+    let retained = line_starts.partition_point(|offset| *offset <= start);
+    let removed_end = line_starts.partition_point(|offset| *offset <= end);
+    line_starts.drain(retained..removed_end);
+
+    let removed = end.saturating_sub(start);
+    for offset in &mut line_starts[retained..] {
+        *offset = offset.saturating_sub(removed).saturating_add(value.len());
     }
+    let inserted = value
+        .match_indices('\n')
+        .map(|(offset, _)| start.saturating_add(offset).saturating_add(1))
+        .collect::<Vec<_>>();
+    line_starts.splice(retained..retained, inserted);
 }
 
 fn previous_cursor(text: &str, cursor: usize) -> usize {
@@ -893,6 +968,62 @@ mod tests {
         editor.insert_newline().unwrap();
         editor.insert("pasted\nline").unwrap();
         assert_eq!(editor.text(), "first\r\npasted\r\nline\r\nsecond\r\n");
+    }
+
+    #[test]
+    fn line_index_and_dirty_state_follow_edits_and_undo() {
+        let (_directory, mut editor) = editor("one\ntwo\n");
+        let initial_revision = editor.revision();
+        assert_eq!(editor.line_starts(), &[0, 4, 8]);
+        assert!(!editor.dirty());
+
+        editor.set_cursor(1, 3);
+        editor.insert("\nthree").unwrap();
+        assert_eq!(editor.text(), "one\ntwo\nthree\n");
+        assert_eq!(editor.line_starts(), &[0, 4, 8, 14]);
+        assert_eq!(editor.cursor_position(), (2, 5));
+        assert!(editor.dirty());
+        assert_ne!(editor.revision(), initial_revision);
+
+        assert!(editor.undo());
+        assert_eq!(editor.line_starts(), &[0, 4, 8]);
+        assert_eq!(editor.cursor_position(), (1, 3));
+        assert!(!editor.dirty());
+    }
+
+    #[test]
+    fn revision_invalidation_accumulates_until_presented() {
+        let (_directory, mut editor) = editor("one\ntwo\nthree");
+        editor.mark_revision_presented();
+
+        editor.set_cursor(2, 5);
+        editor.insert("!").unwrap();
+        assert_eq!(editor.revision_changed_from_line(), 2);
+        editor.set_cursor(1, 3);
+        editor.insert("!").unwrap();
+        assert_eq!(editor.revision_changed_from_line(), 1);
+
+        editor.mark_revision_presented();
+        editor.set_cursor(2, 0);
+        editor.insert("!").unwrap();
+        assert_eq!(editor.revision_changed_from_line(), 2);
+    }
+
+    #[test]
+    fn incremental_line_index_matches_a_full_rebuild() {
+        let source = "aa\nbbb\n\ncccc\n";
+        let replacements = ["", "x", "\n", "x\ny", "\n\n"];
+        for start in 0..=source.len() {
+            for end in start..=source.len() {
+                for replacement in replacements {
+                    let mut expected = source.to_owned();
+                    expected.replace_range(start..end, replacement);
+                    let mut actual = source_line_starts(source);
+                    update_line_starts_after_replace(&mut actual, start, end, replacement);
+                    assert_eq!(actual, source_line_starts(&expected));
+                }
+            }
+        }
     }
 
     #[test]

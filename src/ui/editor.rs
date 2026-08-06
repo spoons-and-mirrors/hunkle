@@ -1,8 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use ratatui::buffer::Buffer;
-
-use crate::repo_path::RepoPath;
 
 use super::*;
 
@@ -60,7 +56,8 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
     let Some(editor) = &mut app.file_editor else {
         return;
     };
-    let line_markers = editor_line_markers(
+    let line_markers = app.changes.preview_presentation.editor_line_markers(
+        app.changes.preview.generation(),
         app.changes.preview.document(),
         editor.path(),
         editor.locally_changed_lines(),
@@ -92,7 +89,11 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
     let viewport_width = usize::from(editor_body.width).max(1);
     let (lines, line_numbers, cursor_row, rendered_cursor_column, cursor_visible) = if wrapped {
         let (cursor_row, rendered_cursor_column) =
-            wrapped_editor_cursor(editor.text(), viewport_width, cursor_line, cursor_column);
+            app.changes.preview_presentation.editor_rendered_position(
+                editor_preview_input(editor, &path, viewport_width, viewport_height, wrapped),
+                cursor_line,
+                cursor_column,
+            );
         if let Some(anchor) = app.file_editor_anchor.take() {
             let row = usize::from(anchor.y.saturating_sub(editor_body.y))
                 .min(viewport_height.saturating_sub(1));
@@ -101,24 +102,40 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
         if editor.should_follow_cursor() {
             editor.ensure_wrapped_cursor_visible(cursor_row, viewport_height);
         }
-        let (lines, line_numbers, rows) = wrapped_editor_view(
-            editor.text(),
-            &path,
-            viewport_width,
-            editor.wrap_scroll_row,
-            viewport_height,
-            &line_markers,
-            number_width,
-            narrow,
+        let mut scroll = editor.wrap_scroll_row;
+        let prepared = app.changes.preview_presentation.prepare_editor(
+            editor_preview_input(editor, &path, viewport_width, viewport_height, wrapped),
+            &mut scroll,
         );
-        app.regions.editor_rows = rows;
+        editor.wrap_scroll_row = scroll;
+        let mut lines = prepared.lines;
+        let mut line_numbers = prepared
+            .rows
+            .iter()
+            .map(|row| {
+                let first_row = row
+                    .columns
+                    .first()
+                    .is_some_and(|(_, source_column)| *source_column == 0);
+                editor_line_number(
+                    first_row.then_some(row.line),
+                    line_markers.get(&row.line).copied(),
+                    number_width,
+                    narrow,
+                )
+            })
+            .collect::<Vec<_>>();
+        while lines.len() < viewport_height {
+            lines.push(Line::default().style(Style::default().bg(palette().panel)));
+            line_numbers.push(editor_line_number(None, None, number_width, narrow));
+        }
+        app.regions.editor_rows = prepared.rows;
         (
             lines,
             line_numbers,
-            cursor_row.saturating_sub(editor.wrap_scroll_row),
+            cursor_row.saturating_sub(scroll),
             rendered_cursor_column,
-            cursor_row >= editor.wrap_scroll_row
-                && cursor_row < editor.wrap_scroll_row.saturating_add(viewport_height),
+            cursor_row >= scroll && cursor_row < scroll.saturating_add(viewport_height),
         )
     } else {
         if let Some(anchor) = app.file_editor_anchor.take() {
@@ -131,21 +148,20 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
         if editor.should_follow_cursor() {
             editor.ensure_cursor_visible(viewport_height, viewport_width);
         }
-        let lines = text::styled_source_window(
-            editor.text(),
-            &path,
-            0,
-            editor.scroll_line,
-            viewport_height,
+        let mut scroll = editor.scroll_line;
+        let prepared = app.changes.preview_presentation.prepare_editor(
+            editor_preview_input(editor, &path, viewport_width, viewport_height, wrapped),
+            &mut scroll,
         );
-        let mut lines = editor_visible_lines(lines, editor.scroll_column, viewport_width);
-        while lines.len() <= cursor_line.saturating_sub(editor.scroll_line) {
+        editor.scroll_line = scroll;
+        let mut lines = editor_visible_lines(prepared.lines, editor.scroll_column, viewport_width);
+        while lines.len() <= cursor_line.saturating_sub(scroll) {
             lines.push(Line::default().style(Style::default().bg(palette().panel)));
         }
         let line_count = line_count.expect("unwrapped editor counted visible lines");
         let line_numbers = (0..viewport_height)
             .map(|row| {
-                let line = editor.scroll_line.saturating_add(row);
+                let line = scroll.saturating_add(row);
                 editor_line_number(
                     (line < line_count).then_some(line),
                     line_markers.get(&line).copied(),
@@ -157,12 +173,12 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
         (
             lines,
             line_numbers,
-            cursor_line.saturating_sub(editor.scroll_line),
+            cursor_line.saturating_sub(scroll),
             cursor_column.saturating_sub(editor.scroll_column),
-            cursor_line >= editor.scroll_line
-                && cursor_line < editor.scroll_line.saturating_add(viewport_height),
+            cursor_line >= scroll && cursor_line < scroll.saturating_add(viewport_height),
         )
     };
+    editor.mark_revision_presented();
     frame.render_widget(Paragraph::new(line_numbers), gutter);
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(palette().panel)),
@@ -170,12 +186,10 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
     );
     render_file_editor_selection(
         frame.buffer_mut(),
-        editor.text(),
-        editor.selected_range(),
+        editor,
         editor_body,
         wrapped,
         &app.regions.editor_rows,
-        (editor.scroll_line, editor.scroll_column),
     );
     let cursor_x = editor_body
         .x
@@ -188,22 +202,44 @@ pub(super) fn draw_file_editor(frame: &mut Frame<'_>, app: &mut App, profile: La
     }
 }
 
+fn editor_preview_input<'a>(
+    editor: &'a crate::app::FileEditor,
+    path: &'a str,
+    width: usize,
+    viewport_height: usize,
+    wrapped: bool,
+) -> crate::ui::preview::EditorPreviewInput<'a> {
+    crate::ui::preview::EditorPreviewInput {
+        source: editor.text(),
+        line_starts: editor.line_starts(),
+        revision: editor.revision(),
+        revision_changed_from_line: editor.revision_changed_from_line(),
+        repo_path: editor.path(),
+        path,
+        width,
+        viewport_height,
+        wrapped,
+    }
+}
+
 fn render_file_editor_selection(
     buffer: &mut Buffer,
-    source: &str,
-    selection: Option<(usize, usize)>,
+    editor: &crate::app::FileEditor,
     body: Rect,
     wrapped: bool,
     rows: &[crate::app::EditorRenderedRow],
-    scroll: (usize, usize),
 ) {
-    let Some(selection) = selection else {
+    let Some(selection) = editor.selected_range() else {
         return;
     };
+    let source = editor.text();
+    let line_starts = editor.line_starts();
     let selected_style = Style::default().fg(palette().canvas).bg(palette().accent);
     if wrapped {
         for (row_index, row) in rows.iter().enumerate() {
-            let Some((start, end)) = selected_display_range(source, row.line, selection) else {
+            let Some((start, end)) =
+                selected_display_range(source, line_starts, row.line, selection)
+            else {
                 continue;
             };
             for pair in row.columns.windows(2) {
@@ -225,10 +261,11 @@ fn render_file_editor_selection(
         return;
     }
 
-    let (scroll_line, scroll_column) = scroll;
+    let (scroll_line, scroll_column) = (editor.scroll_line, editor.scroll_column);
     for row in 0..usize::from(body.height) {
         let line = scroll_line.saturating_add(row);
-        let Some((start, end)) = selected_display_range(source, line, selection) else {
+        let Some((start, end)) = selected_display_range(source, line_starts, line, selection)
+        else {
             continue;
         };
         style_editor_cells(
@@ -269,31 +306,33 @@ fn style_editor_cells(
 
 pub(super) fn selected_display_range(
     source: &str,
+    line_starts: &[usize],
     line_number: usize,
     selection: (usize, usize),
 ) -> Option<(usize, usize)> {
-    let mut line_start = 0usize;
-    for (index, raw_line) in source.split('\n').enumerate() {
-        let raw_end = line_start.saturating_add(raw_line.len());
-        let line_end = raw_end.saturating_add(usize::from(raw_end < source.len()));
-        if index == line_number {
-            if selection.0 >= line_end || selection.1 <= line_start {
-                return None;
-            }
-            let content = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-            let content_end = line_start.saturating_add(content.len());
-            let start = selection.0.clamp(line_start, content_end);
-            let end = selection.1.clamp(line_start, content_end);
-            let start_column = editor_display_width(&source[line_start..start]);
-            let mut end_column = editor_display_width(&source[line_start..end]);
-            if start == end && selection.1 > content_end {
-                end_column = start_column.saturating_add(1);
-            }
-            return Some((start_column, end_column.max(start_column.saturating_add(1))));
-        }
-        line_start = line_end;
+    let line_start = line_starts.get(line_number).copied()?;
+    let line_end = line_starts
+        .get(line_number.saturating_add(1))
+        .copied()
+        .unwrap_or(source.len());
+    if selection.0 >= line_end || selection.1 <= line_start {
+        return None;
     }
-    None
+    let mut content_end = line_end;
+    if content_end > line_start && source.as_bytes().get(content_end - 1) == Some(&b'\n') {
+        content_end -= 1;
+        if content_end > line_start && source.as_bytes().get(content_end - 1) == Some(&b'\r') {
+            content_end -= 1;
+        }
+    }
+    let start = selection.0.clamp(line_start, content_end);
+    let end = selection.1.clamp(line_start, content_end);
+    let start_column = editor_display_width(&source[line_start..start]);
+    let mut end_column = editor_display_width(&source[line_start..end]);
+    if start == end && selection.1 > content_end {
+        end_column = start_column.saturating_add(1);
+    }
+    Some((start_column, end_column.max(start_column.saturating_add(1))))
 }
 
 fn editor_display_width(value: &str) -> usize {
@@ -306,23 +345,6 @@ fn editor_display_width(value: &str) -> usize {
         }
     }
     column
-}
-
-fn editor_line_markers(
-    diff: Option<&crate::ui::preview::DiffDocument>,
-    path: &RepoPath,
-    locally_changed_lines: &BTreeSet<usize>,
-) -> BTreeMap<usize, char> {
-    let mut markers = BTreeMap::new();
-    if let Some(diff) = diff {
-        for (line, marker) in diff.new_line_markers(path) {
-            markers.insert(line, marker);
-        }
-    }
-    for line in locally_changed_lines {
-        markers.insert(*line, '~');
-    }
-    markers
 }
 
 fn editor_line_number(
@@ -364,6 +386,7 @@ fn editor_line_number(
     )
 }
 
+#[cfg(test)]
 pub(super) fn wrapped_editor_cursor(
     source: &str,
     width: usize,
@@ -391,80 +414,7 @@ pub(super) fn wrapped_editor_cursor(
     (visual_row, 0)
 }
 
-fn wrapped_editor_view(
-    source: &str,
-    path: &str,
-    width: usize,
-    scroll: usize,
-    height: usize,
-    line_markers: &BTreeMap<usize, char>,
-    number_width: usize,
-    flush_line_numbers_left: bool,
-) -> (
-    Vec<Line<'static>>,
-    Vec<Line<'static>>,
-    Vec<crate::app::EditorRenderedRow>,
-) {
-    let mut lines = Vec::new();
-    let mut line_numbers = Vec::new();
-    let mut rendered_rows = Vec::new();
-    let mut visual_row = 0usize;
-    let viewport_end = scroll.saturating_add(height);
-    for (line_number, content) in editor_source_lines(source).enumerate() {
-        if visual_row >= viewport_end {
-            break;
-        }
-        if visual_row < scroll {
-            let line_end = visual_row.saturating_add(text::word_wrapped_height(content, width));
-            if line_end <= scroll {
-                visual_row = line_end;
-                continue;
-            }
-        }
-        let rows = text::word_wrapped_rows(content, width);
-        let line_end = visual_row.saturating_add(rows.len());
-        if line_end > scroll && visual_row < viewport_end {
-            let styled = text::styled_source_window(source, path, 0, line_number, 1)
-                .into_iter()
-                .next()
-                .unwrap_or_default();
-            for (index, row) in rows.iter().enumerate() {
-                let absolute_row = visual_row.saturating_add(index);
-                if absolute_row < scroll || absolute_row >= viewport_end {
-                    continue;
-                }
-                let rendered =
-                    editor_visible_lines(vec![styled.clone()], row.source_start(), row.width())
-                        .into_iter()
-                        .next()
-                        .unwrap_or_default();
-                lines.push(rendered);
-                line_numbers.push(editor_line_number(
-                    (index == 0).then_some(line_number),
-                    line_markers.get(&line_number).copied(),
-                    number_width,
-                    flush_line_numbers_left,
-                ));
-                rendered_rows.push(crate::app::EditorRenderedRow {
-                    line: line_number,
-                    columns: row.columns(),
-                });
-            }
-        }
-        visual_row = line_end;
-    }
-    while lines.len() < height {
-        lines.push(Line::default().style(Style::default().bg(palette().panel)));
-        line_numbers.push(editor_line_number(
-            None,
-            None,
-            number_width,
-            flush_line_numbers_left,
-        ));
-    }
-    (lines, line_numbers, rendered_rows)
-}
-
+#[cfg(test)]
 fn editor_source_lines(source: &str) -> impl Iterator<Item = &str> {
     source
         .split('\n')
@@ -523,13 +473,20 @@ fn editor_visible_lines(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::BTreeSet;
+
+    use crate::{repo_path::RepoPath, ui::preview::PreviewPresentation};
 
     #[test]
     fn editor_markers_are_sparse() {
         let changed = BTreeSet::from([2, 1_000_000]);
 
-        let markers = editor_line_markers(None, &RepoPath::from("notes.txt"), &changed);
+        let markers = PreviewPresentation::default().editor_line_markers(
+            1,
+            None,
+            &RepoPath::from("notes.txt"),
+            &changed,
+        );
 
         assert_eq!(markers.len(), 2);
         assert_eq!(markers.get(&2), Some(&'~'));

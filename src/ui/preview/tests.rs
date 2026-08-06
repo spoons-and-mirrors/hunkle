@@ -512,3 +512,54 @@ fn markdown_table_cache_tracks_wrap_mode() {
     let unwrapped_again = prepare(&mut presentation, false);
     assert!(!contains_tail(&unwrapped_again));
 }
+
+#[test]
+fn editor_presentation_reuses_deep_wrapping_and_styled_window() {
+    use std::fmt::Write;
+
+    let mut source = String::new();
+    let mut line_starts = vec![0];
+    for line in 0..50_000 {
+        if line > 0 {
+            source.push('\n');
+            line_starts.push(source.len());
+        }
+        write!(source, "line {line:05} value").unwrap();
+    }
+    let path = RepoPath::from("source.rs");
+    let input = EditorPreviewInput {
+        source: &source,
+        line_starts: &line_starts,
+        revision: 1,
+        revision_changed_from_line: 0,
+        repo_path: &path,
+        path: "source.rs",
+        width: 24,
+        viewport_height: 24,
+        wrapped: true,
+    };
+    let mut presentation = PreviewPresentation::default();
+
+    let (cursor_row, _) = presentation.editor_rendered_position(input, 49_999, 5);
+    assert_eq!(presentation.editor_cache_metrics(), (50_000, 0));
+    let mut scroll = cursor_row.saturating_sub(23);
+    let first = presentation.prepare_editor(input, &mut scroll);
+    assert_eq!(first.lines.len(), 24);
+    assert_eq!(presentation.editor_cache_metrics(), (50_000, 1));
+
+    let second = presentation.prepare_editor(input, &mut scroll);
+    assert_eq!(second.lines.len(), 24);
+    assert_eq!(presentation.editor_cache_metrics(), (50_000, 1));
+
+    let mut edited = source.clone();
+    edited.pop();
+    edited.push(' ');
+    let edited_input = EditorPreviewInput {
+        source: &edited,
+        revision: 4,
+        revision_changed_from_line: 49_999,
+        ..input
+    };
+    presentation.editor_rendered_position(edited_input, 49_999, 5);
+    assert_eq!(presentation.editor_cache_metrics(), (50_001, 1));
+}

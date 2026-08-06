@@ -38,10 +38,47 @@ pub(super) fn styled_source_window_from(
     start: usize,
     count: usize,
 ) -> Vec<Line<'static>> {
-    let numbered = width >= 72;
+    styled_source_lines(
+        source.lines(),
+        path,
+        width,
+        width >= 72,
+        line_offset,
+        start,
+        count,
+    )
+}
+
+pub(super) fn styled_editor_source_window_from(
+    source: &str,
+    path: &str,
+    line_offset: usize,
+    count: usize,
+) -> Vec<Line<'static>> {
+    styled_source_lines(
+        source
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line)),
+        path,
+        0,
+        false,
+        line_offset,
+        0,
+        count,
+    )
+}
+
+fn styled_source_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    path: &str,
+    width: usize,
+    numbered: bool,
+    line_offset: usize,
+    start: usize,
+    count: usize,
+) -> Vec<Line<'static>> {
     let language = Language::from_path(path);
-    source
-        .lines()
+    lines
         .enumerate()
         .skip(start)
         .take(count)
@@ -126,10 +163,6 @@ impl WrappedCursorRow {
             .iter()
             .min_by_key(|(rendered, _)| rendered.abs_diff(column))
             .map_or(0, |(_, source)| *source)
-    }
-
-    pub(super) fn source_start(&self) -> usize {
-        self.boundaries.first().map_or(0, |boundary| boundary.1)
     }
 
     pub(super) fn rendered_column_at(&self, source_column: usize) -> usize {

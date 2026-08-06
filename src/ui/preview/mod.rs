@@ -1,4 +1,5 @@
 pub(super) use std::{
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         mpsc::{self, Receiver},
@@ -23,11 +24,11 @@ pub(super) use ratatui_image::{
 pub(super) use unicode_segmentation::UnicodeSegmentation;
 pub(super) use unicode_width::UnicodeWidthStr;
 
-pub(super) use crate::media::MediaPreviewProtocol;
+pub(super) use crate::{media::MediaPreviewProtocol, repo_path::RepoPath};
 
 pub(super) use super::text::{
-    markdown_prefix_style, styled_diff, styled_diff_window, styled_markdown, styled_source,
-    styled_source_window_from, wrapped_source_line_starts,
+    markdown_prefix_style, styled_diff, styled_diff_window, styled_editor_source_window_from,
+    styled_markdown, styled_source, styled_source_window_from, wrapped_source_line_starts,
 };
 
 mod diff;
@@ -161,8 +162,28 @@ pub(crate) struct PreparedPreview {
     pub(crate) wrapped: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct EditorPreviewInput<'a> {
+    pub(crate) source: &'a str,
+    pub(crate) line_starts: &'a [usize],
+    pub(crate) revision: u64,
+    pub(crate) revision_changed_from_line: usize,
+    pub(crate) repo_path: &'a RepoPath,
+    pub(crate) path: &'a str,
+    pub(crate) width: usize,
+    pub(crate) viewport_height: usize,
+    pub(crate) wrapped: bool,
+}
+
+pub(crate) struct PreparedEditorPreview {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) rows: Vec<crate::app::EditorRenderedRow>,
+}
+
 pub(crate) struct PreviewPresentation {
     cache: Option<PreviewCache>,
+    editor_cache: Option<EditorPreviewCache>,
+    editor_markers: Option<EditorMarkerCache>,
     media_state: Option<ThreadProtocol>,
     media_receiver: Receiver<Result<ResizeResponse, ImageError>>,
     media_worker: Option<JoinHandle<()>>,
@@ -244,6 +265,32 @@ struct WrappedWindow {
     lines: Vec<Line<'static>>,
 }
 
+struct EditorPreviewCache {
+    revision: u64,
+    path: RepoPath,
+    width: usize,
+    wrapped: bool,
+    wrapped_line_starts: Vec<usize>,
+    window: Option<EditorPreviewWindow>,
+    #[cfg(test)]
+    wrapped_lines_computed: usize,
+    #[cfg(test)]
+    window_builds: usize,
+}
+
+struct EditorPreviewWindow {
+    scroll: usize,
+    viewport_height: usize,
+    lines: Vec<Line<'static>>,
+    rows: Vec<crate::app::EditorRenderedRow>,
+}
+
+struct EditorMarkerCache {
+    generation: u64,
+    path: RepoPath,
+    markers: BTreeMap<usize, char>,
+}
+
 impl Default for PreviewPresentation {
     fn default() -> Self {
         let (request_sender, request_receiver) = mpsc::channel::<ResizeRequest>();
@@ -257,6 +304,8 @@ impl Default for PreviewPresentation {
         });
         Self {
             cache: None,
+            editor_cache: None,
+            editor_markers: None,
             media_state: Some(ThreadProtocol::new(request_sender, None)),
             media_receiver,
             media_worker: Some(media_worker),
@@ -278,7 +327,262 @@ impl Default for PreviewPresentation {
 impl PreviewPresentation {
     pub(crate) fn clear(&mut self) {
         self.cache = None;
+        self.editor_cache = None;
+        self.editor_markers = None;
         self.hide_media();
+    }
+
+    pub(crate) fn editor_line_markers(
+        &mut self,
+        generation: u64,
+        diff: Option<&DiffDocument>,
+        path: &RepoPath,
+        locally_changed_lines: &BTreeSet<usize>,
+    ) -> BTreeMap<usize, char> {
+        let matches = self
+            .editor_markers
+            .as_ref()
+            .is_some_and(|cache| cache.generation == generation && cache.path == *path);
+        if !matches {
+            self.editor_markers = Some(EditorMarkerCache {
+                generation,
+                path: path.clone(),
+                markers: diff
+                    .map(|diff| diff.new_line_markers(path).into_iter().collect())
+                    .unwrap_or_default(),
+            });
+        }
+        let mut markers = self
+            .editor_markers
+            .as_ref()
+            .map(|cache| cache.markers.clone())
+            .unwrap_or_default();
+        for line in locally_changed_lines {
+            markers.insert(*line, '~');
+        }
+        markers
+    }
+
+    pub(crate) fn editor_rendered_position(
+        &mut self,
+        input: EditorPreviewInput<'_>,
+        line: usize,
+        column: usize,
+    ) -> (usize, usize) {
+        self.ensure_editor_cache(input);
+        if !input.wrapped {
+            return (line, column);
+        }
+
+        let line = line.min(input.line_starts.len().saturating_sub(1));
+        let cache = self
+            .editor_cache
+            .as_mut()
+            .expect("editor preview cache was initialized");
+        extend_editor_wrapped_lines(cache, input, line.saturating_add(1));
+        let visual_row = cache
+            .wrapped_line_starts
+            .get(line)
+            .copied()
+            .unwrap_or_default();
+        let rows = super::text::word_wrapped_rows(editor_source_line(input, line), input.width);
+        let (row, rendered_column) = rows
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, row)| {
+                row.source_column_at(row.rendered_column_at(column))
+                    .abs_diff(column)
+            })
+            .map_or((0, 0), |(index, row)| {
+                (index, row.rendered_column_at(column))
+            });
+        (visual_row.saturating_add(row), rendered_column)
+    }
+
+    pub(crate) fn prepare_editor(
+        &mut self,
+        input: EditorPreviewInput<'_>,
+        scroll: &mut usize,
+    ) -> PreparedEditorPreview {
+        self.ensure_editor_cache(input);
+        let line_count = input.line_starts.len();
+        if line_count == 0 {
+            return PreparedEditorPreview {
+                lines: Vec::new(),
+                rows: Vec::new(),
+            };
+        }
+
+        if input.wrapped {
+            let cache = self
+                .editor_cache
+                .as_mut()
+                .expect("editor preview cache was initialized");
+            let viewport_end = scroll.saturating_add(input.viewport_height.max(1));
+            while cache
+                .wrapped_line_starts
+                .last()
+                .copied()
+                .unwrap_or_default()
+                <= viewport_end
+                && cache.wrapped_line_starts.len() <= line_count
+            {
+                let next_line = cache.wrapped_line_starts.len().saturating_sub(1);
+                extend_editor_wrapped_lines(cache, input, next_line.saturating_add(1));
+            }
+            if cache.wrapped_line_starts.len() == line_count.saturating_add(1) {
+                let rendered_height = cache
+                    .wrapped_line_starts
+                    .last()
+                    .copied()
+                    .unwrap_or_default();
+                *scroll =
+                    (*scroll).min(rendered_height.saturating_sub(input.viewport_height.max(1)));
+            }
+        } else {
+            *scroll = (*scroll).min(line_count.saturating_sub(input.viewport_height.max(1)));
+        }
+
+        let cache = self
+            .editor_cache
+            .as_ref()
+            .expect("editor preview cache was initialized");
+        if let Some(window) = cache.window.as_ref().filter(|window| {
+            window.scroll == *scroll && window.viewport_height == input.viewport_height
+        }) {
+            return PreparedEditorPreview {
+                lines: window.lines.clone(),
+                rows: window.rows.clone(),
+            };
+        }
+
+        let (first, end, local_scroll) = if input.wrapped {
+            let starts = &cache.wrapped_line_starts;
+            let first = starts
+                .partition_point(|start| *start <= *scroll)
+                .saturating_sub(1)
+                .min(line_count.saturating_sub(1));
+            let viewport_end = scroll.saturating_add(input.viewport_height);
+            let end = starts
+                .partition_point(|start| *start < viewport_end)
+                .max(first.saturating_add(1))
+                .min(line_count);
+            (first, end, scroll.saturating_sub(starts[first]))
+        } else {
+            let first = (*scroll).min(line_count.saturating_sub(1));
+            (
+                first,
+                first.saturating_add(input.viewport_height).min(line_count),
+                0,
+            )
+        };
+        let byte_start = input.line_starts[first];
+        let byte_end = input
+            .line_starts
+            .get(end)
+            .copied()
+            .unwrap_or(input.source.len());
+        let logical_lines = styled_editor_source_window_from(
+            &input.source[byte_start..byte_end],
+            input.path,
+            first,
+            end.saturating_sub(first),
+        );
+        let (lines, rows) = if input.wrapped {
+            let lines = hard_wrap_lines(
+                logical_lines,
+                input.width,
+                local_scroll,
+                input.viewport_height,
+                false,
+                false,
+            );
+            let starts = &cache.wrapped_line_starts;
+            let viewport_end = scroll.saturating_add(input.viewport_height);
+            let mut rows = Vec::with_capacity(lines.len());
+            for (line, &line_start) in starts.iter().enumerate().take(end).skip(first) {
+                for (row_index, row) in
+                    super::text::word_wrapped_rows(editor_source_line(input, line), input.width)
+                        .into_iter()
+                        .enumerate()
+                {
+                    let rendered_row = line_start.saturating_add(row_index);
+                    if rendered_row >= *scroll && rendered_row < viewport_end {
+                        rows.push(crate::app::EditorRenderedRow {
+                            line,
+                            columns: row.columns(),
+                        });
+                    }
+                }
+            }
+            (lines, rows)
+        } else {
+            (logical_lines, Vec::new())
+        };
+        self.editor_cache
+            .as_mut()
+            .expect("editor preview cache was initialized")
+            .window = Some(EditorPreviewWindow {
+            scroll: *scroll,
+            viewport_height: input.viewport_height,
+            lines: lines.clone(),
+            rows: rows.clone(),
+        });
+        #[cfg(test)]
+        {
+            self.editor_cache
+                .as_mut()
+                .expect("editor preview cache was initialized")
+                .window_builds += 1;
+        }
+        PreparedEditorPreview { lines, rows }
+    }
+
+    fn ensure_editor_cache(&mut self, input: EditorPreviewInput<'_>) {
+        let matches = self.editor_cache.as_ref().is_some_and(|cache| {
+            cache.revision == input.revision
+                && cache.path == *input.repo_path
+                && cache.width == input.width
+                && cache.wrapped == input.wrapped
+        });
+        if !matches {
+            let can_reuse_wrapping = self.editor_cache.as_ref().is_some_and(|cache| {
+                cache.path == *input.repo_path
+                    && cache.width == input.width
+                    && cache.wrapped == input.wrapped
+            });
+            if can_reuse_wrapping {
+                let cache = self.editor_cache.as_mut().expect("editor cache exists");
+                cache.revision = input.revision;
+                cache
+                    .wrapped_line_starts
+                    .truncate(input.revision_changed_from_line.saturating_add(1));
+                if cache.wrapped_line_starts.is_empty() {
+                    cache.wrapped_line_starts.push(0);
+                }
+                cache.window = None;
+            } else {
+                self.editor_cache = Some(EditorPreviewCache {
+                    revision: input.revision,
+                    path: input.repo_path.clone(),
+                    width: input.width,
+                    wrapped: input.wrapped,
+                    wrapped_line_starts: vec![0],
+                    window: None,
+                    #[cfg(test)]
+                    wrapped_lines_computed: 0,
+                    #[cfg(test)]
+                    window_builds: 0,
+                });
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn editor_cache_metrics(&self) -> (usize, usize) {
+        self.editor_cache.as_ref().map_or((0, 0), |cache| {
+            (cache.wrapped_lines_computed, cache.window_builds)
+        })
     }
 
     pub(crate) fn source_position_at_rendered_position(
@@ -943,6 +1247,49 @@ impl PreviewPresentation {
             .as_ref()
             .is_some_and(|cache| !cache.fully_styled && !cache.lines.is_empty())
     }
+}
+
+fn extend_editor_wrapped_lines(
+    cache: &mut EditorPreviewCache,
+    input: EditorPreviewInput<'_>,
+    target: usize,
+) {
+    let target = target.min(input.line_starts.len());
+    while cache.wrapped_line_starts.len().saturating_sub(1) < target {
+        let line = cache.wrapped_line_starts.len().saturating_sub(1);
+        let height =
+            super::text::word_wrapped_height(editor_source_line(input, line), input.width.max(1));
+        cache.wrapped_line_starts.push(
+            cache
+                .wrapped_line_starts
+                .last()
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(height),
+        );
+        #[cfg(test)]
+        {
+            cache.wrapped_lines_computed += 1;
+        }
+    }
+}
+
+fn editor_source_line(input: EditorPreviewInput<'_>, line: usize) -> &str {
+    let Some(start) = input.line_starts.get(line).copied() else {
+        return "";
+    };
+    let mut end = input
+        .line_starts
+        .get(line.saturating_add(1))
+        .copied()
+        .unwrap_or(input.source.len());
+    if end > start && input.source.as_bytes().get(end - 1) == Some(&b'\n') {
+        end -= 1;
+        if end > start && input.source.as_bytes().get(end - 1) == Some(&b'\r') {
+            end -= 1;
+        }
+    }
+    input.source.get(start..end).unwrap_or_default()
 }
 
 impl Drop for PreviewPresentation {
