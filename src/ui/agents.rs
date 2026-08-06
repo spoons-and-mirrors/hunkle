@@ -30,7 +30,7 @@ const MAX_AGENT_TRANSCRIPT_PRESENTATIONS: usize = 8;
 
 struct TranscriptBlock {
     user: bool,
-    text_only: bool,
+    headerless_response: bool,
     lines: Arc<[Line<'static>]>,
     animated_rows: Arc<[usize]>,
     start: usize,
@@ -1005,7 +1005,7 @@ pub(super) fn draw_history(
     );
     let user_block = TranscriptBlock {
         user: true,
-        text_only: false,
+        headerless_response: false,
         lines: cached.user_lines.clone(),
         animated_rows: Arc::default(),
         start: 0,
@@ -1277,7 +1277,7 @@ pub(super) fn draw_scheduled_history(
     );
     let user_block = TranscriptBlock {
         user: true,
-        text_only: false,
+        headerless_response: false,
         lines: cached.user_lines.clone(),
         animated_rows: Arc::default(),
         start: 0,
@@ -1510,11 +1510,16 @@ fn build_request_transcript_counted(
         document_height = document_height.saturating_add(usize::from(elapsed.is_some()));
         blocks.push(TranscriptBlock {
             user: false,
-            text_only: !request.parts.is_empty()
-                && request
-                    .parts
-                    .iter()
-                    .all(|part| matches!(part, AgentRequestPartPreview::Text(_))),
+            headerless_response: request
+                .parts
+                .iter()
+                .any(|part| matches!(part, AgentRequestPartPreview::Text(_)))
+                && !request.parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning)
+                    )
+                }),
             lines: lines.into(),
             animated_rows: animated_rows.into(),
             start: document_height,
@@ -1530,7 +1535,7 @@ fn build_request_transcript_counted(
         let (lines, height, animated_rows) = request_content(None, width, live, stats);
         blocks.push(TranscriptBlock {
             user: false,
-            text_only: false,
+            headerless_response: false,
             lines: lines.into(),
             animated_rows: animated_rows.into(),
             start: 0,
@@ -1734,7 +1739,7 @@ fn draw_transcript_card(
         );
     }
     if local_start == 0 {
-        if block.text_only {
+        if block.headerless_response {
             let top = Rect::new(cards.x, y, cards.width, 1);
             frame.render_widget(Clear, top);
             fill(frame, top, background);
@@ -1759,7 +1764,7 @@ fn draw_transcript_card(
             } else {
                 Some(format!(" {} {request_word} ", block.request_count))
             }
-        } else if block.text_only {
+        } else if block.headerless_response {
             None
         } else {
             block
@@ -1892,7 +1897,7 @@ fn draw_transcript_card(
             }
         }
     }
-    if block.text_only
+    if block.headerless_response
         && local_start <= 1
         && local_end > 1
         && let Some(elapsed) = block.elapsed.as_deref()
@@ -3084,8 +3089,15 @@ mod tests {
     }
 
     #[test]
-    fn text_only_response_omits_header_line_and_lowers_timer() {
-        let message = request_message(vec![AgentRequestPartPreview::Text("response".to_owned())]);
+    fn response_without_reasoning_omits_header_line_and_lowers_timer() {
+        let message = request_message(vec![
+            AgentRequestPartPreview::Text("response".to_owned()),
+            AgentRequestPartPreview::Activity(AgentActivityPreview::Tool {
+                name: "skill".to_owned(),
+                title: Some("Loaded skill".to_owned()),
+                running: false,
+            }),
+        ]);
         let (blocks, _) = build_request_transcript(&message, 40, false, 0, &[]);
         let block = &blocks[0];
         let area = Rect::new(0, 0, 40, 6);
@@ -3106,6 +3118,12 @@ mod tests {
         assert!(!row(top).contains('▄'));
         assert!(!row(top).contains("1s"));
         assert!(row(top + 1).contains("1s"));
+        assert!(
+            block
+                .lines
+                .iter()
+                .any(|line| { line.spans.iter().any(|span| span.content.contains("skill")) })
+        );
     }
 
     #[test]
@@ -3138,7 +3156,7 @@ mod tests {
         let animated_row = 15;
         let block = TranscriptBlock {
             user: false,
-            text_only: false,
+            headerless_response: false,
             lines: (0..20)
                 .map(|row| {
                     if row == animated_row {
