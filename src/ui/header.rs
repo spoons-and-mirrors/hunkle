@@ -40,35 +40,9 @@ pub(super) fn draw_header(
         }
         rect
     });
-    let controls_right = fullscreen_rect
+    let header_right = fullscreen_rect
         .map(|rect| rect.x.saturating_sub(1))
         .unwrap_or_else(|| area.right());
-    let schedule_rect = herdr_available.then(|| {
-        let label = " SCHEDULE F4 ";
-        let width = UnicodeWidthStr::width(label) as u16;
-        let rect = Rect::new(controls_right.saturating_sub(width), content_y, width, 1);
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderSchedule);
-        frame.render_widget(
-            Paragraph::new(label).alignment(Alignment::Center).style(
-                Style::default()
-                    .fg(if hovered || app.mode == Mode::Scheduler {
-                        palette().accent
-                    } else {
-                        palette().cyan
-                    })
-                    .bg(palette().canvas)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            rect,
-        );
-        app.regions
-            .register_hit_target(HitTarget::HeaderSchedule, rect);
-        rect
-    });
-    let controls_right = schedule_rect
-        .map(|rect| rect.x.saturating_sub(1))
-        .unwrap_or(controls_right);
-    let header_right = controls_right;
     let Some(repo) = app.repository() else {
         frame.render_widget(
             Paragraph::new("  No workspace selected").style(Style::default().fg(palette().muted)),
@@ -125,6 +99,8 @@ pub(super) fn draw_header(
     let available = usize::from(header_right.saturating_sub(area.x));
     let comparison_width = if is_local || !show_agent_actions {
         0
+    } else if profile.is_single() {
+        requested_comparison_width
     } else {
         requested_comparison_width.min(available.saturating_sub(
             1 + 5
@@ -167,6 +143,25 @@ pub(super) fn draw_header(
             + usize::from(branch_width)
             + action_width
     };
+    let header_scroll_max = profile
+        .is_single()
+        .then(|| badge_width.saturating_sub(available))
+        .unwrap_or_default();
+    app.regions.header_scroll_max = header_scroll_max;
+    if profile.is_single() {
+        app.header_scroll = app.header_scroll.min(header_scroll_max);
+        app.regions.register_scroll_target(
+            ScrollTarget::Header,
+            Rect::new(
+                area.x,
+                area.y,
+                header_right.saturating_sub(area.x),
+                area.height,
+            ),
+        );
+    } else {
+        app.header_scroll = 0;
+    }
     let notice_budget = available
         .saturating_sub(badge_width.saturating_add(4))
         .min(30);
@@ -179,18 +174,34 @@ pub(super) fn draw_header(
         .as_deref()
         .map_or(0, |notice| UnicodeWidthStr::width(notice) + 2);
     let content_right = header_right.saturating_sub(notice_width as u16);
+    let viewport = Rect::new(area.x, content_y, content_right.saturating_sub(area.x), 1);
+    let scroll = app.header_scroll;
+    let remaining = |x: u16| {
+        if profile.is_single() {
+            u16::MAX
+        } else {
+            content_right.saturating_sub(x)
+        }
+    };
     let mut x = area.x.saturating_add(2);
     let render = |frame: &mut Frame<'_>, x: &mut u16, text: String, style: Style, limit: u16| {
         let width = (UnicodeWidthStr::width(text.as_str()) as u16).min(limit);
         if width == 0 {
             return None;
         }
-        frame.render_widget(
-            Paragraph::new(truncate_width(&text, usize::from(width))).style(style),
-            Rect::new(*x, content_y, width, 1),
-        );
-        let rect = Rect::new(*x, content_y, width, 1);
+        let virtual_x = *x;
         *x = x.saturating_add(width);
+        let (rect, skip) = if profile.is_single() {
+            scrolled_header_rect(virtual_x, width, viewport, scroll)?
+        } else {
+            (Rect::new(virtual_x, content_y, width, 1), 0)
+        };
+        let text = if profile.is_single() {
+            width_window(&text, skip, usize::from(rect.width))
+        } else {
+            truncate_width(&text, usize::from(width))
+        };
+        frame.render_widget(Paragraph::new(text).style(style), rect);
         Some(rect)
     };
     let render_card = |frame: &mut Frame<'_>,
@@ -203,13 +214,38 @@ pub(super) fn draw_header(
         if width == 0 {
             return None;
         }
-        let rect = Rect::new(*x, content_y, width, 1);
-        draw_header_card(frame, rect, &text, color, active, false);
+        let virtual_x = *x;
         *x = x.saturating_add(width);
+        let (rect, skip) = if profile.is_single() {
+            scrolled_header_rect(virtual_x, width, viewport, scroll)?
+        } else {
+            (Rect::new(virtual_x, content_y, width, 1), 0)
+        };
+        if profile.is_single() && skip > 0 {
+            let text = width_window(&text, skip, usize::from(rect.width));
+            frame.render_widget(
+                Paragraph::new(text).style(header_badge_style(color, active)),
+                rect,
+            );
+            draw_half_padding(
+                frame,
+                Rect::new(rect.x, rect.y.saturating_sub(1), rect.width, 1),
+                '▄',
+                header_card_background(active),
+                palette().canvas,
+            );
+        } else {
+            let text = if profile.is_single() {
+                width_window(&text, 0, usize::from(rect.width))
+            } else {
+                text
+            };
+            draw_header_card(frame, rect, &text, color, active, false);
+        }
         Some(rect)
     };
 
-    let room = content_right.saturating_sub(x);
+    let room = remaining(x);
     let repository_rect = render_card(
         frame,
         &mut x,
@@ -232,11 +268,11 @@ pub(super) fn draw_header(
         app.regions
             .register_hit_target(HitTarget::HeaderRepository, rect);
     }
-    let room = content_right.saturating_sub(x);
+    let room = remaining(x);
     let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
 
     if is_local {
-        let room = content_right.saturating_sub(x);
+        let room = remaining(x);
         let _ = render(
             frame,
             &mut x,
@@ -245,9 +281,9 @@ pub(super) fn draw_header(
             room,
         );
         if agent_width > 0 {
-            let room = content_right.saturating_sub(x);
+            let room = remaining(x);
             let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-            let room = content_right.saturating_sub(x);
+            let room = remaining(x);
             let agent_rect = render_card(
                 frame,
                 &mut x,
@@ -262,7 +298,7 @@ pub(super) fn draw_header(
             }
         }
     } else {
-        let room = content_right.saturating_sub(x);
+        let room = remaining(x);
         let worktree_rect = render_card(
             frame,
             &mut x,
@@ -283,9 +319,9 @@ pub(super) fn draw_header(
             app.regions
                 .register_hit_target(HitTarget::HeaderWorktrees, rect);
         }
-        let room = content_right.saturating_sub(x);
+        let room = remaining(x);
         let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-        let room = content_right.saturating_sub(x);
+        let room = remaining(x);
         let branch_limit = room.saturating_sub(
             diff_width
                 .saturating_add(issue_width)
@@ -306,9 +342,9 @@ pub(super) fn draw_header(
                 .register_hit_target(HitTarget::HeaderBranch, rect);
         }
         if show_agent_actions {
-            let room = content_right.saturating_sub(x);
+            let room = remaining(x);
             let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-            let room = content_right.saturating_sub(x);
+            let room = remaining(x);
             let diff_rect = render_card(
                 frame,
                 &mut x,
@@ -324,9 +360,9 @@ pub(super) fn draw_header(
             if let Some(rect) = diff_rect {
                 app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
             }
-            let room = content_right.saturating_sub(x);
+            let room = remaining(x);
             let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-            let room = content_right.saturating_sub(x);
+            let room = remaining(x);
             let issue_rect = render_card(
                 frame,
                 &mut x,
@@ -341,9 +377,9 @@ pub(super) fn draw_header(
                     .register_hit_target(HitTarget::HeaderIssue, rect);
             }
             if herdr_available {
-                let room = content_right.saturating_sub(x);
+                let room = remaining(x);
                 let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-                let room = content_right.saturating_sub(x);
+                let room = remaining(x);
                 let agent_rect = render_card(
                     frame,
                     &mut x,
@@ -358,7 +394,7 @@ pub(super) fn draw_header(
                 }
             }
             if let Some(comparison) = comparison {
-                let room = content_right.saturating_sub(x);
+                let room = remaining(x);
                 let _ = render(
                     frame,
                     &mut x,
@@ -370,6 +406,12 @@ pub(super) fn draw_header(
                 );
             }
         }
+    }
+
+    if profile.is_single() {
+        let actual_scroll_max = usize::from(x.saturating_sub(content_right));
+        app.regions.header_scroll_max = actual_scroll_max;
+        app.header_scroll = app.header_scroll.min(actual_scroll_max);
     }
 
     if let Some(notice) = notice {
@@ -1243,6 +1285,58 @@ fn header_picker_visible_items(screen_height: u16, available_height: u16, chrome
             .min(maximum_height)
             .saturating_sub(u16::try_from(chrome).unwrap_or(u16::MAX)),
     )
+}
+
+fn scrolled_header_rect(
+    x: u16,
+    width: u16,
+    viewport: Rect,
+    scroll: usize,
+) -> Option<(Rect, usize)> {
+    let start = i64::from(x) - i64::try_from(scroll).unwrap_or(i64::MAX);
+    let end = start.saturating_add(i64::from(width));
+    let visible_start = start.max(i64::from(viewport.x));
+    let visible_end = end.min(i64::from(viewport.right()));
+    if visible_start >= visible_end {
+        return None;
+    }
+    Some((
+        Rect::new(
+            u16::try_from(visible_start).ok()?,
+            viewport.y,
+            u16::try_from(visible_end - visible_start).ok()?,
+            1,
+        ),
+        usize::try_from(visible_start - start).ok()?,
+    ))
+}
+
+fn width_window(value: &str, skip: usize, width: usize) -> String {
+    let mut position = 0;
+    let mut used = 0;
+    let mut result = String::new();
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        let end = position + grapheme_width;
+        if end <= skip {
+            position = end;
+            continue;
+        }
+        if position < skip {
+            let visible = end.saturating_sub(skip).min(width);
+            result.push_str(&" ".repeat(visible));
+            used += visible;
+            position = end;
+            continue;
+        }
+        if used + grapheme_width > width {
+            break;
+        }
+        result.push_str(grapheme);
+        used += grapheme_width;
+        position = end;
+    }
+    result
 }
 
 fn draw_picker_input(frame: &mut Frame<'_>, input: &TextInput, area: Rect, active: bool) {

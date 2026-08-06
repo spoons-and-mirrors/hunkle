@@ -13,6 +13,7 @@ use super::{
 };
 
 const AGENT_PREVIEW_SWIPE_THRESHOLD: u16 = 4;
+const HEADER_SCROLL_THRESHOLD: u16 = 2;
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -331,10 +332,20 @@ impl App {
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
-        ) && let Some(agent) = self.agent_preview_at(point)
-        {
-            self.cycle_agent_preview(&agent, mouse.kind == MouseEventKind::ScrollRight);
-            return;
+        ) {
+            if self.regions.scroll_target_at(point) == Some(ScrollTarget::Header) {
+                let delta = if mouse.kind == MouseEventKind::ScrollRight {
+                    1
+                } else {
+                    -1
+                };
+                self.scroll_target(ScrollTarget::Header, delta, true);
+                return;
+            }
+            if let Some(agent) = self.agent_preview_at(point) {
+                self.cycle_agent_preview(&agent, mouse.kind == MouseEventKind::ScrollRight);
+                return;
+            }
         }
 
         if matches!(
@@ -571,16 +582,20 @@ impl App {
                 | MouseEventKind::Moved
                 | MouseEventKind::Up(MouseButton::Left) => {
                     if point != drag.previous {
-                        drag.moved = true;
                         let horizontal = drag.start.x.abs_diff(point.x);
                         let vertical = drag.start.y.abs_diff(point.y);
+                        let header = drag.scroll_target == Some(ScrollTarget::Header);
+                        let vertical_threshold = if header { HEADER_SCROLL_THRESHOLD } else { 1 };
                         if drag.axis.is_none() {
-                            drag.axis = if drag.agent_preview.is_some()
+                            drag.axis = if (drag.agent_preview.is_some()
                                 && horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD
-                                && horizontal > vertical
+                                && horizontal > vertical)
+                                || (header
+                                    && horizontal >= HEADER_SCROLL_THRESHOLD
+                                    && horizontal > vertical)
                             {
                                 Some(MobileDragAxis::Horizontal)
-                            } else if vertical > 0
+                            } else if vertical >= vertical_threshold
                                 && (drag.agent_preview.is_none() || vertical >= horizontal)
                             {
                                 Some(MobileDragAxis::Vertical)
@@ -588,15 +603,34 @@ impl App {
                                 None
                             };
                         }
-                        if drag.axis == Some(MobileDragAxis::Vertical) {
-                            let delta = drag.previous.y as isize - point.y as isize;
-                            if delta != 0 {
-                                if let Some(target) = drag.scroll_target.clone() {
-                                    self.scroll_target(target, delta, false);
+                        if drag.axis.is_none() && header {
+                            if mouse.kind != MouseEventKind::Up(MouseButton::Left) {
+                                self.mobile_scroll_drag = Some(drag);
+                                return true;
+                            }
+                        } else {
+                            drag.moved = true;
+                            if drag.axis == Some(MobileDragAxis::Vertical) {
+                                let delta = drag.previous.y as isize - point.y as isize;
+                                if delta != 0 {
+                                    if let Some(target) = drag
+                                        .scroll_target
+                                        .clone()
+                                        .filter(|target| *target != ScrollTarget::Header)
+                                    {
+                                        self.scroll_target(target, delta, false);
+                                    }
+                                }
+                            } else if drag.axis == Some(MobileDragAxis::Horizontal)
+                                && drag.scroll_target == Some(ScrollTarget::Header)
+                            {
+                                let delta = drag.previous.x as isize - point.x as isize;
+                                if delta != 0 {
+                                    self.scroll_target(ScrollTarget::Header, delta, false);
                                 }
                             }
+                            drag.previous = point;
                         }
-                        drag.previous = point;
                     }
                     let released = mouse.kind == MouseEventKind::Up(MouseButton::Left);
                     if released {
@@ -679,6 +713,12 @@ impl App {
     fn scroll_target(&mut self, target: ScrollTarget, delta: isize, wheel: bool) {
         let wheel_amount = |amount: isize| amount.saturating_mul(if wheel { 3 } else { 1 });
         match target {
+            ScrollTarget::Header => {
+                self.header_scroll = self
+                    .header_scroll
+                    .saturating_add_signed(wheel_amount(delta))
+                    .min(self.regions.header_scroll_max);
+            }
             ScrollTarget::HeaderPicker => {
                 self.hovered_hit_target = None;
                 self.header_picker.scroll_by(wheel_amount(delta));

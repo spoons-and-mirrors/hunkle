@@ -48,14 +48,14 @@ pub(super) fn draw_header_card_bottom(
     }
 }
 
-fn header_badge_style(color: Color, active: bool) -> Style {
+pub(super) fn header_badge_style(color: Color, active: bool) -> Style {
     Style::default()
         .fg(if active { color } else { palette().ink })
         .bg(header_card_background(active))
         .add_modifier(Modifier::BOLD)
 }
 
-fn header_card_background(active: bool) -> Color {
+pub(super) fn header_card_background(active: bool) -> Color {
     if active {
         palette().raised
     } else {

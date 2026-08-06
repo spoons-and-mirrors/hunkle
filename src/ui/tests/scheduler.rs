@@ -25,7 +25,7 @@ fn scheduler_rect(app: &App, target: SchedulerHitTarget) -> Option<Rect> {
 }
 
 #[test]
-fn schedule_header_control_is_herdr_gated() {
+fn schedule_footer_control_is_herdr_gated() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -38,12 +38,16 @@ fn schedule_header_control_is_herdr_gated() {
     );
     enable_herdr(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::HeaderSchedule)
-            .is_some()
-    );
-    assert!(screen_text(&terminal).contains("SCHEDULE F4"));
+    let schedule = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderSchedule)
+        .unwrap();
+    let text = screen_text(&terminal);
+    assert_eq!(schedule.y, 23);
+    assert!(!text.contains("SCHEDULE F4"));
+    assert!(text.contains("F4 Schedule"));
+    click(&mut app, schedule.x, schedule.y);
+    assert_eq!(app.mode, Mode::Scheduler);
 }
 
 #[test]
