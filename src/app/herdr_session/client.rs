@@ -1665,7 +1665,8 @@ pub(super) fn replace_pane_with_agent(
     if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
         return Err("Agents can only be started inside Herdr".to_owned());
     }
-    replace_pane_with_agent_with(path, workspace_id, pane_id, session_id, run)
+    let pane_id = replace_pane_with_agent_with(path, workspace_id, pane_id, session_id, run)?;
+    focus_agent_pane(pane_id, api_request)
 }
 
 pub(super) fn split_pane_with_agent(
@@ -1677,7 +1678,16 @@ pub(super) fn split_pane_with_agent(
     if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
         return Err("Agents can only be started inside Herdr".to_owned());
     }
-    split_pane_with_agent_with(path, pane_id, direction, session_id, run)
+    let pane_id = split_pane_with_agent_with(path, pane_id, direction, session_id, run)?;
+    focus_agent_pane(pane_id, api_request)
+}
+
+fn focus_agent_pane<A>(pane_id: String, mut api: A) -> Result<String, String>
+where
+    A: FnMut(&str, &Value) -> Result<Value, String>,
+{
+    focus_pane(&mut api, &pane_id, "focus the new agent")?;
+    Ok(pane_id)
 }
 
 pub(super) fn close_pane(pane_id: String) -> Result<(), String> {
@@ -3433,6 +3443,25 @@ mod tests {
                     .map(str::to_owned)
                     .to_vec(),
             ]
+        );
+    }
+
+    #[test]
+    fn focuses_a_new_opencode_agent_pane() {
+        let mut calls = Vec::new();
+        let pane_id = focus_agent_pane("w1:p4".to_owned(), |method, params| {
+            calls.push((method.to_owned(), params.clone()));
+            Ok(focused("w1:p4"))
+        })
+        .unwrap();
+
+        assert_eq!(pane_id, "w1:p4");
+        assert_eq!(
+            calls,
+            [(
+                "pane.focus".to_owned(),
+                serde_json::json!({ "pane_id": "w1:p4" })
+            )]
         );
     }
 
