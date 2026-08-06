@@ -1,26 +1,35 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    process::Command as ProcessCommand,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+use std::time::Instant;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
-    app::valid_discord_webhook_url,
+    app::{commit_message::parse_opencode_events, valid_discord_webhook_url},
     filesystem::{read_optional_workspace_directory, read_workspace_file},
+    process::{self, Limits},
     repo_path::RepoPath,
 };
 
+#[cfg(test)]
+use super::client::{SchedulerLaunchRequest, SchedulerLaunchResult};
 use super::{
     AgentStatus,
-    client::{
-        SchedulerLaunchRequest, SchedulerLaunchResult, SchedulerObserveResult, scheduler_launch,
-        scheduler_observe,
-    },
+    client::{SchedulerObserveResult, scheduler_observe},
+    latest_message,
 };
 
 const MAX_RUNS: i64 = 50;
@@ -28,6 +37,10 @@ const DISCORD_DELIVERY_ERROR: &str = "Discord delivery failed: ";
 const DISCORD_MESSAGE_BYTES: usize = 1_900;
 const RESULT_FETCH_ATTEMPTS: usize = 20;
 const RESULT_FETCH_RETRY_DELAY: Duration = Duration::from_millis(250);
+const MAX_ACTIVE_HEADLESS_RUNS: usize = 4;
+const OPENCODE_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const OPENCODE_ERROR_BYTES: usize = 1024 * 1024;
+const OPENCODE_RUN_TIMEOUT: Duration = Duration::from_secs(4 * 60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScheduledTask {
@@ -163,6 +176,20 @@ impl SchedulerService {
         files_root: Option<PathBuf>,
         discord_webhooks: Vec<crate::app::DiscordWebhookConfig>,
     ) -> Result<Self, String> {
+        Self::open_with_program(
+            path,
+            files_root,
+            discord_webhooks,
+            PathBuf::from("opencode"),
+        )
+    }
+
+    fn open_with_program(
+        path: Option<PathBuf>,
+        files_root: Option<PathBuf>,
+        discord_webhooks: Vec<crate::app::DiscordWebhookConfig>,
+        opencode_program: PathBuf,
+    ) -> Result<Self, String> {
         let enabled = path.is_some();
         let discord_webhooks = discord_webhooks_by_id(discord_webhooks);
         let files_root = files_root
@@ -198,6 +225,7 @@ impl SchedulerService {
                     enabled,
                     discord_webhooks,
                     notice_tx,
+                    opencode_program,
                 )
             })
             .map_err(|error| format!("Could not start scheduler worker: {error}"))?;
@@ -272,6 +300,24 @@ impl SchedulerService {
     }
     pub(crate) fn refresh_run(&self, id: i64) -> Result<(), String> {
         self.send(Command::Refresh(id))
+    }
+
+    pub(crate) fn prompt_run(&self, id: i64, prompt: String) -> Result<(), String> {
+        if prompt.trim().is_empty() {
+            return Err("Enter a message".to_owned());
+        }
+        let run = self
+            .runs
+            .iter()
+            .find(|run| run.id == id)
+            .ok_or_else(|| "scheduled run not found".to_owned())?;
+        if run.status.is_active() {
+            return Err("This scheduled run is still working".to_owned());
+        }
+        if run.session_id.is_none() {
+            return Err("This scheduled run has no OpenCode session".to_owned());
+        }
+        self.send(Command::PromptRun(id, prompt))
     }
 
     pub(crate) fn configure_discord_webhooks(
@@ -356,6 +402,7 @@ enum Command {
     ConfigureProject(i64, String),
     Delete(i64),
     RunNow(i64),
+    PromptRun(i64, String),
     Refresh(i64),
     BindAgent(i64, String, String),
     BindSession(i64, String),
@@ -371,6 +418,34 @@ struct Claim {
     prompt: String,
     model: Option<String>,
     destination: PathBuf,
+}
+
+struct HeadlessRunRequest {
+    run_id: i64,
+    destination: PathBuf,
+    label: String,
+    prompt: String,
+    model: Option<String>,
+    session_id: Option<String>,
+    deliver: bool,
+}
+
+struct HeadlessRunCompletion {
+    run_id: i64,
+    deliver: bool,
+    session_id: Option<String>,
+    error: Option<String>,
+}
+
+struct ActiveHeadlessRun {
+    cancelled: Arc<AtomicBool>,
+    worker: JoinHandle<()>,
+    session_worker: Option<JoinHandle<()>>,
+}
+
+struct HeadlessSessionCompletion {
+    run_id: i64,
+    session_id: String,
 }
 
 struct DiscordWebhook {
@@ -436,10 +511,59 @@ fn worker(
     enabled: bool,
     mut discord_webhooks: HashMap<String, DiscordWebhook>,
     notices: Sender<String>,
+    opencode_program: PathBuf,
 ) {
+    let (completion_sender, completion_receiver) = mpsc::channel::<HeadlessRunCompletion>();
+    let (session_sender, session_receiver) = mpsc::channel::<HeadlessSessionCompletion>();
+    let mut active_runs = HashMap::<i64, ActiveHeadlessRun>::new();
     loop {
-        match commands.recv_timeout(Duration::from_secs(if enabled { 2 } else { 30 })) {
-            Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
+        let mut session_changed = false;
+        while let Ok(completion) = session_receiver.try_recv() {
+            if active_runs.contains_key(&completion.run_id)
+                && db
+                    .execute(
+                        "UPDATE scheduled_runs SET session_id = ?2 WHERE id = ?1 AND session_id IS NULL",
+                        params![completion.run_id, completion.session_id],
+                    )
+                    .is_ok()
+            {
+                session_changed = true;
+            }
+        }
+        if session_changed {
+            let _ = updates.send(load_state(&db));
+        }
+        while let Ok(completion) = completion_receiver.try_recv() {
+            let run_id = completion.run_id;
+            if let Some(active) = active_runs.remove(&run_id) {
+                active.cancelled.store(true, Ordering::Release);
+                let _ = active.worker.join();
+                if let Some(worker) = active.session_worker {
+                    let _ = worker.join();
+                }
+            }
+            finish_headless_run(&db, completion, &discord_webhooks);
+            let _ = updates.send(load_state(&db));
+        }
+        let wait = if active_runs.is_empty() {
+            Duration::from_secs(if enabled { 2 } else { 30 })
+        } else {
+            Duration::from_millis(100)
+        };
+        match commands.recv_timeout(wait) {
+            Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                for (&run_id, active) in &active_runs {
+                    active.cancelled.store(true, Ordering::Release);
+                    let _ = fail_run(&db, run_id, "Hunkle stopped while this run was working");
+                }
+                for (_, active) in active_runs.drain() {
+                    let _ = active.worker.join();
+                    if let Some(worker) = active.session_worker {
+                        let _ = worker.join();
+                    }
+                }
+                break;
+            }
             Ok(command) => {
                 let result = match command {
                     Command::Save(id, task, next) => save_task(&db, id, task, next),
@@ -461,34 +585,65 @@ fn worker(
                         "project task not found",
                     ),
                     Command::Delete(id) => delete_task(&db, id),
-                    Command::RunNow(id) if enabled => claim(&mut db, Some(id), now_ms())
-                        .and_then(|run| run.ok_or_else(|| "scheduled task not found".to_owned()))
-                        .and_then(|run| {
-                            execute_claim_with_update(
-                                &db,
-                                run,
-                                &mut scheduler_launch,
-                                &mut |db, run_id| {
-                                    complete_run(db, run_id, &discord_webhooks)
-                                },
-                                &updates,
-                            )
-                        }),
+                    Command::RunNow(id) if enabled => {
+                        if active_runs.len() >= MAX_ACTIVE_HEADLESS_RUNS {
+                            Err("Too many scheduled tasks are already running".to_owned())
+                        } else {
+                            claim(&mut db, Some(id), now_ms())
+                                .and_then(|run| {
+                                    run.ok_or_else(|| "scheduled task not found".to_owned())
+                                })
+                                .and_then(|run| {
+                                    start_headless_claim(
+                                        &db,
+                                        run,
+                                        &completion_sender,
+                                        &session_sender,
+                                        &mut active_runs,
+                                        &opencode_program,
+                                    )
+                                })
+                        }
+                    }
                     Command::RunNow(_) => {
+                        Err("scheduler execution is disabled for an in-memory service".to_owned())
+                    }
+                    Command::PromptRun(id, prompt) if enabled => {
+                        if active_runs.len() >= MAX_ACTIVE_HEADLESS_RUNS {
+                            Err("Too many scheduled tasks are already running".to_owned())
+                        } else {
+                            headless_followup_request(&db, id, prompt).and_then(|request| {
+                                start_headless_run(
+                                    &db,
+                                    request,
+                                    &completion_sender,
+                                    &session_sender,
+                                    &mut active_runs,
+                                    &opencode_program,
+                                )
+                            })
+                        }
+                    }
+                    Command::PromptRun(_, _) => {
                         Err("scheduler execution is disabled for an in-memory service".to_owned())
                     }
                     Command::Refresh(id) => match retry_delivery(&db, id, &mut |db, run_id| {
                         complete_run(db, run_id, &discord_webhooks)
                     }) {
                         Ok(true) => Ok(()),
-                        Ok(false) => refresh(
-                            &db,
-                            Some(id),
-                            &mut scheduler_observe,
-                            &mut |db, run_id| {
-                                complete_run(db, run_id, &discord_webhooks)
-                            },
-                        ),
+                        Ok(false) if active_runs.contains_key(&id) => Ok(()),
+                        Ok(false) => match run_has_pane(&db, id) {
+                            Ok(false) => Ok(()),
+                            Ok(true) => refresh(
+                                &db,
+                                Some(id),
+                                &mut scheduler_observe,
+                                &mut |db, run_id| {
+                                    complete_run(db, run_id, &discord_webhooks)
+                                },
+                            ),
+                            Err(error) => Err(error),
+                        },
                         Err(error) => Err(error),
                     },
                     Command::BindAgent(id, pane_id, terminal_id) => db
@@ -530,18 +685,20 @@ fn worker(
             Err(RecvTimeoutError::Timeout) => {
                 let result = if enabled {
                     (|| {
-                        while let Some(run) = claim(&mut db, None, now_ms())? {
-                            execute_claim_with_update(
+                        while active_runs.len() < MAX_ACTIVE_HEADLESS_RUNS {
+                            let Some(run) = claim(&mut db, None, now_ms())? else {
+                                break;
+                            };
+                            start_headless_claim(
                                 &db,
                                 run,
-                                &mut scheduler_launch,
-                                &mut |db, run_id| complete_run(db, run_id, &discord_webhooks),
-                                &updates,
+                                &completion_sender,
+                                &session_sender,
+                                &mut active_runs,
+                                &opencode_program,
                             )?;
                         }
-                        refresh(&db, None, &mut scheduler_observe, &mut |db, run_id| {
-                            complete_run(db, run_id, &discord_webhooks)
-                        })
+                        Ok(())
                     })()
                 } else {
                     Ok(())
@@ -549,6 +706,290 @@ fn worker(
                 publish(&db, &updates, result);
             }
         }
+    }
+}
+
+fn run_has_pane(db: &Connection, run_id: i64) -> Result<bool, String> {
+    db.query_row(
+        "SELECT pane_id IS NOT NULL FROM scheduled_runs WHERE id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|present| present.unwrap_or(false))
+    .map_err(db_error)
+}
+
+fn start_headless_claim(
+    db: &Connection,
+    claim: Claim,
+    completions: &Sender<HeadlessRunCompletion>,
+    sessions: &Sender<HeadlessSessionCompletion>,
+    active_runs: &mut HashMap<i64, ActiveHeadlessRun>,
+    opencode_program: &Path,
+) -> Result<(), String> {
+    if let Err(error) = validate_destination(&claim.destination) {
+        return fail_run(db, claim.run_id, &error);
+    }
+    start_headless_run(
+        db,
+        HeadlessRunRequest {
+            run_id: claim.run_id,
+            destination: claim.destination,
+            label: format!("Hunkle: {} #{}", claim.title, claim.task_id),
+            prompt: claim.prompt,
+            model: claim.model,
+            session_id: None,
+            deliver: true,
+        },
+        completions,
+        sessions,
+        active_runs,
+        opencode_program,
+    )
+}
+
+fn headless_followup_request(
+    db: &Connection,
+    run_id: i64,
+    prompt: String,
+) -> Result<HeadlessRunRequest, String> {
+    db.query_row(
+        "SELECT t.destination, t.title, r.session_id FROM scheduled_runs r JOIN scheduled_tasks t ON t.id = r.task_id WHERE r.id = ?1",
+        [run_id],
+        |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(db_error)?
+    .ok_or_else(|| "scheduled run not found".to_owned())
+    .and_then(|(destination, title, session_id)| {
+        Ok(HeadlessRunRequest {
+            run_id,
+            destination: decode_path(destination).map_err(db_error)?,
+            label: format!("Hunkle: {title}"),
+            prompt,
+            model: None,
+            session_id: Some(
+                session_id.ok_or_else(|| "This scheduled run has no OpenCode session".to_owned())?,
+            ),
+            deliver: false,
+        })
+    })
+}
+
+fn start_headless_run(
+    db: &Connection,
+    request: HeadlessRunRequest,
+    completions: &Sender<HeadlessRunCompletion>,
+    sessions: &Sender<HeadlessSessionCompletion>,
+    active_runs: &mut HashMap<i64, ActiveHeadlessRun>,
+    opencode_program: &Path,
+) -> Result<(), String> {
+    if active_runs.contains_key(&request.run_id) {
+        return Err("This scheduled run is already working".to_owned());
+    }
+    validate_destination(&request.destination)?;
+    db.execute(
+        "UPDATE scheduled_runs SET status = 'working', completed_at_ms = NULL, error = NULL, pane_id = NULL, terminal_id = NULL WHERE id = ?1",
+        [request.run_id],
+    )
+    .map_err(db_error)?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+    let sender = completions.clone();
+    let run_id = request.run_id;
+    let session_worker = if request.session_id.is_none() {
+        let destination = request.destination.clone();
+        let prompt = request.prompt.clone();
+        let created_at_ms = db
+            .query_row(
+                "SELECT created_at_ms FROM scheduled_runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        let session_cancelled = Arc::clone(&cancelled);
+        let sessions = sessions.clone();
+        let session_program = opencode_program.to_path_buf();
+        thread::Builder::new()
+            .name(format!("scheduled-session-{run_id}"))
+            .spawn(move || {
+                resolve_headless_session(
+                    run_id,
+                    &destination,
+                    &prompt,
+                    created_at_ms,
+                    &session_program,
+                    &session_cancelled,
+                    &sessions,
+                );
+            })
+            .ok()
+    } else {
+        None
+    };
+    let opencode_program = opencode_program.to_path_buf();
+    let worker = match thread::Builder::new()
+        .name(format!("scheduled-opencode-{run_id}"))
+        .spawn(move || {
+            let completion = run_headless(request, &worker_cancelled, &opencode_program);
+            let _ = sender.send(completion);
+        }) {
+        Ok(worker) => worker,
+        Err(error) => {
+            let error = format!("Could not start scheduled OpenCode worker: {error}");
+            fail_run(db, run_id, &error)?;
+            return Err(error);
+        }
+    };
+    active_runs.insert(
+        run_id,
+        ActiveHeadlessRun {
+            cancelled,
+            worker,
+            session_worker,
+        },
+    );
+    Ok(())
+}
+
+fn resolve_headless_session(
+    run_id: i64,
+    destination: &Path,
+    prompt: &str,
+    created_at_ms: i64,
+    opencode_program: &Path,
+    cancelled: &AtomicBool,
+    sessions: &Sender<HeadlessSessionCompletion>,
+) {
+    while !cancelled.load(Ordering::Acquire) {
+        match latest_message::resolve_scheduled_session_id_with_program(
+            opencode_program,
+            destination,
+            prompt,
+            created_at_ms,
+            &|| cancelled.load(Ordering::Acquire),
+        ) {
+            Ok(session_id) => {
+                let _ = sessions.send(HeadlessSessionCompletion { run_id, session_id });
+                return;
+            }
+            Err(_) if cancelled.load(Ordering::Acquire) => return,
+            Err(_) => {
+                for _ in 0..10 {
+                    if cancelled.load(Ordering::Acquire) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+}
+
+fn run_headless(
+    request: HeadlessRunRequest,
+    cancelled: &AtomicBool,
+    opencode_program: &Path,
+) -> HeadlessRunCompletion {
+    let mut command = ProcessCommand::new(opencode_program);
+    command.current_dir(&request.destination).args([
+        "run",
+        "--format",
+        "json",
+        "--title",
+        &request.label,
+    ]);
+    if let Some(model) = request.model.as_deref() {
+        command.args(["--model", model]);
+    }
+    if let Some(session_id) = request.session_id.as_deref() {
+        command.args(["--session", session_id]);
+    }
+    command.arg("-");
+    let output = process::run_cancellable_with_input(
+        &mut command,
+        request.prompt.as_bytes().to_vec(),
+        Limits {
+            stdout_bytes: OPENCODE_OUTPUT_BYTES,
+            stderr_bytes: OPENCODE_ERROR_BYTES,
+            timeout: OPENCODE_RUN_TIMEOUT,
+        },
+        &|| cancelled.load(Ordering::Acquire),
+    );
+    let (session_id, error) = match output {
+        Ok(output) => {
+            let events = parse_opencode_events(&output.stdout);
+            let session_id = events.session_id.or(request.session_id);
+            let error = if output.status.success() {
+                events.result.err()
+            } else {
+                Some(command_failure(
+                    "OpenCode scheduled task failed",
+                    &output.stderr,
+                ))
+            };
+            (session_id, error)
+        }
+        Err(error) => (
+            request.session_id,
+            Some(format!("OpenCode scheduled task failed: {error}")),
+        ),
+    };
+    HeadlessRunCompletion {
+        run_id: request.run_id,
+        deliver: request.deliver,
+        session_id,
+        error,
+    }
+}
+
+fn finish_headless_run(
+    db: &Connection,
+    completion: HeadlessRunCompletion,
+    discord_webhooks: &HashMap<String, DiscordWebhook>,
+) {
+    let status = if completion.error.is_some() {
+        ScheduledRunStatus::Failed
+    } else {
+        ScheduledRunStatus::Completed
+    };
+    let result = db
+        .execute(
+            "UPDATE scheduled_runs SET status = ?2, session_id = COALESCE(?3, session_id), error = ?4, completed_at_ms = ?5 WHERE id = ?1",
+            params![
+                completion.run_id,
+                status.text(),
+                completion.session_id,
+                completion.error,
+                now_ms()
+            ],
+        )
+        .map_err(db_error)
+        .and_then(|_| {
+            if completion.deliver && status == ScheduledRunStatus::Completed {
+                complete_run(db, completion.run_id, discord_webhooks)
+            } else {
+                Ok(())
+            }
+        });
+    if let Err(error) = result {
+        let _ = fail_run(db, completion.run_id, &error);
+    }
+}
+
+fn command_failure(prefix: &str, stderr: &[u8]) -> String {
+    let detail = String::from_utf8_lossy(stderr).trim().to_owned();
+    if detail.is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}: {detail}")
     }
 }
 
@@ -1421,6 +1862,7 @@ fn retain_history(db: &Connection, task_id: i64) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn execute_claim(
     db: &Connection,
     claim: Claim,
@@ -1470,6 +1912,7 @@ fn execute_claim(
     Ok(())
 }
 
+#[cfg(test)]
 fn execute_claim_with_update(
     db: &Connection,
     claim: Claim,
@@ -1899,7 +2342,7 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
 
 fn recover_stale_launches(db: &Connection, now: i64) -> Result<(), String> {
     db.execute(
-        "UPDATE scheduled_runs SET status = 'failed', error = 'Hunkle stopped while launching this run', completed_at_ms = ?2 WHERE status = 'launching' AND created_at_ms <= ?1",
+        "UPDATE scheduled_runs SET status = 'failed', error = 'Hunkle stopped while this run was working', completed_at_ms = ?2 WHERE status = 'working' OR (status = 'launching' AND created_at_ms <= ?1)",
         params![now.saturating_sub(5 * 60 * 1_000), now],
     )
     .map_err(db_error)?;
@@ -2018,6 +2461,256 @@ fn query_all<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_runs_capture_and_resume_opencode_sessions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("fake-opencode");
+        let arguments = directory.path().join("arguments");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncat >> '{}'\nprintf '\\n' >> '{}'\nprintf '%s\\n' '{{\"type\":\"text\",\"sessionID\":\"ses_headless\",\"part\":{{\"type\":\"text\",\"text\":\"ok\"}}}}'\n",
+                arguments.display(),
+                arguments.display(),
+                arguments.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        let cancelled = AtomicBool::new(false);
+
+        let initial = run_headless(
+            HeadlessRunRequest {
+                run_id: 1,
+                destination: directory.path().to_path_buf(),
+                label: "Hunkle: test".to_owned(),
+                prompt: "first question".to_owned(),
+                model: Some("provider/model".to_owned()),
+                session_id: None,
+                deliver: true,
+            },
+            &cancelled,
+            &program,
+        );
+        assert_eq!(initial.session_id.as_deref(), Some("ses_headless"));
+        assert_eq!(initial.error, None);
+
+        let followup = run_headless(
+            HeadlessRunRequest {
+                run_id: 1,
+                destination: directory.path().to_path_buf(),
+                label: "Hunkle: test".to_owned(),
+                prompt: "follow-up".to_owned(),
+                model: None,
+                session_id: initial.session_id,
+                deliver: false,
+            },
+            &cancelled,
+            &program,
+        );
+        assert_eq!(followup.session_id.as_deref(), Some("ses_headless"));
+        assert_eq!(followup.error, None);
+        let arguments = std::fs::read_to_string(arguments).unwrap();
+        assert!(arguments.contains("--model\nprovider/model"));
+        assert!(arguments.contains("first question"));
+        assert!(arguments.contains("--session\nses_headless"));
+        assert!(arguments.contains("follow-up"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_run_reports_process_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("fake-opencode");
+        std::fs::write(&program, "#!/bin/sh\nprintf 'nope' >&2\nexit 7\n").unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+
+        let completion = run_headless(
+            HeadlessRunRequest {
+                run_id: 2,
+                destination: directory.path().to_path_buf(),
+                label: "Hunkle: failure".to_owned(),
+                prompt: "fail".to_owned(),
+                model: None,
+                session_id: None,
+                deliver: true,
+            },
+            &AtomicBool::new(false),
+            &program,
+        );
+        assert!(completion.session_id.is_none());
+        assert!(
+            completion
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("nope"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_owns_headless_execution_and_followups() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("fake-opencode");
+        let arguments = directory.path().join("arguments");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = db ]; then printf '%s\\n' '[{{\"id\":\"ses_service\"}}]'; exit 0; fi\nprintf '%s\\n' \"$@\" >> '{}'\ncat >> '{}'\nprintf '\\n' >> '{}'\nsleep 0.3\nprintf '%s\\n' '{{\"type\":\"text\",\"sessionID\":\"ses_service\",\"part\":{{\"type\":\"text\",\"text\":\"ok\"}}}}'\n",
+                arguments.display(),
+                arguments.display(),
+                arguments.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        let mut scheduler = SchedulerService::open_with_program(
+            Some(directory.path().join("scheduler.sqlite")),
+            None,
+            Vec::new(),
+            program,
+        )
+        .unwrap();
+        scheduler
+            .save_task(
+                None,
+                ScheduledTaskEdit {
+                    title: "Headless".to_owned(),
+                    description: String::new(),
+                    prompt: "initial".to_owned(),
+                    model: String::new(),
+                    discord_webhook_id: String::new(),
+                    destination: directory.path().to_path_buf(),
+                    repository: "repo".to_owned(),
+                    branch: "main".to_owned(),
+                    enabled: false,
+                    interval_minutes: 60,
+                },
+            )
+            .unwrap();
+        wait_for_scheduler(&mut scheduler, |scheduler| !scheduler.tasks.is_empty());
+        scheduler.run_now(scheduler.tasks[0].id).unwrap();
+        wait_for_scheduler(&mut scheduler, |scheduler| {
+            scheduler.runs.first().is_some_and(|run| {
+                run.status == ScheduledRunStatus::Working
+                    && run.session_id.as_deref() == Some("ses_service")
+            })
+        });
+        wait_for_scheduler(&mut scheduler, |scheduler| {
+            scheduler
+                .runs
+                .first()
+                .is_some_and(|run| run.status == ScheduledRunStatus::Completed)
+        });
+        let run = scheduler.runs[0].clone();
+        assert_eq!(run.session_id.as_deref(), Some("ses_service"));
+        assert!(run.pane_id.is_none());
+        assert!(run.terminal_id.is_none());
+
+        scheduler
+            .prompt_run(run.id, "follow-up".to_owned())
+            .unwrap();
+        wait_for_scheduler(&mut scheduler, |scheduler| {
+            scheduler
+                .runs
+                .first()
+                .is_some_and(|run| run.status == ScheduledRunStatus::Working)
+        });
+        wait_for_scheduler(&mut scheduler, |scheduler| {
+            scheduler
+                .runs
+                .first()
+                .is_some_and(|run| run.status == ScheduledRunStatus::Completed)
+        });
+        let arguments = std::fs::read_to_string(arguments).unwrap();
+        assert!(arguments.contains("initial"));
+        assert!(arguments.contains("--session\nses_service"));
+        assert!(arguments.contains("follow-up"));
+        scheduler.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_shutdown_cancels_and_persists_active_headless_runs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("scheduler.sqlite");
+        let program = directory.path().join("fake-opencode");
+        std::fs::write(&program, "#!/bin/sh\nsleep 10\n").unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        let mut scheduler =
+            SchedulerService::open_with_program(Some(database.clone()), None, Vec::new(), program)
+                .unwrap();
+        scheduler
+            .save_task(
+                None,
+                ScheduledTaskEdit {
+                    title: "Cancelled".to_owned(),
+                    description: String::new(),
+                    prompt: "wait".to_owned(),
+                    model: String::new(),
+                    discord_webhook_id: String::new(),
+                    destination: directory.path().to_path_buf(),
+                    repository: "repo".to_owned(),
+                    branch: "main".to_owned(),
+                    enabled: false,
+                    interval_minutes: 60,
+                },
+            )
+            .unwrap();
+        wait_for_scheduler(&mut scheduler, |scheduler| !scheduler.tasks.is_empty());
+        scheduler.run_now(scheduler.tasks[0].id).unwrap();
+        wait_for_scheduler(&mut scheduler, |scheduler| {
+            scheduler
+                .runs
+                .first()
+                .is_some_and(|run| run.status == ScheduledRunStatus::Working)
+        });
+        let started = Instant::now();
+        scheduler.shutdown();
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let db = Connection::open(database).unwrap();
+        let (_, runs) = load_state(&db).unwrap();
+        assert_eq!(runs[0].status, ScheduledRunStatus::Failed);
+        assert!(
+            runs[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("stopped while this run was working"))
+        );
+    }
+
+    fn wait_for_scheduler(
+        scheduler: &mut SchedulerService,
+        condition: impl Fn(&SchedulerService) -> bool,
+    ) {
+        for _ in 0..200 {
+            scheduler.poll_completions();
+            if condition(scheduler) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("scheduler state did not settle: {:?}", scheduler.runs);
+    }
 
     #[test]
     fn discord_test_reports_missing_configuration() {

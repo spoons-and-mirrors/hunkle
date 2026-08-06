@@ -60,11 +60,11 @@ pub(crate) use scheduler::{
 };
 #[cfg(test)]
 pub use settings::AgentCardClickAction;
-pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use settings::{
     DiscordWebhookConfig, DiscordWebhookEditor, DiscordWebhookStore, SettingsStore,
     valid_discord_webhook_url, valid_opencode_model,
 };
+pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
 
 pub(super) use std::{

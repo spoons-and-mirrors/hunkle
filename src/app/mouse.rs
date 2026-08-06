@@ -371,7 +371,11 @@ impl App {
                     return;
                 }
                 Some(HitTarget::AgentScheduledRun(run_id)) => {
-                    self.open_scheduled_run_preview(run_id);
+                    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                        self.promote_scheduled_run(run_id);
+                    } else {
+                        self.open_scheduled_run_preview(run_id);
+                    }
                     return;
                 }
                 Some(HitTarget::AgentStash(key)) => {

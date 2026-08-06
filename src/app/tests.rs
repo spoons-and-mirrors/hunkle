@@ -1181,7 +1181,47 @@ fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
 }
 
 #[test]
-fn live_scheduled_agent_preview_can_focus_its_prompt() {
+fn scheduled_run_promotion_preserves_destination_and_exact_session() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+        id: 7,
+        title: "Nightly review".to_owned(),
+        description: String::new(),
+        prompt: "Review the diff.".to_owned(),
+        model: String::new(),
+        discord_webhook_id: String::new(),
+        destination: directory.path().join("scheduled-worktree"),
+        repository: "repo".to_owned(),
+        branch: "main".to_owned(),
+        enabled: true,
+        interval_minutes: 90,
+        next_run_ms: 1,
+        source: None,
+        project_status: None,
+    }]);
+    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+        id: 11,
+        task_id: 7,
+        created_at_ms: 1,
+        completed_at_ms: Some(2),
+        status: ScheduledRunStatus::Completed,
+        pane_id: None,
+        terminal_id: None,
+        session_id: Some("ses_exact_scheduled".to_owned()),
+        error: None,
+    }]);
+
+    let (destination, session_id) = app.scheduled_run_promotion(11).unwrap();
+
+    assert_eq!(destination, directory.path().join("scheduled-worktree"));
+    assert_eq!(session_id, "ses_exact_scheduled");
+}
+
+#[test]
+fn headless_scheduled_preview_can_focus_its_prompt_without_a_matching_pane() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());
     let mut app = App::new(directory.path().to_path_buf());
@@ -1213,7 +1253,7 @@ fn live_scheduled_agent_preview_can_focus_its_prompt() {
         task_id: 7,
         created_at_ms: 1,
         completed_at_ms: None,
-        status: ScheduledRunStatus::Working,
+        status: ScheduledRunStatus::Completed,
         pane_id: Some("w1:p2".to_owned()),
         terminal_id: None,
         session_id: Some("ses-live".to_owned()),
@@ -1231,16 +1271,16 @@ fn live_scheduled_agent_preview_can_focus_its_prompt() {
         task_id: 7,
         created_at_ms: 1,
         completed_at_ms: None,
-        status: ScheduledRunStatus::Working,
+        status: ScheduledRunStatus::Completed,
         pane_id: Some("w1:p2".to_owned()),
         terminal_id: None,
         session_id: Some("ses-stale".to_owned()),
         error: None,
     }]);
     assert!(app.agent_preview_index().is_none());
-    assert!(!app.herdr.scheduled_prompt_available(11));
+    assert!(app.herdr.scheduled_prompt_available(11));
     app.focus_agent_preview_prompt();
-    assert!(!app.agent_preview_prompt_focused);
+    assert!(app.agent_preview_prompt_focused);
 }
 
 #[test]

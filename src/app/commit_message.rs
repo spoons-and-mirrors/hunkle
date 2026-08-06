@@ -252,7 +252,7 @@ fn generate_message(root: &Path, model: &str, variant: Option<&str>) -> Result<S
 
 pub(super) struct OpenCodeEvents {
     pub(super) session_id: Option<String>,
-    result: Result<String, String>,
+    pub(super) result: Result<String, String>,
 }
 
 pub(super) fn parse_opencode_events(output: &[u8]) -> OpenCodeEvents {

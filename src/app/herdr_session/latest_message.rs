@@ -296,6 +296,31 @@ pub(super) fn resolve_scheduled_session_id(
     prompt: &str,
     run_created_at_ms: i64,
 ) -> Result<String, String> {
+    resolve_scheduled_session_id_cancellable(directory, prompt, run_created_at_ms, &|| false)
+}
+
+pub(super) fn resolve_scheduled_session_id_cancellable(
+    directory: &Path,
+    prompt: &str,
+    run_created_at_ms: i64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    resolve_scheduled_session_id_with_program(
+        Path::new("opencode"),
+        directory,
+        prompt,
+        run_created_at_ms,
+        cancelled,
+    )
+}
+
+pub(super) fn resolve_scheduled_session_id_with_program(
+    program: &Path,
+    directory: &Path,
+    prompt: &str,
+    run_created_at_ms: i64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
     let directory = sql_string(&directory.to_string_lossy());
     let prompt = sql_string(prompt);
     let query = format!(
@@ -310,9 +335,10 @@ pub(super) fn resolve_scheduled_session_id(
           ORDER BY abs(session.time_created - {run_created_at_ms}) \
           LIMIT 1"
     );
-    let output = process::run(
-        Command::new("opencode").args(["db", &query, "--format", "json", "--pure"]),
+    let output = process::run_cancellable(
+        Command::new(program).args(["db", &query, "--format", "json", "--pure"]),
         QUERY_LIMITS,
+        cancelled,
     )
     .map_err(|error| format!("Could not query OpenCode sessions: {error}"))?;
     if output.timed_out {

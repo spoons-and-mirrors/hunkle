@@ -1241,6 +1241,43 @@ impl App {
         self.open_scheduled_run_conversation(run_id, Mode::Normal);
     }
 
+    pub(super) fn promote_scheduled_run(&mut self, run_id: i64) {
+        let (destination, session_id) = match self.scheduled_run_promotion(run_id) {
+            Ok(promotion) => promotion,
+            Err(error) => {
+                self.notice = Some(error);
+                return;
+            }
+        };
+        match self
+            .herdr_prompt
+            .prepare_stashed_agent(destination, session_id)
+        {
+            Ok(()) => self.notice = Some("Loading active Herdr tab layout".to_owned()),
+            Err(error) => self.notice = Some(format!("Could not open scheduled agent: {error}")),
+        }
+    }
+
+    pub(super) fn scheduled_run_promotion(&self, run_id: i64) -> Result<(PathBuf, String), String> {
+        let run = self
+            .herdr
+            .scheduled_runs()
+            .iter()
+            .find(|run| run.id == run_id)
+            .ok_or_else(|| "Scheduled run is no longer available".to_owned())?;
+        let session_id = run
+            .session_id
+            .clone()
+            .ok_or_else(|| "Scheduled run has not started an OpenCode session yet".to_owned())?;
+        let task = self
+            .herdr
+            .scheduled_tasks()
+            .iter()
+            .find(|task| task.id == run.task_id)
+            .ok_or_else(|| "Scheduled task is no longer available".to_owned())?;
+        Ok((task.destination.clone(), session_id))
+    }
+
     fn open_scheduled_run_conversation(&mut self, run_id: i64, return_mode: Mode) {
         let Some(run) = self
             .herdr

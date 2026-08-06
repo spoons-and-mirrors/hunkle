@@ -357,11 +357,6 @@ enum Completion {
         key: AgentTimingKey,
         result: Result<(), String>,
     },
-    ScheduledPrompt {
-        run_id: i64,
-        session_id: Option<String>,
-        result: Result<(), String>,
-    },
     ScheduledSession {
         run_id: i64,
         result: Result<String, String>,
@@ -469,8 +464,6 @@ pub(crate) struct HerdrSession {
     agent_prompt_requests: HashSet<AgentTimingKey>,
     agent_prompts_on_idle: HashMap<AgentTimingKey, String>,
     agent_prompt_errors: HashMap<AgentTimingKey, String>,
-    scheduled_prompt_requests: HashSet<i64>,
-    scheduled_prompt_errors: HashMap<i64, String>,
     agent_prompt_notice: Option<String>,
     scheduled_preview_identity: Option<OpenCodeConversationIdentity>,
     scheduled_session_requests: HashSet<i64>,
@@ -572,8 +565,6 @@ impl HerdrSession {
             agent_prompt_requests: HashSet::new(),
             agent_prompts_on_idle: HashMap::new(),
             agent_prompt_errors: HashMap::new(),
-            scheduled_prompt_requests: HashSet::new(),
-            scheduled_prompt_errors: HashMap::new(),
             agent_prompt_notice: None,
             scheduled_preview_identity: None,
             scheduled_session_requests: HashSet::new(),
@@ -1042,26 +1033,6 @@ impl HerdrSession {
                         }
                     });
                 }
-                Completion::ScheduledPrompt {
-                    run_id,
-                    session_id,
-                    result,
-                } => {
-                    self.scheduled_prompt_requests.remove(&run_id);
-                    poll.notice = Some(match result {
-                        Ok(()) => {
-                            self.scheduled_prompt_errors.remove(&run_id);
-                            if let Some(session_id) = session_id {
-                                self.refresh_scheduled_conversation(&session_id);
-                            }
-                            "Message sent to scheduled agent".to_owned()
-                        }
-                        Err(error) => {
-                            self.scheduled_prompt_errors.insert(run_id, error.clone());
-                            format!("Could not message scheduled agent: {error}")
-                        }
-                    });
-                }
                 Completion::ScheduledSession { run_id, result } => {
                     self.scheduled_session_requests.remove(&run_id);
                     match result {
@@ -1297,70 +1268,31 @@ impl HerdrSession {
         run_id: i64,
         prompt: String,
     ) -> Result<(), String> {
-        if prompt.trim().is_empty() {
-            return Err("Enter a message".to_owned());
-        }
-        if self.scheduled_prompt_requests.contains(&run_id) {
-            return Err("A message is already being sent to this run".to_owned());
-        }
-        let run = self
-            .scheduled_runs()
-            .iter()
-            .find(|run| run.id == run_id)
-            .ok_or_else(|| "Scheduled run is no longer available".to_owned())?;
-        let pane_id = self
-            .scheduled_run_prompt_pane(run)
-            .ok_or_else(|| "Scheduled run is no longer attached to its Herdr agent".to_owned())?;
-        let session_id = run.session_id.clone();
-        self.scheduled_prompt_requests.insert(run_id);
-        self.scheduled_prompt_errors.remove(&run_id);
-        let sender = self.sender.clone();
-        thread::spawn(move || {
-            let result = client::prompt_agent(pane_id, prompt);
-            let _ = sender.send(Completion::ScheduledPrompt {
-                run_id,
-                session_id,
-                result,
-            });
-        });
-        Ok(())
+        self.scheduler_service()?.prompt_run(run_id, prompt)
     }
 
     pub(crate) fn scheduled_prompt_sending(&self, run_id: i64) -> bool {
-        self.scheduled_prompt_requests.contains(&run_id)
+        self.scheduled_runs()
+            .iter()
+            .find(|run| run.id == run_id)
+            .is_some_and(|run| run.status.is_active())
     }
 
     pub(crate) fn scheduled_prompt_available(&self, run_id: i64) -> bool {
         self.scheduled_runs()
             .iter()
             .find(|run| run.id == run_id)
-            .and_then(|run| self.scheduled_run_prompt_pane(run))
-            .is_some()
+            .is_some_and(|run| run.session_id.is_some())
     }
 
     pub(crate) fn scheduled_prompt_error(&self, run_id: i64) -> Option<&str> {
-        self.scheduled_prompt_errors
-            .get(&run_id)
-            .map(String::as_str)
-    }
-
-    pub(crate) fn clear_scheduled_prompt_error(&mut self, run_id: i64) {
-        self.scheduled_prompt_errors.remove(&run_id);
-    }
-
-    fn scheduled_run_prompt_pane(&self, run: &ScheduledRun) -> Option<String> {
-        let pane_id = run.pane_id.as_deref()?;
-        self.observed_agents
+        self.scheduled_runs()
             .iter()
-            .find(|agent| {
-                agent.pane_id == pane_id
-                    && run
-                        .session_id
-                        .as_deref()
-                        .is_some_and(|session_id| agent_has_opencode_session(agent, session_id))
-            })
-            .map(|agent| agent.pane_id.clone())
+            .find(|run| run.id == run_id)
+            .and_then(|run| run.error.as_deref())
     }
+
+    pub(crate) fn clear_scheduled_prompt_error(&mut self, _run_id: i64) {}
 
     fn start_agent_prompt(&mut self, key: AgentTimingKey, pane_id: String, prompt: String) {
         self.agent_prompt_requests.insert(key.clone());

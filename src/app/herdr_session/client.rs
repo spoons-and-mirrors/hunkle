@@ -12,10 +12,9 @@ use interprocess::local_socket::{Stream, traits::Stream as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    filesystem,
-    process::{self, Limits},
-};
+#[cfg(test)]
+use crate::filesystem;
+use crate::process::{self, Limits};
 
 use super::{
     AgentPane, AgentPaneDirection, AgentRuntime, AgentSessionIdentity, AgentStatus, AgentTimingKey,
@@ -265,6 +264,7 @@ struct ParsedWorkspace {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(crate) struct SchedulerLaunchRequest {
     pub(crate) run_id: i64,
     pub(crate) destination: PathBuf,
@@ -274,6 +274,7 @@ pub(crate) struct SchedulerLaunchRequest {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(crate) struct SchedulerLaunchResult {
     pub(crate) pane_id: Option<String>,
     pub(crate) terminal_id: Option<String>,
@@ -329,10 +330,6 @@ fn prompt_agent_with(
     runner(&["agent".to_owned(), "prompt".to_owned(), pane_id, prompt]).map(drop)
 }
 
-pub(crate) fn scheduler_launch(request: SchedulerLaunchRequest) -> SchedulerLaunchResult {
-    scheduler_launch_with(request, run_required_json)
-}
-
 pub(crate) fn scheduler_observe(
     pane_id: &str,
     terminal_id: Option<&str>,
@@ -340,6 +337,7 @@ pub(crate) fn scheduler_observe(
     scheduler_observe_with(pane_id, terminal_id, run_required_json)
 }
 
+#[cfg(test)]
 fn scheduler_launch_with(
     request: SchedulerLaunchRequest,
     mut runner: impl FnMut(&[OsString]) -> Result<Value, CommandError>,
@@ -473,10 +471,12 @@ fn scheduler_launch_with(
     }
 }
 
+#[cfg(test)]
 fn scheduler_command_error(stage: &str, error: CommandError) -> String {
     format!("{stage}: {}", error.message)
 }
 
+#[cfg(test)]
 fn scheduler_matching_workspace(
     value: &Value,
     destination: &Path,
@@ -511,6 +511,7 @@ fn scheduler_agent<'a>(value: &'a Value, expected_pane_id: &str) -> Result<&'a V
     Ok(agent)
 }
 
+#[cfg(test)]
 fn scheduler_label(value: &str) -> String {
     let mut label = value
         .chars()

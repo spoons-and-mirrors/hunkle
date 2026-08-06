@@ -66,6 +66,15 @@ pub(crate) fn run_with_input(
     run_inner(command, Some(input), limits, None)
 }
 
+pub(crate) fn run_cancellable_with_input(
+    command: &mut Command,
+    input: Vec<u8>,
+    limits: Limits,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Output> {
+    run_inner(command, Some(input), limits, Some(cancelled))
+}
+
 fn run_inner(
     command: &mut Command,
     input: Option<Vec<u8>>,

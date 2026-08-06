@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::{
     AgentCardClickAction, AgentKey, AgentPromptDelivery, AgentRequestPartPreview,
-    AgentRequestPreview, ScheduledRun, ScheduledRunStatus,
+    AgentRequestPreview, ScheduledRun, ScheduledRunStatus, ScheduledTask,
 };
 use std::path::PathBuf;
 
@@ -48,6 +48,7 @@ fn control_click_opens_the_live_agent_preview_modal() {
     let directory = tempfile::tempdir().unwrap();
     run_git(directory.path(), &["init", "-b", "main"]);
     let mut app = App::new(directory.path().to_path_buf());
+    app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
     app.herdr.set_agent_user_messages_for_test(
         0,
@@ -268,6 +269,7 @@ fn agent_preview_modal_routes_message_and_agent_scroll_gestures() {
             "focused": false
         }));
     let mut app = App::new(directory.path().to_path_buf());
+    app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&snapshot);
     app.herdr.set_agent_user_messages_for_test(
         0,
@@ -349,6 +351,7 @@ fn fullscreen_agent_first_click_replaces_footer_path_with_activation_hint() {
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
+    app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
     app.herdr.agents[0].destination_cwd = Some(root.to_path_buf());
     app.herdr.set_fullscreen_for_test(true);
@@ -380,6 +383,7 @@ fn panel_mode_toggle_reaches_stashed_agent_cards() {
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
+    app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.settings.agents_height = 9;
     app.settings.worktree_width = 48;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
@@ -479,13 +483,29 @@ fn panel_mode_toggle_reaches_stashed_agent_cards() {
 }
 
 #[test]
-fn scheduled_run_cards_cap_automatic_height_and_open_preview_on_any_click() {
+fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewing() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
+    app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.herdr.set_scheduled_tasks_for_test(Vec::new());
+    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+        id: 7,
+        title: "Review".to_owned(),
+        description: String::new(),
+        prompt: "Review this repository".to_owned(),
+        model: String::new(),
+        discord_webhook_id: String::new(),
+        destination: root.to_path_buf(),
+        repository: "repo".to_owned(),
+        branch: "main".to_owned(),
+        enabled: true,
+        interval_minutes: 60,
+        next_run_ms: 0,
+        source: None,
+        project_status: None,
+    }]);
     let completed_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -501,7 +521,7 @@ fn scheduled_run_cards_cap_automatic_height_and_open_preview_on_any_click() {
                 status: ScheduledRunStatus::Completed,
                 pane_id: None,
                 terminal_id: None,
-                session_id: None,
+                session_id: Some(format!("ses_{id}")),
                 error: Some("No session".to_owned()),
             })
             .collect(),
@@ -547,8 +567,11 @@ fn scheduled_run_cards_cap_automatic_height_and_open_preview_on_any_click() {
         row: card.y,
         modifiers: KeyModifiers::CONTROL,
     });
-    assert_eq!(app.mode, Mode::AgentPreview);
-    assert_eq!(app.agent_preview_scheduled_run, Some(run_id));
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Loading active Herdr tab layout")
+    );
 }
 
 #[test]
@@ -612,6 +635,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
+    app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.settings.agents_height = 9;
     app.settings.worktree_width = 48;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
@@ -1489,6 +1513,7 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
+    app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
     app.herdr.set_agent_user_messages_for_test(
         0,
