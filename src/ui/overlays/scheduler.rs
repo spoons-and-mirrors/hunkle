@@ -169,7 +169,7 @@ fn scheduler_area(area: Rect, profile: LayoutProfile) -> Rect {
 }
 
 fn draw_tasks(frame: &mut Frame<'_>, app: &App, area: Rect, regions: &mut SchedulerRegions) {
-    let tasks = app.herdr.scheduled_tasks();
+    let tasks = app.scheduled_tasks.tasks();
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(

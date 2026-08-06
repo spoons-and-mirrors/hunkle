@@ -18,19 +18,18 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
-    app::{commit_message::parse_opencode_events, valid_discord_webhook_url},
+    app::{
+        commit_message::parse_opencode_events,
+        herdr_session::{AgentStatus, HerdrSession, SchedulerObserveResult},
+        opencode_session, valid_discord_webhook_url,
+    },
     filesystem::{read_optional_workspace_directory, read_workspace_file},
     process::{self, Limits},
     repo_path::RepoPath,
 };
 
 #[cfg(test)]
-use super::client::{SchedulerLaunchRequest, SchedulerLaunchResult};
-use super::{
-    AgentStatus,
-    client::{SchedulerObserveResult, scheduler_observe},
-    latest_message,
-};
+use crate::app::herdr_session::{SchedulerLaunchRequest, SchedulerLaunchResult};
 
 const MAX_RUNS: i64 = 50;
 const DISCORD_DELIVERY_ERROR: &str = "Discord delivery failed: ";
@@ -637,7 +636,7 @@ fn worker(
                             Ok(true) => refresh(
                                 &db,
                                 Some(id),
-                                &mut scheduler_observe,
+                                &mut HerdrSession::observe_scheduled_run,
                                 &mut |db, run_id| {
                                     complete_run(db, run_id, &discord_webhooks)
                                 },
@@ -869,7 +868,7 @@ fn resolve_headless_session(
     sessions: &Sender<HeadlessSessionCompletion>,
 ) {
     while !cancelled.load(Ordering::Acquire) {
-        match latest_message::resolve_scheduled_session_id_with_program(
+        match opencode_session::resolve_scheduled_session_id_with_program(
             opencode_program,
             destination,
             prompt,
@@ -2027,7 +2026,7 @@ fn apply_observation(
 fn fetch_scheduled_result(session_id: &str) -> Result<String, String> {
     let mut result = Err("OpenCode session has no assistant response".to_owned());
     for attempt in 0..RESULT_FETCH_ATTEMPTS {
-        result = super::latest_message::final_assistant_text(session_id);
+        result = opencode_session::final_assistant_text(session_id);
         if result.is_ok() || attempt + 1 == RESULT_FETCH_ATTEMPTS {
             break;
         }

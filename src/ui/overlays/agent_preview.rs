@@ -77,44 +77,41 @@ pub(in crate::ui) fn draw_agent_preview_modal(
     ];
     let Some(index) = app.agent_preview_index() else {
         if let Some(run) = app
-            .agent_preview_scheduled_run
-            .and_then(|id| app.herdr.scheduled_runs().iter().find(|run| run.id == id))
+            .agent_preview
+            .scheduled_run
+            .and_then(|id| app.scheduled_tasks.runs().iter().find(|run| run.id == id))
         {
             let run_id = run.id;
-            let prompt_available = app.herdr.scheduled_prompt_available(run_id);
-            let prompt_sending = app.herdr.scheduled_prompt_sending(run_id);
-            let prompt_error = app
-                .agent_preview_prompt_error
-                .as_deref()
-                .or_else(|| app.herdr.scheduled_prompt_error(run_id));
-            let transcript = run
-                .session_id
-                .as_deref()
-                .and_then(|session| app.herdr.scheduled_transcript(session));
-            let conversation_message = run
-                .session_id
-                .as_deref()
-                .and_then(|session| app.herdr.scheduled_conversation_error(session))
-                .or(run.error.as_deref())
-                .or_else(|| {
-                    transcript
-                        .is_none_or(|transcript| transcript.messages.is_empty())
-                        .then_some(if run.status.is_active() {
-                            "Waiting for this run's OpenCode session…"
-                        } else {
-                            "No OpenCode conversation was recorded for this run."
-                        })
-                });
+            let prompt_available = run.session_id.is_some();
+            let prompt_sending = run.status.is_active();
+            let preview = app
+                .agent_preview
+                .scheduled_render_state(run.session_id.as_deref());
+            let prompt_error = preview.prompt_error.or(run.error.as_deref());
+            let conversation_message =
+                preview
+                    .conversation_error
+                    .or(run.error.as_deref())
+                    .or_else(|| {
+                        preview
+                            .transcript
+                            .is_none_or(|transcript| transcript.messages.is_empty())
+                            .then_some(if run.status.is_active() {
+                                "Waiting for this run's OpenCode session…"
+                            } else {
+                                "No OpenCode conversation was recorded for this run."
+                            })
+                    });
             let (history_targets, scroll_max, scroll) = agents::draw_scheduled_history(
                 frame,
                 run_id,
-                transcript,
-                &mut app.agent_transcript_presentation,
-                app.scheduler.conversation_message,
-                app.scheduler.conversation_scroll,
-                &app.scheduler.conversation_expanded_requests,
-                &app.agent_preview_prompt,
-                app.agent_preview_prompt_focused,
+                preview.transcript,
+                preview.presentation,
+                preview.message,
+                preview.scroll,
+                preview.expanded_requests,
+                preview.prompt,
+                preview.prompt_focused,
                 prompt_error,
                 prompt_sending,
                 prompt_available,
@@ -177,17 +174,17 @@ pub(in crate::ui) fn draw_agent_preview_modal(
     let (history_targets, scroll_max, scroll, animation_presented) = agents::draw_history(
         frame,
         &app.herdr,
-        &mut app.agent_transcript_presentation,
+        &mut app.agent_preview.presentation,
         index,
         selected_message,
         transcript_scroll,
         &expanded_requests,
         picker_open,
         hovered,
-        &app.agent_preview_prompt,
-        app.agent_preview_prompt_focused,
-        app.agent_preview_prompt_error.as_deref(),
-        app.agent_preview_prompt_delivery,
+        &app.agent_preview.prompt,
+        app.agent_preview.prompt_focused,
+        app.agent_preview.prompt_error.as_deref(),
+        app.agent_preview.prompt_delivery,
         status_area,
         body,
     );

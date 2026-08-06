@@ -305,7 +305,7 @@ impl App {
         self.discord_webhook_editor = None;
         self.discord_webhook_error = None;
         match self
-            .herdr
+            .scheduled_tasks
             .configure_discord_webhooks(self.discord_webhooks.clone())
         {
             Ok(()) => self.notice = Some("Discord webhook saved".to_owned()),
@@ -319,7 +319,10 @@ impl App {
             self.notice = Some("Add a Discord webhook first".to_owned());
             return;
         };
-        match self.herdr.test_discord_webhook(webhook.id.clone()) {
+        match self
+            .scheduled_tasks
+            .test_discord_webhook(webhook.id.clone())
+        {
             Ok(()) => self.notice = Some("Sending Discord test message…".to_owned()),
             Err(error) => self.notice = Some(error),
         }
@@ -333,8 +336,8 @@ impl App {
             .discord_webhook_index
             .min(self.discord_webhooks.len() - 1)];
         if let Some(task) = self
-            .herdr
-            .scheduled_tasks()
+            .scheduled_tasks
+            .tasks()
             .iter()
             .find(|task| task.discord_webhook_id == webhook.id)
         {
@@ -357,7 +360,7 @@ impl App {
         self.discord_webhook_editor = None;
         self.discord_webhook_error = None;
         match self
-            .herdr
+            .scheduled_tasks
             .configure_discord_webhooks(self.discord_webhooks.clone())
         {
             Ok(()) => self.notice = Some("Discord webhook removed".to_owned()),

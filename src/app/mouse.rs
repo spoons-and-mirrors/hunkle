@@ -5,8 +5,7 @@ use std::time::Instant;
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, AgentKey, AgentPreviewExpandedRequests, AgentPreviewMessageSelection,
-    AgentPreviewTranscriptScroll, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget,
+    ACTION_ITEMS, AgentKey, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget,
     FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane,
     MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, SchedulerHitTarget, ScrollTarget,
     SettingsHitTarget, View, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
@@ -90,14 +89,14 @@ impl App {
             self.copy_request = Some(format!("herdr_pane_id {pane_id}"));
             return;
         }
-        if self.agent_preview_picker_open
+        if self.agent_preview.picker_open
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && !matches!(
                 self.regions.hit_target_at(point),
                 Some(HitTarget::AgentPreviewPicker(_) | HitTarget::AgentPreviewPickerItem(_))
             )
         {
-            self.agent_preview_picker_open = false;
+            self.agent_preview.close_picker();
         }
         if mouse.kind == MouseEventKind::Moved {
             self.hovered_hit_target = self.regions.hit_target_at(point);
@@ -410,14 +409,14 @@ impl App {
                 }
                 Some(HitTarget::AgentPreviewPrompt(key)) => {
                     if self.herdr.agent_index(&key).is_some() {
-                        self.agent_preview_selection = Some(key);
+                        self.agent_preview.focus_agent(key);
                         self.focus_agent_preview_prompt();
                     }
                     return;
                 }
                 Some(HitTarget::AgentPreviewPromptDelivery(key)) => {
                     if self.herdr.agent_index(&key).is_some() {
-                        self.agent_preview_selection = Some(key);
+                        self.agent_preview.focus_agent(key);
                         self.toggle_agent_preview_prompt_delivery();
                     }
                     return;
@@ -1069,8 +1068,7 @@ impl App {
                 if self.herdr.agent_index(&key).is_none() {
                     return;
                 }
-                self.agent_preview_selection = Some(key);
-                self.agent_preview_picker_open = !self.agent_preview_picker_open;
+                self.agent_preview.toggle_picker(key);
                 return;
             }
             Some(HitTarget::AgentPreviewPickerItem(key)) => {
@@ -1445,8 +1443,6 @@ impl App {
         } else {
             current - 1
         };
-        self.agent_preview_picker_open = false;
-        self.reset_agent_preview_prompt();
         self.select_agent_preview(index);
     }
 
@@ -1454,13 +1450,7 @@ impl App {
         let Some(key) = self.herdr.agent_key(index) else {
             return;
         };
-        self.agent_preview_selection = Some(key.clone());
-        self.agent_preview_scheduled_run = None;
-        self.agent_preview_transcript_scroll = None;
-        self.agent_preview_message_selection = None;
-        self.agent_preview_expanded_requests = None;
-        self.agent_preview_picker_open = false;
-        self.reset_agent_preview_prompt();
+        self.agent_preview.select_agent(key.clone());
         self.hovered_hit_target = self
             .herdr
             .agent_user_messages(index)
@@ -1487,18 +1477,18 @@ impl App {
             Some(HitTarget::AgentPreviewModalClose) => self.close_agent_preview_modal(),
             Some(HitTarget::AgentPreviewPrompt(key)) => {
                 if self.herdr.agent_index(&key).is_some() {
-                    self.agent_preview_selection = Some(key);
+                    self.agent_preview.focus_agent(key);
                     self.focus_agent_preview_prompt();
                 }
             }
             Some(HitTarget::AgentPreviewScheduledPrompt(run_id)) => {
-                if self.agent_preview_scheduled_run == Some(run_id) {
+                if self.agent_preview.scheduled_run == Some(run_id) {
                     self.focus_agent_preview_prompt();
                 }
             }
             Some(HitTarget::AgentPreviewPromptDelivery(key)) => {
                 if self.herdr.agent_index(&key).is_some() {
-                    self.agent_preview_selection = Some(key);
+                    self.agent_preview.focus_agent(key);
                     self.toggle_agent_preview_prompt_delivery();
                 }
             }
@@ -1509,8 +1499,7 @@ impl App {
             }) => self.toggle_agent_preview_request(agent, message, request),
             Some(HitTarget::AgentPreviewPicker(key)) => {
                 if self.herdr.agent_index(&key).is_some() {
-                    self.agent_preview_selection = Some(key);
-                    self.agent_preview_picker_open = !self.agent_preview_picker_open;
+                    self.agent_preview.toggle_picker(key);
                 }
             }
             Some(HitTarget::AgentPreviewPickerItem(key)) => {
@@ -1734,25 +1723,12 @@ impl App {
         else {
             return;
         };
-        let selected = if forward {
-            message.saturating_add(1).min(message_count - 1)
-        } else {
-            message.saturating_sub(1)
-        };
-        if selected == message {
+        let Some(selected) =
+            self.agent_preview
+                .select_message(key.clone(), message_count, message, forward)
+        else {
             return;
-        }
-        self.agent_preview_message_selection =
-            (selected + 1 < message_count).then(|| AgentPreviewMessageSelection {
-                agent: key.clone(),
-                message: selected,
-            });
-        self.agent_preview_expanded_requests = None;
-        self.agent_preview_transcript_scroll = Some(AgentPreviewTranscriptScroll {
-            agent: key.clone(),
-            message: selected,
-            offset: 0,
-        });
+        };
         self.hovered_hit_target = Some(HitTarget::AgentTooltip {
             agent: key,
             message: selected,
@@ -1774,30 +1750,7 @@ impl App {
     }
 
     fn toggle_agent_preview_request(&mut self, key: AgentKey, message: usize, request: usize) {
-        let same_scope = self
-            .agent_preview_expanded_requests
-            .as_ref()
-            .is_some_and(|expanded| expanded.agent == key && expanded.message == message);
-        if !same_scope {
-            self.agent_preview_expanded_requests = Some(AgentPreviewExpandedRequests {
-                agent: key,
-                message,
-                requests: vec![request],
-            });
-            return;
-        }
-        let Some(expanded) = self.agent_preview_expanded_requests.as_mut() else {
-            return;
-        };
-        if let Some(index) = expanded
-            .requests
-            .iter()
-            .position(|expanded| *expanded == request)
-        {
-            expanded.requests.remove(index);
-        } else {
-            expanded.requests.push(request);
-        }
+        self.agent_preview.toggle_request(key, message, request);
     }
 
     pub(super) fn scroll_agent_preview_by(&mut self, delta: isize) {
@@ -1831,21 +1784,12 @@ impl App {
         }) else {
             return;
         };
-        let offset = self
-            .agent_preview_transcript_scroll
-            .as_ref()
-            .filter(|scroll| scroll.agent == key && scroll.message == message)
-            .map_or(self.regions.agent_preview_scroll_max, |scroll| {
-                scroll.offset
-            })
-            .saturating_add_signed(delta)
-            .min(self.regions.agent_preview_scroll_max);
-        self.agent_preview_transcript_scroll = (offset < self.regions.agent_preview_scroll_max)
-            .then_some(AgentPreviewTranscriptScroll {
-                agent: key,
-                message,
-                offset,
-            });
+        self.agent_preview.scroll_transcript(
+            key,
+            message,
+            delta,
+            self.regions.agent_preview_scroll_max,
+        );
     }
 
     fn scroll_commit(&mut self, delta: isize, wheel: bool) {

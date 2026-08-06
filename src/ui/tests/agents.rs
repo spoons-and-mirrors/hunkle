@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::{
     AgentCardClickAction, AgentKey, AgentPromptDelivery, AgentRequestPartPreview,
-    AgentRequestPreview, ScheduledRun, ScheduledRunStatus, ScheduledTask,
+    AgentRequestPreview, AgentUserMessage, ScheduledRun, ScheduledRunStatus, ScheduledTask,
 };
 use std::path::PathBuf;
 
@@ -115,7 +115,7 @@ fn control_click_opens_the_live_agent_preview_modal() {
         modifiers: KeyModifiers::NONE,
     });
     assert_eq!(
-        app.agent_preview_prompt_delivery,
+        app.agent_preview.prompt_delivery,
         AgentPromptDelivery::OnIdle
     );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -136,14 +136,14 @@ fn control_click_opens_the_live_agent_preview_modal() {
         row: prompt.y,
         modifiers: KeyModifiers::NONE,
     });
-    assert!(app.agent_preview_prompt_focused);
+    assert!(app.agent_preview.prompt_focused);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
-    assert_eq!(app.agent_preview_prompt.text(), "\n\n\n");
+    assert_eq!(app.agent_preview.prompt.text(), "\n\n\n");
     app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     app.handle_paste("Please check\nthe tests");
-    assert_eq!(app.agent_preview_prompt.text(), "Please check\nthe tests");
+    assert_eq!(app.agent_preview.prompt.text(), "Please check\nthe tests");
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let grown_prompt = app
         .regions
@@ -159,11 +159,11 @@ fn control_click_opens_the_live_agent_preview_modal() {
         "›"
     );
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-    assert!(app.agent_preview_prompt.text().is_empty());
+    assert!(app.agent_preview.prompt.text().is_empty());
     assert!(!app.should_quit);
     app.handle_paste("Wait for idle");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(!app.agent_preview_prompt_focused);
+    assert!(!app.agent_preview.prompt_focused);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(screen_text(&terminal).contains("waiting for idle"));
     assert!(
@@ -490,7 +490,7 @@ fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewi
     let mut app = App::new(root.to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+    app.scheduled_tasks.set_tasks_for_test(vec![ScheduledTask {
         id: 7,
         title: "Review".to_owned(),
         description: String::new(),
@@ -511,7 +511,7 @@ fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewi
         .unwrap()
         .as_millis()
         .saturating_sub(120_000) as i64;
-    app.herdr.set_scheduled_runs_for_test(
+    app.scheduled_tasks.set_runs_for_test(
         (1..=12)
             .map(|id| ScheduledRun {
                 id,
@@ -552,7 +552,7 @@ fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewi
     }));
     click(&mut app, card.x, card.y);
     assert_eq!(app.mode, Mode::AgentPreview);
-    assert_eq!(app.agent_preview_scheduled_run, Some(run_id));
+    assert_eq!(app.agent_preview.scheduled_run, Some(run_id));
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
@@ -581,8 +581,8 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.herdr.set_scheduled_tasks_for_test(Vec::new());
-    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+    app.scheduled_tasks.set_tasks_for_test(Vec::new());
+    app.scheduled_tasks.set_runs_for_test(vec![ScheduledRun {
         id: 17,
         task_id: 7,
         created_at_ms: 1,
@@ -593,17 +593,27 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
         session_id: Some("ses_test".to_owned()),
         error: None,
     }]);
-    app.herdr.set_scheduled_conversation_for_test(
+    app.agent_preview.set_scheduled_conversation_for_test(
         "ses_test",
-        "one user message",
-        &(0..100)
-            .map(|line| format!("response line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        vec![AgentUserMessage {
+            text: "one user message".to_owned(),
+            requests: vec![AgentRequestPreview {
+                parts: vec![AgentRequestPartPreview::Text(
+                    (0..100)
+                        .map(|line| format!("response line {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )],
+                reasoning_active: false,
+                duration_ms: None,
+                reasoning_duration_ms: None,
+                tool_call_count: 0,
+            }],
+        }],
     );
     // Exercise the scheduled fallback while retaining the authoritative observed agent.
     app.herdr.agents.clear();
-    app.agent_preview_scheduled_run = Some(17);
+    app.agent_preview.open_scheduled_run(17, Mode::Normal);
     app.mode = Mode::AgentPreview;
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
 
@@ -614,8 +624,8 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
             .hit_target_rect(HitTarget::AgentPreviewScheduledPrompt(17))
             .is_some()
     );
-    assert!(app.scheduler.conversation_scroll_max > 0);
-    assert_eq!(app.scheduler.conversation_scroll, None);
+    assert!(app.agent_preview.scheduled_scroll_max() > 0);
+    assert_eq!(app.agent_preview.scheduled_scroll(), None);
     let transcript = app
         .regions
         .scroll_target_rect(ScrollTarget::SchedulerConversation)
@@ -626,7 +636,7 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
         row: transcript.y,
         modifiers: KeyModifiers::NONE,
     });
-    assert!(app.scheduler.conversation_scroll.is_some());
+    assert!(app.agent_preview.scheduled_scroll().is_some());
 }
 
 #[test]
@@ -1202,10 +1212,10 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
             })
             .is_none()
     );
-    let build_counts = app.agent_transcript_presentation.build_counts_for_test();
+    let build_counts = app.agent_preview.presentation.build_counts_for_test();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
-        app.agent_transcript_presentation.build_counts_for_test(),
+        app.agent_preview.presentation.build_counts_for_test(),
         build_counts
     );
     for _ in 0..10 {

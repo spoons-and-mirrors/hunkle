@@ -321,8 +321,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::AgentPreview => {
             dim(frame);
             let regions = overlays::draw_agent_preview_modal(frame, app, profile);
-            if app.agent_preview_scheduled_run.is_some() && app.agent_preview_index().is_none() {
-                app.scheduler.conversation_scroll_max = regions.scroll_max;
+            if app.agent_preview.scheduled_run.is_some() && app.agent_preview_index().is_none() {
+                app.agent_preview
+                    .set_scheduled_scroll_max(regions.scroll_max);
             } else {
                 app.regions.agent_preview_scroll_max = regions.scroll_max;
                 app.regions.agent_preview_scroll = regions.scroll;
@@ -522,10 +523,8 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
         (key_label(ShortcutAction::OpenSettings), "Settings"),
         (key_label(ShortcutAction::OpenHelp), "Help"),
     ]);
-    let schedule_index = app.herdr_available().then(|| {
-        labels.push(("F4".to_owned(), "Schedule"));
-        labels.len() - 1
-    });
+    labels.push(("F4".to_owned(), "Schedule"));
+    let schedule_index = labels.len() - 1;
 
     let total_width = labels.iter().fold(0_u16, |width, (key, label)| {
         let label_width = if compact {
@@ -617,7 +616,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
     app.regions.explorer = rects.get(offset + 2).copied();
     app.regions.settings = rects.get(offset + 3).copied();
     app.regions.help = rects.get(offset + 4).copied();
-    if let Some(rect) = schedule_index.and_then(|index| rects.get(index).copied()) {
+    if let Some(rect) = rects.get(schedule_index).copied() {
         app.regions
             .register_hit_target(HitTarget::HeaderSchedule, rect);
     }

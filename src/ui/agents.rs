@@ -16,7 +16,7 @@ use crate::app::{
     AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey, AgentListMode,
     AgentPromptDelivery, AgentPromptOutcome, AgentRequestPartPreview, AgentRequestPreview,
     AgentStatus, AgentTranscript, AgentUserMessage, HerdrSession, HitTarget, LinkedWorktreeCatalog,
-    ScheduledRunStatus, SchedulerHitTarget, Settings, TextInput,
+    ScheduledRun, ScheduledRunStatus, ScheduledTask, SchedulerHitTarget, Settings, TextInput,
 };
 use crate::theme::Palette;
 
@@ -211,6 +211,8 @@ impl AgentTranscriptCacheKey {
 pub(super) fn draw(
     frame: &mut Frame<'_>,
     herdr: &mut HerdrSession,
+    scheduled_tasks: &[ScheduledTask],
+    scheduled_runs: &[ScheduledRun],
     linked_worktrees: &LinkedWorktreeCatalog,
     settings: &Settings,
     header: Rect,
@@ -226,7 +228,7 @@ pub(super) fn draw(
     let mode = herdr.agent_list_mode();
     let (section_name, count, toggle_label) = match mode {
         AgentListMode::Agents => ("AGENTS", herdr.agents.len(), " SCHEDULED "),
-        AgentListMode::Scheduled => ("SCHEDULED", herdr.scheduled_runs().len(), " STASH "),
+        AgentListMode::Scheduled => ("SCHEDULED", scheduled_runs.len(), " STASH "),
         AgentListMode::Stash => ("STASHED", herdr.stashed_agents().len(), " AGENTS "),
     };
     let toggle_width = u16::try_from(UnicodeWidthStr::width(toggle_label)).unwrap_or(0);
@@ -290,8 +292,15 @@ pub(super) fn draw(
     match mode {
         AgentListMode::Agents => {}
         AgentListMode::Scheduled => {
-            let animation_presented =
-                draw_scheduled_runs(frame, herdr, list, hovered, &mut targets);
+            let animation_presented = draw_scheduled_runs(
+                frame,
+                herdr,
+                scheduled_tasks,
+                scheduled_runs,
+                list,
+                hovered,
+                &mut targets,
+            );
             return (targets, animation_presented);
         }
         AgentListMode::Stash => {
@@ -473,11 +482,13 @@ pub(super) fn draw(
 fn draw_scheduled_runs(
     frame: &mut Frame<'_>,
     herdr: &mut HerdrSession,
+    scheduled_tasks: &[ScheduledTask],
+    scheduled_runs: &[ScheduledRun],
     list: Rect,
     hovered: Option<HitTarget>,
     targets: &mut Vec<(HitTarget, Rect)>,
 ) -> bool {
-    if herdr.scheduled_runs().is_empty() {
+    if scheduled_runs.is_empty() {
         frame.render_widget(
             Paragraph::new("  No scheduled runs").style(
                 Style::default()
@@ -501,15 +512,14 @@ fn draw_scheduled_runs(
     let viewport = usize::from((card_list.height + card_gap) / item_step).max(1);
     let scroll = herdr
         .scheduled_run_scroll
-        .min(herdr.scheduled_runs().len().saturating_sub(viewport));
+        .min(scheduled_runs.len().saturating_sub(viewport));
     let hovered_run = match hovered {
         Some(HitTarget::AgentScheduledRun(run_id)) => Some(run_id),
         _ => None,
     };
     let mut last_card = None;
     let mut animation_presented = false;
-    for (screen_row, run) in herdr
-        .scheduled_runs()
+    for (screen_row, run) in scheduled_runs
         .iter()
         .skip(scroll)
         .take(viewport)
@@ -538,10 +548,7 @@ fn draw_scheduled_runs(
             );
         }
         fill(frame, full_row_area, background);
-        let task = herdr
-            .scheduled_tasks()
-            .iter()
-            .find(|task| task.id == run.task_id);
+        let task = scheduled_tasks.iter().find(|task| task.id == run.task_id);
         let title = task.map_or_else(
             || format!("Scheduled run #{}", run.id),
             |task| task.title.clone(),

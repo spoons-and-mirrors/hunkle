@@ -18,7 +18,7 @@ pub(super) fn layout_agents_pane(
     let mode = app.herdr.agent_list_mode();
     let agent_count = match mode {
         AgentListMode::Agents => app.herdr.agent_card_count(),
-        AgentListMode::Scheduled => app.herdr.scheduled_runs().len(),
+        AgentListMode::Scheduled => app.scheduled_tasks.runs().len(),
         AgentListMode::Stash => app.herdr.stashed_agents().len(),
     };
     let automatic_count = agent_count.min(10);
@@ -90,6 +90,8 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
     let (targets, animation_presented) = agents::draw(
         frame,
         &mut app.herdr,
+        app.scheduled_tasks.tasks(),
+        app.scheduled_tasks.runs(),
         &app.linked_worktrees,
         &app.settings,
         header,

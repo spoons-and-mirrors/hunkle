@@ -1,5 +1,202 @@
+mod service;
+
 use super::*;
+pub(crate) use service::{
+    ProjectTaskStatus, ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination,
+    ScheduledTaskEdit,
+};
 use std::collections::HashSet;
+
+pub(crate) struct ScheduledTasks {
+    service: Option<service::SchedulerService>,
+    open_error: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct ScheduledTasksPoll {
+    pub(crate) changed: bool,
+    pub(crate) notice: Option<String>,
+}
+
+pub(crate) struct LegacyScheduledRunBinding {
+    pub(crate) run_id: i64,
+    pub(crate) agent: Option<(String, String)>,
+    pub(crate) session_id: Option<String>,
+}
+
+impl ScheduledTasks {
+    #[cfg(not(test))]
+    pub(crate) fn open(
+        config_dir: Option<&Path>,
+        discord_webhooks: Vec<DiscordWebhookConfig>,
+    ) -> Self {
+        let files_root = crate::paths::data_root().map_err(|error| error.to_string());
+        match files_root.and_then(|files_root| {
+            service::SchedulerService::open(
+                config_dir.map(|path| path.join("scheduler.sqlite3")),
+                Some(files_root),
+                discord_webhooks,
+            )
+        }) {
+            Ok(service) => Self {
+                service: Some(service),
+                open_error: None,
+            },
+            Err(error) => Self {
+                service: None,
+                open_error: Some(error),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn memory() -> Self {
+        Self {
+            service: Some(service::SchedulerService::open(None, None, Vec::new()).unwrap()),
+            open_error: None,
+        }
+    }
+
+    pub(crate) fn is_available(&self) -> bool {
+        self.service.is_some()
+    }
+
+    pub(crate) fn tasks(&self) -> &[ScheduledTask] {
+        self.service
+            .as_ref()
+            .map_or(&[], |service| service.tasks.as_slice())
+    }
+
+    pub(crate) fn runs(&self) -> &[ScheduledRun] {
+        self.service
+            .as_ref()
+            .map_or(&[], |service| service.runs.as_slice())
+    }
+
+    pub(crate) fn poll(&mut self) -> ScheduledTasksPoll {
+        let Some(service) = self.service.as_mut() else {
+            return ScheduledTasksPoll {
+                notice: self
+                    .open_error
+                    .take()
+                    .map(|error| format!("Could not open scheduler: {error}")),
+                ..ScheduledTasksPoll::default()
+            };
+        };
+        let (changed, notice) = service.poll_completions();
+        ScheduledTasksPoll {
+            changed,
+            notice: notice.map(|notice| format!("Scheduler: {notice}")),
+        }
+    }
+
+    fn service(&self) -> Result<&service::SchedulerService, String> {
+        self.service
+            .as_ref()
+            .ok_or_else(|| "scheduler is unavailable".to_owned())
+    }
+
+    pub(crate) fn save_task(&self, id: Option<i64>, edit: ScheduledTaskEdit) -> Result<(), String> {
+        self.service()?.save_task(id, edit)
+    }
+
+    pub(crate) fn configure_project_task(
+        &self,
+        id: i64,
+        discord_webhook_id: String,
+    ) -> Result<(), String> {
+        self.service()?
+            .configure_project_task(id, discord_webhook_id)
+    }
+
+    pub(crate) fn discover_project_tasks(
+        &self,
+        destination: ScheduledTaskDestination,
+        repository_identity: PathBuf,
+    ) -> Result<(), String> {
+        self.service()?
+            .discover_project_tasks(destination, repository_identity)
+    }
+
+    pub(crate) fn toggle_task(&self, id: i64, enabled: bool) -> Result<(), String> {
+        self.service()?.toggle_task(id, enabled)
+    }
+
+    pub(crate) fn delete_task(&self, id: i64) -> Result<(), String> {
+        self.service()?.delete_task(id)
+    }
+
+    pub(crate) fn run_now(&self, id: i64) -> Result<(), String> {
+        self.service()?.run_now(id)
+    }
+
+    pub(crate) fn refresh_run(&self, id: i64) -> Result<(), String> {
+        self.service()?.refresh_run(id)
+    }
+
+    pub(crate) fn prompt_run(&self, id: i64, prompt: String) -> Result<(), String> {
+        self.service()?.prompt_run(id, prompt)
+    }
+
+    pub(crate) fn configure_discord_webhooks(
+        &self,
+        webhooks: Vec<DiscordWebhookConfig>,
+    ) -> Result<(), String> {
+        let Some(service) = self.service.as_ref() else {
+            return Ok(());
+        };
+        service.configure_discord_webhooks(webhooks)
+    }
+
+    pub(crate) fn test_discord_webhook(&self, channel: String) -> Result<(), String> {
+        self.service()?.test_discord_webhook(channel)
+    }
+
+    pub(crate) fn bind_agent(&mut self, id: i64, pane_id: String, terminal_id: String) {
+        if let Some(service) = self.service.as_mut() {
+            service.bind_agent(id, pane_id, terminal_id);
+        }
+    }
+
+    pub(crate) fn bind_session(&mut self, id: i64, session_id: String) {
+        if let Some(service) = self.service.as_mut() {
+            service.bind_session(id, session_id);
+        }
+    }
+
+    pub(crate) fn bind_legacy_agents(&mut self, herdr: &HerdrSession) {
+        for binding in herdr.legacy_scheduled_run_bindings(self.tasks(), self.runs()) {
+            if let Some((pane_id, terminal_id)) = binding.agent {
+                self.bind_agent(binding.run_id, pane_id, terminal_id);
+            }
+            if let Some(session_id) = binding.session_id {
+                self.bind_session(binding.run_id, session_id);
+            }
+        }
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        if let Some(service) = self.service.as_mut() {
+            service.shutdown();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_tasks_for_test(&mut self, tasks: Vec<ScheduledTask>) {
+        if self.service.is_none() {
+            *self = Self::memory();
+        }
+        self.service.as_mut().unwrap().tasks = tasks;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_runs_for_test(&mut self, runs: Vec<ScheduledRun>) {
+        if self.service.is_none() {
+            *self = Self::memory();
+        }
+        self.service.as_mut().unwrap().runs = runs;
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SchedulerSurface {
@@ -405,10 +602,6 @@ pub(crate) struct SchedulerState {
     pub(crate) composer: Option<ScheduledTaskComposer>,
     pub(crate) task_scroll: usize,
     pub(crate) run_scroll: usize,
-    pub(crate) conversation_scroll: Option<usize>,
-    pub(crate) conversation_scroll_max: usize,
-    pub(crate) conversation_message: Option<usize>,
-    pub(crate) conversation_expanded_requests: Vec<usize>,
     pub(crate) runs_focused: bool,
     pub(crate) error: Option<String>,
     pub(crate) pending_worktree: Option<usize>,
@@ -535,7 +728,7 @@ impl App {
     }
 
     pub(crate) fn open_scheduler(&mut self) {
-        if !self.herdr_available() {
+        if !self.scheduled_tasks.is_available() {
             return;
         }
         self.header_picker.close();
@@ -558,7 +751,7 @@ impl App {
     }
 
     pub(crate) fn discover_active_project_tasks(&mut self) {
-        if !self.herdr.is_enabled() {
+        if !self.scheduled_tasks.is_available() {
             return;
         }
         let Some(repository) = self.repository() else {
@@ -586,7 +779,7 @@ impl App {
                     .to_string_lossy()
                     .into_owned()
             });
-        if let Err(error) = self.herdr.discover_project_tasks(
+        if let Err(error) = self.scheduled_tasks.discover_project_tasks(
             ScheduledTaskDestination {
                 path: root,
                 repository,
@@ -619,7 +812,7 @@ impl App {
     }
 
     pub(crate) fn sync_scheduler_selection(&mut self) {
-        let tasks = self.herdr.scheduled_tasks();
+        let tasks = self.scheduled_tasks.tasks();
         if !tasks
             .iter()
             .any(|task| Some(task.id) == self.scheduler.selected_task_id)
@@ -641,7 +834,6 @@ impl App {
         self.scheduler.composer = None;
         self.scheduler.error = None;
         self.mode = Mode::Normal;
-        self.herdr.clear_scheduled_conversation();
     }
 
     pub(crate) fn begin_scheduled_task(&mut self) {
@@ -679,8 +871,8 @@ impl App {
         let Some(selected) = self.scheduler.selected_task_id else {
             return Vec::new();
         };
-        self.herdr
-            .scheduled_runs()
+        self.scheduled_tasks
+            .runs()
             .iter()
             .filter(|run| run.task_id == selected)
             .collect()
@@ -688,7 +880,7 @@ impl App {
 
     fn select_default_scheduled_run(&mut self) {
         let task_id = self.scheduler.selected_task_id;
-        let runs = self.herdr.scheduled_runs();
+        let runs = self.scheduled_tasks.runs();
         let selected = self.scheduler.selected_run_id;
         if !runs
             .iter()
@@ -703,8 +895,8 @@ impl App {
 
     pub(crate) fn select_scheduled_task(&mut self, id: i64) {
         if !self
-            .herdr
-            .scheduled_tasks()
+            .scheduled_tasks
+            .tasks()
             .iter()
             .any(|task| task.id == id)
         {
@@ -722,8 +914,8 @@ impl App {
 
     pub(crate) fn select_scheduled_run(&mut self, id: i64) {
         if self
-            .herdr
-            .scheduled_runs()
+            .scheduled_tasks
+            .runs()
             .iter()
             .any(|run| Some(run.task_id) == self.scheduler.selected_task_id && run.id == id)
         {
@@ -775,16 +967,7 @@ impl App {
                 self.open_selected_scheduled_run_conversation();
             }
             SchedulerHitTarget::ConversationRequest(request) => {
-                if let Some(index) = self
-                    .scheduler
-                    .conversation_expanded_requests
-                    .iter()
-                    .position(|value| *value == request)
-                {
-                    self.scheduler.conversation_expanded_requests.remove(index);
-                } else {
-                    self.scheduler.conversation_expanded_requests.push(request);
-                }
+                self.agent_preview.toggle_scheduled_request(request);
             }
         }
     }
@@ -1063,7 +1246,7 @@ impl App {
         if composer.project {
             let task_id = composer.task_id.unwrap();
             match self
-                .herdr
+                .scheduled_tasks
                 .configure_project_task(task_id, composer.discord_webhook_id())
             {
                 Ok(()) => {
@@ -1111,7 +1294,7 @@ impl App {
             interval_minutes: composer.schedule.text().parse().unwrap_or(0),
         };
         let task_id = composer.task_id;
-        match self.herdr.save_scheduled_task(task_id, edit) {
+        match self.scheduled_tasks.save_task(task_id, edit) {
             Ok(()) => {
                 self.scheduler.composer = None;
                 self.scheduler.error = None;
@@ -1171,8 +1354,8 @@ impl App {
 
     pub(crate) fn selected_scheduled_task(&self) -> Option<&ScheduledTask> {
         let selected = self.scheduler.selected_task_id?;
-        self.herdr
-            .scheduled_tasks()
+        self.scheduled_tasks
+            .tasks()
             .iter()
             .find(|task| task.id == selected)
     }
@@ -1184,24 +1367,21 @@ impl App {
         else {
             return;
         };
-        self.scheduler.error = self.herdr.toggle_scheduled_task(id, enabled).err();
+        self.scheduler.error = self.scheduled_tasks.toggle_task(id, enabled).err();
     }
 
     fn run_selected_scheduled_task(&mut self) {
         let Some(id) = self.selected_scheduled_task().map(|task| task.id) else {
             return;
         };
-        self.scheduler.error = self.herdr.run_scheduled_task_now(id).err();
+        self.scheduler.error = self.scheduled_tasks.run_now(id).err();
         if self.scheduler.error.is_none() {
             // The next scheduler update contains the newly claimed run at the front.
             self.scheduler.selected_run_id = None;
             self.scheduler.run_scroll = 0;
             self.scheduler.surface = SchedulerSurface::Detail;
             self.scheduler.preview_pending = true;
-            self.scheduler.conversation_scroll = None;
-            self.scheduler.conversation_message = None;
-            self.scheduler.conversation_expanded_requests.clear();
-            self.herdr.clear_scheduled_conversation();
+            self.agent_preview.clear_scheduled_conversation();
         }
     }
 
@@ -1209,7 +1389,7 @@ impl App {
         let Some(id) = self.selected_scheduled_task().map(|task| task.id) else {
             return;
         };
-        if let Err(error) = self.herdr.delete_scheduled_task(id) {
+        if let Err(error) = self.scheduled_tasks.delete_task(id) {
             self.scheduler.error = Some(error);
             return;
         }
@@ -1223,7 +1403,7 @@ impl App {
         let Some(id) = self.scheduler.selected_run_id else {
             return;
         };
-        self.scheduler.error = self.herdr.refresh_scheduled_run(id).err();
+        self.scheduler.error = self.scheduled_tasks.refresh_run(id).err();
     }
 
     fn open_selected_scheduled_run_conversation(&mut self) {
@@ -1260,8 +1440,8 @@ impl App {
 
     pub(super) fn scheduled_run_promotion(&self, run_id: i64) -> Result<(PathBuf, String), String> {
         let run = self
-            .herdr
-            .scheduled_runs()
+            .scheduled_tasks
+            .runs()
             .iter()
             .find(|run| run.id == run_id)
             .ok_or_else(|| "Scheduled run is no longer available".to_owned())?;
@@ -1270,8 +1450,8 @@ impl App {
             .clone()
             .ok_or_else(|| "Scheduled run has not started an OpenCode session yet".to_owned())?;
         let task = self
-            .herdr
-            .scheduled_tasks()
+            .scheduled_tasks
+            .tasks()
             .iter()
             .find(|task| task.id == run.task_id)
             .ok_or_else(|| "Scheduled task is no longer available".to_owned())?;
@@ -1280,8 +1460,8 @@ impl App {
 
     fn open_scheduled_run_conversation(&mut self, run_id: i64, return_mode: Mode) {
         let Some(run) = self
-            .herdr
-            .scheduled_runs()
+            .scheduled_tasks
+            .runs()
             .iter()
             .find(|run| run.id == run_id)
             .cloned()
@@ -1289,15 +1469,17 @@ impl App {
             self.notice = Some("Scheduled run is no longer available".to_owned());
             return;
         };
+        self.agent_preview.open_scheduled_run(run.id, return_mode);
         if let Some(session_id) = run.session_id.as_deref() {
-            self.herdr.refresh_scheduled_conversation(session_id);
+            self.agent_preview
+                .refresh_scheduled_conversation(session_id);
         } else if let Some(task) = self
-            .herdr
-            .scheduled_tasks()
+            .scheduled_tasks
+            .tasks()
             .iter()
             .find(|task| task.id == run.task_id)
         {
-            self.herdr.resolve_scheduled_run_session(
+            self.agent_preview.request_scheduled_session(
                 run.id,
                 task.destination.clone(),
                 task.prompt.clone(),
@@ -1305,13 +1487,7 @@ impl App {
             );
         }
         self.scheduler.surface = SchedulerSurface::Detail;
-        self.scheduler.conversation_scroll = None;
-        self.scheduler.conversation_message = None;
-        self.scheduler.conversation_expanded_requests.clear();
         self.scheduler.error = None;
-        self.agent_preview_scheduled_run = Some(run.id);
-        self.agent_preview_return_mode = return_mode;
-        self.agent_preview_picker_open = false;
         self.mode = Mode::AgentPreview;
     }
 
@@ -1335,7 +1511,7 @@ impl App {
             }
             return;
         }
-        let tasks = self.herdr.scheduled_tasks();
+        let tasks = self.scheduled_tasks.tasks();
         let current = self
             .scheduler
             .selected_task_id
@@ -1391,37 +1567,12 @@ impl App {
     }
 
     pub(crate) fn scroll_scheduler_conversation(&mut self, delta: isize) {
-        let current = self
-            .scheduler
-            .conversation_scroll
-            .unwrap_or(self.scheduler.conversation_scroll_max);
-        self.scheduler.conversation_scroll = Some(
-            current
-                .saturating_add_signed(delta)
-                .min(self.scheduler.conversation_scroll_max),
-        );
+        self.agent_preview.scroll_scheduled(delta);
     }
 
     pub(crate) fn move_scheduler_conversation_message(&mut self, delta: isize) {
-        let count = self
-            .scheduler
-            .selected_run_id
-            .and_then(|id| self.herdr.scheduled_runs().iter().find(|run| run.id == id))
-            .and_then(|run| run.session_id.as_deref())
-            .and_then(|session| self.herdr.scheduled_conversation(session))
-            .map(<[_]>::len)
-            .unwrap_or(0);
-        if count == 0 {
-            return;
-        }
-        let current = self.scheduler.conversation_message.unwrap_or(count - 1);
-        self.scheduler.conversation_message = Some(
-            current
-                .saturating_add_signed(delta)
-                .min(count.saturating_sub(1)),
-        );
-        self.scheduler.conversation_scroll = None;
-        self.scheduler.conversation_expanded_requests.clear();
+        let count = self.agent_preview.scheduled_message_count();
+        self.agent_preview.move_scheduled_message(delta, count);
     }
 
     fn toggle_scheduler_prompt_expansion(&mut self) {

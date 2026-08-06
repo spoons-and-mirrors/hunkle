@@ -12,27 +12,24 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
+#[cfg(test)]
+use super::scheduler;
 use super::{
     AgentPaneDirection, AgentPromptDelivery, LinkedWorktreeCandidate, LinkedWorktreeObservation,
-    settings::AgentTimeDisplay,
+    ScheduledRun, ScheduledTask, opencode_session as latest_message,
+    scheduler::LegacyScheduledRunBinding, settings::AgentTimeDisplay,
 };
 use crate::filesystem::atomic_write;
 
 mod client;
-mod latest_message;
-mod scheduler;
 mod stash;
 mod timings;
 
 pub(crate) use stash::StashedAgent;
 
-pub(crate) use client::HerdrPaneLayout;
+pub(crate) use client::{HerdrPaneLayout, SchedulerObserveResult};
 #[cfg(test)]
-pub(crate) use client::HerdrPaneRect;
-pub(crate) use scheduler::{
-    ProjectTaskStatus, ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination,
-    ScheduledTaskEdit,
-};
+pub(crate) use client::{HerdrPaneRect, SchedulerLaunchRequest, SchedulerLaunchResult};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const AGENT_MESSAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -142,6 +139,7 @@ impl OpenCodeConversationIdentity {
         })
     }
 
+    #[cfg(test)]
     fn from_session_id(session_id: &str) -> Self {
         Self {
             session_id: session_id.to_owned(),
@@ -357,14 +355,6 @@ enum Completion {
         key: AgentTimingKey,
         result: Result<(), String>,
     },
-    ScheduledSession {
-        run_id: i64,
-        result: Result<String, String>,
-    },
-    ScheduledConversation {
-        identity: OpenCodeConversationIdentity,
-        result: Result<latest_message::TranscriptFetch, String>,
-    },
 }
 
 struct PendingAgentStash {
@@ -411,10 +401,6 @@ pub(crate) struct AgentRequestPreview {
     pub(crate) duration_ms: Option<u64>,
     pub(crate) reasoning_duration_ms: Option<u64>,
     pub(crate) tool_call_count: u64,
-}
-
-fn scheduled_conversation_identity(session_id: &str) -> OpenCodeConversationIdentity {
-    OpenCodeConversationIdentity::from_session_id(session_id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,11 +451,6 @@ pub(crate) struct HerdrSession {
     agent_prompts_on_idle: HashMap<AgentTimingKey, String>,
     agent_prompt_errors: HashMap<AgentTimingKey, String>,
     agent_prompt_notice: Option<String>,
-    scheduled_preview_identity: Option<OpenCodeConversationIdentity>,
-    scheduled_session_requests: HashSet<i64>,
-    scheduled_session_refreshes: HashMap<i64, Instant>,
-    scheduled_session_errors: HashMap<i64, String>,
-    scheduled_conversation_errors: HashMap<OpenCodeConversationIdentity, String>,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
     next_refresh: Instant,
@@ -489,15 +470,10 @@ pub(crate) struct HerdrSession {
     agent_stash_running: bool,
     pending_agent_stash: Option<PendingAgentStash>,
     stashed_pane_ids: HashSet<String>,
-    scheduler: Option<scheduler::SchedulerService>,
-    scheduler_error: Option<String>,
 }
 
 impl HerdrSession {
-    pub(crate) fn detect(
-        config_dir: Option<&Path>,
-        discord_webhooks: Vec<crate::app::DiscordWebhookConfig>,
-    ) -> Self {
+    pub(crate) fn detect(config_dir: Option<&Path>) -> Self {
         #[cfg(test)]
         let environment: Option<client::Environment> = None;
         #[cfg(not(test))]
@@ -520,17 +496,6 @@ impl HerdrSession {
                 session.agent_layouts_path = Some(path);
             }
             session.start_event_listener();
-            let files_root = crate::paths::data_root().map_err(|error| error.to_string());
-            match files_root.and_then(|files_root| {
-                scheduler::SchedulerService::open(
-                    config_dir.map(|path| path.join("scheduler.sqlite3")),
-                    Some(files_root),
-                    discord_webhooks,
-                )
-            }) {
-                Ok(scheduler) => session.scheduler = Some(scheduler),
-                Err(error) => session.scheduler_error = Some(error),
-            }
         }
         session
     }
@@ -566,11 +531,6 @@ impl HerdrSession {
             agent_prompts_on_idle: HashMap::new(),
             agent_prompt_errors: HashMap::new(),
             agent_prompt_notice: None,
-            scheduled_preview_identity: None,
-            scheduled_session_requests: HashSet::new(),
-            scheduled_session_refreshes: HashMap::new(),
-            scheduled_session_errors: HashMap::new(),
-            scheduled_conversation_errors: HashMap::new(),
             sender,
             receiver,
             next_refresh: Instant::now(),
@@ -592,8 +552,6 @@ impl HerdrSession {
             agent_stash_running: false,
             pending_agent_stash: None,
             stashed_pane_ids: HashSet::new(),
-            scheduler: None,
-            scheduler_error: None,
         }
     }
 
@@ -601,188 +559,14 @@ impl HerdrSession {
         self.enabled
     }
 
-    pub(crate) fn scheduled_tasks(&self) -> &[ScheduledTask] {
-        self.scheduler
-            .as_ref()
-            .map_or(&[], |scheduler| scheduler.tasks.as_slice())
-    }
-
-    pub(crate) fn scheduled_runs(&self) -> &[ScheduledRun] {
-        self.scheduler
-            .as_ref()
-            .map_or(&[], |scheduler| scheduler.runs.as_slice())
-    }
-
-    pub(crate) fn save_scheduled_task(
-        &self,
-        id: Option<i64>,
-        edit: ScheduledTaskEdit,
-    ) -> Result<(), String> {
-        self.scheduler_service()?.save_task(id, edit)
-    }
-
-    pub(crate) fn configure_project_task(
-        &self,
-        id: i64,
-        discord_webhook_id: String,
-    ) -> Result<(), String> {
-        self.scheduler_service()?
-            .configure_project_task(id, discord_webhook_id)
-    }
-
-    pub(crate) fn discover_project_tasks(
-        &self,
-        destination: ScheduledTaskDestination,
-        repository_identity: PathBuf,
-    ) -> Result<(), String> {
-        self.scheduler_service()?
-            .discover_project_tasks(destination, repository_identity)
-    }
-
-    pub(crate) fn toggle_scheduled_task(&self, id: i64, enabled: bool) -> Result<(), String> {
-        self.scheduler_service()?.toggle_task(id, enabled)
-    }
-
-    pub(crate) fn delete_scheduled_task(&self, id: i64) -> Result<(), String> {
-        self.scheduler_service()?.delete_task(id)
-    }
-
-    pub(crate) fn run_scheduled_task_now(&self, id: i64) -> Result<(), String> {
-        self.scheduler_service()?.run_now(id)
-    }
-
-    pub(crate) fn refresh_scheduled_run(&self, id: i64) -> Result<(), String> {
-        self.scheduler_service()?.refresh_run(id)
-    }
-
-    pub(crate) fn configure_discord_webhooks(
-        &self,
-        webhooks: Vec<crate::app::DiscordWebhookConfig>,
-    ) -> Result<(), String> {
-        let Some(scheduler) = self.scheduler.as_ref() else {
-            return Ok(());
-        };
-        scheduler.configure_discord_webhooks(webhooks)
-    }
-
-    pub(crate) fn test_discord_webhook(&self, channel: String) -> Result<(), String> {
-        self.scheduler_service()?.test_discord_webhook(channel)
-    }
-
-    pub(crate) fn resolve_scheduled_run_session(
-        &mut self,
-        run_id: i64,
-        directory: PathBuf,
-        prompt: String,
-        run_created_at_ms: i64,
-    ) {
-        let now = Instant::now();
-        if self.scheduled_session_requests.contains(&run_id)
-            || self
-                .scheduled_session_refreshes
-                .get(&run_id)
-                .is_some_and(|refresh| now < *refresh)
-        {
-            return;
-        }
-        self.scheduled_session_requests.insert(run_id);
-        self.scheduled_session_refreshes
-            .insert(run_id, now + AGENT_MESSAGE_REFRESH_INTERVAL);
-        self.scheduled_session_errors.remove(&run_id);
-        let sender = self.sender.clone();
-        thread::spawn(move || {
-            let result = latest_message::resolve_scheduled_session_id(
-                &directory,
-                &prompt,
-                run_created_at_ms,
-            );
-            let _ = sender.send(Completion::ScheduledSession { run_id, result });
-        });
-    }
-
-    pub(crate) fn scheduled_session_error(&self, run_id: i64) -> Option<&str> {
-        self.scheduled_session_errors
-            .get(&run_id)
-            .map(String::as_str)
-    }
-
-    pub(crate) fn request_scheduled_conversation(&mut self, session_id: &str, active: bool) {
-        let identity = scheduled_conversation_identity(session_id);
-        self.scheduled_preview_identity = Some(identity.clone());
-        let now = Instant::now();
-        if (self.latest_user_messages.contains_key(&identity) && !active)
-            || self.latest_user_message_requests.contains(&identity)
-            || self
-                .latest_user_message_refreshes
-                .get(&identity)
-                .is_some_and(|refresh| now < *refresh)
-        {
-            return;
-        }
-        self.latest_user_message_requests.insert(identity.clone());
-        self.latest_user_message_refreshes
-            .insert(identity.clone(), now + AGENT_MESSAGE_REFRESH_INTERVAL);
-        self.scheduled_conversation_errors.remove(&identity);
-        let session_id = session_id.to_owned();
-        let sender = self.sender.clone();
-        thread::spawn(move || {
-            let result = latest_message::fetch(&session_id, false);
-            let _ = sender.send(Completion::ScheduledConversation { identity, result });
-        });
-    }
-
-    pub(crate) fn refresh_scheduled_conversation(&mut self, session_id: &str) {
-        let identity = scheduled_conversation_identity(session_id);
-        self.scheduled_preview_identity = Some(identity.clone());
-        if self.latest_user_message_requests.contains(&identity) {
-            return;
-        }
-        self.latest_user_message_requests.insert(identity.clone());
-        self.latest_user_message_refreshes.remove(&identity);
-        self.scheduled_conversation_errors.remove(&identity);
-        let session_id = session_id.to_owned();
-        let sender = self.sender.clone();
-        thread::spawn(move || {
-            let result = latest_message::fetch(&session_id, false);
-            let _ = sender.send(Completion::ScheduledConversation { identity, result });
-        });
-    }
-
-    pub(crate) fn scheduled_conversation(&self, session_id: &str) -> Option<&[AgentUserMessage]> {
-        self.scheduled_transcript(session_id)
-            .map(|transcript| transcript.messages)
-    }
-
-    pub(crate) fn scheduled_transcript(&self, session_id: &str) -> Option<AgentTranscript<'_>> {
-        let identity = scheduled_conversation_identity(session_id);
-        let (identity, transcript) = self.latest_user_messages.get_key_value(&identity)?;
-        Some(AgentTranscript {
-            identity: identity.session_id.as_str(),
-            revision: transcript.revision,
-            messages: transcript.messages.as_slice(),
-        })
-    }
-
-    pub(crate) fn scheduled_conversation_error(&self, session_id: &str) -> Option<&str> {
-        self.scheduled_conversation_errors
-            .get(&scheduled_conversation_identity(session_id))
-            .map(String::as_str)
-    }
-
-    pub(crate) fn clear_scheduled_conversation(&mut self) {
-        self.scheduled_preview_identity = None;
-    }
-
-    fn scheduler_service(&self) -> Result<&scheduler::SchedulerService, String> {
-        self.scheduler
-            .as_ref()
-            .ok_or_else(|| "scheduler is unavailable".to_owned())
+    pub(crate) fn observe_scheduled_run(
+        pane_id: &str,
+        terminal_id: Option<&str>,
+    ) -> SchedulerObserveResult {
+        client::scheduler_observe(pane_id, terminal_id)
     }
 
     pub(crate) fn shutdown(&mut self) {
-        if let Some(scheduler) = self.scheduler.as_mut() {
-            scheduler.shutdown();
-        }
         if let Some(persistence) = self.agent_timing_persistence.as_mut() {
             persistence.shutdown();
         }
@@ -807,16 +591,6 @@ impl HerdrSession {
             return HerdrSessionPoll::default();
         }
         let mut poll = HerdrSessionPoll::default();
-        if let Some(scheduler) = self.scheduler.as_mut() {
-            let (changed, error) = scheduler.poll_completions();
-            poll.changed |= changed;
-            if let Some(error) = error {
-                poll.notice = Some(format!("Scheduler: {error}"));
-            }
-        }
-        if let Some(error) = self.scheduler_error.take() {
-            poll.notice = Some(format!("Could not open scheduler: {error}"));
-        }
         if let Some(notice) = self.agent_timing_persistence_notice.take() {
             poll.notice = Some(notice);
         }
@@ -1033,44 +807,6 @@ impl HerdrSession {
                         }
                     });
                 }
-                Completion::ScheduledSession { run_id, result } => {
-                    self.scheduled_session_requests.remove(&run_id);
-                    match result {
-                        Ok(session_id) => {
-                            self.scheduled_session_errors.remove(&run_id);
-                            if let Some(scheduler) = self.scheduler.as_mut() {
-                                scheduler.bind_session(run_id, session_id);
-                            }
-                        }
-                        Err(error) => {
-                            self.scheduled_session_errors.insert(run_id, error);
-                        }
-                    }
-                }
-                Completion::ScheduledConversation { identity, result } => {
-                    self.latest_user_message_requests.remove(&identity);
-                    match result {
-                        Ok(latest_message::TranscriptFetch::Changed(messages)) => {
-                            completion_changed = self
-                                .scheduled_conversation_errors
-                                .remove(&identity)
-                                .is_some();
-                            if self.update_transcript(identity, messages) {
-                                completion_changed = true;
-                            }
-                        }
-                        Ok(latest_message::TranscriptFetch::Unchanged) => {
-                            completion_changed = self
-                                .scheduled_conversation_errors
-                                .remove(&identity)
-                                .is_some();
-                        }
-                        Err(error) => {
-                            self.scheduled_conversation_errors.insert(identity, error);
-                            completion_changed = true;
-                        }
-                    }
-                }
             }
             poll.changed |= completion_changed;
         }
@@ -1112,7 +848,6 @@ impl HerdrSession {
             self.agent_prompt_notice =
                 Some("Queued message cancelled because the agent departed".to_owned());
         }
-        self.bind_legacy_scheduled_agents();
         let agents = if self.cross_workspace_agents || self.host_workspace_id.is_none() {
             agents
         } else {
@@ -1129,7 +864,6 @@ impl HerdrSession {
                 }
                 _ => None,
             })
-            .chain(self.scheduled_preview_identity.iter().cloned())
             .collect::<HashSet<_>>();
         self.latest_user_messages
             .retain(|identity, _| active_identities.contains(identity));
@@ -1147,8 +881,6 @@ impl HerdrSession {
             .collect::<HashSet<_>>();
         self.agent_prompt_errors
             .retain(|key, _| active_agent_keys.contains(key));
-        self.scheduled_conversation_errors
-            .retain(|identity, _| active_identities.contains(identity));
         timings::update_snapshot(&mut self.agent_timings, &agents, now_ms);
         if let Some(persistence) = self.agent_timing_persistence.as_ref()
             && let Err(error) = persistence.sync(
@@ -1263,37 +995,6 @@ impl HerdrSession {
         Ok(AgentPromptOutcome::Sending)
     }
 
-    pub(crate) fn prompt_scheduled_run(
-        &mut self,
-        run_id: i64,
-        prompt: String,
-    ) -> Result<(), String> {
-        self.scheduler_service()?.prompt_run(run_id, prompt)
-    }
-
-    pub(crate) fn scheduled_prompt_sending(&self, run_id: i64) -> bool {
-        self.scheduled_runs()
-            .iter()
-            .find(|run| run.id == run_id)
-            .is_some_and(|run| run.status.is_active())
-    }
-
-    pub(crate) fn scheduled_prompt_available(&self, run_id: i64) -> bool {
-        self.scheduled_runs()
-            .iter()
-            .find(|run| run.id == run_id)
-            .is_some_and(|run| run.session_id.is_some())
-    }
-
-    pub(crate) fn scheduled_prompt_error(&self, run_id: i64) -> Option<&str> {
-        self.scheduled_runs()
-            .iter()
-            .find(|run| run.id == run_id)
-            .and_then(|run| run.error.as_deref())
-    }
-
-    pub(crate) fn clear_scheduled_prompt_error(&mut self, _run_id: i64) {}
-
     fn start_agent_prompt(&mut self, key: AgentTimingKey, pane_id: String, prompt: String) {
         self.agent_prompt_requests.insert(key.clone());
         self.agent_prompt_errors.remove(&key);
@@ -1373,13 +1074,12 @@ impl HerdrSession {
         })
     }
 
-    fn bind_legacy_scheduled_agents(&mut self) {
-        let Some(scheduler) = self.scheduler.as_ref() else {
-            return;
-        };
-        let bindings = scheduler
-            .runs
-            .iter()
+    pub(crate) fn legacy_scheduled_run_bindings(
+        &self,
+        tasks: &[ScheduledTask],
+        runs: &[ScheduledRun],
+    ) -> Vec<LegacyScheduledRunBinding> {
+        runs.iter()
             .filter(|run| run.terminal_id.is_none() || run.session_id.is_none())
             .filter_map(|run| {
                 let exact = run.pane_id.as_deref().and_then(|pane_id| {
@@ -1388,7 +1088,7 @@ impl HerdrSession {
                         .find(|agent| agent.pane_id == pane_id)
                 });
                 let agent = exact.or_else(|| {
-                    let task = scheduler.tasks.iter().find(|task| task.id == run.task_id)?;
+                    let task = tasks.iter().find(|task| task.id == run.task_id)?;
                     let name = client::scheduler_agent_name(&format!(
                         "Hunkle: {} #{}",
                         task.title, task.id
@@ -1420,26 +1120,20 @@ impl HerdrSession {
                     }
                     _ => None,
                 };
-                Some((
-                    run.id,
-                    run.terminal_id.is_none(),
-                    agent.pane_id.clone(),
-                    agent.terminal_id.clone(),
-                    run.session_id.is_none().then_some(session_id).flatten(),
-                ))
+                Some(LegacyScheduledRunBinding {
+                    run_id: run.id,
+                    agent: if run.terminal_id.is_none() {
+                        agent
+                            .terminal_id
+                            .clone()
+                            .map(|terminal_id| (agent.pane_id.clone(), terminal_id))
+                    } else {
+                        None
+                    },
+                    session_id: run.session_id.is_none().then_some(session_id).flatten(),
+                })
             })
-            .collect::<Vec<_>>();
-        let Some(scheduler) = self.scheduler.as_mut() else {
-            return;
-        };
-        for (run_id, bind_agent, pane_id, terminal_id, session_id) in bindings {
-            if bind_agent && let Some(terminal_id) = terminal_id {
-                scheduler.bind_agent(run_id, pane_id, terminal_id);
-            }
-            if let Some(session_id) = session_id {
-                scheduler.bind_session(run_id, session_id);
-            }
-        }
+            .collect()
     }
 
     pub(crate) fn agent_index(&self, key: &AgentKey) -> Option<usize> {
@@ -2079,40 +1773,6 @@ impl HerdrSession {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_scheduled_tasks_for_test(&mut self, tasks: Vec<ScheduledTask>) {
-        let mut scheduler = scheduler::SchedulerService::open(None, None, Vec::new()).unwrap();
-        scheduler.tasks = tasks;
-        self.scheduler = Some(scheduler);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_scheduled_runs_for_test(&mut self, runs: Vec<ScheduledRun>) {
-        self.scheduler.as_mut().unwrap().runs = runs;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_scheduled_conversation_for_test(
-        &mut self,
-        session_id: &str,
-        user: &str,
-        response: &str,
-    ) {
-        self.update_transcript(
-            scheduled_conversation_identity(session_id),
-            vec![AgentUserMessage {
-                text: user.to_owned(),
-                requests: vec![AgentRequestPreview {
-                    parts: vec![AgentRequestPartPreview::Text(response.to_owned())],
-                    reasoning_active: false,
-                    duration_ms: None,
-                    reasoning_duration_ms: None,
-                    tool_call_count: 0,
-                }],
-            }],
-        );
-    }
-
-    #[cfg(test)]
     pub(crate) fn apply_snapshot_for_test(&mut self, value: &Value) {
         let (mut workspaces, agents) = client::parse_snapshot(value).unwrap();
         populate_workspace_branches(&mut workspaces);
@@ -2611,10 +2271,7 @@ mod latest_user_message_cache_tests {
     #[test]
     fn binds_a_scheduled_run_to_its_live_terminal_and_session() {
         let mut session = HerdrSession::new(true, None, None);
-        session.scheduler =
-            Some(scheduler::SchedulerService::open(None, None, Vec::new()).unwrap());
-        let scheduler = session.scheduler.as_mut().unwrap();
-        scheduler.tasks.push(scheduler::ScheduledTask {
+        let tasks = vec![scheduler::ScheduledTask {
             id: 7,
             title: "Nightly review".to_owned(),
             description: String::new(),
@@ -2629,8 +2286,8 @@ mod latest_user_message_cache_tests {
             next_run_ms: 3_600_000,
             source: None,
             project_status: None,
-        });
-        scheduler.runs.push(scheduler::ScheduledRun {
+        }];
+        let runs = vec![scheduler::ScheduledRun {
             id: 9,
             task_id: 7,
             created_at_ms: 1,
@@ -2640,7 +2297,7 @@ mod latest_user_message_cache_tests {
             terminal_id: None,
             session_id: None,
             error: None,
-        });
+        }];
         let mut remote = agent("w2:p9", identity("ses_remote"));
         remote.workspace_id = "w2".to_owned();
         remote.cwd = Some(PathBuf::from("/repo"));
@@ -2651,72 +2308,13 @@ mod latest_user_message_cache_tests {
 
         session.apply_agent_snapshot_at(vec![remote], unix_time_ms());
 
-        let run = &session.scheduler.as_ref().unwrap().runs[0];
-        assert_eq!(run.pane_id.as_deref(), Some("w2:p9"));
-        assert_eq!(run.terminal_id.as_deref(), Some("term-w2:p9"));
-        assert_eq!(run.session_id.as_deref(), Some("ses_remote"));
-    }
-
-    #[test]
-    fn retains_a_scheduled_conversation_without_a_live_agent() {
-        let mut session = HerdrSession::new(true, None, None);
-        session.next_refresh = Instant::now() + Duration::from_secs(60);
-        let identity = scheduled_conversation_identity("ses_scheduled");
-        session.scheduled_preview_identity = Some(identity.clone());
-        session
-            .latest_user_message_requests
-            .insert(identity.clone());
-        session
-            .sender
-            .send(Completion::ScheduledConversation {
-                identity: identity.clone(),
-                result: Ok(latest_message::TranscriptFetch::Changed(message(
-                    "durable history",
-                ))),
-            })
-            .unwrap();
-
-        session.poll(false);
-        session.apply_agent_snapshot_at(Vec::new(), unix_time_ms());
-
+        let bindings = session.legacy_scheduled_run_bindings(&tasks, &runs);
+        assert_eq!(bindings.len(), 1);
         assert_eq!(
-            session.scheduled_conversation("ses_scheduled").unwrap()[0].text,
-            "durable history"
+            bindings[0].agent,
+            Some(("w2:p9".to_owned(), "term-w2:p9".to_owned()))
         );
-        assert!(session.agents.is_empty());
-    }
-
-    #[test]
-    fn scheduler_history_is_visible_from_a_live_identity_alias() {
-        let mut session = HerdrSession::new(true, None, None);
-        session.cross_workspace_agents = true;
-        session.next_refresh = Instant::now() + Duration::from_secs(60);
-        let live_identity = identity("ses_shared");
-        session.apply_agent_snapshot_at(vec![agent("w1:p1", live_identity)], unix_time_ms());
-        let scheduled_identity = scheduled_conversation_identity("ses_shared");
-        session
-            .latest_user_message_requests
-            .insert(scheduled_identity.clone());
-        session
-            .sender
-            .send(Completion::ScheduledConversation {
-                identity: scheduled_identity,
-                result: Ok(latest_message::TranscriptFetch::Changed(message(
-                    "shared history",
-                ))),
-            })
-            .unwrap();
-
-        session.poll(false);
-
-        assert_eq!(
-            session.agent_user_messages(0).unwrap()[0].text,
-            "shared history"
-        );
-        assert_eq!(
-            session.scheduled_conversation("ses_shared").unwrap()[0].text,
-            "shared history"
-        );
+        assert_eq!(bindings[0].session_id.as_deref(), Some("ses_remote"));
     }
 
     #[test]
@@ -2744,9 +2342,6 @@ mod latest_user_message_cache_tests {
         session
             .latest_user_message_statuses
             .insert(conversation_identity.clone(), AgentStatus::Idle);
-        session
-            .scheduled_conversation_errors
-            .insert(conversation_identity.clone(), "old error".to_owned());
 
         session.apply_agent_snapshot_at(vec![agent("w1:p1", replacement_identity)], unix_time_ms());
         assert!(
@@ -2776,11 +2371,6 @@ mod latest_user_message_cache_tests {
                 .latest_user_message_statuses
                 .contains_key(&conversation_identity)
         );
-        assert!(
-            session
-                .scheduled_conversation_errors
-                .contains_key(&conversation_identity)
-        );
         session
             .latest_user_message_requests
             .insert(conversation_identity.clone());
@@ -2805,11 +2395,6 @@ mod latest_user_message_cache_tests {
         assert!(
             !session
                 .latest_user_message_statuses
-                .contains_key(&conversation_identity)
-        );
-        assert!(
-            !session
-                .scheduled_conversation_errors
                 .contains_key(&conversation_identity)
         );
     }

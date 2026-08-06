@@ -1,4 +1,5 @@
 mod actions;
+mod agent_preview;
 mod author_filter;
 mod changes;
 mod commit_message;
@@ -15,6 +16,7 @@ mod herdr_session;
 mod issues;
 mod linked_worktrees;
 mod mouse;
+mod opencode_session;
 mod scheduler;
 mod settings;
 mod shortcuts;
@@ -23,6 +25,7 @@ mod text_input;
 pub(crate) use actions::{
     ACTION_ITEMS, ActionsState, CommandLayout, CommandLineSource, CommandStatus,
 };
+pub(crate) use agent_preview::AgentPreview;
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub(crate) use changes::{ChangesHitTarget, PreviewOrigin, SqliteFocus, SqlitePage};
 pub use changes::{ChangesState, LeftPane};
@@ -42,8 +45,7 @@ pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
     AgentActivityPreview, AgentEntryState, AgentKey, AgentListMode, AgentPromptOutcome,
     AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript, AgentUserMessage,
-    HerdrPaneLayout, HerdrSession, ProjectTaskStatus, ScheduledRun, ScheduledRunStatus,
-    ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit,
+    HerdrPaneLayout, HerdrSession,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -55,8 +57,8 @@ pub(crate) use linked_worktrees::{
 #[cfg(test)]
 pub(crate) use scheduler::SchedulerDestination;
 pub(crate) use scheduler::{
-    ScheduledTaskComposer, SchedulerDestinationCard, SchedulerField, SchedulerState,
-    SchedulerSurface,
+    ProjectTaskStatus, ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskComposer,
+    ScheduledTasks, SchedulerDestinationCard, SchedulerField, SchedulerState, SchedulerSurface,
 };
 #[cfg(test)]
 pub use settings::AgentCardClickAction;
@@ -80,26 +82,6 @@ const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 8, 9];
 const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
-
-#[derive(Debug)]
-struct AgentPreviewTranscriptScroll {
-    agent: AgentKey,
-    message: usize,
-    offset: usize,
-}
-
-#[derive(Debug)]
-struct AgentPreviewMessageSelection {
-    agent: AgentKey,
-    message: usize,
-}
-
-#[derive(Debug)]
-struct AgentPreviewExpandedRequests {
-    agent: AgentKey,
-    message: usize,
-    requests: Vec<usize>,
-}
 
 pub(super) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) use ratatui::{
@@ -170,20 +152,10 @@ pub struct App {
     pub(crate) header_picker: HeaderPicker,
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) herdr: HerdrSession,
+    pub(crate) scheduled_tasks: ScheduledTasks,
     pub(crate) scheduler: SchedulerState,
     pub(crate) agents_visible: bool,
-    agent_preview_selection: Option<AgentKey>,
-    agent_preview_transcript_scroll: Option<AgentPreviewTranscriptScroll>,
-    agent_preview_message_selection: Option<AgentPreviewMessageSelection>,
-    agent_preview_expanded_requests: Option<AgentPreviewExpandedRequests>,
-    pub(crate) agent_transcript_presentation: crate::ui::AgentTranscriptPresentation,
-    agent_preview_picker_open: bool,
-    pub(crate) agent_preview_prompt: TextInput,
-    pub(crate) agent_preview_prompt_focused: bool,
-    pub(crate) agent_preview_prompt_error: Option<String>,
-    pub(crate) agent_preview_prompt_delivery: AgentPromptDelivery,
-    pub(crate) agent_preview_scheduled_run: Option<i64>,
-    agent_preview_return_mode: Mode,
+    pub(crate) agent_preview: AgentPreview,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
     pub settings_selection: usize,
@@ -308,7 +280,11 @@ impl App {
             let _ = linked_worktrees
                 .remember_workspace(repository.common_dir.as_deref(), &repository.root);
         }
-        let mut herdr = HerdrSession::detect(workspace_config_dir, discord_webhooks.clone());
+        let mut herdr = HerdrSession::detect(workspace_config_dir);
+        #[cfg(not(test))]
+        let scheduled_tasks = ScheduledTasks::open(workspace_config_dir, discord_webhooks.clone());
+        #[cfg(test)]
+        let scheduled_tasks = ScheduledTasks::memory();
         herdr.set_cross_workspace_agents(settings.cross_workspace_agents);
         linked_worktrees.observe_herdr(herdr.linked_worktree_observation());
         linked_worktrees.refresh();
@@ -355,20 +331,10 @@ impl App {
             header_picker: HeaderPicker::default(),
             linked_worktrees,
             herdr,
+            scheduled_tasks,
             scheduler: SchedulerState::default(),
             agents_visible: true,
-            agent_preview_selection: None,
-            agent_preview_transcript_scroll: None,
-            agent_preview_message_selection: None,
-            agent_preview_expanded_requests: None,
-            agent_transcript_presentation: crate::ui::AgentTranscriptPresentation::default(),
-            agent_preview_picker_open: false,
-            agent_preview_prompt: TextInput::default(),
-            agent_preview_prompt_focused: false,
-            agent_preview_prompt_error: None,
-            agent_preview_prompt_delivery: AgentPromptDelivery::default(),
-            agent_preview_scheduled_run: None,
-            agent_preview_return_mode: Mode::Normal,
+            agent_preview: AgentPreview::default(),
             hovered_hit_target: None,
             settings,
             settings_selection: 0,
@@ -534,22 +500,24 @@ impl App {
         if !self.navigation.agents_selected() {
             return None;
         }
-        self.agent_preview_selection
+        self.agent_preview
+            .selection
             .as_ref()
             .and_then(|key| self.herdr.agent_index(key))
             .or_else(|| self.default_agent_preview_index())
     }
 
     pub(crate) fn agent_preview_index(&self) -> Option<usize> {
-        if let Some(run_id) = self.agent_preview_scheduled_run {
+        if let Some(run_id) = self.agent_preview.scheduled_run {
             let run = self
-                .herdr
-                .scheduled_runs()
+                .scheduled_tasks
+                .runs()
                 .iter()
                 .find(|run| run.id == run_id)?;
             return self.herdr.scheduled_run_agent_index(run);
         }
-        self.agent_preview_selection
+        self.agent_preview
+            .selection
             .as_ref()
             .and_then(|key| self.herdr.agent_index(key))
             .or_else(|| self.default_agent_preview_index())
@@ -715,6 +683,7 @@ impl App {
     }
 
     pub(crate) fn shutdown(&mut self) {
+        self.scheduled_tasks.shutdown();
         self.herdr.shutdown();
         self.file_search.shutdown();
         self.changes.shutdown();
@@ -777,12 +746,12 @@ impl App {
             self.should_quit = true;
             return;
         }
-        if self.agent_preview_prompt_focused {
+        if self.agent_preview.prompt_focused {
             self.handle_agent_preview_prompt_key(key);
             return;
         }
         if self.mode == Mode::Normal
-            && self.herdr_available()
+            && self.scheduled_tasks.is_available()
             && key.code == KeyCode::F(4)
             && key.modifiers.is_empty()
         {
@@ -877,8 +846,8 @@ impl App {
             self.header_picker.apply_filter();
             return;
         }
-        if self.agent_preview_prompt_focused {
-            self.agent_preview_prompt.insert(text);
+        if self.agent_preview.prompt_focused {
+            self.agent_preview.prompt.insert(text);
             self.clear_agent_preview_prompt_error();
             return;
         }
@@ -968,52 +937,63 @@ impl App {
         let explorer_changed = self.workspace_explorer.poll_index();
         changed |= self.mode == Mode::Explorer && explorer_changed;
         changed |= self.file_search.poll(self.session.data());
+        let scheduled_poll = self.scheduled_tasks.poll();
+        let scheduled_tasks_changed = scheduled_poll.changed;
+        changed |= scheduled_tasks_changed;
+        if let Some(notice) = scheduled_poll.notice {
+            self.notice = Some(notice);
+        }
         if self.session.data().is_some() {
             changed |= self.graph_search.poll(self.author_filter.visible_indices());
         }
-        if self.herdr_available() {
-            let scheduled_run = (self.mode == Mode::AgentPreview
-                && self.agent_preview_scheduled_run.is_some())
-            .then(|| {
-                self.agent_preview_scheduled_run.and_then(|id| {
-                    self.herdr
-                        .scheduled_runs()
-                        .iter()
-                        .find(|run| run.id == id)
-                        .cloned()
-                })
-            })
-            .flatten();
-            if let Some(run) = scheduled_run {
-                if let Some(session_id) = run.session_id.as_deref() {
-                    self.herdr
-                        .request_scheduled_conversation(session_id, run.status.is_active());
-                } else if let Some(task) = self
-                    .herdr
-                    .scheduled_tasks()
+        let scheduled_run = (self.mode == Mode::AgentPreview
+            && self.agent_preview.scheduled_run.is_some())
+        .then(|| {
+            self.agent_preview.scheduled_run.and_then(|id| {
+                self.scheduled_tasks
+                    .runs()
                     .iter()
-                    .find(|task| task.id == run.task_id)
+                    .find(|run| run.id == id)
                     .cloned()
-                {
-                    if run.status.is_active()
-                        || self.herdr.scheduled_session_error(run.id).is_none()
-                    {
-                        self.herdr.resolve_scheduled_run_session(
-                            run.id,
-                            task.destination,
-                            task.prompt,
-                            run.created_at_ms,
-                        );
-                    }
-                }
+            })
+        })
+        .flatten();
+        if let Some(run) = scheduled_run {
+            if let Some(session_id) = run.session_id.as_deref() {
+                self.agent_preview
+                    .request_scheduled_conversation(session_id, run.status.is_active());
+            } else if let Some(task) = self
+                .scheduled_tasks
+                .tasks()
+                .iter()
+                .find(|task| task.id == run.task_id)
+                .cloned()
+                && (run.status.is_active()
+                    || self.agent_preview.scheduled_session_error(run.id).is_none())
+            {
+                self.agent_preview.request_scheduled_session(
+                    run.id,
+                    task.destination,
+                    task.prompt,
+                    run.created_at_ms,
+                );
             }
+        }
+        let preview_poll = self.agent_preview.poll();
+        changed |= preview_poll.changed;
+        for (run_id, session_id) in preview_poll.resolved_sessions {
+            self.scheduled_tasks.bind_session(run_id, session_id);
+        }
+        let mut herdr_changed = false;
+        if self.herdr_available() {
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
                 self.herdr.poll(self.regions.agent_animation_presented)
             };
+            herdr_changed = herdr_poll.changed;
             changed |= herdr_poll.changed;
-            if herdr_poll.changed {
-                self.sync_scheduler_selection();
+            if herdr_poll.changed || scheduled_tasks_changed {
+                self.scheduled_tasks.bind_legacy_agents(&self.herdr);
             }
             if let Some(error) = herdr_poll.notice {
                 self.notice = Some(error);
@@ -1031,6 +1011,9 @@ impl App {
                 diagnostics::event(format!("opening repository path={}", path.display()));
                 self.queue_workspace_restore(path);
             }
+        }
+        if scheduled_tasks_changed || herdr_changed {
+            self.sync_scheduler_selection();
         }
         if self
             .linked_worktrees
@@ -1112,8 +1095,9 @@ impl App {
         }
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
         changed |= self
-            .agent_preview_prompt
-            .poll_blink(self.agent_preview_prompt_focused);
+            .agent_preview
+            .prompt
+            .poll_blink(self.agent_preview.prompt_focused);
         if let Some(editor) = &mut self.discord_webhook_editor {
             changed |= editor.active_input_mut().poll_blink(
                 self.mode == Mode::Settings && self.settings_page == SettingsPage::Discord,
@@ -2504,8 +2488,15 @@ impl App {
     pub(crate) fn begin_render_frame(&mut self, area: Rect) -> LayoutProfile {
         self.layout_profile = LayoutProfile::for_area(area);
         let herdr = &self.herdr;
-        self.agent_transcript_presentation
-            .retain_conversations(|identity| herdr.has_transcript(identity));
+        let scheduled_identity = self
+            .agent_preview
+            .scheduled_transcript_identity()
+            .map(str::to_owned);
+        self.agent_preview
+            .presentation
+            .retain_conversations(|identity| {
+                herdr.has_transcript(identity) || scheduled_identity.as_deref() == Some(identity)
+            });
         self.regions.begin_frame(area);
         self.layout_profile
     }
@@ -2542,10 +2533,7 @@ impl App {
                 self.changes.deactivate_sqlite();
             }
             if agent {
-                self.agent_preview_transcript_scroll = None;
-                self.agent_preview_message_selection = None;
-                self.agent_preview_expanded_requests = None;
-                self.reset_agent_preview_prompt();
+                self.agent_preview.reset_conversation();
             }
         }
     }
@@ -2575,21 +2563,16 @@ impl App {
             self.flush_commit_draft();
         }
         self.select_agent_preview(index);
-        self.agent_preview_return_mode = Mode::Normal;
+        self.agent_preview.set_return_mode(Mode::Normal);
         self.mode = Mode::AgentPreview;
     }
 
     pub(super) fn close_agent_preview_modal(&mut self) {
-        self.agent_preview_picker_open = false;
-        self.agent_preview_scheduled_run = None;
-        self.herdr.clear_scheduled_conversation();
-        self.reset_agent_preview_prompt();
-        self.mode = self.agent_preview_return_mode;
-        self.agent_preview_return_mode = Mode::Normal;
+        self.mode = self.agent_preview.close();
     }
 
     fn handle_agent_preview_modal(&mut self, key: KeyEvent) {
-        if self.agent_preview_scheduled_run.is_some() && self.agent_preview_index().is_none() {
+        if self.agent_preview.scheduled_run.is_some() && self.agent_preview_index().is_none() {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('v') => self.close_agent_preview_modal(),
                 KeyCode::Enter => self.focus_agent_preview_prompt(),
@@ -2597,8 +2580,8 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => self.scroll_scheduler_conversation(1),
                 KeyCode::PageUp => self.scroll_scheduler_conversation(-10),
                 KeyCode::PageDown => self.scroll_scheduler_conversation(10),
-                KeyCode::Home => self.scheduler.conversation_scroll = Some(0),
-                KeyCode::End => self.scheduler.conversation_scroll = None,
+                KeyCode::Home => self.agent_preview.scroll_scheduled_to_start(),
+                KeyCode::End => self.agent_preview.scroll_scheduled_to_end(),
                 KeyCode::Char('[') => self.move_scheduler_conversation_message(-1),
                 KeyCode::Char(']') => self.move_scheduler_conversation_message(1),
                 _ => {}
@@ -2636,12 +2619,7 @@ impl App {
 
     fn dismiss_agent_preview(&mut self) {
         self.navigation.select_sidebar();
-        self.agent_preview_selection = None;
-        self.agent_preview_transcript_scroll = None;
-        self.agent_preview_message_selection = None;
-        self.agent_preview_expanded_requests = None;
-        self.agent_preview_picker_open = false;
-        self.reset_agent_preview_prompt();
+        self.agent_preview.dismiss();
         if matches!(
             self.hovered_hit_target,
             Some(
@@ -2714,19 +2692,25 @@ impl App {
     }
 
     pub(crate) fn agent_preview_picker_open(&self) -> bool {
-        self.agent_preview_picker_open
+        self.agent_preview.picker_open
     }
 
     pub(super) fn focus_agent_preview_prompt(&mut self) {
-        if let Some(run_id) = self.agent_preview_scheduled_run
+        if let Some(run_id) = self.agent_preview.scheduled_run
             && self.agent_preview_index().is_none()
         {
-            let available = self.herdr.scheduled_prompt_available(run_id);
-            if !available || self.herdr.scheduled_prompt_sending(run_id) {
+            let Some(run) = self
+                .scheduled_tasks
+                .runs()
+                .iter()
+                .find(|run| run.id == run_id)
+            else {
+                return;
+            };
+            if run.session_id.is_none() || run.status.is_active() {
                 return;
             }
-            self.agent_preview_prompt_focused = true;
-            self.agent_preview_prompt.focus();
+            self.agent_preview.focus_prompt();
             self.clear_agent_preview_prompt_error();
             return;
         }
@@ -2736,8 +2720,7 @@ impl App {
         if self.herdr.agent_prompt_sending(index) {
             return;
         }
-        self.agent_preview_prompt_focused = true;
-        self.agent_preview_prompt.focus();
+        self.agent_preview.focus_prompt();
         self.clear_agent_preview_prompt_error();
     }
 
@@ -2750,31 +2733,31 @@ impl App {
                     .hit_target_rect(HitTarget::AgentPreviewPrompt(key))
             })
             .or_else(|| {
-                self.agent_preview_scheduled_run.and_then(|run_id| {
+                self.agent_preview.scheduled_run.and_then(|run_id| {
                     self.regions
                         .hit_target_rect(HitTarget::AgentPreviewScheduledPrompt(run_id))
                 })
             })
             .map_or(1, |area| usize::from(area.width.saturating_sub(4)).max(1));
         match key.code {
-            KeyCode::Esc => self.agent_preview_prompt_focused = false,
+            KeyCode::Esc => self.agent_preview.blur_prompt(),
             KeyCode::Enter
                 if key
                     .modifiers
                     .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
             {
-                self.agent_preview_prompt.insert_char('\n');
+                self.agent_preview.prompt.insert_char('\n');
                 self.clear_agent_preview_prompt_error();
             }
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.agent_preview_prompt.insert_char('\n');
+                self.agent_preview.prompt.insert_char('\n');
                 self.clear_agent_preview_prompt_error();
             }
             KeyCode::Enter => self.submit_agent_preview_prompt(),
-            KeyCode::Up => self.agent_preview_prompt.move_up(input_width),
-            KeyCode::Down => self.agent_preview_prompt.move_down(input_width),
+            KeyCode::Up => self.agent_preview.prompt.move_up(input_width),
+            KeyCode::Down => self.agent_preview.prompt.move_down(input_width),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.agent_preview_prompt.clear();
+                self.agent_preview.prompt.clear();
                 self.clear_agent_preview_prompt_error();
             }
             KeyCode::Backspace
@@ -2782,11 +2765,11 @@ impl App {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                self.agent_preview_prompt.delete_word();
+                self.agent_preview.prompt.delete_word();
                 self.clear_agent_preview_prompt_error();
             }
             _ => {
-                if self.agent_preview_prompt.handle_edit_key(key) == EditOutcome::Edited {
+                if self.agent_preview.prompt.handle_edit_key(key) == EditOutcome::Edited {
                     self.clear_agent_preview_prompt_error();
                 }
             }
@@ -2794,7 +2777,7 @@ impl App {
     }
 
     fn text_field_focused(&self) -> bool {
-        self.agent_preview_prompt_focused
+        self.agent_preview.prompt_focused
             || (self.mode == Mode::Normal
                 && (self.view() == View::RepositorySearch
                     || (self.visible_view() == View::Graph && self.graph_search_focused)))
@@ -2819,38 +2802,31 @@ impl App {
     }
 
     fn submit_agent_preview_prompt(&mut self) {
-        if let Some(run_id) = self.agent_preview_scheduled_run
+        if let Some(run_id) = self.agent_preview.scheduled_run
             && self.agent_preview_index().is_none()
         {
-            let prompt = self.agent_preview_prompt.text().trim().to_owned();
-            match self.herdr.prompt_scheduled_run(run_id, prompt) {
-                Ok(()) => {
-                    self.agent_preview_prompt.clear();
-                    self.agent_preview_prompt_error = None;
-                    self.agent_preview_prompt_focused = false;
-                }
-                Err(error) => self.agent_preview_prompt_error = Some(error),
-            }
+            let prompt = self.agent_preview.prompt.text().trim().to_owned();
+            let result = self.scheduled_tasks.prompt_run(run_id, prompt);
+            self.agent_preview.finish_prompt(result);
             return;
         }
         let Some(index) = self.agent_preview_index() else {
-            self.agent_preview_prompt_error = Some("Agent is no longer available".to_owned());
+            self.agent_preview
+                .set_prompt_error("Agent is no longer available");
             return;
         };
-        let prompt = self.agent_preview_prompt.text().trim().to_owned();
+        let prompt = self.agent_preview.prompt.text().trim().to_owned();
         match self
             .herdr
-            .prompt_agent(index, prompt, self.agent_preview_prompt_delivery)
+            .prompt_agent(index, prompt, self.agent_preview.prompt_delivery)
         {
             Ok(outcome) => {
-                self.agent_preview_prompt.clear();
-                self.agent_preview_prompt_error = None;
-                self.agent_preview_prompt_focused = false;
+                self.agent_preview.finish_prompt(Ok(()));
                 if outcome == AgentPromptOutcome::Queued {
                     self.notice = Some("Message queued until agent is idle".to_owned());
                 }
             }
-            Err(error) => self.agent_preview_prompt_error = Some(error),
+            Err(error) => self.agent_preview.finish_prompt(Err(error)),
         }
     }
 
@@ -2861,34 +2837,24 @@ impl App {
         {
             return;
         }
-        self.agent_preview_prompt_delivery = self.agent_preview_prompt_delivery.toggle();
+        self.agent_preview.toggle_prompt_delivery();
     }
 
     fn clear_agent_preview_prompt_error(&mut self) {
-        self.agent_preview_prompt_error = None;
-        if let Some(run_id) = self.agent_preview_scheduled_run {
-            self.herdr.clear_scheduled_prompt_error(run_id);
-        }
+        self.agent_preview.clear_prompt_error();
         if let Some(index) = self.agent_preview_index() {
             self.herdr.clear_agent_prompt_error(index);
         }
     }
 
-    fn reset_agent_preview_prompt(&mut self) {
-        self.agent_preview_prompt.clear();
-        self.agent_preview_prompt_focused = false;
-        self.agent_preview_prompt_error = None;
-    }
-
     pub(crate) fn agent_preview_transcript_scroll(&self, index: usize) -> Option<usize> {
-        let scroll = self.agent_preview_transcript_scroll.as_ref()?;
         let message = self.agent_preview_message(index).or_else(|| {
             self.herdr
                 .agent_user_messages(index)
                 .and_then(|messages| messages.len().checked_sub(1))
         })?;
-        (self.herdr.agent_key(index).as_ref() == Some(&scroll.agent) && scroll.message == message)
-            .then_some(scroll.offset)
+        let key = self.herdr.agent_key(index)?;
+        self.agent_preview.transcript_scroll(&key, message)
     }
 
     pub(crate) fn agent_preview_swipe(&self, index: usize) -> Option<(i32, usize)> {
@@ -2914,16 +2880,13 @@ impl App {
     }
 
     pub(crate) fn agent_preview_message(&self, index: usize) -> Option<usize> {
-        let selection = self
-            .agent_preview_message_selection
-            .as_ref()
-            .filter(|selection| self.herdr.agent_key(index).as_ref() == Some(&selection.agent))?;
+        let key = self.herdr.agent_key(index)?;
         let last = self
             .herdr
             .agent_user_messages(index)?
             .len()
             .checked_sub(1)?;
-        Some(selection.message.min(last))
+        self.agent_preview.selected_message(&key, last)
     }
 
     pub(crate) fn agent_preview_expanded_requests(&self, index: usize) -> &[usize] {
@@ -2937,14 +2900,7 @@ impl App {
         }) else {
             return &[];
         };
-        let Some(expanded) = self.agent_preview_expanded_requests.as_ref() else {
-            return &[];
-        };
-        if expanded.agent == agent && expanded.message == message {
-            &expanded.requests
-        } else {
-            &[]
-        }
+        self.agent_preview.expanded_requests(&agent, message)
     }
 
     pub(super) fn show_agents_pane(&mut self) {
@@ -2958,7 +2914,7 @@ impl App {
         self.initial_pane_pending = false;
         self.agents_visible = true;
         self.navigation.select_agents();
-        self.agent_preview_selection = selection;
+        self.agent_preview.restore_selection(selection);
     }
 
     fn show_graph(&mut self) {

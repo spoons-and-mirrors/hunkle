@@ -25,18 +25,11 @@ fn scheduler_rect(app: &App, target: SchedulerHitTarget) -> Option<Rect> {
 }
 
 #[test]
-fn schedule_footer_control_is_herdr_gated() {
+fn schedule_footer_control_works_without_herdr() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
 
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::HeaderSchedule)
-            .is_none()
-    );
-    enable_herdr(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let schedule = app
         .regions

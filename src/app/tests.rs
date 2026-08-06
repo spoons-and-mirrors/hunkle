@@ -963,15 +963,11 @@ fn function_keys_select_changes_files_and_agents() {
 }
 
 #[test]
-fn scheduler_f4_is_herdr_gated_and_toggles_the_modal() {
+fn scheduler_f4_works_without_herdr_and_toggles_the_modal() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());
     let mut app = App::new(directory.path().to_path_buf());
 
-    app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
-    assert_eq!(app.mode, Mode::Normal);
-
-    enable_herdr(&mut app);
     app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Scheduler);
     app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
@@ -1067,7 +1063,7 @@ fn scheduler_edits_an_existing_task_in_the_shared_composer() {
     initialize_repository(directory.path());
     let mut app = App::new(directory.path().to_path_buf());
     enable_herdr(&mut app);
-    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+    app.scheduled_tasks.set_tasks_for_test(vec![ScheduledTask {
         id: 7,
         title: "Nightly review".to_owned(),
         description: "Check open changes".to_owned(),
@@ -1100,12 +1096,11 @@ fn scheduler_edits_an_existing_task_in_the_shared_composer() {
 }
 
 #[test]
-fn scheduler_run_now_opens_the_live_conversation() {
+fn scheduler_run_now_queues_headless_preview_without_herdr() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());
     let mut app = App::new(directory.path().to_path_buf());
-    enable_herdr(&mut app);
-    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+    app.scheduled_tasks.set_tasks_for_test(vec![ScheduledTask {
         id: 7,
         title: "Nightly review".to_owned(),
         description: String::new(),
@@ -1139,7 +1134,7 @@ fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
     initialize_repository(directory.path());
     let mut app = App::new(directory.path().to_path_buf());
     enable_herdr(&mut app);
-    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+    app.scheduled_tasks.set_tasks_for_test(vec![ScheduledTask {
         id: 7,
         title: "Nightly review".to_owned(),
         description: String::new(),
@@ -1155,7 +1150,7 @@ fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
         source: None,
         project_status: None,
     }]);
-    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+    app.scheduled_tasks.set_runs_for_test(vec![ScheduledRun {
         id: 11,
         task_id: 7,
         created_at_ms: 1,
@@ -1173,11 +1168,11 @@ fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::AgentPreview);
-    assert_eq!(app.agent_preview_scheduled_run, Some(11));
+    assert_eq!(app.agent_preview.scheduled_run, Some(11));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Scheduler);
-    assert_eq!(app.agent_preview_scheduled_run, None);
+    assert_eq!(app.agent_preview.scheduled_run, None);
 }
 
 #[test]
@@ -1186,7 +1181,7 @@ fn scheduled_run_promotion_preserves_destination_and_exact_session() {
     initialize_repository(directory.path());
     let mut app = App::new(directory.path().to_path_buf());
     enable_herdr(&mut app);
-    app.herdr.set_scheduled_tasks_for_test(vec![ScheduledTask {
+    app.scheduled_tasks.set_tasks_for_test(vec![ScheduledTask {
         id: 7,
         title: "Nightly review".to_owned(),
         description: String::new(),
@@ -1202,7 +1197,7 @@ fn scheduled_run_promotion_preserves_destination_and_exact_session() {
         source: None,
         project_status: None,
     }]);
-    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+    app.scheduled_tasks.set_runs_for_test(vec![ScheduledRun {
         id: 11,
         task_id: 7,
         created_at_ms: 1,
@@ -1247,8 +1242,8 @@ fn headless_scheduled_preview_can_focus_its_prompt_without_a_matching_pane() {
             }]
         } }
     }));
-    app.herdr.set_scheduled_tasks_for_test(Vec::new());
-    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+    app.scheduled_tasks.set_tasks_for_test(Vec::new());
+    app.scheduled_tasks.set_runs_for_test(vec![ScheduledRun {
         id: 11,
         task_id: 7,
         created_at_ms: 1,
@@ -1259,14 +1254,14 @@ fn headless_scheduled_preview_can_focus_its_prompt_without_a_matching_pane() {
         session_id: Some("ses-live".to_owned()),
         error: None,
     }]);
-    app.agent_preview_scheduled_run = Some(11);
+    app.agent_preview.open_scheduled_run(11, Mode::Normal);
 
     app.focus_agent_preview_prompt();
 
-    assert!(app.agent_preview_prompt_focused);
+    assert!(app.agent_preview.prompt_focused);
 
-    app.agent_preview_prompt_focused = false;
-    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+    app.agent_preview.blur_prompt();
+    app.scheduled_tasks.set_runs_for_test(vec![ScheduledRun {
         id: 11,
         task_id: 7,
         created_at_ms: 1,
@@ -1278,9 +1273,15 @@ fn headless_scheduled_preview_can_focus_its_prompt_without_a_matching_pane() {
         error: None,
     }]);
     assert!(app.agent_preview_index().is_none());
-    assert!(app.herdr.scheduled_prompt_available(11));
+    assert!(
+        app.scheduled_tasks
+            .runs()
+            .iter()
+            .find(|run| run.id == 11)
+            .is_some_and(|run| run.session_id.is_some())
+    );
     app.focus_agent_preview_prompt();
-    assert!(app.agent_preview_prompt_focused);
+    assert!(app.agent_preview.prompt_focused);
 }
 
 #[test]

@@ -11,15 +11,22 @@ use serde_json::Value;
 
 use crate::process::{self, Limits};
 
-use super::{
+use super::herdr_session::{
     AgentActivityPreview, AgentRequestPartPreview, AgentRequestPreview, AgentUserMessage,
-    unix_time_ms,
 };
 
 const QUERY_LIMITS: Limits = Limits::new(2 * 1024 * 1024, 64 * 1024, Duration::from_secs(5));
 
 static DATABASE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 static TRANSCRIPT_DATABASE: Mutex<Option<TranscriptDatabase>> = Mutex::new(None);
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum TranscriptFetch {
