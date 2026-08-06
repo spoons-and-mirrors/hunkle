@@ -17,6 +17,40 @@ fn enable_herdr(app: &mut App) {
 }
 
 #[test]
+fn control_c_clears_a_raw_text_field_instead_of_quitting() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.mode = Mode::Command;
+    app.actions.input = "draft command".to_owned();
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert!(app.actions.input.is_empty());
+    assert!(!app.should_quit);
+}
+
+#[test]
+fn control_c_still_quits_outside_a_text_field() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert!(app.should_quit);
+}
+
+#[test]
+fn control_c_quits_from_the_non_editable_add_file_choice() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.open_add_dialog();
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert!(app.should_quit);
+}
+
+#[test]
 fn clearing_targets_removes_overlaps_but_keeps_adjacent_targets() {
     let mut regions = Regions::default();
     regions.register_hit_target(HitTarget::CommitMessageGenerate, Rect::new(0, 0, 4, 1));
@@ -1090,6 +1124,45 @@ fn scheduler_v_opens_shared_agent_preview_and_returns_to_scheduler() {
     app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Scheduler);
     assert_eq!(app.agent_preview_scheduled_run, None);
+}
+
+#[test]
+fn live_scheduled_agent_preview_can_focus_its_prompt() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE" }],
+            "agents": [{
+                "agent": "opencode",
+                "agent_status": "idle",
+                "pane_id": "w1:p2"
+            }],
+            "panes": [{
+                "pane_id": "w1:p2",
+                "tab_id": "w1:t2",
+                "workspace_id": "w1",
+                "cwd": directory.path()
+            }]
+        } }
+    }));
+    app.herdr.set_scheduled_tasks_for_test(Vec::new());
+    app.herdr.set_scheduled_runs_for_test(vec![ScheduledRun {
+        id: 11,
+        task_id: 7,
+        created_at_ms: 1,
+        status: ScheduledRunStatus::Working,
+        pane_id: Some("w1:p2".to_owned()),
+        terminal_id: None,
+        session_id: None,
+        error: None,
+    }]);
+    app.agent_preview_scheduled_run = Some(11);
+
+    app.focus_agent_preview_prompt();
+
+    assert!(app.agent_preview_prompt_focused);
 }
 
 #[test]

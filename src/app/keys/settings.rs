@@ -127,6 +127,12 @@ impl App {
 
     pub(crate) fn handle_opencode_model_input(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(input) = &mut self.opencode_model_input {
+                    input.clear();
+                }
+                self.opencode_error = None;
+            }
             KeyCode::Esc => {
                 self.opencode_model_input = None;
                 self.opencode_error = None;

@@ -36,6 +36,10 @@ impl Default for TextInput {
 impl TextInput {
     pub(crate) fn handle_edit_key(&mut self, key: KeyEvent) -> EditOutcome {
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.clear();
+                EditOutcome::Edited
+            }
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.select_all();
                 EditOutcome::Navigated
@@ -100,11 +104,15 @@ impl TextInput {
     }
 
     pub(crate) fn visual_cursor_row(&self, width: usize) -> usize {
-        visual_position(&self.text, self.cursor, width).0
+        self.visual_metrics(width).0
     }
 
     pub(crate) fn visual_height(&self, width: usize) -> usize {
-        visual_position(&self.text, self.text.len(), width).0 + 1
+        self.visual_metrics(width).1
+    }
+
+    pub(crate) fn visual_metrics(&self, width: usize) -> (usize, usize) {
+        visual_metrics(&self.text, self.cursor, width)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -360,6 +368,28 @@ fn visual_position(text: &str, cursor: usize, width: usize) -> (usize, usize) {
     (row, 0)
 }
 
+fn visual_metrics(text: &str, cursor: usize, width: usize) -> (usize, usize) {
+    let width = width.max(1);
+    let mut completed_rows = 0usize;
+    let mut line_width = 0usize;
+    let mut cursor_row = None;
+    for (index, character) in text.char_indices() {
+        if index == cursor {
+            cursor_row = Some(completed_rows.saturating_add(line_width / width));
+        }
+        if character == '\n' {
+            completed_rows = completed_rows
+                .saturating_add(line_width.saturating_sub(1) / width)
+                .saturating_add(1);
+            line_width = 0;
+        } else {
+            line_width = line_width.saturating_add(UnicodeWidthChar::width(character).unwrap_or(0));
+        }
+    }
+    let final_row = completed_rows.saturating_add(line_width / width);
+    (cursor_row.unwrap_or(final_row), final_row.saturating_add(1))
+}
+
 fn previous_boundary(text: &str, cursor: usize) -> usize {
     text[..cursor]
         .char_indices()
@@ -382,7 +412,7 @@ fn is_word_character(character: char) -> bool {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{EditOutcome, TextInput};
+    use super::{EditOutcome, TextInput, visual_position};
 
     #[test]
     fn edits_unicode_and_replaces_selection() {
@@ -429,6 +459,29 @@ mod tests {
     }
 
     #[test]
+    fn measures_cursor_and_height_in_one_pass() {
+        for text in ["", "\n", "abcd\n", "abcdef\nghij", "wide 界 text"] {
+            for width in 1..=6 {
+                for cursor in (0..=text.len()).filter(|cursor| text.is_char_boundary(*cursor)) {
+                    let input = TextInput {
+                        text: text.to_owned(),
+                        cursor,
+                        ..TextInput::default()
+                    };
+                    assert_eq!(
+                        input.visual_metrics(width),
+                        (
+                            visual_position(text, cursor, width).0,
+                            visual_position(text, text.len(), width).0 + 1,
+                        ),
+                        "text={text:?} cursor={cursor} width={width}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn blinks_only_while_focused() {
         let mut input = TextInput {
             next_blink: std::time::Instant::now(),
@@ -457,5 +510,16 @@ mod tests {
         );
         input.insert_single_line(" one\r\ntwo");
         assert_eq!(input.text(), " onetwoé");
+    }
+    #[test]
+    fn control_c_clears_the_input() {
+        let mut input = TextInput::default();
+        input.insert("draft");
+
+        assert_eq!(
+            input.handle_edit_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            EditOutcome::Edited
+        );
+        assert!(input.text().is_empty());
     }
 }

@@ -164,6 +164,10 @@ pub(in crate::ui) fn draw_agent_preview_modal(
         &expanded_requests,
         picker_open,
         hovered,
+        &app.agent_preview_prompt,
+        app.agent_preview_prompt_focused,
+        app.agent_preview_prompt_error.as_deref(),
+        app.agent_preview_prompt_delivery,
         status_area,
         body,
     );
@@ -179,7 +183,7 @@ pub(in crate::ui) fn draw_agent_preview_modal(
             1,
         );
         frame.render_widget(
-            Paragraph::new("↑↓ scroll   PgUp/PgDn page   [ ] messages   Esc close")
+            Paragraph::new("Enter message   ↑↓ scroll   [ ] messages   Esc close")
                 .style(Style::default().fg(palette().faint).bg(palette().panel)),
             footer,
         );

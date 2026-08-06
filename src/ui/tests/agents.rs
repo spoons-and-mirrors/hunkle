@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::{AgentKey, AgentRequestPartPreview, AgentRequestPreview};
+use crate::app::{AgentKey, AgentPromptDelivery, AgentRequestPartPreview, AgentRequestPreview};
 use std::path::PathBuf;
 
 fn agent_snapshot() -> serde_json::Value {
@@ -81,6 +81,9 @@ fn control_click_opens_the_live_agent_preview_modal() {
 
     let screen = screen_text(&terminal);
     assert!(screen.contains("AGENT PREVIEW"));
+    assert!(!screen.contains("MESSAGE"));
+    assert!(!screen.contains("Enter send"));
+    assert!(!screen.contains("Esc cancel"));
     assert!(screen.contains("Inspect the scheduler"));
     assert!(screen.contains("Conversation loaded"));
     let overlay = app
@@ -91,6 +94,78 @@ fn control_click_opens_the_live_agent_preview_modal() {
         app.regions
             .hit_target_rect(HitTarget::AgentPreviewModalClose)
             .is_some()
+    );
+    let prompt = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPrompt(key))
+        .unwrap();
+    let delivery = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPromptDelivery(agent_key(&app, 0)))
+        .unwrap();
+    assert!(screen.contains("send now"));
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: delivery.x,
+        row: delivery.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(
+        app.agent_preview_prompt_delivery,
+        AgentPromptDelivery::OnIdle
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(screen_text(&terminal).contains("send on idle"));
+    assert_eq!(prompt.height, 3);
+    assert_eq!(delivery.bottom(), prompt.y);
+    for y in prompt.y..prompt.bottom() {
+        for x in prompt.x..prompt.right() {
+            assert_eq!(
+                terminal.backend().buffer()[(x, y)].bg,
+                palette().surface_alt
+            );
+        }
+    }
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: prompt.x,
+        row: prompt.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.agent_preview_prompt_focused);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    assert_eq!(app.agent_preview_prompt.text(), "\n\n\n");
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    app.handle_paste("Please check\nthe tests");
+    assert_eq!(app.agent_preview_prompt.text(), "Please check\nthe tests");
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let grown_prompt = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPrompt(agent_key(&app, 0)))
+        .unwrap();
+    assert_eq!(grown_prompt.height, 4);
+    assert_eq!(
+        terminal.backend().buffer()[(grown_prompt.x, grown_prompt.y + 1)].symbol(),
+        " "
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(grown_prompt.x + 1, grown_prompt.y + 1)].symbol(),
+        "›"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.agent_preview_prompt.text().is_empty());
+    assert!(!app.should_quit);
+    app.handle_paste("Wait for idle");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.agent_preview_prompt_focused);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(screen_text(&terminal).contains("waiting for idle"));
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPromptDelivery(agent_key(&app, 0)))
+            .is_none()
     );
 
     app.handle_mouse(MouseEvent {
@@ -723,13 +798,6 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(latest_screen.contains("Please refine the agent timers"));
-    assert!(
-        (user_message.bottom()..tooltip.bottom().saturating_sub(2)).any(|y| {
-            terminal.backend().buffer()[(user_message.x, y)].symbol() == "▀"
-                && terminal.backend().buffer()[(user_message.x, y + 1)].symbol() == " "
-                && terminal.backend().buffer()[(user_message.x, y + 2)].symbol() == "▄"
-        })
-    );
     let top_screen = terminal
         .backend()
         .buffer()
@@ -893,25 +961,22 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert_eq!(app.regions.agent_preview_scroll_max, 0);
-    let collapsed_screen = terminal
+    assert!(app.regions.agent_preview_scroll_max > 0);
+    assert_eq!(
+        app.regions.agent_preview_scroll,
+        app.regions.agent_preview_scroll_max
+    );
+    let initial_screen = terminal
         .backend()
         .buffer()
         .content
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(collapsed_screen.contains("agent line 00"));
-    assert!(collapsed_screen.contains("agent line 02"));
-    assert!(!collapsed_screen.contains("agent line 03"));
-    assert!(!collapsed_screen.contains("agent line 39"));
-    assert!(collapsed_screen.contains("reasoning  2s"));
-    assert!(collapsed_screen.contains("tool_0"));
-    assert!(collapsed_screen.contains("tool_2"));
-    assert!(!collapsed_screen.contains("tool_3"));
-    assert!(collapsed_screen.contains("⌄ more"));
-    assert!(!collapsed_screen.contains("click to expand"));
-    assert!(collapsed_screen.contains("user line 00"));
+    assert!(initial_screen.contains("agent line 39"));
+    assert!(initial_screen.contains("tool_3"));
+    assert!(!initial_screen.contains("⌄ more"));
+    assert!(initial_screen.contains("user line 00"));
     let preview = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
@@ -919,69 +984,28 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
             message: 0,
         })
         .unwrap();
-    let request = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPreviewRequest {
-            agent: key.clone(),
-            message: 0,
-            request: 0,
-        })
-        .unwrap();
-    assert_eq!(request.height, 14);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewRequest {
+                agent: key.clone(),
+                message: 0,
+                request: 0,
+            })
+            .is_none()
+    );
     let build_counts = app.agent_transcript_presentation.build_counts_for_test();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
         app.agent_transcript_presentation.build_counts_for_test(),
         build_counts
     );
-    let request_row = |row: u16| {
-        let start = usize::from(row) * 49 + usize::from(request.x.saturating_add(1));
-        let end = usize::from(row) * 49 + usize::from(request.right());
-        terminal.backend().buffer().content[start..end]
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-    };
-    assert!(request_row(request.y + 2).contains('▄'));
-    assert!(request_row(request.y + 3).trim().is_empty());
-    assert!(request_row(request.y + 7).trim().is_empty());
-    assert!(request_row(request.y + 8).contains('▀'));
-    let buffer = terminal.backend().buffer();
-    for x in request.x..request.right() {
-        assert_eq!(buffer[(x, request.y + 2)].symbol(), "▄");
-        assert_eq!(buffer[(x, request.y + 2)].fg, super::palette().panel);
-        assert_eq!(buffer[(x, request.y + 2)].bg, super::palette().canvas);
-        assert_eq!(buffer[(x, request.y + 3)].bg, super::palette().panel);
-        assert_eq!(buffer[(x, request.y + 7)].bg, super::palette().panel);
-        assert_eq!(buffer[(x, request.y + 8)].symbol(), "▀");
-        assert_eq!(buffer[(x, request.y + 8)].fg, super::palette().panel);
-        assert_eq!(buffer[(x, request.y + 8)].bg, super::palette().canvas);
+    for _ in 0..10 {
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            preview.x + 2,
+            preview.bottom() - 2,
+        ));
     }
-    for x in request.x + 1..request.right() {
-        assert_eq!(buffer[(x, request.y + 1)].bg, super::palette().canvas);
-        assert_eq!(buffer[(x, request.y + 9)].bg, super::palette().canvas);
-    }
-    assert_eq!(buffer[(request.x, request.y + 1)].symbol(), "┃");
-    assert_eq!(buffer[(request.x, request.y + 2)].symbol(), "▄");
-    assert_eq!(
-        buffer[(request.x, request.y + 2)].fg,
-        super::palette().panel
-    );
-    assert_eq!(buffer[(request.x, request.y + 3)].symbol(), " ");
-    assert_eq!(buffer[(request.x, request.y + 7)].symbol(), " ");
-    assert_eq!(buffer[(request.x, request.y + 8)].symbol(), "▀");
-    assert_eq!(
-        buffer[(request.x, request.y + 8)].fg,
-        super::palette().panel
-    );
-    assert_eq!(buffer[(request.x, request.y + 9)].symbol(), "┃");
-    let request_bottom =
-        usize::from(request.bottom().saturating_sub(1)) * 49 + usize::from(request.x);
-    assert_eq!(
-        terminal.backend().buffer().content[request_bottom].symbol(),
-        "▀"
-    );
-    click(&mut app, request.x + 2, request.y + 2);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agent_preview_scroll_max > 0);
     assert_eq!(
@@ -1008,31 +1032,30 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
             })
             .is_some()
     );
-    let request = app
+    let transcript = app
         .regions
-        .hit_target_rect(HitTarget::AgentPreviewRequest {
+        .hit_target_rect(HitTarget::AgentTooltip {
             agent: key.clone(),
             message: 0,
-            request: 0,
         })
         .unwrap();
-    let drag_start = request.y.saturating_add(2);
-    let drag_end = drag_start.saturating_add(7).min(request.bottom() - 1);
+    let drag_start = transcript.y.saturating_add(2);
+    let drag_end = drag_start.saturating_add(7).min(transcript.bottom() - 1);
 
     for _ in 0..10 {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            request.x + 4,
+            transcript.x + 4,
             drag_start,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            request.x + 4,
+            transcript.x + 4,
             drag_end,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
-            request.x + 4,
+            transcript.x + 4,
             drag_end,
         ));
     }

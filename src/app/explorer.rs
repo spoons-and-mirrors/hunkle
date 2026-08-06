@@ -348,6 +348,10 @@ impl Explorer {
         }
         if self.naming_favorite {
             match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.favorite_name.clear();
+                    self.error = None;
+                }
                 KeyCode::Esc => self.cancel_favorite_name(),
                 KeyCode::Enter => self.save_favorite_name(),
                 KeyCode::Backspace => {
@@ -371,6 +375,10 @@ impl Explorer {
         }
         if self.editing_path {
             match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.set_path_input(String::new());
+                    self.refresh_matches();
+                }
                 KeyCode::Esc => {
                     self.invalidate_targets();
                     self.cancel_match_search();

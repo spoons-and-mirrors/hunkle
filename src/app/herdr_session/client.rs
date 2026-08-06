@@ -317,6 +317,18 @@ pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<AgentPane>)
     run(&["api".to_owned(), "snapshot".to_owned()]).and_then(|value| parse_snapshot(&value))
 }
 
+pub(super) fn prompt_agent(pane_id: String, prompt: String) -> Result<(), String> {
+    prompt_agent_with(pane_id, prompt, run)
+}
+
+fn prompt_agent_with(
+    pane_id: String,
+    prompt: String,
+    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<(), String> {
+    runner(&["agent".to_owned(), "prompt".to_owned(), pane_id, prompt]).map(drop)
+}
+
 pub(crate) fn scheduler_launch(request: SchedulerLaunchRequest) -> SchedulerLaunchResult {
     scheduler_launch_with(request, run_required_json)
 }
@@ -2199,6 +2211,30 @@ mod tests {
     use std::{cell::RefCell, path::Path};
 
     use super::*;
+
+    #[test]
+    fn prompts_an_agent_by_pane_id() {
+        let mut calls = Vec::new();
+        prompt_agent_with(
+            "w1:p2".to_owned(),
+            "Check the failing test".to_owned(),
+            |args| {
+                calls.push(args.to_vec());
+                Ok(serde_json::json!({ "result": {} }))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls,
+            vec![vec![
+                "agent".to_owned(),
+                "prompt".to_owned(),
+                "w1:p2".to_owned(),
+                "Check the failing test".to_owned(),
+            ]]
+        );
+    }
 
     fn pane(pane_id: &str) -> Value {
         serde_json::json!({ "type": "pane", "pane_id": pane_id })

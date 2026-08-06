@@ -22,6 +22,10 @@ impl App {
         }
         if self.actions.status != CommandStatus::Running {
             match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.actions.input.clear();
+                    self.actions.stderr.clear();
+                }
                 KeyCode::Enter => {
                     let input = if self.actions.input.trim().is_empty()
                         && matches!(self.actions.status, CommandStatus::Complete { .. })
