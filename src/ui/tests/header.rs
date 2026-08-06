@@ -20,6 +20,77 @@ fn local_workspace_keeps_the_agent_action() {
 }
 
 #[test]
+fn mobile_header_cards_scroll_horizontally_without_losing_taps() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    enable_herdr(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(49, 24)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let repository = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderRepository)
+        .unwrap();
+    assert!(app.regions.header_scroll_max > 0);
+
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        repository.x,
+        repository.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        repository.x + 1,
+        repository.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        repository.x + 1,
+        repository.y,
+    ));
+    assert!(app.header_picker.is_open());
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let repository = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderRepository)
+        .unwrap();
+    let drag_start = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderSchedule)
+        .unwrap()
+        .x
+        .saturating_sub(2);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        drag_start,
+        repository.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        0,
+        repository.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        0,
+        repository.y,
+    ));
+    assert!(app.header_scroll > 0);
+    assert!(!app.header_picker.is_open());
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::HeaderAgent)
+            .is_some()
+    );
+}
+
+#[test]
 fn errors_use_the_full_footer_instead_of_the_header() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

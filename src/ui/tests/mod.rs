@@ -431,7 +431,12 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.graph.unwrap().y, 36);
     assert_eq!(app.regions.help.unwrap().y, 36);
     assert!(app.regions.graph.unwrap().x > 0);
-    assert_eq!(app.regions.help.unwrap().right(), 120);
+    let schedule = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderSchedule)
+        .unwrap();
+    assert_eq!(app.regions.help.unwrap().right(), schedule.x);
+    assert_eq!(schedule.right(), 120);
     let buffer = terminal.backend().buffer();
     let agents = app.regions.agents_splitter.unwrap();
     let agents_offset = usize::from(agents.y) * 120 + usize::from(agents.x);

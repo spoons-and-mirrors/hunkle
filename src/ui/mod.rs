@@ -391,6 +391,7 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
         HitTarget::HeaderDiff,
         HitTarget::HeaderIssue,
         HitTarget::HeaderAgent,
+        HitTarget::HeaderSchedule,
         HitTarget::HeaderFullscreen,
     ] {
         let Some(rect) = app.regions.hit_target_rect(target) else {
@@ -521,6 +522,10 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
         (key_label(ShortcutAction::OpenSettings), "Settings"),
         (key_label(ShortcutAction::OpenHelp), "Help"),
     ]);
+    let schedule_index = app.herdr_available().then(|| {
+        labels.push(("F4".to_owned(), "Schedule"));
+        labels.len() - 1
+    });
 
     let total_width = labels.iter().fold(0_u16, |width, (key, label)| {
         let label_width = if compact {
@@ -612,6 +617,10 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
     app.regions.explorer = rects.get(offset + 2).copied();
     app.regions.settings = rects.get(offset + 3).copied();
     app.regions.help = rects.get(offset + 4).copied();
+    if let Some(rect) = schedule_index.and_then(|index| rects.get(index).copied()) {
+        app.regions
+            .register_hit_target(HitTarget::HeaderSchedule, rect);
+    }
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)),

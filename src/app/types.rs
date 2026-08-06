@@ -633,6 +633,7 @@ pub(crate) enum MobileDragAxis {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ScrollTarget {
+    Header,
     HeaderPicker,
     ActionMenu,
     AuthorFilter,
@@ -732,6 +733,7 @@ pub struct Regions {
     pub commit_scroll_max: usize,
     pub(crate) agent_preview_scroll: usize,
     pub(crate) agent_preview_scroll_max: usize,
+    pub(crate) header_scroll_max: usize,
     pub graph_table: Option<Rect>,
     pub(crate) graph_columns: Vec<GraphColumnRegion>,
     pub action_menu: Option<Rect>,
