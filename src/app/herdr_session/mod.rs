@@ -30,8 +30,8 @@ pub(crate) use client::HerdrPaneLayout;
 #[cfg(test)]
 pub(crate) use client::HerdrPaneRect;
 pub(crate) use scheduler::{
-    ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit,
-    ScheduledTaskSource,
+    ProjectTaskStatus, ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination,
+    ScheduledTaskEdit,
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -463,7 +463,10 @@ pub(crate) struct HerdrSession {
 }
 
 impl HerdrSession {
-    pub(crate) fn detect(config_dir: Option<&Path>) -> Self {
+    pub(crate) fn detect(
+        config_dir: Option<&Path>,
+        discord_webhooks: Vec<crate::app::DiscordWebhookConfig>,
+    ) -> Self {
         #[cfg(test)]
         let environment: Option<client::Environment> = None;
         #[cfg(not(test))]
@@ -491,6 +494,7 @@ impl HerdrSession {
                 scheduler::SchedulerService::open(
                     config_dir.map(|path| path.join("scheduler.sqlite3")),
                     Some(files_root),
+                    discord_webhooks,
                 )
             }) {
                 Ok(scheduler) => session.scheduler = Some(scheduler),
@@ -581,23 +585,26 @@ impl HerdrSession {
         &self,
         id: Option<i64>,
         edit: ScheduledTaskEdit,
-        source: Option<ScheduledTaskSource>,
     ) -> Result<(), String> {
-        self.scheduler_service()?.save_task(id, edit, source)
+        self.scheduler_service()?.save_task(id, edit)
     }
 
-    pub(crate) fn scheduled_task_source(
+    pub(crate) fn configure_project_task(
         &self,
-        task: &ScheduledTask,
-    ) -> Result<Option<ScheduledTaskSource>, String> {
-        self.scheduler_service()?.task_source(task)
+        id: i64,
+        discord_webhook_id: String,
+    ) -> Result<(), String> {
+        self.scheduler_service()?
+            .configure_project_task(id, discord_webhook_id)
     }
 
-    pub(crate) fn sync_scheduled_task_files(
+    pub(crate) fn discover_project_tasks(
         &self,
-        destinations: Vec<ScheduledTaskDestination>,
+        destination: ScheduledTaskDestination,
+        repository_identity: PathBuf,
     ) -> Result<(), String> {
-        self.scheduler_service()?.sync_task_files(destinations)
+        self.scheduler_service()?
+            .discover_project_tasks(destination, repository_identity)
     }
 
     pub(crate) fn toggle_scheduled_task(&self, id: i64, enabled: bool) -> Result<(), String> {
@@ -614,6 +621,20 @@ impl HerdrSession {
 
     pub(crate) fn refresh_scheduled_run(&self, id: i64) -> Result<(), String> {
         self.scheduler_service()?.refresh_run(id)
+    }
+
+    pub(crate) fn configure_discord_webhooks(
+        &self,
+        webhooks: Vec<crate::app::DiscordWebhookConfig>,
+    ) -> Result<(), String> {
+        let Some(scheduler) = self.scheduler.as_ref() else {
+            return Ok(());
+        };
+        scheduler.configure_discord_webhooks(webhooks)
+    }
+
+    pub(crate) fn test_discord_webhook(&self, channel: String) -> Result<(), String> {
+        self.scheduler_service()?.test_discord_webhook(channel)
     }
 
     pub(crate) fn resolve_scheduled_run_session(
@@ -1968,7 +1989,7 @@ impl HerdrSession {
 
     #[cfg(test)]
     pub(crate) fn set_scheduled_tasks_for_test(&mut self, tasks: Vec<ScheduledTask>) {
-        let mut scheduler = scheduler::SchedulerService::open(None, None).unwrap();
+        let mut scheduler = scheduler::SchedulerService::open(None, None, Vec::new()).unwrap();
         scheduler.tasks = tasks;
         self.scheduler = Some(scheduler);
     }
@@ -2477,7 +2498,8 @@ mod latest_user_message_cache_tests {
     #[test]
     fn binds_a_scheduled_run_to_its_live_terminal_and_session() {
         let mut session = HerdrSession::new(true, None, None);
-        session.scheduler = Some(scheduler::SchedulerService::open(None, None).unwrap());
+        session.scheduler =
+            Some(scheduler::SchedulerService::open(None, None, Vec::new()).unwrap());
         let scheduler = session.scheduler.as_mut().unwrap();
         scheduler.tasks.push(scheduler::ScheduledTask {
             id: 7,
@@ -2485,6 +2507,7 @@ mod latest_user_message_cache_tests {
             description: String::new(),
             prompt: "Review".to_owned(),
             model: String::new(),
+            discord_webhook_id: String::new(),
             destination: PathBuf::from("/repo"),
             repository: "repo".to_owned(),
             branch: "main".to_owned(),
@@ -2492,6 +2515,7 @@ mod latest_user_message_cache_tests {
             interval_minutes: 60,
             next_run_ms: 3_600_000,
             source: None,
+            project_status: None,
         });
         scheduler.runs.push(scheduler::ScheduledRun {
             id: 9,

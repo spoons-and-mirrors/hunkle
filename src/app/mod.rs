@@ -42,8 +42,8 @@ pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
     AgentActivityPreview, AgentEntryState, AgentKey, AgentPromptOutcome, AgentRequestPartPreview,
     AgentRequestPreview, AgentStatus, AgentTranscript, AgentUserMessage, HerdrPaneLayout,
-    HerdrSession, ScheduledRun, ScheduledRunStatus, ScheduledTask, ScheduledTaskDestination,
-    ScheduledTaskEdit, ScheduledTaskSource,
+    HerdrSession, ProjectTaskStatus, ScheduledRun, ScheduledRunStatus, ScheduledTask,
+    ScheduledTaskDestination, ScheduledTaskEdit,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -58,8 +58,11 @@ pub(crate) use scheduler::{
     ScheduledTaskComposer, SchedulerDestinationCard, SchedulerField, SchedulerState,
     SchedulerSurface,
 };
+pub(crate) use settings::{
+    DiscordWebhookConfig, DiscordWebhookEditor, DiscordWebhookStore, SettingsStore,
+    valid_discord_webhook_url, valid_opencode_model,
+};
 pub use settings::{OpenCodeReasoning, Settings};
-pub(crate) use settings::{SettingsStore, valid_opencode_model};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
 
 pub(super) use std::{
@@ -189,6 +192,11 @@ pub struct App {
     pub(crate) opencode_selection: usize,
     pub(crate) opencode_model_input: Option<String>,
     pub(crate) opencode_error: Option<String>,
+    pub(crate) discord_selection: usize,
+    pub(crate) discord_webhook_index: usize,
+    pub(crate) discord_webhook_editor: Option<DiscordWebhookEditor>,
+    pub(crate) discord_webhook_error: Option<String>,
+    pub(crate) discord_webhooks: Vec<DiscordWebhookConfig>,
     pub notice: Option<String>,
     pub regions: Regions,
     pub(crate) selection: SelectionState,
@@ -196,6 +204,7 @@ pub struct App {
     restart_request: Option<PathBuf>,
     pub should_quit: bool,
     pub(crate) settings_store: SettingsStore,
+    pub(crate) discord_webhook_store: DiscordWebhookStore,
     pending_reload: Option<ReloadRestoration>,
     pub(crate) editor_input: String,
     pub(crate) file_editor: Option<FileEditor>,
@@ -241,6 +250,14 @@ impl App {
             (SettingsStore::memory(), settings)
         };
         let workspace_config_dir = settings_store.config_dir();
+        let discord_webhook_store = DiscordWebhookStore::new(workspace_config_dir);
+        let (discord_webhooks, discord_webhook_notice) = match discord_webhook_store.load() {
+            Ok(webhooks) => (webhooks, None),
+            Err(error) => (
+                Vec::new(),
+                Some(format!("Could not load Discord webhook: {error}")),
+            ),
+        };
         #[cfg(not(test))]
         let known_repositories_path =
             workspace_config_dir.map(|path| path.join("known-repositories.json"));
@@ -288,7 +305,7 @@ impl App {
             let _ = linked_worktrees
                 .remember_workspace(repository.common_dir.as_deref(), &repository.root);
         }
-        let mut herdr = HerdrSession::detect(workspace_config_dir);
+        let mut herdr = HerdrSession::detect(workspace_config_dir, discord_webhooks.clone());
         herdr.set_cross_workspace_agents(settings.cross_workspace_agents);
         linked_worktrees.observe_herdr(herdr.linked_worktree_observation());
         linked_worktrees.refresh();
@@ -359,13 +376,21 @@ impl App {
             opencode_selection: 0,
             opencode_model_input: None,
             opencode_error: None,
-            notice: open_in_background.then(|| "Opening workspace…".to_owned()),
+            discord_selection: 0,
+            discord_webhook_index: 0,
+            discord_webhook_editor: None,
+            discord_webhook_error: None,
+            discord_webhooks,
+            notice: open_in_background
+                .then(|| "Opening workspace…".to_owned())
+                .or(discord_webhook_notice),
             regions: Regions::default(),
             selection: SelectionState::default(),
             copy_request: None,
             restart_request: None,
             should_quit: false,
             settings_store,
+            discord_webhook_store,
             pending_reload: None,
             editor_input: String::new(),
             file_editor: None,
@@ -392,6 +417,7 @@ impl App {
             footer_marquee: None,
         };
         app.restore_commit_draft();
+        app.discover_active_project_tasks();
         app.queue_local_build_restart();
         app
     }
@@ -901,7 +927,10 @@ impl App {
                 self.editor_error = None;
             }
             Mode::Settings => {
-                if let Some(input) = &mut self.opencode_model_input {
+                if let Some(editor) = &mut self.discord_webhook_editor {
+                    editor.active_input_mut().insert_single_line(text);
+                    self.discord_webhook_error = None;
+                } else if let Some(input) = &mut self.opencode_model_input {
                     input.push_str(text);
                     self.opencode_error = None;
                 }
@@ -1081,6 +1110,11 @@ impl App {
         changed |= self
             .agent_preview_prompt
             .poll_blink(self.agent_preview_prompt_focused);
+        if let Some(editor) = &mut self.discord_webhook_editor {
+            changed |= editor.active_input_mut().poll_blink(
+                self.mode == Mode::Settings && self.settings_page == SettingsPage::Discord,
+            );
+        }
         changed |= self.poll_scheduler_inputs();
         changed |= self
             .file_search
@@ -1421,6 +1455,7 @@ impl App {
                             .then_some(0),
                     );
                     self.restore_commit_draft();
+                    self.discover_active_project_tasks();
                     if let Some(request) = follow_up_refresh {
                         self.track_refresh_request(request, false);
                     }
@@ -1511,6 +1546,9 @@ impl App {
                                 Some(repo.files_fingerprint),
                             );
                         }
+                    }
+                    if refresh_scope.includes_worktree() || refresh_scope.includes_inventory() {
+                        self.discover_active_project_tasks();
                     }
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());

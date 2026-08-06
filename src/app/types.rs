@@ -310,6 +310,7 @@ pub enum Mode {
 pub(crate) enum SettingsPage {
     General,
     OpenCode,
+    Discord,
     Shortcuts,
 }
 
@@ -317,7 +318,8 @@ impl SettingsPage {
     pub(crate) fn next(self) -> Self {
         match self {
             Self::General => Self::OpenCode,
-            Self::OpenCode => Self::Shortcuts,
+            Self::OpenCode => Self::Discord,
+            Self::Discord => Self::Shortcuts,
             Self::Shortcuts => Self::General,
         }
     }
@@ -326,7 +328,8 @@ impl SettingsPage {
         match self {
             Self::General => Self::Shortcuts,
             Self::OpenCode => Self::General,
-            Self::Shortcuts => Self::OpenCode,
+            Self::Discord => Self::OpenCode,
+            Self::Shortcuts => Self::Discord,
         }
     }
 }
@@ -442,6 +445,13 @@ pub(crate) enum SettingsHitTarget {
     Shortcut(ShortcutAction),
     OpenCodeModel,
     OpenCodeReasoning,
+    DiscordWebhook,
+    DiscordAdd,
+    DiscordField(usize),
+    DiscordSave,
+    DiscordCancel,
+    DiscordTest,
+    DiscordRemove,
     AutoFetch,
     FetchInterval,
     FetchIntervalDown,
@@ -510,7 +520,14 @@ impl SettingsHitTarget {
             | Self::Page(_)
             | Self::Shortcut(_)
             | Self::OpenCodeModel
-            | Self::OpenCodeReasoning => None,
+            | Self::OpenCodeReasoning
+            | Self::DiscordWebhook
+            | Self::DiscordAdd
+            | Self::DiscordField(_)
+            | Self::DiscordSave
+            | Self::DiscordCancel
+            | Self::DiscordTest
+            | Self::DiscordRemove => None,
         }
     }
 }

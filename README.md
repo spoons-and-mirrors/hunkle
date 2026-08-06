@@ -72,40 +72,49 @@ it never climbs into an enclosing repository.
 
 ## Scheduled tasks
 
-Scheduled task definitions are Hunkle-owned files under
-`$XDG_DATA_HOME/hunkle/scheduled/*.md` (normally
-`~/.local/share/hunkle/scheduled/*.md`). Existing database-backed definitions and
-legacy repository-local `.hunkle/scheduled/*.md` files are migrated there; run
-history remains in Hunkle's scheduler database.
-Tasks can also be created, edited, enabled, disabled, or deleted in the scheduler,
-which updates the corresponding Markdown file.
-Changing the destination while editing updates the file's destination metadata while
-preserving its location and the task's run history.
+Tasks created in Hunkle are stored in
+`$XDG_CONFIG_HOME/hunkle/scheduler.sqlite3` (normally
+`~/.config/hunkle/scheduler.sqlite3`) with their run history and operational state.
+Legacy task files under Hunkle's global `scheduled` data directory are imported once
+as local database tasks and left in place.
+
+Repositories can declare project tasks as direct Markdown files under
+`.agents/scheduled/*.md`. Hunkle discovers them when the repository is opened or
+refreshed, leaves them in place, and stores only their local activation state and
+history in the database. New and changed project tasks are disabled until explicitly
+approved; missing source files disable their tasks without deleting history.
+
+Local tasks can be created, edited, enabled, disabled, or deleted in the scheduler.
+Project task definitions remain repository-owned; Hunkle configures their local
+Discord delivery and approval state without rewriting the source file.
 The branch picker includes the repository's local and remote branches. Saving a
-task reuses an existing checkout or creates a managed linked worktree for a branch
+local task reuses an existing checkout or creates a managed linked worktree for a branch
 that is not checked out yet.
 
 ```markdown
 ---
-status: enabled
+id: review-open-changes
 frequency: 2h
 title: "Review open changes"
 description: "Inspect the worktree and report risks"
 model: "openai/gpt-5.6-sol"
-destination: "/home/me/code/project"
-repository: "project"
-branch: "main"
 ---
 
 Review the current diff. Summarize correctness risks and missing tests.
 ```
 
-The destination and schedule fields are required; `model` is optional and uses
-OpenCode's `provider/model` syntax. Leave it empty to use OpenCode's configured default.
-`status` is `enabled` or `disabled`.
+Project task `id`, `title`, and `frequency` fields are required. IDs contain only
+letters, numbers, `.`, `_`, and `-`; `model` and `description` are optional.
 `frequency` accepts a positive number of minutes, or a number followed by `m`, `h`,
-or `d`. `destination` is the agent's worktree path; `repository` and `branch` label
-that checkout. The Markdown body is the task prompt.
+or `d`. The destination is the worktree where Hunkle discovered the file, and the
+Markdown body is the task prompt. Enabled state and Discord webhook selection are
+local settings and are never written into the repository file.
+
+Open **Settings > Discord** to save, test, or remove webhooks identified by server,
+channel, and webhook name. Each scheduled task can independently select one webhook or
+leave Discord delivery off. Mentions are disabled and responses longer than one
+Discord message are delivered in full as Markdown attachments. Delivery failures do not fail or rerun the task; they
+appear on the run, and **Refresh** retries the delivery.
 
 ## Keys
 

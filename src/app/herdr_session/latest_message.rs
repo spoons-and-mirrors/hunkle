@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::Value;
 
 use crate::process::{self, Limits};
@@ -33,14 +33,78 @@ struct TranscriptDatabase {
 }
 
 pub(super) fn fetch(session_id: &str, allow_unchanged: bool) -> Result<TranscriptFetch, String> {
-    if !session_id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err("OpenCode session ID contains unsupported characters".to_owned());
-    }
+    validate_session_id(session_id)?;
     let path = database_path()?;
     fetch_from_database(&TRANSCRIPT_DATABASE, &path, session_id, allow_unchanged)
+}
+
+pub(super) fn final_assistant_text(session_id: &str) -> Result<String, String> {
+    validate_session_id(session_id)?;
+    let path = database_path()?;
+    let mut database = TRANSCRIPT_DATABASE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if database.is_none() {
+        *database = Some(TranscriptDatabase::open(&path)?);
+    }
+    query_final_assistant_text(
+        &database
+            .as_ref()
+            .expect("transcript database was opened")
+            .connection,
+        session_id,
+    )
+}
+
+fn validate_session_id(session_id: &str) -> Result<(), String> {
+    session_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        .then_some(())
+        .ok_or_else(|| "OpenCode session ID contains unsupported characters".to_owned())
+}
+
+fn query_final_assistant_text(connection: &Connection, session_id: &str) -> Result<String, String> {
+    let response_id = connection
+        .query_row(
+            "SELECT response.id FROM message response \
+             WHERE response.session_id = ?1 \
+               AND json_extract(response.data, '$.role') = 'assistant' \
+               AND json_extract(response.data, '$.parentID') = ( \
+                   SELECT user.id FROM message user \
+                   WHERE user.session_id = ?1 \
+                     AND json_extract(user.data, '$.role') = 'user' \
+                   ORDER BY user.time_created DESC, user.id DESC LIMIT 1 \
+               ) \
+               AND json_extract(response.data, '$.time.completed') IS NOT NULL \
+             ORDER BY response.time_created DESC, response.id DESC LIMIT 1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("Could not query the final OpenCode response: {error}"))?
+        .ok_or_else(|| "OpenCode's latest assistant response is not complete".to_owned())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT json_extract(data, '$.text') FROM part \
+             WHERE message_id = ?1 AND json_extract(data, '$.type') = 'text' \
+             ORDER BY time_created, id",
+        )
+        .map_err(|error| format!("Could not prepare the final OpenCode response: {error}"))?;
+    let text = statement
+        .query_map([response_id], |row| row.get::<_, Option<String>>(0))
+        .map_err(|error| format!("Could not query the final OpenCode response: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Could not read the final OpenCode response: {error}"))?
+        .into_iter()
+        .flatten()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty())
+        .then_some(text)
+        .ok_or_else(|| "OpenCode's final assistant response has no text".to_owned())
 }
 
 fn fetch_from_database(
@@ -478,7 +542,8 @@ mod tests {
 
     use super::{
         AgentActivityPreview, AgentRequestPartPreview, TranscriptDatabase, TranscriptFetch,
-        cached_database_path, fetch_from_database, parse, parse_session_id, sql_string,
+        cached_database_path, fetch_from_database, parse, parse_session_id,
+        query_final_assistant_text, sql_string,
     };
 
     fn create_transcript_schema(connection: &Connection) {
@@ -663,6 +728,49 @@ mod tests {
             vec![AgentRequestPartPreview::Text(
                 "Combined response".to_owned()
             )]
+        );
+    }
+
+    #[test]
+    fn final_text_requires_a_completed_response_to_the_latest_user_message() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_transcript_schema(&connection);
+        insert_user_message(&connection, "alpha", "First request");
+        connection
+            .execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES ('response-one', 'alpha', 2, '{\"role\":\"assistant\",\"parentID\":\"alpha-message\",\"time\":{\"completed\":2}}')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES ('response-one-text', 'response-one', 'alpha', 2, '{\"type\":\"text\",\"text\":\"First result\"}')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES ('latest-user', 'alpha', 3, '{\"role\":\"user\"}')",
+                [],
+            )
+            .unwrap();
+        assert!(query_final_assistant_text(&connection, "alpha").is_err());
+
+        connection
+            .execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES ('response-two', 'alpha', 4, '{\"role\":\"assistant\",\"parentID\":\"latest-user\",\"time\":{\"completed\":4}}')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES ('response-two-a', 'response-two', 'alpha', 4, '{\"type\":\"text\",\"text\":\"Latest\"}'), ('response-two-b', 'response-two', 'alpha', 5, '{\"type\":\"text\",\"text\":\"result\"}')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            query_final_assistant_text(&connection, "alpha").unwrap(),
+            "Latest\n\nresult"
         );
     }
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread::{self, JoinHandle},
@@ -10,11 +10,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
-    filesystem::{
-        atomic_write_if_unchanged, atomic_write_workspace, ensure_workspace_directory,
-        read_optional_workspace_directory, read_workspace_file, remove_workspace_file,
-        remove_workspace_file_if_unchanged,
-    },
+    app::valid_discord_webhook_url,
+    filesystem::{read_optional_workspace_directory, read_workspace_file},
     repo_path::RepoPath,
 };
 
@@ -27,6 +24,10 @@ use super::{
 };
 
 const MAX_RUNS: i64 = 50;
+const DISCORD_DELIVERY_ERROR: &str = "Discord delivery failed: ";
+const DISCORD_MESSAGE_BYTES: usize = 1_900;
+const RESULT_FETCH_ATTEMPTS: usize = 20;
+const RESULT_FETCH_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScheduledTask {
@@ -35,6 +36,7 @@ pub(crate) struct ScheduledTask {
     pub(crate) description: String,
     pub(crate) prompt: String,
     pub(crate) model: String,
+    pub(crate) discord_webhook_id: String,
     pub(crate) destination: PathBuf,
     pub(crate) repository: String,
     pub(crate) branch: String,
@@ -42,6 +44,7 @@ pub(crate) struct ScheduledTask {
     pub(crate) interval_minutes: u64,
     pub(crate) next_run_ms: i64,
     pub(crate) source: Option<RepoPath>,
+    pub(crate) project_status: Option<ProjectTaskStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,19 +53,31 @@ pub(crate) struct ScheduledTaskEdit {
     pub(crate) description: String,
     pub(crate) prompt: String,
     pub(crate) model: String,
+    pub(crate) discord_webhook_id: String,
     pub(crate) destination: PathBuf,
     pub(crate) repository: String,
     pub(crate) branch: String,
     pub(crate) enabled: bool,
     pub(crate) interval_minutes: u64,
-    pub(crate) source: Option<RepoPath>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ScheduledTaskSource {
-    pub(crate) root: PathBuf,
-    pub(crate) path: RepoPath,
-    pub(crate) original: Vec<u8>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectTaskStatus {
+    Pending,
+    Current,
+    Changed,
+    Missing,
+}
+
+impl ProjectTaskStatus {
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::Pending => "approval required",
+            Self::Current => "current",
+            Self::Changed => "changed; approval required",
+            Self::Missing => "source missing",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,13 +148,18 @@ pub(crate) struct SchedulerService {
     pub(crate) runs: Vec<ScheduledRun>,
     commands: Sender<Command>,
     updates: Receiver<Update>,
+    notices: Receiver<String>,
     worker: Option<JoinHandle<()>>,
-    files_root: Option<PathBuf>,
 }
 
 impl SchedulerService {
-    pub(crate) fn open(path: Option<PathBuf>, files_root: Option<PathBuf>) -> Result<Self, String> {
+    pub(crate) fn open(
+        path: Option<PathBuf>,
+        files_root: Option<PathBuf>,
+        discord_webhooks: Vec<crate::app::DiscordWebhookConfig>,
+    ) -> Result<Self, String> {
         let enabled = path.is_some();
+        let discord_webhooks = discord_webhooks_by_id(discord_webhooks);
         let files_root = files_root
             .map(|root| {
                 std::fs::create_dir_all(&root)
@@ -152,15 +172,28 @@ impl SchedulerService {
             .map_or_else(Connection::open_in_memory, Connection::open)
             .map_err(|error| format!("Could not open scheduler database: {error}"))?;
         prepare_database(&mut db)?;
+        let import_notice = files_root
+            .as_deref()
+            .and_then(|root| import_legacy_task_files(&db, root).err());
         recover_stale_launches(&db, now_ms())?;
         let (tasks, runs) = load_state(&db)?;
         let (commands, command_rx) = mpsc::channel();
         let (update_tx, updates) = mpsc::channel();
+        let (notice_tx, notices) = mpsc::channel();
+        if let Some(notice) = import_notice {
+            let _ = notice_tx.send(notice);
+        }
         let worker = thread::Builder::new()
             .name("hunkle-scheduler".to_owned())
-            .spawn({
-                let files_root = files_root.clone();
-                move || worker(db, command_rx, update_tx, enabled, files_root)
+            .spawn(move || {
+                worker(
+                    db,
+                    command_rx,
+                    update_tx,
+                    enabled,
+                    discord_webhooks,
+                    notice_tx,
+                )
             })
             .map_err(|error| format!("Could not start scheduler worker: {error}"))?;
         Ok(Self {
@@ -168,8 +201,8 @@ impl SchedulerService {
             runs,
             commands,
             updates,
+            notices,
             worker: Some(worker),
-            files_root,
         })
     }
 
@@ -177,7 +210,6 @@ impl SchedulerService {
         &self,
         id: Option<i64>,
         mut task: ScheduledTaskEdit,
-        original: Option<ScheduledTaskSource>,
     ) -> Result<(), String> {
         let interval = interval_ms(task.interval_minutes)?;
         task.destination = validate_destination(&task.destination)?;
@@ -186,110 +218,39 @@ impl SchedulerService {
         let next = now_ms()
             .checked_add(interval)
             .ok_or_else(|| "schedule is too large".to_owned())?;
-        if let Some(source) = original
-            && let Some(files_root) = self.files_root.as_deref()
-        {
-            if task.source.as_ref() != Some(&source.path) {
-                return Err("scheduled task source changed while editing".to_owned());
-            }
-            if source.root == files_root {
-                let content = render_task_file(&task);
-                atomic_write_if_unchanged(
-                    files_root,
-                    &source.path,
-                    &source.original,
-                    content.as_bytes(),
-                )
-                .map_err(|error| error.to_string())?;
-            } else {
-                ensure_workspace_directory(files_root, &RepoPath::from("scheduled"))
-                    .map_err(|error| error.to_string())?;
-                let target = available_task_path(files_root, &task.title, id)?;
-                task.source = Some(target.clone());
-                atomic_write_workspace(files_root, &target, render_task_file(&task).as_bytes())
-                    .map_err(|error| error.to_string())?;
-                if let Err(error) =
-                    remove_workspace_file_if_unchanged(&source.root, &source.path, &source.original)
-                {
-                    let rollback = remove_workspace_file(files_root, &target);
-                    return Err(match rollback {
-                        Ok(()) => error.to_string(),
-                        Err(rollback) => format!(
-                            "{error}; could not remove the new task file during rollback: {rollback}"
-                        ),
-                    });
-                }
-            }
-        } else if id.is_none()
-            && let Some(files_root) = self.files_root.as_deref()
-        {
-            ensure_workspace_directory(files_root, &RepoPath::from("scheduled"))
-                .map_err(|error| error.to_string())?;
-            let source = available_task_path(files_root, &task.title, None)?;
-            task.source = Some(source.clone());
-            atomic_write_workspace(files_root, &source, render_task_file(&task).as_bytes())
-                .map_err(|error| error.to_string())?;
-        }
         self.send(Command::Save(id, task, next))
     }
 
-    pub(crate) fn task_source(
+    pub(crate) fn discover_project_tasks(
         &self,
-        task: &ScheduledTask,
-    ) -> Result<Option<ScheduledTaskSource>, String> {
-        let Some(path) = task.source.clone() else {
-            return Ok(None);
-        };
-        let root = if path.as_path().starts_with("scheduled") {
-            self.files_root
-                .clone()
-                .ok_or_else(|| "Hunkle task storage is unavailable".to_owned())?
-        } else {
-            task.destination.clone()
-        };
-        let original = read_workspace_file(&root, &path)
-            .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
-        Ok(Some(ScheduledTaskSource {
-            root,
-            path,
-            original,
-        }))
-    }
-
-    pub(crate) fn sync_task_files(
-        &self,
-        destinations: Vec<ScheduledTaskDestination>,
+        destination: ScheduledTaskDestination,
+        repository_identity: PathBuf,
     ) -> Result<(), String> {
-        self.send(Command::Sync(destinations))
+        self.send(Command::Discover(
+            destination,
+            encode_path(&repository_identity),
+        ))
     }
 
     pub(crate) fn toggle_task(&self, id: i64, enabled: bool) -> Result<(), String> {
-        let Some(task) = self.tasks.iter().find(|task| task.id == id) else {
-            return Err("scheduled task not found".to_owned());
-        };
-        if task.source.is_none() {
-            return self.send(Command::Toggle(id, enabled));
-        }
-        let source = self.task_source(task)?.expect("source was checked");
-        let mut edit = task.edit();
-        edit.enabled = enabled;
-        self.save_task(Some(id), edit, Some(source))
+        self.send(Command::Toggle(id, enabled))
     }
     pub(crate) fn delete_task(&self, id: i64) -> Result<(), String> {
         let Some(task) = self.tasks.iter().find(|task| task.id == id) else {
             return Err("scheduled task not found".to_owned());
         };
-        if let Some(source) = task.source.as_ref() {
-            let root = if source.as_path().starts_with("scheduled") {
-                self.files_root
-                    .as_deref()
-                    .ok_or_else(|| "Hunkle task storage is unavailable".to_owned())?
-            } else {
-                &task.destination
-            };
-            remove_workspace_file(root, source).map_err(|error| error.to_string())?;
+        if task.project_status.is_some() {
+            return Err("remove the project task's Markdown file from the repository".to_owned());
         }
         self.send(Command::Delete(id))
+    }
+
+    pub(crate) fn configure_project_task(
+        &self,
+        id: i64,
+        discord_webhook_id: String,
+    ) -> Result<(), String> {
+        self.send(Command::ConfigureProject(id, discord_webhook_id))
     }
     pub(crate) fn run_now(&self, id: i64) -> Result<(), String> {
         if !self.tasks.iter().any(|task| task.id == id) {
@@ -306,6 +267,17 @@ impl SchedulerService {
     }
     pub(crate) fn refresh_run(&self, id: i64) -> Result<(), String> {
         self.send(Command::Refresh(id))
+    }
+
+    pub(crate) fn configure_discord_webhooks(
+        &self,
+        webhooks: Vec<crate::app::DiscordWebhookConfig>,
+    ) -> Result<(), String> {
+        self.send(Command::ConfigureDiscord(webhooks))
+    }
+
+    pub(crate) fn test_discord_webhook(&self, channel: String) -> Result<(), String> {
+        self.send(Command::TestDiscord(channel))
     }
 
     pub(crate) fn bind_agent(&mut self, id: i64, pane_id: String, terminal_id: String) {
@@ -346,6 +318,9 @@ impl SchedulerService {
                 Err(update_error) => error = Some(update_error),
             }
         }
+        while let Ok(notice) = self.notices.try_recv() {
+            error = Some(notice);
+        }
         (changed, error)
     }
 
@@ -371,13 +346,16 @@ impl Drop for SchedulerService {
 
 enum Command {
     Save(Option<i64>, ScheduledTaskEdit, i64),
-    Sync(Vec<ScheduledTaskDestination>),
+    Discover(ScheduledTaskDestination, Vec<u8>),
     Toggle(i64, bool),
+    ConfigureProject(i64, String),
     Delete(i64),
     RunNow(i64),
     Refresh(i64),
     BindAgent(i64, String, String),
     BindSession(i64, String),
+    ConfigureDiscord(Vec<crate::app::DiscordWebhookConfig>),
+    TestDiscord(String),
     Shutdown,
 }
 
@@ -390,12 +368,69 @@ struct Claim {
     destination: PathBuf,
 }
 
+struct DiscordWebhook {
+    url: String,
+    agent: ureq::Agent,
+}
+
+impl DiscordWebhook {
+    fn new(url: String) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build();
+        Self {
+            url: url.trim().to_owned(),
+            agent: config.into(),
+        }
+    }
+
+    fn publish(&self, title: &str, output: &str) -> Result<(), String> {
+        if !valid_discord_webhook_url(&self.url) {
+            return Err("Discord webhook URL is invalid".to_owned());
+        }
+        let result = match discord_delivery(title, output) {
+            DiscordDelivery::Message(content) => {
+                self.agent.post(&self.url).send_json(serde_json::json!({
+                    "content": content,
+                    "allowed_mentions": { "parse": [] },
+                }))
+            }
+            DiscordDelivery::Attachment { content, report } => {
+                use ureq::unversioned::multipart::{Form, Part};
+
+                let payload = serde_json::json!({
+                    "content": content,
+                    "allowed_mentions": { "parse": [] },
+                    "attachments": [{
+                        "id": 0,
+                        "filename": "hunkle-report.md",
+                    }],
+                })
+                .to_string();
+                let file = Part::bytes(report.as_bytes())
+                    .file_name("hunkle-report.md")
+                    .mime_str("text/markdown")
+                    .map_err(|_| "Could not prepare Discord report attachment".to_owned())?;
+                self.agent.post(&self.url).send(
+                    Form::new()
+                        .text("payload_json", &payload)
+                        .part("files[0]", file),
+                )
+            }
+        };
+        result
+            .map(|_| ())
+            .map_err(|_| "Discord webhook request failed".to_owned())
+    }
+}
+
 fn worker(
     mut db: Connection,
     commands: Receiver<Command>,
     updates: Sender<Update>,
     enabled: bool,
-    files_root: Option<PathBuf>,
+    mut discord_webhooks: HashMap<String, DiscordWebhook>,
+    notices: Sender<String>,
 ) {
     loop {
         match commands.recv_timeout(Duration::from_secs(if enabled { 2 } else { 30 })) {
@@ -403,16 +438,22 @@ fn worker(
             Ok(command) => {
                 let result = match command {
                     Command::Save(id, task, next) => save_task(&db, id, task, next),
-                    Command::Sync(destinations) => files_root
-                        .as_deref()
-                        .ok_or_else(|| "Hunkle task storage is unavailable".to_owned())
-                        .and_then(|files_root| sync_task_files(&db, files_root, &destinations)),
-                    Command::Toggle(id, enabled) => changed(
+                    Command::Discover(destination, repository_identity) => {
+                        match discover_project_tasks(&mut db, &destination, &repository_identity) {
+                            Ok(()) => Ok(()),
+                            Err(error) => {
+                                let _ = notices.send(error);
+                                Ok(())
+                            }
+                        }
+                    }
+                    Command::Toggle(id, enabled) => toggle_task(&db, id, enabled),
+                    Command::ConfigureProject(id, discord_webhook_id) => changed(
                         db.execute(
-                            "UPDATE scheduled_tasks SET enabled = ?2 WHERE id = ?1",
-                            params![id, enabled],
+                            "UPDATE scheduled_tasks SET discord_webhook_id = ?2 WHERE id = ?1 AND source_kind = 'project'",
+                            params![id, discord_webhook_id],
                         ),
-                        "scheduled task not found",
+                        "project task not found",
                     ),
                     Command::Delete(id) => delete_task(&db, id),
                     Command::RunNow(id) if enabled => claim(&mut db, Some(id), now_ms())
@@ -422,13 +463,29 @@ fn worker(
                                 &db,
                                 run,
                                 &mut scheduler_launch,
+                                &mut |db, run_id| {
+                                    complete_run(db, run_id, &discord_webhooks)
+                                },
                                 &updates,
                             )
                         }),
                     Command::RunNow(_) => {
                         Err("scheduler execution is disabled for an in-memory service".to_owned())
                     }
-                    Command::Refresh(id) => refresh(&db, Some(id), &mut scheduler_observe),
+                    Command::Refresh(id) => match retry_delivery(&db, id, &mut |db, run_id| {
+                        complete_run(db, run_id, &discord_webhooks)
+                    }) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => refresh(
+                            &db,
+                            Some(id),
+                            &mut scheduler_observe,
+                            &mut |db, run_id| {
+                                complete_run(db, run_id, &discord_webhooks)
+                            },
+                        ),
+                        Err(error) => Err(error),
+                    },
                     Command::BindAgent(id, pane_id, terminal_id) => db
                         .execute(
                             "UPDATE scheduled_runs SET pane_id = ?2, terminal_id = ?3 WHERE id = ?1 AND terminal_id IS NULL",
@@ -443,6 +500,24 @@ fn worker(
                         )
                         .map(|_| ())
                         .map_err(db_error),
+                    Command::ConfigureDiscord(webhooks) => {
+                        discord_webhooks = discord_webhooks_by_id(webhooks);
+                        Ok(())
+                    }
+                    Command::TestDiscord(channel) => {
+                        let notice = match discord_webhooks.get(&channel) {
+                            Some(webhook) => match webhook.publish(
+                                "Hunkle Discord integration",
+                                "Test message delivered successfully.",
+                            ) {
+                                Ok(()) => "Discord test message sent".to_owned(),
+                                Err(error) => format!("Discord test failed: {error}"),
+                            },
+                            None => "Discord webhook is not configured".to_owned(),
+                        };
+                        let _ = notices.send(notice);
+                        Ok(())
+                    }
                     Command::Shutdown => unreachable!(),
                 };
                 publish(&db, &updates, result);
@@ -451,9 +526,17 @@ fn worker(
                 let result = if enabled {
                     (|| {
                         while let Some(run) = claim(&mut db, None, now_ms())? {
-                            execute_claim_with_update(&db, run, &mut scheduler_launch, &updates)?;
+                            execute_claim_with_update(
+                                &db,
+                                run,
+                                &mut scheduler_launch,
+                                &mut |db, run_id| complete_run(db, run_id, &discord_webhooks),
+                                &updates,
+                            )?;
                         }
-                        refresh(&db, None, &mut scheduler_observe)
+                        refresh(&db, None, &mut scheduler_observe, &mut |db, run_id| {
+                            complete_run(db, run_id, &discord_webhooks)
+                        })
                     })()
                 } else {
                     Ok(())
@@ -462,6 +545,42 @@ fn worker(
             }
         }
     }
+}
+
+fn complete_run(
+    db: &Connection,
+    run_id: i64,
+    discord_webhooks: &HashMap<String, DiscordWebhook>,
+) -> Result<(), String> {
+    let channel = db
+        .query_row(
+            "SELECT discord_webhook_id FROM scheduled_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(db_error)?;
+    if channel.is_empty() {
+        return Ok(());
+    }
+    let webhook = discord_webhooks.get(&channel);
+    finalize_completed_run(
+        db,
+        run_id,
+        &mut fetch_scheduled_result,
+        &mut |title, output| match webhook {
+            Some(webhook) => webhook.publish(title, output),
+            None => Err("Selected Discord webhook is not configured".to_owned()),
+        },
+    )
+}
+
+fn discord_webhooks_by_id(
+    webhooks: Vec<crate::app::DiscordWebhookConfig>,
+) -> HashMap<String, DiscordWebhook> {
+    webhooks
+        .into_iter()
+        .map(|webhook| (webhook.id, DiscordWebhook::new(webhook.url)))
+        .collect()
 }
 
 fn publish(db: &Connection, updates: &Sender<Update>, result: Result<(), String>) {
@@ -475,145 +594,43 @@ fn save_task(
     task: ScheduledTaskEdit,
     next: i64,
 ) -> Result<(), String> {
-    let source = task.source.as_ref().map(|path| encode_path(path.as_path()));
     let minutes = i64::try_from(task.interval_minutes).map_err(|_| "schedule is too large")?;
     if let Some(id) = id {
         return changed(
             db.execute(
-                "UPDATE scheduled_tasks SET title = ?2, description = ?3, prompt = ?4, model = ?5, destination = ?6, repository = ?7, branch = ?8, enabled = ?9, interval_minutes = ?10, next_run_ms = ?11, source_path = ?12 WHERE id = ?1",
-                params![id, task.title, task.description, task.prompt, task.model, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next, source],
+                "UPDATE scheduled_tasks SET title = ?2, description = ?3, prompt = ?4, model = ?5, discord_webhook_id = ?6, destination = ?7, repository = ?8, branch = ?9, enabled = ?10, interval_minutes = ?11, next_run_ms = ?12 WHERE id = ?1 AND source_kind = 'local'",
+                params![id, task.title, task.description, task.prompt, task.model, task.discord_webhook_id, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next],
             ),
-            "scheduled task not found",
+            "local scheduled task not found",
         );
     }
     db.execute(
-        "INSERT INTO scheduled_tasks (title, description, prompt, model, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![task.title, task.description, task.prompt, task.model, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next, source],
+        "INSERT INTO scheduled_tasks (title, description, prompt, model, discord_webhook_id, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'local')",
+        params![task.title, task.description, task.prompt, task.model, task.discord_webhook_id, encode_path(&task.destination), task.repository, task.branch, task.enabled, minutes, next],
     )
     .map_err(db_error)?;
     Ok(())
 }
 
-fn sync_task_files(
-    db: &Connection,
-    files_root: &Path,
-    destinations: &[ScheduledTaskDestination],
-) -> Result<(), String> {
-    let destinations = destinations
-        .iter()
-        .map(|destination| {
-            Ok(ScheduledTaskDestination {
-                path: validate_destination(&destination.path)?,
-                repository: destination.repository.clone(),
-                branch: destination.branch.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    ensure_workspace_directory(files_root, &RepoPath::from("scheduled"))
-        .map_err(|error| error.to_string())?;
+struct ProjectTaskDefinition {
+    key: String,
+    source: RepoPath,
+    content: Vec<u8>,
+    edit: ScheduledTaskEdit,
+}
 
-    for task in load_state(db)?.0 {
-        if task
-            .source
-            .as_ref()
-            .is_some_and(|source| source.as_path().starts_with("scheduled"))
-        {
-            continue;
-        }
-        let legacy = task.source.as_ref().and_then(|source| {
-            read_workspace_file(&task.destination, source)
-                .ok()
-                .map(|content| (source.clone(), content))
-        });
-        let mut edit = if let Some((source, content)) = legacy.as_ref() {
-            parse_task_file(
-                content,
-                source.clone(),
-                Some(ScheduledTaskDestination {
-                    path: task.destination.clone(),
-                    repository: task.repository.clone(),
-                    branch: task.branch.clone(),
-                }),
-            )?
-        } else {
-            task.edit()
-        };
-        let source = available_task_path(files_root, &edit.title, Some(task.id))?;
-        edit.source = Some(source.clone());
-        atomic_write_workspace(files_root, &source, render_task_file(&edit).as_bytes())
-            .map_err(|error| error.to_string())?;
-        if let Some((legacy_source, content)) = legacy
-            && let Err(error) =
-                remove_workspace_file_if_unchanged(&task.destination, &legacy_source, &content)
-        {
-            let _ = remove_workspace_file(files_root, &source);
-            return Err(error.to_string());
-        }
-        save_task(db, Some(task.id), edit, task.next_run_ms)?;
-    }
-
-    let mut errors = Vec::new();
-    for destination in &destinations {
-        let entries = read_optional_workspace_directory(
-            &destination.path,
-            &RepoPath::from(".hunkle/scheduled"),
-        )
-        .map_err(|error| error.to_string())?;
-        for entry in entries {
-            if entry.is_directory
-                || entry
-                    .path
-                    .as_path()
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    != Some("md")
-            {
-                continue;
-            }
-            let content = match read_workspace_file(&destination.path, &entry.path) {
-                Ok(content) => content,
-                Err(error) => {
-                    errors.push(format!("{}: {error}", entry.path.display()));
-                    continue;
-                }
-            };
-            let mut edit =
-                match parse_task_file(&content, entry.path.clone(), Some(destination.clone())) {
-                    Ok(edit) => edit,
-                    Err(error) => {
-                        errors.push(format!("{}: {error}", entry.path.display()));
-                        continue;
-                    }
-                };
-            let source = available_task_path(files_root, &edit.title, None)?;
-            edit.source = Some(source.clone());
-            atomic_write_workspace(files_root, &source, render_task_file(&edit).as_bytes())
-                .map_err(|error| error.to_string())?;
-            if let Err(error) =
-                remove_workspace_file_if_unchanged(&destination.path, &entry.path, &content)
-            {
-                let _ = remove_workspace_file(files_root, &source);
-                errors.push(format!("{}: {error}", entry.path.display()));
-                continue;
-            }
-            let next = now_ms()
-                .checked_add(interval_ms(edit.interval_minutes)?)
-                .ok_or_else(|| "schedule is too large".to_owned())?;
-            save_task(db, None, edit, next)?;
-        }
-    }
-
-    for task in load_state(db)?.0.into_iter().filter(|task| {
-        task.source
-            .as_ref()
-            .is_some_and(|source| source.as_path().starts_with("scheduled"))
-    }) {
-        db.execute(
-            "UPDATE scheduled_tasks SET enabled = 0 WHERE id = ?1",
-            [task.id],
+fn import_legacy_task_files(db: &Connection, files_root: &Path) -> Result<(), String> {
+    let imported = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM scheduler_metadata WHERE key = 'legacy_task_files_imported')",
+            [],
+            |row| row.get::<_, bool>(0),
         )
         .map_err(db_error)?;
+    if imported {
+        return Ok(());
     }
+    let mut errors = Vec::new();
     let entries = read_optional_workspace_directory(files_root, &RepoPath::from("scheduled"))
         .map_err(|error| error.to_string())?;
     for entry in entries {
@@ -634,7 +651,7 @@ fn sync_task_files(
                 continue;
             }
         };
-        let mut edit = match parse_task_file(&content, entry.path.clone(), None) {
+        let edit = match parse_task_file(&content, None) {
             Ok(edit) => edit,
             Err(error) => {
                 errors.push(format!("{}: {error}", entry.path.display()));
@@ -642,87 +659,340 @@ fn sync_task_files(
             }
         };
         let source = encode_path(entry.path.as_path());
+        let destination = encode_path(&edit.destination);
         let existing = db
             .query_row(
-                "SELECT id, interval_minutes, next_run_ms FROM scheduled_tasks WHERE source_path = ?1",
-                [source],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, u64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
+                "SELECT id, interval_minutes, next_run_ms FROM scheduled_tasks WHERE source_path = ?1 OR (title = ?2 AND destination = ?3 AND prompt = ?4) LIMIT 1",
+                params![source, edit.title, destination, edit.prompt],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, i64>(2)?)),
             )
             .optional()
             .map_err(db_error)?;
-        let next = if let Some((_, interval, next)) = existing
-            && interval == edit.interval_minutes
-        {
-            next
-        } else {
-            now_ms()
-                .checked_add(interval_ms(edit.interval_minutes)?)
-                .ok_or_else(|| "schedule is too large".to_owned())?
-        };
-        edit.source = Some(entry.path);
+        let next = existing
+            .filter(|(_, interval, _)| *interval == edit.interval_minutes)
+            .map(|(_, _, next)| next)
+            .unwrap_or_else(|| {
+                now_ms().saturating_add(interval_ms(edit.interval_minutes).unwrap_or(i64::MAX))
+            });
         save_task(db, existing.map(|(id, _, _)| id), edit, next)?;
     }
+    if !errors.is_empty() {
+        return Err(format!(
+            "Could not import existing scheduled tasks: {}",
+            errors.join("; ")
+        ));
+    }
+    db.execute(
+        "UPDATE scheduled_tasks SET source_path = NULL, source_kind = 'local' WHERE source_kind = 'local'",
+        [],
+    )
+    .map_err(db_error)?;
+    db.execute(
+        "INSERT OR REPLACE INTO scheduler_metadata (key, value) VALUES ('legacy_task_files_imported', '1')",
+        [],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+fn discover_project_tasks(
+    db: &mut Connection,
+    destination: &ScheduledTaskDestination,
+    repository_identity: &[u8],
+) -> Result<(), String> {
+    let destination = ScheduledTaskDestination {
+        path: validate_destination(&destination.path)?,
+        repository: destination.repository.clone(),
+        branch: destination.branch.clone(),
+    };
+    let mut errors = Vec::new();
+    if let Err(error) = import_legacy_repository_task_files(db, &destination, repository_identity) {
+        errors.push(error);
+    }
+    let directory = RepoPath::from(".agents/scheduled");
+    let entries = read_optional_workspace_directory(&destination.path, &directory)
+        .map_err(|error| error.to_string())?;
+    let mut definitions = Vec::new();
+    let mut keys = HashSet::new();
+    for entry in entries {
+        if entry.is_directory
+            || entry
+                .path
+                .as_path()
+                .extension()
+                .and_then(|value| value.to_str())
+                != Some("md")
+        {
+            continue;
+        }
+        let content = match read_workspace_file(&destination.path, &entry.path) {
+            Ok(content) => content,
+            Err(error) => {
+                errors.push(format!("{}: {error}", entry.path.display()));
+                continue;
+            }
+        };
+        match parse_project_task(&content, entry.path.clone(), &destination) {
+            Ok(definition) if keys.insert(definition.key.clone()) => definitions.push(definition),
+            Ok(definition) => errors.push(format!(
+                "{}: duplicate project task id `{}`",
+                entry.path.display(),
+                definition.key
+            )),
+            Err(error) => errors.push(format!("{}: {error}", entry.path.display())),
+        }
+    }
+
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    let destination_path = encode_path(&destination.path);
+    let known = {
+        let mut statement = tx
+            .prepare(
+                "SELECT id, project_key FROM scheduled_tasks WHERE source_kind = 'project' AND project_repository = ?1 AND destination = ?2",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map(params![repository_identity, destination_path], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
+    };
+    for definition in definitions {
+        let existing = tx
+            .query_row(
+                "SELECT id, interval_minutes, next_run_ms, approved_content, destination FROM scheduled_tasks WHERE source_kind = 'project' AND project_repository = ?1 AND project_key = ?2",
+                params![repository_identity, definition.key],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<Vec<u8>>>(3)?, row.get::<_, Vec<u8>>(4)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let next = existing
+            .as_ref()
+            .filter(|(_, interval, _, _, path)| {
+                *path == destination_path && *interval == definition.edit.interval_minutes
+            })
+            .map(|(_, _, next, _, _)| *next)
+            .unwrap_or_else(|| {
+                now_ms().saturating_add(
+                    interval_ms(definition.edit.interval_minutes).unwrap_or(i64::MAX),
+                )
+            });
+        if let Some((id, _, _, approved, path)) = existing {
+            if path != destination_path {
+                continue;
+            }
+            let enabled = approved.as_deref() == Some(definition.content.as_slice());
+            tx.execute(
+                "UPDATE scheduled_tasks SET title = ?2, description = ?3, prompt = ?4, model = ?5, destination = ?6, repository = ?7, branch = ?8, enabled = CASE WHEN ?9 THEN enabled ELSE 0 END, interval_minutes = ?10, next_run_ms = ?11, source_path = ?12, source_content = ?13, source_missing = 0 WHERE id = ?1",
+                params![id, definition.edit.title, definition.edit.description, definition.edit.prompt, definition.edit.model, destination_path, destination.repository, destination.branch, enabled, definition.edit.interval_minutes, next, encode_path(definition.source.as_path()), definition.content],
+            ).map_err(db_error)?;
+        } else {
+            tx.execute(
+                "INSERT INTO scheduled_tasks (title, description, prompt, model, discord_webhook_id, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path, source_kind, project_key, source_content, source_missing, project_repository) VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, 0, ?8, ?9, ?10, 'project', ?11, ?12, 0, ?13)",
+                params![definition.edit.title, definition.edit.description, definition.edit.prompt, definition.edit.model, destination_path, destination.repository, destination.branch, definition.edit.interval_minutes, next, encode_path(definition.source.as_path()), definition.key, definition.content, repository_identity],
+            ).map_err(db_error)?;
+        }
+    }
+    for (id, key) in known {
+        if !keys.contains(&key) {
+            tx.execute(
+                "UPDATE scheduled_tasks SET source_missing = 1, enabled = 0 WHERE id = ?1",
+                [id],
+            )
+            .map_err(db_error)?;
+        }
+    }
+    tx.commit().map_err(db_error)?;
     if errors.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "Could not load scheduled task files: {}",
+            "Could not load project tasks: {}",
             errors.join("; ")
         ))
     }
 }
 
-fn available_task_path(root: &Path, title: &str, id: Option<i64>) -> Result<RepoPath, String> {
-    let existing = read_optional_workspace_directory(root, &RepoPath::from("scheduled"))
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter_map(|entry| entry.path.file_name().map(|name| name.to_owned()))
-        .collect::<HashSet<_>>();
-    let slug = task_slug(title);
-    let preferred = id.map_or_else(|| slug.clone(), |id| format!("{slug}-{id}"));
-    for suffix in 1.. {
-        let name = if suffix == 1 {
-            format!("{preferred}.md")
-        } else {
-            format!("{preferred}-{suffix}.md")
-        };
-        if !existing.contains(std::ffi::OsStr::new(&name)) {
-            return Ok(RepoPath::from(format!("scheduled/{name}")));
-        }
+fn import_legacy_repository_task_files(
+    db: &Connection,
+    destination: &ScheduledTaskDestination,
+    repository_identity: &[u8],
+) -> Result<(), String> {
+    let identity = repository_identity
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let metadata_key = format!("legacy_repository_task_files_imported:{identity}");
+    let imported = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM scheduler_metadata WHERE key = ?1)",
+            [&metadata_key],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(db_error)?;
+    if imported {
+        return Ok(());
     }
-    unreachable!()
+    let entries =
+        read_optional_workspace_directory(&destination.path, &RepoPath::from(".hunkle/scheduled"))
+            .map_err(|error| error.to_string())?;
+    let mut found = false;
+    let mut errors = Vec::new();
+    for entry in entries {
+        if entry.is_directory
+            || entry
+                .path
+                .as_path()
+                .extension()
+                .and_then(|value| value.to_str())
+                != Some("md")
+        {
+            continue;
+        }
+        found = true;
+        let content = match read_workspace_file(&destination.path, &entry.path) {
+            Ok(content) => content,
+            Err(error) => {
+                errors.push(format!("{}: {error}", entry.path.display()));
+                continue;
+            }
+        };
+        let edit = match parse_task_file(&content, Some(destination.clone())) {
+            Ok(edit) => edit,
+            Err(error) => {
+                errors.push(format!("{}: {error}", entry.path.display()));
+                continue;
+            }
+        };
+        let destination_path = encode_path(&edit.destination);
+        let existing = db
+            .query_row(
+                "SELECT id, interval_minutes, next_run_ms FROM scheduled_tasks WHERE source_kind = 'local' AND title = ?1 AND destination = ?2 AND prompt = ?3 LIMIT 1",
+                params![edit.title, destination_path, edit.prompt],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, i64>(2)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let next = existing
+            .filter(|(_, interval, _)| *interval == edit.interval_minutes)
+            .map(|(_, _, next)| next)
+            .unwrap_or_else(|| {
+                now_ms().saturating_add(interval_ms(edit.interval_minutes).unwrap_or(i64::MAX))
+            });
+        save_task(db, existing.map(|(id, _, _)| id), edit, next)?;
+    }
+    if !errors.is_empty() {
+        return Err(format!(
+            "Could not import existing repository tasks: {}",
+            errors.join("; ")
+        ));
+    }
+    if found {
+        db.execute(
+            "INSERT INTO scheduler_metadata (key, value) VALUES (?1, '1')",
+            [&metadata_key],
+        )
+        .map_err(db_error)?;
+    }
+    Ok(())
 }
 
-fn task_slug(title: &str) -> String {
-    let mut slug = String::new();
-    let mut separator = false;
-    for character in title.chars() {
-        if character.is_ascii_alphanumeric() {
-            if separator && !slug.is_empty() {
-                slug.push('-');
-            }
-            slug.push(character.to_ascii_lowercase());
-            separator = false;
-        } else {
-            separator = true;
+fn parse_project_task(
+    content: &[u8],
+    source: RepoPath,
+    destination: &ScheduledTaskDestination,
+) -> Result<ProjectTaskDefinition, String> {
+    let text = std::str::from_utf8(content).map_err(|_| "task file must be UTF-8".to_owned())?;
+    let mut offset = 0;
+    let mut lines = text.split_inclusive('\n');
+    let first = lines
+        .next()
+        .ok_or_else(|| "missing YAML frontmatter".to_owned())?;
+    offset += first.len();
+    if first.trim_end_matches(['\r', '\n']) != "---" {
+        return Err("task file must start with YAML frontmatter".to_owned());
+    }
+    let mut fields = HashMap::new();
+    let mut closed = false;
+    for line in lines {
+        offset += line.len();
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (key, value) = trimmed
+            .split_once(':')
+            .ok_or_else(|| format!("invalid frontmatter line `{trimmed}`"))?;
+        let key = key.trim();
+        if !matches!(key, "id" | "frequency" | "title" | "description" | "model") {
+            return Err(format!("unknown project task field `{key}`"));
+        }
+        if fields
+            .insert(key, parse_yaml_scalar(value.trim())?)
+            .is_some()
+        {
+            return Err(format!("duplicate frontmatter field `{key}`"));
         }
     }
-    if slug.is_empty() {
-        "task".to_owned()
-    } else {
-        slug
+    if !closed {
+        return Err("YAML frontmatter is not closed with `---`".to_owned());
     }
+    let fallback_key = source
+        .as_path()
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "project task filename must be UTF-8".to_owned())?;
+    let key = fields
+        .remove("id")
+        .unwrap_or_else(|| fallback_key.to_owned());
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+    {
+        return Err(
+            "project task id may contain only letters, numbers, `-`, `_`, and `.`".to_owned(),
+        );
+    }
+    let title = fields
+        .remove("title")
+        .ok_or_else(|| "missing frontmatter field `title`".to_owned())?;
+    let interval_minutes = parse_frequency(
+        &fields
+            .remove("frequency")
+            .ok_or_else(|| "missing frontmatter field `frequency`".to_owned())?,
+    )?;
+    let edit = ScheduledTaskEdit {
+        title,
+        description: fields.remove("description").unwrap_or_default(),
+        prompt: text[offset..].trim_matches(['\r', '\n']).to_owned(),
+        model: fields.remove("model").unwrap_or_default(),
+        discord_webhook_id: String::new(),
+        destination: destination.path.clone(),
+        repository: destination.repository.clone(),
+        branch: destination.branch.clone(),
+        enabled: false,
+        interval_minutes,
+    };
+    validate_task(&edit)?;
+    Ok(ProjectTaskDefinition {
+        key,
+        source,
+        content: content.to_vec(),
+        edit,
+    })
 }
 
 fn parse_task_file(
     content: &[u8],
-    source: RepoPath,
     default_destination: Option<ScheduledTaskDestination>,
 ) -> Result<ScheduledTaskEdit, String> {
     let content = std::str::from_utf8(content).map_err(|_| "task file must be UTF-8".to_owned())?;
@@ -759,6 +1029,7 @@ fn parse_task_file(
                 | "title"
                 | "description"
                 | "model"
+                | "discord_webhook"
                 | "destination"
                 | "repository"
                 | "branch"
@@ -812,18 +1083,19 @@ fn parse_task_file(
     let title = required("title")?;
     let description = required("description")?;
     let model = fields.remove("model").unwrap_or_default();
+    let discord_webhook_id = fields.remove("discord_webhook").unwrap_or_default();
     let prompt = content[offset..].trim_matches(['\r', '\n']).to_owned();
     let edit = ScheduledTaskEdit {
         title,
         description,
         prompt,
         model,
+        discord_webhook_id,
         destination: validate_destination(&destination)?,
         repository,
         branch,
         enabled,
         interval_minutes,
-        source: Some(source),
     };
     validate_task(&edit)?;
     Ok(edit)
@@ -871,10 +1143,13 @@ fn parse_frequency(value: &str) -> Result<u64, String> {
         })
 }
 
+#[cfg(test)]
 fn render_task_file(task: &ScheduledTaskEdit) -> String {
     let title = serde_json::to_string(&task.title).expect("strings serialize as JSON");
     let description = serde_json::to_string(&task.description).expect("strings serialize as JSON");
     let model = serde_json::to_string(&task.model).expect("strings serialize as JSON");
+    let discord_webhook =
+        serde_json::to_string(&task.discord_webhook_id).expect("strings serialize as JSON");
     let destination = task.destination.to_str().map_or_else(
         || format!("base64:{}", STANDARD.encode(encode_path(&task.destination))),
         str::to_owned,
@@ -883,12 +1158,13 @@ fn render_task_file(task: &ScheduledTaskEdit) -> String {
     let repository = serde_json::to_string(&task.repository).expect("strings serialize as JSON");
     let branch = serde_json::to_string(&task.branch).expect("strings serialize as JSON");
     format!(
-        "---\nstatus: {}\nfrequency: {}m\ntitle: {}\ndescription: {}\nmodel: {}\ndestination: {}\nrepository: {}\nbranch: {}\n---\n\n{}\n",
+        "---\nstatus: {}\nfrequency: {}m\ntitle: {}\ndescription: {}\nmodel: {}\ndiscord_webhook: {}\ndestination: {}\nrepository: {}\nbranch: {}\n---\n\n{}\n",
         if task.enabled { "enabled" } else { "disabled" },
         task.interval_minutes,
         title,
         description,
         model,
+        discord_webhook,
         destination,
         repository,
         branch,
@@ -910,21 +1186,75 @@ fn validate_task(task: &ScheduledTaskEdit) -> Result<(), String> {
     interval_ms(task.interval_minutes).map(|_| ())
 }
 
-impl ScheduledTask {
-    pub(crate) fn edit(&self) -> ScheduledTaskEdit {
-        ScheduledTaskEdit {
-            title: self.title.clone(),
-            description: self.description.clone(),
-            prompt: self.prompt.clone(),
-            model: self.model.clone(),
-            destination: self.destination.clone(),
-            repository: self.repository.clone(),
-            branch: self.branch.clone(),
-            enabled: self.enabled,
-            interval_minutes: self.interval_minutes,
-            source: self.source.clone(),
-        }
+fn toggle_task(db: &Connection, id: i64, enabled: bool) -> Result<(), String> {
+    let task = db
+        .query_row(
+            "SELECT source_kind, destination, repository, branch, source_path, project_key FROM scheduled_tasks WHERE id = ?1",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(db_error)?
+        .ok_or_else(|| "scheduled task not found".to_owned())?;
+    if task.0 == "local" || !enabled {
+        return changed(
+            db.execute(
+                "UPDATE scheduled_tasks SET enabled = ?2 WHERE id = ?1",
+                params![id, enabled],
+            ),
+            "scheduled task not found",
+        );
     }
+    let destination = decode_path(task.1).map_err(db_error)?;
+    let source = task
+        .4
+        .map(decode_path)
+        .transpose()
+        .map_err(db_error)?
+        .map(RepoPath::from)
+        .ok_or_else(|| "project task source is unavailable".to_owned())?;
+    let content = match read_workspace_file(&destination, &source) {
+        Ok(content) => content,
+        Err(error) => {
+            db.execute(
+                "UPDATE scheduled_tasks SET enabled = 0, source_missing = 1 WHERE id = ?1",
+                [id],
+            )
+            .map_err(db_error)?;
+            return Err(format!("Could not read {}: {error}", source.display()));
+        }
+    };
+    let definition = parse_project_task(
+        &content,
+        source,
+        &ScheduledTaskDestination {
+            path: destination,
+            repository: task.2,
+            branch: task.3,
+        },
+    )?;
+    if definition.key != task.5 {
+        return Err("project task id changed; refresh project tasks first".to_owned());
+    }
+    let next = now_ms()
+        .checked_add(interval_ms(definition.edit.interval_minutes)?)
+        .ok_or_else(|| "schedule is too large".to_owned())?;
+    changed(
+        db.execute(
+            "UPDATE scheduled_tasks SET title = ?2, description = ?3, prompt = ?4, model = ?5, enabled = 1, interval_minutes = ?6, next_run_ms = ?7, source_content = ?8, approved_content = ?8, source_missing = 0 WHERE id = ?1",
+            params![id, definition.edit.title, definition.edit.description, definition.edit.prompt, definition.edit.model, definition.edit.interval_minutes, next, content],
+        ),
+        "project task not found",
+    )
 }
 
 fn delete_task(db: &Connection, id: i64) -> Result<(), String> {
@@ -939,18 +1269,88 @@ fn claim(db: &mut Connection, requested: Option<i64>, now: i64) -> Result<Option
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let task: Option<(i64, String, String, String, Vec<u8>, i64, i64)> = tx
+        let task: Option<(
+            i64,
+            String,
+            String,
+            String,
+            String,
+            Vec<u8>,
+            i64,
+            i64,
+            String,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            bool,
+        )> = tx
             .query_row(
-                "SELECT id, title, prompt, model, destination, interval_minutes, next_run_ms FROM scheduled_tasks WHERE (?1 IS NULL AND enabled = 1 AND next_run_ms <= ?2) OR id = ?1 ORDER BY next_run_ms, id LIMIT 1",
+                "SELECT id, title, prompt, model, discord_webhook_id, destination, interval_minutes, next_run_ms, source_kind, source_path, approved_content, source_missing FROM scheduled_tasks WHERE (?1 IS NULL AND enabled = 1 AND next_run_ms <= ?2) OR id = ?1 ORDER BY next_run_ms, id LIMIT 1",
                 params![requested, now],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?)),
             )
             .optional()
             .map_err(db_error)?;
-        let Some((task_id, title, prompt, model, path, minutes, next)) = task else {
+        let Some((
+            task_id,
+            title,
+            prompt,
+            model,
+            discord_webhook_id,
+            path,
+            minutes,
+            next,
+            source_kind,
+            source_path,
+            approved_content,
+            source_missing,
+        )) = task
+        else {
             tx.commit().map_err(db_error)?;
             return Ok(None);
         };
+        if source_kind == "project" {
+            let unavailable = if source_missing || approved_content.is_none() {
+                Some("project task requires approval".to_owned())
+            } else {
+                let destination = decode_path(path.clone()).map_err(db_error)?;
+                let source = source_path
+                    .map(decode_path)
+                    .transpose()
+                    .map_err(db_error)?
+                    .map(RepoPath::from);
+                match source {
+                    Some(source) => match read_workspace_file(&destination, &source) {
+                        Ok(content) if approved_content.as_deref() == Some(content.as_slice()) => {
+                            None
+                        }
+                        Ok(content) => {
+                            tx.execute(
+                                "UPDATE scheduled_tasks SET enabled = 0, source_content = ?2, source_missing = 0 WHERE id = ?1",
+                                params![task_id, content],
+                            )
+                            .map_err(db_error)?;
+                            Some("project task changed and requires approval".to_owned())
+                        }
+                        Err(_) => {
+                            tx.execute(
+                                "UPDATE scheduled_tasks SET enabled = 0, source_missing = 1 WHERE id = ?1",
+                                [task_id],
+                            )
+                            .map_err(db_error)?;
+                            Some("project task source is missing".to_owned())
+                        }
+                    },
+                    None => Some("project task source is unavailable".to_owned()),
+                }
+            };
+            if let Some(error) = unavailable {
+                tx.commit().map_err(db_error)?;
+                if requested.is_some() {
+                    return Err(error);
+                }
+                continue;
+            }
+        }
         let interval = minutes
             .checked_mul(60_000)
             .filter(|value| *value > 0)
@@ -981,8 +1381,8 @@ fn claim(db: &mut Connection, requested: Option<i64>, now: i64) -> Result<Option
         }
         let inserted = tx
             .execute(
-                "INSERT OR IGNORE INTO scheduled_runs (task_id, scheduled_for_ms, status, created_at_ms) VALUES (?1, ?2, 'launching', ?3)",
-                params![task_id, scheduled, now_ms()],
+                "INSERT OR IGNORE INTO scheduled_runs (task_id, scheduled_for_ms, status, created_at_ms, discord_webhook_id) VALUES (?1, ?2, 'launching', ?3, ?4)",
+                params![task_id, scheduled, now_ms(), discord_webhook_id],
             )
             .map_err(db_error)?;
         if inserted == 0 {
@@ -1020,6 +1420,7 @@ fn execute_claim(
     db: &Connection,
     claim: Claim,
     launch: &mut impl FnMut(SchedulerLaunchRequest) -> SchedulerLaunchResult,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
 ) -> Result<(), String> {
     if let Err(error) = validate_destination(&claim.destination) {
         return fail_run(db, claim.run_id, &error);
@@ -1057,6 +1458,9 @@ fn execute_claim(
         ],
     )
     .map_err(db_error)?;
+    if status == ScheduledRunStatus::Completed {
+        complete(db, claim.run_id)?;
+    }
     Ok(())
 }
 
@@ -1064,17 +1468,19 @@ fn execute_claim_with_update(
     db: &Connection,
     claim: Claim,
     launch: &mut impl FnMut(SchedulerLaunchRequest) -> SchedulerLaunchResult,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
     updates: &Sender<Update>,
 ) -> Result<(), String> {
     // Publish the claimed row before the Herdr launch, which can take several seconds.
     let _ = updates.send(load_state(db));
-    execute_claim(db, claim, launch)
+    execute_claim(db, claim, launch, complete)
 }
 
 fn refresh(
     db: &Connection,
     requested: Option<i64>,
     observe: &mut impl FnMut(&str, Option<&str>) -> SchedulerObserveResult,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut statement = db
         .prepare("SELECT id, pane_id, terminal_id, session_id, created_at_ms FROM scheduled_runs WHERE (?1 IS NULL AND status IN ('working', 'blocked', 'unknown') AND pane_id IS NOT NULL) OR id = ?1")
@@ -1117,10 +1523,11 @@ fn refresh(
                     SchedulerObserveResult::Unavailable(
                         "Waiting for OpenCode to report this run's session".to_owned(),
                     ),
+                    complete,
                 )?;
             }
         } else {
-            apply_observation(db, id, observation)?;
+            apply_observation(db, id, observation, complete)?;
         }
     }
     Ok(())
@@ -1130,7 +1537,18 @@ fn apply_observation(
     db: &Connection,
     run_id: i64,
     result: SchedulerObserveResult,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
 ) -> Result<(), String> {
+    let delivery_error = db
+        .query_row(
+            "SELECT error FROM scheduled_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .flatten()
+        .filter(|error| error.starts_with(DISCORD_DELIVERY_ERROR));
     let (status, output, error) = match result {
         SchedulerObserveResult::Missing(error) => {
             return fail_run(db, run_id, &error);
@@ -1138,14 +1556,139 @@ fn apply_observation(
         SchedulerObserveResult::Unavailable(error) => {
             (ScheduledRunStatus::Unknown, None::<String>, Some(error))
         }
-        SchedulerObserveResult::Observed(status) => (agent_status(status), None, None),
+        SchedulerObserveResult::Observed(status) => (agent_status(status), None, delivery_error),
     };
     db.execute(
         "UPDATE scheduled_runs SET status = ?2, output = COALESCE(?3, output), error = ?4 WHERE id = ?1",
         params![run_id, status.text(), output, error],
     )
     .map_err(db_error)?;
+    if status == ScheduledRunStatus::Completed {
+        complete(db, run_id)?;
+    }
     Ok(())
+}
+
+fn fetch_scheduled_result(session_id: &str) -> Result<String, String> {
+    let mut result = Err("OpenCode session has no assistant response".to_owned());
+    for attempt in 0..RESULT_FETCH_ATTEMPTS {
+        result = super::latest_message::final_assistant_text(session_id);
+        if result.is_ok() || attempt + 1 == RESULT_FETCH_ATTEMPTS {
+            break;
+        }
+        thread::sleep(RESULT_FETCH_RETRY_DELAY);
+    }
+    result
+}
+
+fn finalize_completed_run(
+    db: &Connection,
+    run_id: i64,
+    final_text: &mut impl FnMut(&str) -> Result<String, String>,
+    publish: &mut impl FnMut(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    let (title, session_id, stored_output, error) = db
+        .query_row(
+            "SELECT task.title, run.session_id, run.output, run.error FROM scheduled_runs run JOIN scheduled_tasks task ON task.id = run.task_id WHERE run.id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .map_err(db_error)?;
+    let retrying = error
+        .as_deref()
+        .is_some_and(|error| error.starts_with(DISCORD_DELIVERY_ERROR));
+    if !stored_output.is_empty() && !retrying {
+        return Ok(());
+    }
+    let output = if stored_output.is_empty() {
+        let Some(session_id) = session_id else {
+            return record_delivery_error(db, run_id, None, "OpenCode session is unavailable");
+        };
+        match final_text(&session_id) {
+            Ok(output) => output,
+            Err(error) => return record_delivery_error(db, run_id, None, &error),
+        }
+    } else {
+        stored_output
+    };
+    if let Err(error) = publish(&title, &output) {
+        return record_delivery_error(db, run_id, Some(&output), &error);
+    }
+    db.execute(
+        "UPDATE scheduled_runs SET output = ?2, error = NULL WHERE id = ?1",
+        params![run_id, output],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+fn retry_delivery(
+    db: &Connection,
+    run_id: i64,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
+) -> Result<bool, String> {
+    let retrying = db
+        .query_row(
+            "SELECT error FROM scheduled_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .flatten()
+        .is_some_and(|error| error.starts_with(DISCORD_DELIVERY_ERROR));
+    if retrying {
+        complete(db, run_id)?;
+    }
+    Ok(retrying)
+}
+
+fn record_delivery_error(
+    db: &Connection,
+    run_id: i64,
+    output: Option<&str>,
+    error: &str,
+) -> Result<(), String> {
+    let error = format!("{DISCORD_DELIVERY_ERROR}{error}");
+    db.execute(
+        "UPDATE scheduled_runs SET output = COALESCE(?2, output), error = ?3 WHERE id = ?1",
+        params![run_id, output, error],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+enum DiscordDelivery<'a> {
+    Message(String),
+    Attachment { content: String, report: &'a str },
+}
+
+fn discord_delivery<'a>(title: &str, output: &'a str) -> DiscordDelivery<'a> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = truncate_utf8(&title, 160);
+    let prefix = format!("Hunkle scheduled task: {title}\n\n");
+    if prefix.len().saturating_add(output.trim().len()) <= DISCORD_MESSAGE_BYTES {
+        return DiscordDelivery::Message(format!("{prefix}{}", output.trim()));
+    }
+    DiscordDelivery::Attachment {
+        content: format!("Hunkle scheduled task: {title}\n\nFull report attached."),
+        report: output,
+    }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(value.len());
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    &value[..end]
 }
 
 fn agent_status(status: AgentStatus) -> ScheduledRunStatus {
@@ -1214,9 +1757,10 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .map_err(db_error)?;
     let sql = match version {
-        0 => "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0), next_run_ms INTEGER NOT NULL, source_path BLOB);
-              CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
-              CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id); CREATE UNIQUE INDEX scheduled_tasks_source ON scheduled_tasks(destination, source_path) WHERE source_path IS NOT NULL;",
+        0 => "CREATE TABLE scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT NOT NULL, prompt TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', discord_webhook_id TEXT NOT NULL DEFAULT '', destination BLOB NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0), next_run_ms INTEGER NOT NULL, source_path BLOB, source_kind TEXT NOT NULL DEFAULT 'local', project_key TEXT NOT NULL DEFAULT '', source_content BLOB, approved_content BLOB, source_missing INTEGER NOT NULL DEFAULT 0, project_repository BLOB);
+              CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, discord_webhook_id TEXT NOT NULL DEFAULT '', UNIQUE (task_id, scheduled_for_ms));
+              CREATE TABLE scheduler_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+               CREATE INDEX scheduled_runs_task_history ON scheduled_runs(task_id, created_at_ms DESC, id DESC); CREATE INDEX scheduled_runs_active ON scheduled_runs(status, task_id); CREATE UNIQUE INDEX scheduled_project_tasks ON scheduled_tasks(project_repository, project_key) WHERE source_kind = 'project';",
         1 => "ALTER TABLE scheduled_runs RENAME TO scheduled_runs_v1;
               CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, scheduled_for_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, pane_id TEXT, terminal_id TEXT, session_id TEXT, output TEXT NOT NULL DEFAULT '', error TEXT, UNIQUE (task_id, scheduled_for_ms));
               INSERT INTO scheduled_runs (id, task_id, scheduled_for_ms, status, created_at_ms, pane_id, terminal_id, output, error) SELECT id, task_id, scheduled_for_ms, status, created_at_ms, pane_id, terminal_id, output, error FROM scheduled_runs_v1 WHERE task_id IS NOT NULL;
@@ -1226,6 +1770,9 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
         4 => "ALTER TABLE scheduled_tasks ADD COLUMN source_path BLOB; CREATE UNIQUE INDEX scheduled_tasks_source ON scheduled_tasks(destination, source_path) WHERE source_path IS NOT NULL;",
         5 => "ALTER TABLE scheduled_tasks ADD COLUMN model TEXT NOT NULL DEFAULT '';",
         6 => "",
+        7 => "",
+        8 => "",
+        9 => "",
         _ => return Err(format!("scheduler database version {version} is newer than supported")),
     };
     tx.execute_batch(sql).map_err(db_error)?;
@@ -1257,8 +1804,68 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
             .map_err(db_error)?;
         }
     }
-    if version < 6 {
-        tx.execute_batch("PRAGMA user_version = 6;")
+    if version > 0 && version < 7 {
+        for table in ["scheduled_tasks", "scheduled_runs"] {
+            let exists = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    [table],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(db_error)?;
+            if exists {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN discord_webhook_id TEXT NOT NULL DEFAULT '';"
+                ))
+                .map_err(db_error)?;
+            }
+        }
+    }
+    if version > 0 && version < 8 {
+        let has_tasks = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_tasks')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_error)?;
+        if has_tasks {
+            tx.execute_batch(
+                "ALTER TABLE scheduled_tasks ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'local';
+                 ALTER TABLE scheduled_tasks ADD COLUMN project_key TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE scheduled_tasks ADD COLUMN source_content BLOB;
+                 ALTER TABLE scheduled_tasks ADD COLUMN approved_content BLOB;
+                 ALTER TABLE scheduled_tasks ADD COLUMN source_missing INTEGER NOT NULL DEFAULT 0;
+                 DROP INDEX IF EXISTS scheduled_tasks_source;
+                 CREATE UNIQUE INDEX scheduled_project_tasks ON scheduled_tasks(destination, project_key) WHERE source_kind = 'project';",
+            )
+            .map_err(db_error)?;
+        }
+    }
+    if version > 0 && version < 9 {
+        let has_tasks = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_tasks')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_error)?;
+        if has_tasks {
+            tx.execute_batch(
+                "ALTER TABLE scheduled_tasks ADD COLUMN project_repository BLOB;
+                 UPDATE scheduled_tasks SET project_repository = destination WHERE source_kind = 'project';
+                 DROP INDEX IF EXISTS scheduled_project_tasks;
+                 CREATE UNIQUE INDEX scheduled_project_tasks ON scheduled_tasks(project_repository, project_key) WHERE source_kind = 'project';",
+            )
+            .map_err(db_error)?;
+        }
+    }
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scheduler_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    )
+    .map_err(db_error)?;
+    if version < 9 {
+        tx.execute_batch("PRAGMA user_version = 9;")
             .map_err(db_error)?;
     }
     tx.commit().map_err(db_error)
@@ -1311,7 +1918,7 @@ fn decode_path(bytes: Vec<u8>) -> rusqlite::Result<PathBuf> {
 fn load_state(db: &Connection) -> Result<State, String> {
     let tasks = query_all(
         db,
-        "SELECT id, title, description, prompt, model, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path FROM scheduled_tasks ORDER BY id",
+        "SELECT id, title, description, prompt, model, discord_webhook_id, destination, repository, branch, enabled, interval_minutes, next_run_ms, source_path, source_kind, source_content, approved_content, source_missing FROM scheduled_tasks ORDER BY id",
         |row| {
             Ok(ScheduledTask {
                 id: row.get(0)?,
@@ -1319,17 +1926,33 @@ fn load_state(db: &Connection) -> Result<State, String> {
                 description: row.get(2)?,
                 prompt: row.get(3)?,
                 model: row.get(4)?,
-                destination: decode_path(row.get(5)?)?,
-                repository: row.get(6)?,
-                branch: row.get(7)?,
-                enabled: row.get(8)?,
-                interval_minutes: row.get(9)?,
-                next_run_ms: row.get(10)?,
+                discord_webhook_id: row.get(5)?,
+                destination: decode_path(row.get(6)?)?,
+                repository: row.get(7)?,
+                branch: row.get(8)?,
+                enabled: row.get(9)?,
+                interval_minutes: row.get(10)?,
+                next_run_ms: row.get(11)?,
                 source: row
-                    .get::<_, Option<Vec<u8>>>(11)?
+                    .get::<_, Option<Vec<u8>>>(12)?
                     .map(decode_path)
                     .transpose()?
                     .map(RepoPath::from),
+                project_status: if row.get::<_, String>(13)? == "project" {
+                    let source_content = row.get::<_, Option<Vec<u8>>>(14)?;
+                    let approved_content = row.get::<_, Option<Vec<u8>>>(15)?;
+                    Some(if row.get::<_, bool>(16)? {
+                        ProjectTaskStatus::Missing
+                    } else if approved_content.is_none() {
+                        ProjectTaskStatus::Pending
+                    } else if approved_content == source_content {
+                        ProjectTaskStatus::Current
+                    } else {
+                        ProjectTaskStatus::Changed
+                    })
+                } else {
+                    None
+                },
             })
         },
     )?;
@@ -1369,6 +1992,24 @@ fn query_all<T>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn discord_test_reports_missing_configuration() {
+        let mut scheduler = SchedulerService::open(None, None, Vec::new()).unwrap();
+        scheduler.test_discord_webhook("123456".to_owned()).unwrap();
+
+        let mut notice = None;
+        for _ in 0..20 {
+            let (_, next) = scheduler.poll_completions();
+            notice = notice.or(next);
+            if notice.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(notice.as_deref(), Some("Discord webhook is not configured"));
+    }
+
     fn destination(path: &Path) -> ScheduledTaskDestination {
         ScheduledTaskDestination {
             path: path.to_owned(),
@@ -1380,7 +2021,6 @@ mod tests {
     #[test]
     fn markdown_task_frontmatter_round_trips_supported_yaml_scalars() {
         let directory = tempfile::tempdir().unwrap();
-        let source = RepoPath::from("scheduled/nightly.md");
         let content = br#"---
 status: disabled
 frequency: 2h
@@ -1392,8 +2032,7 @@ Inspect the diff.
 Summarize risks.
 "#;
 
-        let mut task =
-            parse_task_file(content, source, Some(destination(directory.path()))).unwrap();
+        let mut task = parse_task_file(content, Some(destination(directory.path()))).unwrap();
 
         assert_eq!(task.title, "Nightly: review");
         assert_eq!(task.description, "Review \"open\" changes");
@@ -1402,12 +2041,8 @@ Summarize risks.
         assert_eq!(task.model, "");
         assert!(!task.enabled);
         task.model = "opencode-go/deepseek-flash-v4".to_owned();
-        let reparsed = parse_task_file(
-            render_task_file(&task).as_bytes(),
-            task.source.clone().unwrap(),
-            None,
-        )
-        .unwrap();
+        task.discord_webhook_id = "123456".to_owned();
+        let reparsed = parse_task_file(render_task_file(&task).as_bytes(), None).unwrap();
         assert_eq!(reparsed, task);
     }
 
@@ -1424,162 +2059,163 @@ Summarize risks.
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            6
+            9
         );
         assert!(db.prepare("SELECT model FROM scheduled_tasks").is_ok());
     }
 
     #[test]
-    fn sync_imports_markdown_without_postponing_unchanged_tasks() {
+    fn discovers_approves_changes_and_marks_missing_project_tasks() {
         let directory = tempfile::tempdir().unwrap();
-        let files = tempfile::tempdir().unwrap();
-        let scheduled = directory.path().join(".hunkle/scheduled");
+        let scheduled = directory.path().join(".agents/scheduled");
         std::fs::create_dir_all(&scheduled).unwrap();
-        std::fs::write(
-            scheduled.join("review.md"),
-            "---\nstatus: enabled\nfrequency: 1d\ntitle: Review\ndescription: Check changes\n---\n\nReview the repository.\n",
-        )
-        .unwrap();
+        let source = scheduled.join("review.md");
+        let initial = "---\nid: review\nfrequency: 1d\ntitle: Review\ndescription: Check changes\n---\n\nReview the repository.\n";
+        std::fs::write(&source, initial).unwrap();
         let mut db = Connection::open_in_memory().unwrap();
         prepare_database(&mut db).unwrap();
 
-        sync_task_files(&db, files.path(), &[destination(directory.path())]).unwrap();
-        let task = load_state(&db).unwrap().0.pop().unwrap();
-        assert_eq!(task.interval_minutes, 24 * 60);
-        assert_eq!(task.source, Some(RepoPath::from("scheduled/review.md")));
-        assert!(!scheduled.join("review.md").exists());
-        db.execute(
-            "UPDATE scheduled_tasks SET next_run_ms = 123456 WHERE id = ?1",
-            [task.id],
+        discover_project_tasks(
+            &mut db,
+            &destination(directory.path()),
+            directory.path().as_os_str().as_encoded_bytes(),
         )
         .unwrap();
-
-        sync_task_files(&db, files.path(), &[destination(directory.path())]).unwrap();
-
         let task = load_state(&db).unwrap().0.pop().unwrap();
-        assert_eq!(task.next_run_ms, 123456);
+        assert_eq!(task.interval_minutes, 24 * 60);
+        assert_eq!(
+            task.source,
+            Some(RepoPath::from(".agents/scheduled/review.md"))
+        );
+        assert_eq!(task.project_status, Some(ProjectTaskStatus::Pending));
+        assert!(!task.enabled);
+        assert!(source.exists());
 
-        std::fs::remove_file(files.path().join("scheduled/review.md")).unwrap();
-        sync_task_files(&db, files.path(), &[destination(directory.path())]).unwrap();
+        toggle_task(&db, task.id, true).unwrap();
         let task = load_state(&db).unwrap().0.pop().unwrap();
+        assert_eq!(task.project_status, Some(ProjectTaskStatus::Current));
+        assert!(task.enabled);
+        discover_project_tasks(
+            &mut db,
+            &destination(directory.path()),
+            directory.path().as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
+        assert!(load_state(&db).unwrap().0.pop().unwrap().enabled);
+
+        std::fs::write(
+            &source,
+            initial.replace("Review the repository.", "Review carefully."),
+        )
+        .unwrap();
+        assert_eq!(
+            claim(&mut db, Some(task.id), now_ms()).err().unwrap(),
+            "project task changed and requires approval"
+        );
+        let task = load_state(&db).unwrap().0.pop().unwrap();
+        assert_eq!(task.project_status, Some(ProjectTaskStatus::Changed));
+        assert!(!task.enabled);
+        discover_project_tasks(
+            &mut db,
+            &destination(directory.path()),
+            directory.path().as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
+        let task = load_state(&db).unwrap().0.pop().unwrap();
+        assert_eq!(task.project_status, Some(ProjectTaskStatus::Changed));
+        assert!(!task.enabled);
+
+        std::fs::remove_file(source).unwrap();
+        discover_project_tasks(
+            &mut db,
+            &destination(directory.path()),
+            directory.path().as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
+        let task = load_state(&db).unwrap().0.pop().unwrap();
+        assert_eq!(task.project_status, Some(ProjectTaskStatus::Missing));
         assert!(!task.enabled);
     }
 
     #[test]
-    fn sync_migrates_database_tasks_to_hunkle_data() {
-        let directory = tempfile::tempdir().unwrap();
-        let files = tempfile::tempdir().unwrap();
+    fn linked_worktree_discovery_does_not_duplicate_or_retarget_project_tasks() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let content =
+            "---\nid: review\nfrequency: 1d\ntitle: Review\n---\n\nReview the repository.\n";
+        for root in [first.path(), second.path()] {
+            let scheduled = root.join(".agents/scheduled");
+            std::fs::create_dir_all(&scheduled).unwrap();
+            std::fs::write(scheduled.join("review.md"), content).unwrap();
+        }
         let mut db = Connection::open_in_memory().unwrap();
         prepare_database(&mut db).unwrap();
-        save_task(
-            &db,
-            None,
-            ScheduledTaskEdit {
-                title: "Legacy Review".to_owned(),
-                description: "Check changes".to_owned(),
-                prompt: "Review the repository.".to_owned(),
-                model: String::new(),
-                destination: directory.path().to_owned(),
-                repository: "repo".to_owned(),
-                branch: "main".to_owned(),
-                enabled: true,
-                interval_minutes: 60,
-                source: None,
-            },
-            123456,
-        )
-        .unwrap();
-
-        sync_task_files(&db, files.path(), &[destination(directory.path())]).unwrap();
-
+        discover_project_tasks(&mut db, &destination(first.path()), b"repository").unwrap();
         let task = load_state(&db).unwrap().0.pop().unwrap();
-        let source = task.source.unwrap();
-        assert_eq!(source, RepoPath::from("scheduled/legacy-review-1.md"));
-        let content = std::fs::read_to_string(files.path().join(source.as_path())).unwrap();
-        assert!(content.contains("status: enabled\nfrequency: 60m"));
-        assert!(content.ends_with("Review the repository.\n"));
+        toggle_task(&db, task.id, true).unwrap();
+
+        discover_project_tasks(&mut db, &destination(second.path()), b"repository").unwrap();
+
+        let tasks = load_state(&db).unwrap().0;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].destination,
+            std::fs::canonicalize(first.path()).unwrap()
+        );
+        assert!(tasks[0].enabled);
+        assert_eq!(tasks[0].project_status, Some(ProjectTaskStatus::Current));
     }
 
     #[test]
-    fn editing_changes_destination_without_moving_the_hunkle_owned_file() {
+    fn imports_legacy_repository_markdown_without_removing_it() {
         let directory = tempfile::tempdir().unwrap();
-        let files = tempfile::tempdir().unwrap();
-        let source_root = directory.path().join("source");
-        let destination_root = directory.path().join("destination");
-        std::fs::create_dir_all(source_root.join(".hunkle/scheduled")).unwrap();
-        std::fs::create_dir(&destination_root).unwrap();
-        let source_path = RepoPath::from(".hunkle/scheduled/review.md");
+        let scheduled = directory.path().join(".hunkle/scheduled");
+        std::fs::create_dir_all(&scheduled).unwrap();
+        let source = scheduled.join("review.md");
         std::fs::write(
-            source_root.join(source_path.as_path()),
+            &source,
             "---\nstatus: enabled\nfrequency: 1h\ntitle: Review\ndescription: Check changes\n---\n\nReview the repository.\n",
         )
         .unwrap();
-        let mut scheduler = SchedulerService::open(None, Some(files.path().to_owned())).unwrap();
-        scheduler
-            .sync_task_files(vec![
-                ScheduledTaskDestination {
-                    path: source_root.clone(),
-                    repository: "source".to_owned(),
-                    branch: "main".to_owned(),
-                },
-                ScheduledTaskDestination {
-                    path: destination_root.clone(),
-                    repository: "destination".to_owned(),
-                    branch: "feature".to_owned(),
-                },
-            ])
-            .unwrap();
-        for _ in 0..100 {
-            scheduler.poll_completions();
-            if !scheduler.tasks.is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let task = scheduler.tasks.first().unwrap().clone();
-        let source = scheduler.task_source(&task).unwrap().unwrap();
-        let mut edit = task.edit();
-        edit.destination = destination_root.clone();
-        edit.repository = "destination".to_owned();
-        edit.branch = "feature".to_owned();
+        let mut db = Connection::open_in_memory().unwrap();
+        prepare_database(&mut db).unwrap();
 
-        scheduler
-            .save_task(Some(task.id), edit, Some(source))
-            .unwrap();
+        discover_project_tasks(&mut db, &destination(directory.path()), b"repository").unwrap();
+        discover_project_tasks(&mut db, &destination(directory.path()), b"repository").unwrap();
 
-        assert!(!source_root.join(source_path.as_path()).exists());
-        let owned_path = files.path().join("scheduled/review.md");
-        assert!(owned_path.exists());
-        assert!(
-            !destination_root
-                .join(".hunkle/scheduled/review.md")
-                .exists()
-        );
-        for _ in 0..100 {
-            scheduler.poll_completions();
-            if scheduler
-                .tasks
-                .iter()
-                .any(|moved| moved.id == task.id && moved.destination == destination_root)
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let moved = scheduler
-            .tasks
-            .iter()
-            .find(|moved| moved.id == task.id)
-            .unwrap();
-        assert_eq!(moved.destination, destination_root);
-        assert_eq!(moved.source, Some(RepoPath::from("scheduled/review.md")));
-        assert_eq!(moved.repository, "destination");
-        assert_eq!(moved.branch, "feature");
-        let content = std::fs::read_to_string(owned_path).unwrap();
-        assert!(content.contains(&format!(
-            "destination: {}",
-            serde_json::to_string(destination_root.to_str().unwrap()).unwrap()
-        )));
+        let tasks = load_state(&db).unwrap().0;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Review");
+        assert!(tasks[0].project_status.is_none());
+        assert!(tasks[0].enabled);
+        assert!(source.exists());
+    }
+
+    #[test]
+    fn imports_legacy_global_markdown_as_a_local_database_task_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        std::fs::create_dir(files.path().join("scheduled")).unwrap();
+        let source = files.path().join("scheduled/review.md");
+        std::fs::write(
+            &source,
+            "---\nstatus: enabled\nfrequency: 1h\ntitle: Review\ndescription: Check changes\ndestination: \"",
+        )
+        .unwrap();
+        let mut content = std::fs::read_to_string(&source).unwrap();
+        content.push_str(&directory.path().to_string_lossy());
+        content.push_str("\"\nrepository: repo\nbranch: main\n---\n\nReview the repository.\n");
+        std::fs::write(&source, content).unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
+        prepare_database(&mut db).unwrap();
+        import_legacy_task_files(&db, files.path()).unwrap();
+        import_legacy_task_files(&db, files.path()).unwrap();
+        let task = load_state(&db).unwrap().0.pop().unwrap();
+        assert_eq!(task.title, "Review");
+        assert!(task.project_status.is_none());
+        assert!(task.source.is_none());
+        assert!(source.exists());
+        assert_eq!(load_state(&db).unwrap().0.len(), 1);
     }
 
     #[test]
@@ -1604,6 +2240,7 @@ Summarize risks.
                 session_id: Some("ses-1".into()),
                 status: Ok(AgentStatus::Working),
             },
+            &mut |_, _| Ok(()),
             &updates,
         )
         .unwrap();
@@ -1627,6 +2264,7 @@ Summarize risks.
                 session_id: None,
                 status: Ok(AgentStatus::Done),
             },
+            &mut |_, _| Ok(()),
         )
         .unwrap();
         let missing_session = load_state(&first)
@@ -1642,9 +2280,12 @@ Summarize risks.
                 .unwrap()
                 .contains("did not report a session")
         );
-        refresh(&first, None, &mut |_, _| {
-            SchedulerObserveResult::Observed(AgentStatus::Done)
-        })
+        refresh(
+            &first,
+            None,
+            &mut |_, _| SchedulerObserveResult::Observed(AgentStatus::Done),
+            &mut |_, _| Ok(()),
+        )
         .unwrap();
         let missing_session = load_state(&first)
             .unwrap()
@@ -1695,6 +2336,177 @@ Summarize risks.
     }
 
     #[test]
+    fn completed_run_publishes_once_and_persists_the_result() {
+        let (db, run_id) = completed_run_database();
+        let mut fetches = 0;
+        let mut deliveries = Vec::new();
+        let mut fetch = |session_id: &str| {
+            fetches += 1;
+            assert_eq!(session_id, "ses-result");
+            Ok("Final report".to_owned())
+        };
+        let mut publish = |title: &str, output: &str| {
+            deliveries.push((title.to_owned(), output.to_owned()));
+            Ok(())
+        };
+
+        finalize_completed_run(&db, run_id, &mut fetch, &mut publish).unwrap();
+        finalize_completed_run(&db, run_id, &mut fetch, &mut publish).unwrap();
+
+        assert_eq!(fetches, 1);
+        assert_eq!(
+            deliveries,
+            [("Review".to_owned(), "Final report".to_owned())]
+        );
+        let (output, error) = db
+            .query_row(
+                "SELECT output, error FROM scheduled_runs WHERE id = ?1",
+                [run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(output, "Final report");
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn failed_delivery_retries_the_persisted_result() {
+        let (db, run_id) = completed_run_database();
+        let mut fetches = 0;
+        let mut fetch = |_: &str| {
+            fetches += 1;
+            Ok("Final report".to_owned())
+        };
+        finalize_completed_run(&db, run_id, &mut fetch, &mut |_, _| {
+            Err("offline".to_owned())
+        })
+        .unwrap();
+        let error = db
+            .query_row(
+                "SELECT error FROM scheduled_runs WHERE id = ?1",
+                [run_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(error.as_deref(), Some("Discord delivery failed: offline"));
+        assert!(retry_delivery(&db, run_id, &mut |_, _| Ok(())).unwrap());
+
+        let mut delivered = false;
+        finalize_completed_run(&db, run_id, &mut fetch, &mut |_, output| {
+            delivered = output == "Final report";
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(delivered);
+        assert_eq!(fetches, 1);
+        assert!(!retry_delivery(&db, run_id, &mut |_, _| Ok(())).unwrap());
+    }
+
+    #[test]
+    fn discord_delivery_attaches_the_complete_large_report() {
+        let report = "é".repeat(2_000);
+        let delivery = discord_delivery("  Nightly\n review  ", &report);
+
+        let DiscordDelivery::Attachment {
+            content,
+            report: attached,
+        } = delivery
+        else {
+            panic!("large reports should be attached");
+        };
+        assert_eq!(
+            content,
+            "Hunkle scheduled task: Nightly review\n\nFull report attached."
+        );
+        assert_eq!(attached, report);
+    }
+
+    #[test]
+    fn claim_snapshots_the_tasks_discord_webhook() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
+        prepare_database(&mut db).unwrap();
+        save_task(
+            &db,
+            None,
+            ScheduledTaskEdit {
+                title: "Review".to_owned(),
+                description: String::new(),
+                prompt: "Review it".to_owned(),
+                model: String::new(),
+                discord_webhook_id: "123456".to_owned(),
+                destination: directory.path().to_owned(),
+                repository: "repo".to_owned(),
+                branch: "main".to_owned(),
+                enabled: true,
+                interval_minutes: 60,
+            },
+            1,
+        )
+        .unwrap();
+
+        let claim = claim(&mut db, Some(1), 1).unwrap().unwrap();
+
+        assert_eq!(
+            db.query_row(
+                "SELECT discord_webhook_id FROM scheduled_runs WHERE id = ?1",
+                [claim.run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "123456"
+        );
+    }
+
+    #[test]
+    fn completed_run_without_discord_opt_in_does_not_publish() {
+        let (db, run_id) = completed_run_database();
+
+        complete_run(&db, run_id, &HashMap::new()).unwrap();
+
+        assert_eq!(
+            db.query_row(
+                "SELECT output FROM scheduled_runs WHERE id = ?1",
+                [run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            ""
+        );
+    }
+
+    fn completed_run_database() -> (Connection, i64) {
+        let mut db = Connection::open_in_memory().unwrap();
+        prepare_database(&mut db).unwrap();
+        save_task(
+            &db,
+            None,
+            ScheduledTaskEdit {
+                title: "Review".to_owned(),
+                description: String::new(),
+                prompt: "Review it".to_owned(),
+                model: String::new(),
+                discord_webhook_id: String::new(),
+                destination: std::env::temp_dir(),
+                repository: "repo".to_owned(),
+                branch: "main".to_owned(),
+                enabled: true,
+                interval_minutes: 60,
+            },
+            1,
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO scheduled_runs (task_id, scheduled_for_ms, status, created_at_ms, session_id) VALUES (1, 1, 'completed', 1, 'ses-result')",
+            [],
+        )
+        .unwrap();
+        let run_id = db.last_insert_rowid();
+        (db, run_id)
+    }
+
+    #[test]
     fn migrates_v2_run_identities() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(
@@ -1707,7 +2519,7 @@ Summarize risks.
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            6
+            9
         );
         assert!(db.prepare("SELECT terminal_id FROM scheduled_runs").is_ok());
         assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
@@ -1726,7 +2538,7 @@ Summarize risks.
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            6
+            9
         );
         assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
     }

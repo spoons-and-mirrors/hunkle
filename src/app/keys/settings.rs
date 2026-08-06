@@ -2,6 +2,10 @@ use super::super::*;
 
 impl App {
     pub(crate) fn handle_settings(&mut self, key: KeyEvent) {
+        if self.discord_webhook_editor.is_some() {
+            self.handle_discord_webhook_editor(key);
+            return;
+        }
         if self.opencode_model_input.is_some() {
             self.handle_opencode_model_input(key);
             return;
@@ -48,6 +52,10 @@ impl App {
         }
         if self.settings_page == SettingsPage::OpenCode {
             self.handle_opencode_settings(key);
+            return;
+        }
+        if self.settings_page == SettingsPage::Discord {
+            self.handle_discord_settings(key);
             return;
         }
         match key.code {
@@ -186,6 +194,177 @@ impl App {
         self.opencode_error = None;
     }
 
+    fn handle_discord_settings(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_settings(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.discord_selection = (self.discord_selection + 1) % 4;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.discord_selection = (self.discord_selection + 3) % 4;
+            }
+            KeyCode::Left | KeyCode::Char('h') if self.discord_selection == 0 => {
+                if !self.discord_webhooks.is_empty() {
+                    self.discord_webhook_index =
+                        (self.discord_webhook_index + self.discord_webhooks.len() - 1)
+                            % self.discord_webhooks.len();
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.discord_selection == 0 => {
+                if !self.discord_webhooks.is_empty() {
+                    self.discord_webhook_index =
+                        (self.discord_webhook_index + 1) % self.discord_webhooks.len();
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => match self.discord_selection {
+                0 => self.edit_selected_discord_webhook(),
+                1 => self.begin_discord_webhook_editor(None),
+                2 => self.test_discord_webhook(),
+                3 => self.remove_discord_webhook(),
+                _ => unreachable!(),
+            },
+            _ => {}
+        }
+    }
+
+    fn handle_discord_webhook_editor(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.discord_webhook_editor = None;
+                self.discord_webhook_error = None;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                let editor = self.discord_webhook_editor.as_mut().unwrap();
+                let offset = if key.code == KeyCode::BackTab { 3 } else { 1 };
+                editor.select((editor.field + offset) % 4);
+            }
+            KeyCode::Enter => {
+                let field = self.discord_webhook_editor.as_ref().unwrap().field;
+                if field == 3 {
+                    self.save_discord_webhook();
+                } else {
+                    self.discord_webhook_editor
+                        .as_mut()
+                        .unwrap()
+                        .select(field + 1);
+                }
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.save_discord_webhook();
+            }
+            _ => {
+                if self.discord_webhook_editor.as_mut().is_some_and(|editor| {
+                    editor.active_input_mut().handle_edit_key(key) != EditOutcome::Unhandled
+                }) {
+                    self.discord_webhook_error = None;
+                }
+            }
+        }
+    }
+
+    fn begin_discord_webhook_editor(&mut self, webhook: Option<DiscordWebhookConfig>) {
+        self.discord_webhook_editor = Some(DiscordWebhookEditor::new(webhook.as_ref()));
+        self.discord_webhook_error = None;
+    }
+
+    fn edit_selected_discord_webhook(&mut self) {
+        let webhook = self
+            .discord_webhooks
+            .get(self.discord_webhook_index)
+            .cloned();
+        self.begin_discord_webhook_editor(webhook);
+    }
+
+    fn save_discord_webhook(&mut self) {
+        let webhook = match self.discord_webhook_editor.as_ref().unwrap().config() {
+            Ok(webhook) => webhook,
+            Err(error) => {
+                self.discord_webhook_error = Some(error);
+                return;
+            }
+        };
+        let original_id = self
+            .discord_webhook_editor
+            .as_ref()
+            .and_then(|editor| editor.original_id.as_deref());
+        let mut webhooks = self.discord_webhooks.clone();
+        let index =
+            original_id.and_then(|id| webhooks.iter().position(|existing| existing.id == id));
+        if let Some(index) = index {
+            webhooks[index] = webhook;
+            self.discord_webhook_index = index;
+        } else {
+            webhooks.push(webhook);
+            self.discord_webhook_index = webhooks.len() - 1;
+        }
+        if let Err(error) = self.discord_webhook_store.save(&webhooks) {
+            self.discord_webhook_error = Some(format!("Could not save webhook: {error}"));
+            return;
+        }
+        self.discord_webhooks = webhooks;
+        self.discord_webhook_editor = None;
+        self.discord_webhook_error = None;
+        match self
+            .herdr
+            .configure_discord_webhooks(self.discord_webhooks.clone())
+        {
+            Ok(()) => self.notice = Some("Discord webhook saved".to_owned()),
+            Err(error) => self.notice = Some(format!("Could not configure Discord: {error}")),
+        }
+    }
+
+    fn test_discord_webhook(&mut self) {
+        self.discord_webhook_error = None;
+        let Some(webhook) = self.discord_webhooks.get(self.discord_webhook_index) else {
+            self.notice = Some("Add a Discord webhook first".to_owned());
+            return;
+        };
+        match self.herdr.test_discord_webhook(webhook.id.clone()) {
+            Ok(()) => self.notice = Some("Sending Discord test message…".to_owned()),
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    fn remove_discord_webhook(&mut self) {
+        if self.discord_webhooks.is_empty() {
+            return;
+        }
+        let webhook = &self.discord_webhooks[self
+            .discord_webhook_index
+            .min(self.discord_webhooks.len() - 1)];
+        if let Some(task) = self
+            .herdr
+            .scheduled_tasks()
+            .iter()
+            .find(|task| task.discord_webhook_id == webhook.id)
+        {
+            self.notice = Some(format!(
+                "Set Discord to Off for scheduled task `{}` before removing this webhook",
+                task.title
+            ));
+            return;
+        }
+        let mut webhooks = self.discord_webhooks.clone();
+        webhooks.remove(self.discord_webhook_index.min(webhooks.len() - 1));
+        if let Err(error) = self.discord_webhook_store.save(&webhooks) {
+            self.discord_webhook_error = Some(format!("Could not remove webhook: {error}"));
+            return;
+        }
+        self.discord_webhooks = webhooks;
+        self.discord_webhook_index = self
+            .discord_webhook_index
+            .min(self.discord_webhooks.len().saturating_sub(1));
+        self.discord_webhook_editor = None;
+        self.discord_webhook_error = None;
+        match self
+            .herdr
+            .configure_discord_webhooks(self.discord_webhooks.clone())
+        {
+            Ok(()) => self.notice = Some("Discord webhook removed".to_owned()),
+            Err(error) => self.notice = Some(format!("Could not configure Discord: {error}")),
+        }
+    }
+
     pub(crate) fn change_opencode_reasoning(&mut self, delta: isize) {
         self.settings.opencode_reasoning = self.settings.opencode_reasoning.next(delta);
         self.opencode_error = None;
@@ -208,6 +387,8 @@ impl App {
         self.shortcut_error = None;
         self.opencode_model_input = None;
         self.opencode_error = None;
+        self.discord_webhook_editor = None;
+        self.discord_webhook_error = None;
     }
 
     pub(crate) fn close_settings(&mut self) {
@@ -238,6 +419,32 @@ impl App {
             SettingsHitTarget::OpenCodeReasoning => {
                 self.opencode_selection = 1;
                 self.change_opencode_reasoning(1);
+            }
+            SettingsHitTarget::DiscordWebhook => {
+                self.discord_selection = 0;
+                self.edit_selected_discord_webhook();
+            }
+            SettingsHitTarget::DiscordAdd => {
+                self.discord_selection = 1;
+                self.begin_discord_webhook_editor(None);
+            }
+            SettingsHitTarget::DiscordField(field) => {
+                if let Some(editor) = self.discord_webhook_editor.as_mut() {
+                    editor.select(field);
+                }
+            }
+            SettingsHitTarget::DiscordSave => self.save_discord_webhook(),
+            SettingsHitTarget::DiscordCancel => {
+                self.discord_webhook_editor = None;
+                self.discord_webhook_error = None;
+            }
+            SettingsHitTarget::DiscordTest => {
+                self.discord_selection = 2;
+                self.test_discord_webhook();
+            }
+            SettingsHitTarget::DiscordRemove => {
+                self.discord_selection = 3;
+                self.remove_discord_webhook();
             }
             SettingsHitTarget::AutoFetch => self.toggle_auto_fetch(),
             SettingsHitTarget::FetchIntervalDown => self.change_fetch_interval(-1),

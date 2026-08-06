@@ -72,81 +72,24 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     file.commit()
 }
 
+#[cfg(unix)]
+pub(crate) fn atomic_write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut options = atomic_write_file::OpenOptions::new();
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    atomic_write_file::unix::OpenOptionsExt::preserve_mode(&mut options, false);
+    let mut file = options.open(path)?;
+    file.write_all(content)?;
+    file.commit()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn atomic_write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    atomic_write(path, content)
+}
+
 pub(crate) fn read_workspace_file(root: &Path, relative: &RepoPath) -> Result<Vec<u8>> {
     let path = safe_regular_file(root, relative)?;
     fs::read(&path).with_context(|| format!("could not read {}", relative.display()))
-}
-
-pub(crate) fn ensure_workspace_directory(root: &Path, relative: &RepoPath) -> Result<()> {
-    let root_metadata = fs::symlink_metadata(root)
-        .with_context(|| format!("could not inspect workspace {}", root.display()))?;
-    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
-        bail!("the workspace root is no longer a safe directory");
-    }
-    let mut directory = root.to_owned();
-    for component in relative.as_path().components() {
-        let Component::Normal(value) = component else {
-            bail!("Path must stay inside the workspace");
-        };
-        if value == ".git" {
-            bail!("Path must stay inside the workspace");
-        }
-        directory.push(value);
-        match fs::symlink_metadata(&directory) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => bail!("{} is not a safe workspace directory", directory.display()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&directory).with_context(|| {
-                    format!("could not create directory {}", directory.display())
-                })?;
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("could not inspect {}", directory.display()));
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn atomic_write_workspace(
-    root: &Path,
-    relative: &RepoPath,
-    content: &[u8],
-) -> Result<()> {
-    let path = safe_path(root, relative)?;
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => bail!("{} is not a safe workspace file", relative.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("could not inspect {}", relative.display()));
-        }
-    }
-    atomic_write(&path, content).with_context(|| format!("could not save {}", relative.display()))
-}
-
-pub(crate) fn remove_workspace_file(root: &Path, relative: &RepoPath) -> Result<()> {
-    let path = safe_regular_file(root, relative)?;
-    fs::remove_file(&path).with_context(|| format!("could not delete {}", relative.display()))
-}
-
-pub(crate) fn remove_workspace_file_if_unchanged(
-    root: &Path,
-    relative: &RepoPath,
-    expected: &[u8],
-) -> Result<()> {
-    let path = safe_regular_file(root, relative)?;
-    let current = fs::read(&path)
-        .with_context(|| format!("could not read {} before moving", relative.display()))?;
-    if current != expected {
-        bail!(
-            "{} changed on disk; your edits were not saved",
-            relative.display()
-        );
-    }
-    let checked_path = safe_regular_file(root, relative)?;
-    fs::remove_file(&checked_path).with_context(|| format!("could not move {}", relative.display()))
 }
 
 pub(crate) fn atomic_write_if_unchanged(

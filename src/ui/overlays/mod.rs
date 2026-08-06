@@ -10,11 +10,12 @@ pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::app::{
     ACTION_ITEMS, ActionsState, AgentPaneDirection, App, CommandLineSource, CommandStatus,
-    Explorer, ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch,
-    FileSearchHitTarget, FileSearchRow, HerdrPrompt, HitTarget, LayoutProfile, PickerAction,
-    PickerEntry, ScheduledRunStatus, SchedulerDestinationCard, SchedulerField, SchedulerHitTarget,
-    SchedulerSurface, ScrollTarget, SearchScope, Settings, SettingsHitTarget, SettingsPage,
-    ShortcutAction, Shortcuts, SurroundingEntry,
+    DiscordWebhookConfig, DiscordWebhookEditor, Explorer, ExplorerHitTarget, FileDialog,
+    FileDialogKind, FileNameAction, FileSearch, FileSearchHitTarget, FileSearchRow, HerdrPrompt,
+    HitTarget, LayoutProfile, PickerAction, PickerEntry, ScheduledRunStatus,
+    SchedulerDestinationCard, SchedulerField, SchedulerHitTarget, SchedulerSurface, ScrollTarget,
+    SearchScope, Settings, SettingsHitTarget, SettingsPage, ShortcutAction, Shortcuts,
+    SurroundingEntry, TextInput,
 };
 
 pub(super) use super::{
