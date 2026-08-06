@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SchedulerSurface {
@@ -171,24 +172,26 @@ impl ScheduledTaskComposer {
             return Vec::new();
         };
         let mut candidates: Vec<usize> = Vec::new();
+        let mut repositories = HashSet::new();
+        let mut worktrees = HashSet::new();
+        let mut branches = HashSet::new();
         for (index, destination) in self.destinations.iter().enumerate() {
             if card == SchedulerDestinationCard::Worktree && destination.path.is_none() {
                 continue;
             }
-            if (card == SchedulerDestinationCard::Repository
-                || destination.repository_root == selected.repository_root)
-                && !candidates.iter().any(|candidate| match card {
-                    SchedulerDestinationCard::Repository => {
-                        self.destinations[*candidate].repository_root == destination.repository_root
-                    }
-                    SchedulerDestinationCard::Worktree => {
-                        self.destinations[*candidate].path == destination.path
-                    }
-                    SchedulerDestinationCard::Branch => {
-                        self.destinations[*candidate].branch.name == destination.branch.name
-                    }
-                })
+            if card != SchedulerDestinationCard::Repository
+                && destination.repository_root != selected.repository_root
             {
+                continue;
+            }
+            let inserted = match card {
+                SchedulerDestinationCard::Repository => {
+                    repositories.insert(&destination.repository_root)
+                }
+                SchedulerDestinationCard::Worktree => worktrees.insert(destination.path.as_ref()),
+                SchedulerDestinationCard::Branch => branches.insert(&destination.branch.name),
+            };
+            if inserted {
                 candidates.push(index);
             }
         }
@@ -373,6 +376,27 @@ impl App {
                 else {
                     return Vec::new();
                 };
+                let local_tracking = repository
+                    .branches
+                    .iter()
+                    .filter(|branch| !branch.remote)
+                    .filter_map(|branch| {
+                        branch
+                            .upstream
+                            .as_deref()
+                            .map(|upstream| ((branch.name.as_str(), upstream), ()))
+                    })
+                    .collect::<HashMap<_, _>>();
+                let worktrees_by_branch = worktrees
+                    .iter()
+                    .filter_map(|worktree| {
+                        worktree
+                            .branch
+                            .as_deref()
+                            .and_then(|branch| branch.strip_prefix("refs/heads/"))
+                            .map(|branch| (branch, *worktree))
+                    })
+                    .collect::<HashMap<_, _>>();
                 let mut destinations = repository
                     .branches
                     .iter()
@@ -386,21 +410,10 @@ impl App {
                             &branch.name
                         };
                         let local_tracks_remote = !branch.remote
-                            || repository.branches.iter().any(|local| {
-                                !local.remote
-                                    && local.name == checkout_branch
-                                    && local.upstream.as_deref() == Some(branch.name.as_str())
-                            });
+                            || local_tracking
+                                .contains_key(&(checkout_branch, branch.name.as_str()));
                         let worktree = local_tracks_remote
-                            .then(|| {
-                                worktrees.iter().find(|worktree| {
-                                    worktree
-                                        .branch
-                                        .as_deref()
-                                        .and_then(|branch| branch.strip_prefix("refs/heads/"))
-                                        == Some(checkout_branch)
-                                })
-                            })
+                            .then(|| worktrees_by_branch.get(checkout_branch).copied())
                             .flatten();
                         SchedulerDestination {
                             path: worktree.map(|worktree| worktree.path.clone()),
@@ -412,15 +425,17 @@ impl App {
                         }
                     })
                     .collect::<Vec<_>>();
-                for worktree in worktrees {
-                    if destinations.iter().any(|destination| {
-                        destination
-                            .path
-                            .as_deref()
-                            .is_some_and(|path| same_path(path, &worktree.path))
-                    }) {
-                        continue;
-                    }
+                let unmatched_worktrees = {
+                    let destination_paths = destinations
+                        .iter()
+                        .filter_map(|destination| destination.path.as_deref())
+                        .collect::<HashSet<_>>();
+                    worktrees
+                        .into_iter()
+                        .filter(|worktree| !destination_paths.contains(worktree.path.as_path()))
+                        .collect::<Vec<_>>()
+                };
+                for worktree in unmatched_worktrees {
                     let branch = worktree
                         .branch
                         .as_deref()

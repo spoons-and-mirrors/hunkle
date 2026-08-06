@@ -915,6 +915,9 @@ impl App {
         let explorer_changed = self.workspace_explorer.poll_index();
         changed |= self.mode == Mode::Explorer && explorer_changed;
         changed |= self.file_search.poll(self.session.data());
+        if self.session.data().is_some() {
+            changed |= self.graph_search.poll(self.author_filter.visible_indices());
+        }
         if self.herdr_available() {
             let scheduled_run = (self.mode == Mode::AgentPreview
                 && self.agent_preview_scheduled_run.is_some())

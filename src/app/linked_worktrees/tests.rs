@@ -49,6 +49,19 @@ fn wait_for_stats(catalog: &mut LinkedWorktreeCatalog) {
     assert!(catalog.pending_stats.is_empty());
 }
 
+fn wait_for_persistence(catalog: &mut LinkedWorktreeCatalog) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while (catalog.active_persistence_generation.is_some() || catalog.pending_persistence.is_some())
+        && Instant::now() < deadline
+    {
+        catalog.poll();
+        thread::sleep(Duration::from_millis(5));
+    }
+    catalog.poll();
+    assert!(catalog.active_persistence_generation.is_none());
+    assert!(catalog.pending_persistence.is_none());
+}
+
 fn persist_store(catalog: &LinkedWorktreeCatalog) {
     if let Some(request) = catalog.store.persistence_request().unwrap() {
         known_repositories::persist(request).unwrap();
@@ -462,11 +475,11 @@ fn superseded_topology_and_stale_stats_completions_cannot_publish() {
         .stats_sender
         .send(RepositoryStatsCompletion {
             generation: 7,
-            results: vec![RepositoryStatsResult {
+            result: Some(RepositoryStatsResult {
                 root: PathBuf::from("/repo"),
                 revision: 0,
                 result: Ok((WorktreeSignature::for_test(1, 1), Some((99, 88)))),
-            }],
+            }),
         })
         .unwrap();
 
@@ -496,6 +509,7 @@ fn persists_repository_identity_and_recent_order() {
     catalog
         .remember_workspace(Some(Path::new("/repo-5/.git")), Path::new("/repo-5-linked"))
         .unwrap();
+    wait_for_persistence(&mut catalog);
 
     let restored = LinkedWorktreeCatalog::new(Some(path));
     assert_eq!(restored.store.recent.len(), 12);
@@ -530,6 +544,7 @@ fn stale_stats_persistence_cannot_overwrite_newer_topology() {
         .remember_workspace(Some(Path::new("/second/.git")), Path::new("/second"))
         .unwrap();
     known_repositories::persist(stale_stats).unwrap();
+    wait_for_persistence(&mut catalog);
 
     let restored = LinkedWorktreeCatalog::new(Some(path));
     assert_eq!(restored.store.recent[0].root, PathBuf::from("/second"));
@@ -549,6 +564,7 @@ fn bounds_recent_history_and_moves_duplicates_to_the_front() {
     }
     let repeated = Path::new("/workspace-010");
     catalog.remember_workspace(None, repeated).unwrap();
+    wait_for_persistence(&mut catalog);
 
     assert_eq!(
         catalog.store.recent.len(),
@@ -637,7 +653,7 @@ fn bounds_known_history_while_preserving_recent_and_relevant_repositories() {
     let relevant = PathBuf::from("/zzzz-current/.git");
     catalog
         .store
-        .reconcile_and_save(vec![relevant.clone()], &[], std::slice::from_ref(&relevant))
+        .reconcile(vec![relevant.clone()], &[], std::slice::from_ref(&relevant))
         .unwrap();
     assert_eq!(
         catalog.store.repositories.len(),
@@ -694,6 +710,7 @@ fn accepts_oversized_persistence_and_rewrites_it_bounded_and_deduplicated() {
     catalog
         .remember_workspace(None, Path::new("/local-workspace"))
         .unwrap();
+    wait_for_persistence(&mut catalog);
 
     let persisted: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(
@@ -722,12 +739,13 @@ fn missing_repository_pruning_overrides_history_protection() {
 
     catalog
         .store
-        .reconcile_and_save(
+        .reconcile(
             Vec::new(),
             std::slice::from_ref(&missing),
             std::slice::from_ref(&missing),
         )
         .unwrap();
+    persist_store(&catalog);
 
     let restored = LinkedWorktreeCatalog::new(Some(path));
     assert_eq!(restored.store.repositories, [retained]);
@@ -751,6 +769,7 @@ fn persists_local_workspaces_in_recent_order_without_git_inventory() {
     catalog
         .remember_workspace(None, Path::new("/home/example"))
         .unwrap();
+    wait_for_persistence(&mut catalog);
 
     let restored = LinkedWorktreeCatalog::new(Some(path));
     let recent = restored.recent_repository_picker_items();
@@ -835,6 +854,7 @@ fn persists_non_utf8_repository_identity_without_loss() {
     catalog
         .remember_workspace(Some(&common_dir), &root)
         .unwrap();
+    wait_for_persistence(&mut catalog);
 
     let restored = LinkedWorktreeCatalog::new(Some(path));
     assert_eq!(restored.store.repositories, [common_dir]);

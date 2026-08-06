@@ -957,7 +957,7 @@ impl PreviewPresentation {
         let raw = input.content.as_str();
         let is_diff = input.content.is_diff();
         let render_markdown = input.markdown && raw.len() <= MAX_CACHED_PREVIEW_BYTES;
-        let cache_matches = self.cache.as_ref().is_some_and(|cache| {
+        let cache_content_matches = self.cache.as_ref().is_some_and(|cache| {
             let markdown_wrapped = render_markdown && input.wrapped;
             cache.generation == input.generation
                 && cache.path == input.path
@@ -965,8 +965,24 @@ impl PreviewPresentation {
                 && cache.markdown == render_markdown
                 && cache.markdown_wrapped == markdown_wrapped
                 && cache.show_initial_diff_header == input.show_initial_diff_header
-                && cache.width == input.width
         });
+        let cache_matches = cache_content_matches
+            && self.cache.as_ref().is_some_and(|cache| {
+                cache.width == input.width
+                    || (!render_markdown && (cache.width >= 72) == (input.width >= 72))
+            });
+        if cache_matches
+            && self
+                .cache
+                .as_ref()
+                .is_some_and(|cache| cache.width != input.width)
+        {
+            let cache = self.cache.as_mut().expect("preview cache exists");
+            cache.width = input.width;
+            cache.wrapped_line_starts = None;
+            cache.wrapped_window = None;
+            cache.wrapped_hunks = None;
+        }
         if !cache_matches {
             let source_lines = (!render_markdown
                 && matches!(input.content, PreviewContent::Source(_)))

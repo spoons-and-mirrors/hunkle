@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, thread, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use crate::git::{Change, InventoryRefresh, RepositoryKind};
 
@@ -30,7 +30,7 @@ fn repository_data() -> RepositoryData {
         ignored_files: Vec::new(),
         directories: Vec::new(),
         history: Vec::new(),
-        commits: Vec::new(),
+        commits: Arc::new(Vec::new()),
         files_fingerprint: 1,
         inventory_truncated: false,
         changes_fingerprint: 1,

@@ -19,7 +19,7 @@ use super::{AgentPane, AgentTiming, AgentTimingKey};
 
 const INDEX_VERSION: u8 = 2;
 const MAX_AGENT_TIMINGS: usize = 512;
-const MAX_PENDING_REQUESTS: usize = 3;
+const MAX_PENDING_RESETS: usize = 16;
 
 #[derive(Default, Deserialize, Serialize)]
 struct TimingIndex {
@@ -96,8 +96,17 @@ struct PersistedTimings {
 }
 
 impl PendingRequests {
-    fn enqueue(&mut self, request: Request) -> Option<Request> {
+    fn enqueue(&mut self, request: Request) -> bool {
         if matches!(request.operation, Operation::Reset { .. }) {
+            if self
+                .queue
+                .iter()
+                .filter(|pending| matches!(pending.operation, Operation::Reset { .. }))
+                .count()
+                >= MAX_PENDING_RESETS
+            {
+                return false;
+            }
             // A clear makes all queued work from older generations irrelevant, but each clear
             // remains an ordered barrier so its watermark cannot be skipped.
             self.queue
@@ -116,11 +125,8 @@ impl PendingRequests {
             self.queue.remove(position);
         }
 
-        if self.queue.len() >= MAX_PENDING_REQUESTS {
-            return Some(request);
-        }
         self.queue.push_back(request);
-        None
+        true
     }
 }
 
@@ -243,7 +249,7 @@ impl Persistence {
         clear_generation: u64,
         operation: Operation,
     ) -> io::Result<()> {
-        let mut request = Request {
+        let request = Request {
             submitted: local.clone(),
             clear_generation,
             operation,
@@ -253,29 +259,21 @@ impl Persistence {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        loop {
-            if state.closed {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "agent timing persistence worker stopped",
-                ));
-            }
-            match state.enqueue(request) {
-                None => {
-                    drop(state);
-                    self.requests.ready.notify_one();
-                    return Ok(());
-                }
-                Some(returned) => {
-                    request = returned;
-                    state = self
-                        .requests
-                        .ready
-                        .wait(state)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                }
-            }
+        if state.closed {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "agent timing persistence worker stopped",
+            ));
         }
+        if !state.enqueue(request) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "agent timing persistence reset queue is full",
+            ));
+        }
+        drop(state);
+        self.requests.ready.notify_one();
+        Ok(())
     }
 }
 
@@ -817,8 +815,8 @@ mod tests {
         let mut pending = PendingRequests::default();
 
         for index in 1..=100 {
-            assert!(pending.enqueue(status_request(index, 0)).is_none());
-            assert!(pending.enqueue(snapshot_request(index, 0)).is_none());
+            assert!(pending.enqueue(status_request(index, 0)));
+            assert!(pending.enqueue(snapshot_request(index, 0)));
             assert!(pending.queue.len() <= 2);
         }
 
@@ -845,14 +843,14 @@ mod tests {
     #[test]
     fn pending_timing_resets_remain_ordered_barriers() {
         let mut pending = PendingRequests::default();
-        assert!(pending.enqueue(status_request(1, 0)).is_none());
-        assert!(pending.enqueue(snapshot_request(2, 0)).is_none());
-        assert!(pending.enqueue(reset_request(3, 1)).is_none());
-        assert!(pending.enqueue(status_request(4, 1)).is_none());
-        assert!(pending.enqueue(snapshot_request(5, 1)).is_none());
+        assert!(pending.enqueue(status_request(1, 0)));
+        assert!(pending.enqueue(snapshot_request(2, 0)));
+        assert!(pending.enqueue(reset_request(3, 1)));
+        assert!(pending.enqueue(status_request(4, 1)));
+        assert!(pending.enqueue(snapshot_request(5, 1)));
 
-        assert!(pending.enqueue(reset_request(6, 2)).is_none());
-        assert!(pending.enqueue(status_request(7, 2)).is_none());
+        assert!(pending.enqueue(reset_request(6, 2)));
+        assert!(pending.enqueue(status_request(7, 2)));
 
         assert_eq!(pending.queue.len(), 3);
         assert!(matches!(
@@ -875,17 +873,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 2]
         );
-        assert!(pending.enqueue(reset_request(8, 3)).is_none());
-        assert!(pending.enqueue(reset_request(9, 4)).is_some());
-        assert_eq!(pending.queue.len(), MAX_PENDING_REQUESTS);
+        assert!(pending.enqueue(reset_request(8, 3)));
+        assert!(pending.enqueue(reset_request(9, 4)));
+        assert_eq!(pending.queue.len(), 4);
         assert_eq!(
             pending
                 .queue
                 .iter()
                 .map(|request| request.clear_generation)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            vec![1, 2, 3, 4]
         );
+    }
+
+    #[test]
+    fn pending_timing_resets_are_bounded_without_waiting() {
+        let mut pending = PendingRequests::default();
+        for generation in 0..MAX_PENDING_RESETS {
+            assert!(pending.enqueue(reset_request(generation as u64, generation as u64)));
+        }
+        assert!(!pending.enqueue(reset_request(99, 99)));
+        assert_eq!(pending.queue.len(), MAX_PENDING_RESETS);
     }
 
     #[test]

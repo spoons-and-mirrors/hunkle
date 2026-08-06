@@ -2,6 +2,11 @@ use std::ops::Range;
 
 use crate::repo_path::RepoPath;
 
+const MAX_DIFF_METADATA_LINES: usize = 250_000;
+const SEPARATOR_ROW: u32 = u32::MAX;
+const TRUNCATED_ROW: u32 = u32::MAX - 1;
+const TRUNCATED_MESSAGE: &str = "Diff display truncated: too many lines";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DiffLineKind {
     FileHeader,
@@ -20,23 +25,19 @@ struct DiffLine {
     old_line: Option<u32>,
     new_line: Option<u32>,
     new_cursor: Option<u32>,
-    path: Option<RepoPath>,
-    first_new_line: usize,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DisplayRow {
-    Line(usize),
-    Separator,
+    path: Option<u32>,
+    first_new_line: u32,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct DiffDocument {
     raw: String,
     lines: Vec<DiffLine>,
-    compact: Vec<DisplayRow>,
-    with_headers: Vec<DisplayRow>,
+    paths: Vec<RepoPath>,
+    compact: Vec<u32>,
+    with_headers: Vec<u32>,
     hunk_count: usize,
+    truncated: bool,
 }
 
 impl DiffDocument {
@@ -49,7 +50,7 @@ impl DiffDocument {
     }
 
     fn parse_inner(raw: String, patch: bool) -> Self {
-        let ranges = line_ranges(&raw);
+        let (ranges, truncated) = line_ranges(&raw, MAX_DIFF_METADATA_LINES);
         let mut lines = Vec::with_capacity(ranges.len());
         let mut old_line = None;
         let mut new_line = None;
@@ -116,16 +117,18 @@ impl DiffDocument {
             }
         }
 
-        assign_file_paths(&raw, &mut lines);
+        let paths = assign_file_paths(&raw, &mut lines);
         let has_hunks = hunk_count > 0;
-        let compact = project(&lines, has_hunks, false);
-        let with_headers = project(&lines, has_hunks, true);
+        let compact = project(&lines, has_hunks, false, truncated);
+        let with_headers = project(&lines, has_hunks, true, truncated);
         Self {
             raw,
             lines,
+            paths,
             compact,
             with_headers,
-            hunk_count,
+            hunk_count: if truncated { 0 } else { hunk_count },
+            truncated,
         }
     }
 
@@ -138,25 +141,25 @@ impl DiffDocument {
     }
 
     pub(crate) fn display_line(&self, row: usize, show_headers: bool) -> Option<&str> {
-        let index = match self.projection(show_headers).get(row)? {
-            DisplayRow::Line(index) => *index,
-            DisplayRow::Separator => return Some(""),
+        let projected = *self.projection(show_headers).get(row)?;
+        let index = match projected {
+            SEPARATOR_ROW => return Some(""),
+            TRUNCATED_ROW => return Some(TRUNCATED_MESSAGE),
+            index => index as usize,
         };
         Some(self.line_text(index))
     }
 
     pub(crate) fn display_kind(&self, row: usize, show_headers: bool) -> Option<DiffLineKind> {
-        let DisplayRow::Line(index) = *self.projection(show_headers).get(row)? else {
-            return None;
-        };
+        let index = self.line_index(row, show_headers)?;
         Some(self.lines[index].kind)
     }
 
     pub(crate) fn display_path(&self, row: usize, show_headers: bool) -> Option<&RepoPath> {
-        let DisplayRow::Line(index) = *self.projection(show_headers).get(row)? else {
-            return None;
-        };
-        self.lines[index].path.as_ref()
+        let index = self.line_index(row, show_headers)?;
+        self.lines[index]
+            .path
+            .and_then(|path| self.paths.get(path as usize))
     }
 
     pub(crate) fn display_new_position(
@@ -164,9 +167,7 @@ impl DiffDocument {
         row: usize,
         show_headers: bool,
     ) -> Option<(usize, &str)> {
-        let DisplayRow::Line(index) = *self.projection(show_headers).get(row)? else {
-            return None;
-        };
+        let index = self.line_index(row, show_headers)?;
         let line = &self.lines[index];
         if !matches!(line.kind, DiffLineKind::Addition | DiffLineKind::Context) {
             return None;
@@ -185,14 +186,12 @@ impl DiffDocument {
         if !show_headers {
             return None;
         }
-        let DisplayRow::Line(index) = *self.projection(true).get(row)? else {
-            return None;
-        };
+        let index = self.line_index(row, true)?;
         let line = &self.lines[index];
         matches!(line.kind, DiffLineKind::Addition | DiffLineKind::Context)
             .then(|| {
                 Some((
-                    line.path.clone()?,
+                    self.paths.get(line.path? as usize)?.clone(),
                     line.new_line?.max(1) as usize,
                     &self.raw[line.payload.clone()],
                 ))
@@ -208,12 +207,15 @@ impl DiffDocument {
         if !show_headers {
             return None;
         }
-        let DisplayRow::Line(index) = *self.projection(true).get(row)? else {
-            return None;
-        };
+        let index = self.line_index(row, true)?;
         let line = &self.lines[index];
         (line.kind == DiffLineKind::FileHeader)
-            .then(|| Some((line.path.clone()?, line.first_new_line)))
+            .then(|| {
+                Some((
+                    self.paths.get(line.path? as usize)?.clone(),
+                    line.first_new_line as usize,
+                ))
+            })
             .flatten()
     }
 
@@ -252,10 +254,10 @@ impl DiffDocument {
         let projection = self.projection(show_headers);
         let mut hunks = Vec::new();
         for (row, projected) in projection.iter().enumerate() {
-            let DisplayRow::Line(index) = projected else {
+            if *projected >= TRUNCATED_ROW {
                 continue;
-            };
-            if self.lines[*index].kind == DiffLineKind::Hunk {
+            }
+            if self.lines[*projected as usize].kind == DiffLineKind::Hunk {
                 let rendered = if wrapped {
                     let Some(rendered) = wrapped_starts.and_then(|starts| starts.get(row)).copied()
                     else {
@@ -284,6 +286,9 @@ impl DiffDocument {
     }
 
     pub(crate) fn hunk_patch(&self, index: usize) -> Option<String> {
+        if self.truncated {
+            return None;
+        }
         let target = self
             .lines
             .iter()
@@ -318,6 +323,9 @@ impl DiffDocument {
     }
 
     pub(crate) fn new_line_markers(&self, target: &RepoPath) -> Vec<(usize, char)> {
+        if self.truncated {
+            return Vec::new();
+        }
         let mut markers = Vec::new();
         let mut deletion_pending = false;
         let mut pending_line: Option<usize> = None;
@@ -334,12 +342,14 @@ impl DiffDocument {
                 {
                     markers.push((number.saturating_sub(1), '-'));
                 }
-                current_path = line.path.as_ref();
+                current_path = line.path.and_then(|path| self.paths.get(path as usize));
                 deletion_pending = false;
                 pending_line = None;
                 continue;
             }
-            if has_file_headers && line.path.as_ref() != Some(target) {
+            if has_file_headers
+                && line.path.and_then(|path| self.paths.get(path as usize)) != Some(target)
+            {
                 continue;
             }
             match line.kind {
@@ -381,14 +391,14 @@ impl DiffDocument {
         row: usize,
         show_headers: bool,
     ) -> (Option<u32>, Option<u32>) {
-        let Some(DisplayRow::Line(index)) = self.projection(show_headers).get(row) else {
+        let Some(index) = self.line_index(row, show_headers) else {
             return (None, None);
         };
-        let line = &self.lines[*index];
+        let line = &self.lines[index];
         (line.old_line, line.new_line)
     }
 
-    fn projection(&self, show_headers: bool) -> &[DisplayRow] {
+    fn projection(&self, show_headers: bool) -> &[u32] {
         if show_headers {
             &self.with_headers
         } else {
@@ -399,24 +409,35 @@ impl DiffDocument {
     fn line_text(&self, index: usize) -> &str {
         &self.raw[self.lines[index].range.clone()]
     }
+
+    fn line_index(&self, row: usize, show_headers: bool) -> Option<usize> {
+        let index = *self.projection(show_headers).get(row)?;
+        (index < TRUNCATED_ROW).then_some(index as usize)
+    }
 }
 
-fn line_ranges(raw: &str) -> Vec<Range<usize>> {
-    let mut ranges = Vec::new();
+fn line_ranges(raw: &str, maximum: usize) -> (Vec<Range<usize>>, bool) {
+    let mut ranges = Vec::with_capacity(maximum.min(raw.len() / 32));
     let mut start = 0;
     for chunk in raw.split_inclusive('\n') {
+        if ranges.len() == maximum {
+            return (ranges, true);
+        }
         let end = start + chunk.len() - usize::from(chunk.ends_with('\n'));
         let end = end - usize::from(end > start && raw.as_bytes()[end - 1] == b'\r');
         ranges.push(start..end);
         start += chunk.len();
     }
     if start < raw.len() {
+        if ranges.len() == maximum {
+            return (ranges, true);
+        }
         ranges.push(start..raw.len());
     }
-    ranges
+    (ranges, false)
 }
 
-fn project(lines: &[DiffLine], has_hunks: bool, show_headers: bool) -> Vec<DisplayRow> {
+fn project(lines: &[DiffLine], has_hunks: bool, show_headers: bool, truncated: bool) -> Vec<u32> {
     let mut rows = Vec::new();
     let mut in_hunk = false;
     let mut seen_header = false;
@@ -425,10 +446,10 @@ fn project(lines: &[DiffLine], has_hunks: bool, show_headers: bool) -> Vec<Displ
             in_hunk = false;
             if show_headers {
                 if seen_header {
-                    rows.push(DisplayRow::Separator);
+                    rows.push(SEPARATOR_ROW);
                 }
                 seen_header = true;
-                rows.push(DisplayRow::Line(index));
+                rows.push(index as u32);
                 continue;
             }
         }
@@ -437,24 +458,28 @@ fn project(lines: &[DiffLine], has_hunks: bool, show_headers: bool) -> Vec<Displ
         }
         if line.kind == DiffLineKind::Hunk {
             if in_hunk {
-                rows.push(DisplayRow::Separator);
+                rows.push(SEPARATOR_ROW);
             }
             in_hunk = true;
         }
-        rows.push(DisplayRow::Line(index));
+        rows.push(index as u32);
+    }
+    if truncated {
+        rows.push(TRUNCATED_ROW);
     }
     rows
 }
 
-fn assign_file_paths(raw: &str, lines: &mut [DiffLine]) {
+fn assign_file_paths(raw: &str, lines: &mut [DiffLine]) -> Vec<RepoPath> {
     let headers = lines
         .iter()
         .enumerate()
         .filter_map(|(index, line)| (line.kind == DiffLineKind::FileHeader).then_some(index))
         .collect::<Vec<_>>();
     if headers.is_empty() {
-        return;
+        return Vec::new();
     }
+    let mut paths = Vec::with_capacity(headers.len());
     for (position, start) in headers.iter().copied().enumerate() {
         let end = headers.get(position + 1).copied().unwrap_or(lines.len());
         let mut destination = None;
@@ -485,11 +510,17 @@ fn assign_file_paths(raw: &str, lines: &mut [DiffLine]) {
             let header = &raw[lines[start].range.clone()];
             destination = parse_git_diff_header_destination(header);
         }
+        let path = (!deleted).then_some(destination).flatten().map(|path| {
+            let index = paths.len() as u32;
+            paths.push(path);
+            index
+        });
         for line in &mut lines[start..end] {
-            line.path = (!deleted).then(|| destination.clone()).flatten();
-            line.first_new_line = first_new_line;
+            line.path = path;
+            line.first_new_line = first_new_line as u32;
         }
     }
+    paths
 }
 
 fn parse_git_diff_header_destination(header: &str) -> Option<RepoPath> {
@@ -735,5 +766,19 @@ mod tests {
         assert!(!patch.contains("@@@"));
         assert!(patch.contains("@@ -2 +2 @@\n-old\n+new\n"));
         assert!(document.hunk_patch(1).is_none());
+    }
+
+    #[test]
+    fn bounds_metadata_for_pathological_line_counts() {
+        let document = DiffDocument::parse(" \n".repeat(MAX_DIFF_METADATA_LINES + 1));
+
+        assert_eq!(document.lines.len(), MAX_DIFF_METADATA_LINES);
+        assert_eq!(document.display_len(false), MAX_DIFF_METADATA_LINES + 1);
+        assert_eq!(
+            document.display_line(MAX_DIFF_METADATA_LINES, false),
+            Some(TRUNCATED_MESSAGE)
+        );
+        assert_eq!(document.hunk_count(), 0);
+        assert!(document.hunk_patch(0).is_none());
     }
 }

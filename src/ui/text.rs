@@ -178,7 +178,72 @@ impl WrappedCursorRow {
 }
 
 pub(super) fn word_wrapped_height(content: &str, width: usize) -> usize {
+    if content.is_ascii() && !content.contains('\t') {
+        return ascii_word_wrapped_height(content.as_bytes(), width.max(1));
+    }
     wrap_content(content, width, WrappedHeight::default()).rows
+}
+
+fn ascii_word_wrapped_height(content: &[u8], width: usize) -> usize {
+    let mut rows = 1usize;
+    let mut current_width = 0usize;
+    let mut has_word = false;
+    let mut pending_whitespace = 0usize;
+    let mut start = 0usize;
+    while start < content.len() {
+        let whitespace = content[start].is_ascii_whitespace();
+        let mut end = start + 1;
+        while end < content.len() && content[end].is_ascii_whitespace() == whitespace {
+            end += 1;
+        }
+        let token_width = end - start;
+        if whitespace && has_word {
+            pending_whitespace = token_width;
+            start = end;
+            continue;
+        }
+        if !whitespace
+            && has_word
+            && token_width <= width
+            && current_width
+                .saturating_add(pending_whitespace)
+                .saturating_add(token_width)
+                > width
+        {
+            rows = rows.saturating_add(1);
+            current_width = 0;
+            pending_whitespace = 0;
+        } else if pending_whitespace > 0 {
+            append_ascii_width(pending_whitespace, width, &mut rows, &mut current_width);
+            pending_whitespace = 0;
+        }
+        append_ascii_width(token_width, width, &mut rows, &mut current_width);
+        has_word |= !whitespace;
+        start = end;
+    }
+    rows
+}
+
+fn append_ascii_width(
+    mut amount: usize,
+    width: usize,
+    rows: &mut usize,
+    current_width: &mut usize,
+) {
+    if *current_width > 0 {
+        let available = width.saturating_sub(*current_width);
+        let consumed = amount.min(available);
+        *current_width = current_width.saturating_add(consumed);
+        amount -= consumed;
+        if amount > 0 {
+            *rows = rows.saturating_add(1);
+            *current_width = 0;
+        }
+    }
+    if amount > 0 {
+        *rows = rows.saturating_add(amount.saturating_sub(1) / width);
+        *current_width = (amount - 1) % width + 1;
+    }
 }
 
 pub(super) fn word_wrapped_column_at(

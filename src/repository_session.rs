@@ -24,7 +24,7 @@ mod operation_state;
 use operation_state::{Operation, OperationState};
 
 const MIN_STATUS_INTERVAL: Duration = Duration::from_millis(800);
-const MAX_STATUS_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_STATUS_INTERVAL: Duration = Duration::from_secs(60);
 
 pub(crate) enum WorkerOutcome {
     Commit(Result<CommandOutput, String>),

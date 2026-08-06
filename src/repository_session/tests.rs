@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 fn command_output(success: bool) -> CommandOutput {
     CommandOutput {
@@ -543,7 +544,7 @@ fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
             ignored_files: Vec::new(),
             directories: Vec::new(),
             history: Vec::new(),
-            commits: Vec::new(),
+            commits: Arc::new(Vec::new()),
             files_fingerprint: 0,
             inventory_truncated: false,
             changes_fingerprint: 0,

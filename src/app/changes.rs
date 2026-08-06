@@ -12,7 +12,7 @@ use image::DynamicImage;
 use ratatui::widgets::ListState;
 
 use crate::{
-    git::{Branch, Change, Commit, InventoryRefresh, RepositoryData},
+    git::{Branch, Change, Commit, DiffSummary, InventoryRefresh, RepositoryData},
     repo_path::RepoPath,
     tree::{ExplorerRow, FileTree, PreparedFileTree, WorktreeRow, WorktreeSection, WorktreeTree},
     ui::preview::{DiffDocument, PreviewPresentation},
@@ -98,6 +98,7 @@ pub struct ChangesState {
     worktree_tree: Option<WorktreeTree>,
     worktree_tree_fingerprint: Option<u64>,
     change_codes: HashMap<RepoPath, char>,
+    selection_summary: Option<DiffSummary>,
     pub(crate) preview_presentation: PreviewPresentation,
     preview_loader: PreviewLoader,
 }
@@ -368,6 +369,7 @@ impl ChangesState {
             worktree_tree: repo.map(|repo| WorktreeTree::new(&repo.changes)),
             worktree_tree_fingerprint: repo.map(|repo| repo.changes_fingerprint),
             change_codes: repo.map_or_else(HashMap::new, |repo| change_codes(&repo.changes)),
+            selection_summary: None,
             preview_presentation: PreviewPresentation::default(),
             preview_loader: PreviewLoader::new(),
         };
@@ -1518,6 +1520,7 @@ impl ChangesState {
             return;
         }
         self.markdown_alternate_scroll = None;
+        self.selection_summary = None;
         let preserve_hunk = self.pending_hunk_selection.as_ref().is_some_and(|pending| {
             repo.and_then(|repo| {
                 self.selected_change_index(repo)
@@ -1596,6 +1599,12 @@ impl ChangesState {
         };
         if let Some(index) = row.change_index {
             let change = &repo.changes[index];
+            self.selection_summary = Some(DiffSummary {
+                files: vec![change.path.clone()],
+                files_truncated: false,
+                additions: change.additions,
+                deletions: change.deletions,
+            });
             self.preview.origin = PreviewOrigin::WorktreeChange {
                 path: change.path.clone(),
                 staged: change.staged,
@@ -1604,6 +1613,7 @@ impl ChangesState {
             self.set_preview_payload(PreviewPayload::Loading);
             self.preview_loader.request_diff(&repo.root, change.clone());
         } else if let Some(section) = row.section.filter(|_| row.section_stats.is_some()) {
+            self.selection_summary = Some(worktree_summary(repo, section, None));
             self.preview.origin = PreviewOrigin::WorktreeSection(section);
             self.set_preview_payload(PreviewPayload::Loading);
             self.preview_loader.request_section_diff(
@@ -1617,6 +1627,7 @@ impl ChangesState {
             let section = self
                 .selected_worktree_section()
                 .unwrap_or(WorktreeSection::Unstaged);
+            self.selection_summary = Some(worktree_summary(repo, section, Some(&path)));
             self.preview.origin = PreviewOrigin::WorktreeDirectory {
                 path: path.clone(),
                 section,
@@ -1626,6 +1637,10 @@ impl ChangesState {
                 descendant_count
             )));
         }
+    }
+
+    pub(crate) fn selection_summary(&self) -> Option<&DiffSummary> {
+        self.selection_summary.as_ref()
     }
 
     pub(super) fn poll_preview(&mut self, active_root: Option<&Path>) -> bool {
@@ -2028,6 +2043,25 @@ impl ChangesState {
         };
         (pane, selected)
     }
+}
+
+fn worktree_summary(
+    repo: &RepositoryData,
+    section: WorktreeSection,
+    directory: Option<&RepoPath>,
+) -> DiffSummary {
+    repo.changes
+        .iter()
+        .filter(|change| change.staged == (section == WorktreeSection::Staged))
+        .filter(|change| {
+            directory.is_none_or(|path| change.path.as_path().starts_with(path.as_path()))
+        })
+        .fold(DiffSummary::default(), |mut summary, change| {
+            summary.files.push(change.path.clone());
+            summary.additions = summary.additions.saturating_add(change.additions);
+            summary.deletions = summary.deletions.saturating_add(change.deletions);
+            summary
+        })
 }
 
 fn change_codes(changes: &[Change]) -> HashMap<RepoPath, char> {

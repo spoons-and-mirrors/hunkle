@@ -75,15 +75,17 @@ pub(super) fn diff_summary_text(
             usize::from(height.saturating_sub(u16::from(include_changes))),
         )
     } else {
-        vec![truncate_width(
-            &summary
-                .files
-                .iter()
-                .map(RepoPath::display)
-                .collect::<Vec<_>>()
-                .join("  "),
-            available,
-        )]
+        let mut files = String::new();
+        for file in &summary.files {
+            if !files.is_empty() {
+                files.push_str("  ");
+            }
+            files.push_str(&file.display());
+            if UnicodeWidthStr::width(files.as_str()) > available {
+                break;
+            }
+        }
+        vec![truncate_width(&files, available)]
     };
     lines.extend(file_lines.into_iter().enumerate().map(|(index, files)| {
         Line::from(vec![
@@ -109,10 +111,9 @@ pub(super) fn diff_summary_height(
         return 3.min(maximum);
     }
     let file_width = usize::from(width).saturating_sub("FILES  ".len());
+    let maximum_file_rows = usize::from(maximum.saturating_sub(2));
     let rows = summary.map_or(1, |summary| {
-        wrapped_file_summary(&summary.files, file_width, usize::MAX)
-            .len()
-            .max(1)
+        wrapped_file_summary_height(&summary.files, file_width, maximum_file_rows).max(1)
     });
     (rows as u16).saturating_add(2).min(maximum)
 }
@@ -125,10 +126,11 @@ pub(super) fn wrapped_file_summary(
     if width == 0 || maximum_lines == 0 {
         return Vec::new();
     }
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(maximum_lines.min(files.len()));
     let mut line = String::new();
     let mut line_width = 0usize;
-    for file in files {
+    let mut truncated = false;
+    'files: for file in files {
         let file = file.display();
         let file_width = UnicodeWidthStr::width(file.as_str());
         if file_width <= width {
@@ -149,34 +151,103 @@ pub(super) fn wrapped_file_summary(
             }
         }
         if !line.is_empty() {
-            lines.push(std::mem::take(&mut line));
+            if !push_summary_line(&mut lines, std::mem::take(&mut line), maximum_lines) {
+                truncated = true;
+                break;
+            }
         }
         let mut remaining = file.as_str();
-        while UnicodeWidthStr::width(remaining) > width {
-            let split = remaining
-                .char_indices()
-                .take_while(|(index, character)| {
-                    UnicodeWidthStr::width(&remaining[..index + character.len_utf8()]) <= width
-                })
-                .map(|(index, character)| index + character.len_utf8())
-                .last()
-                .unwrap_or_else(|| remaining.chars().next().map_or(0, char::len_utf8));
+        let mut remaining_width = file_width;
+        while remaining_width > width {
+            let (split, split_width) = width_prefix(remaining, width);
             if split == 0 {
                 break;
             }
-            lines.push(remaining[..split].to_owned());
+            if !push_summary_line(&mut lines, remaining[..split].to_owned(), maximum_lines) {
+                truncated = true;
+                break 'files;
+            }
             remaining = &remaining[split..];
+            remaining_width = remaining_width.saturating_sub(split_width);
         }
         line.push_str(remaining);
-        line_width = UnicodeWidthStr::width(remaining);
+        line_width = remaining_width;
     }
-    if !line.is_empty() {
-        lines.push(line);
+    if !truncated && !line.is_empty() && !push_summary_line(&mut lines, line, maximum_lines) {
+        truncated = true;
     }
-    let truncated = lines.len() > maximum_lines;
-    lines.truncate(maximum_lines);
     if truncated && let Some(last) = lines.last_mut() {
         *last = format!("{}…", truncate_width(last, width.saturating_sub(1)));
     }
     lines
+}
+
+fn push_summary_line(lines: &mut Vec<String>, line: String, maximum: usize) -> bool {
+    if lines.len() >= maximum {
+        return false;
+    }
+    lines.push(line);
+    true
+}
+
+fn width_prefix(content: &str, width: usize) -> (usize, usize) {
+    let mut end = 0;
+    let mut measured = 0usize;
+    for (index, character) in content.char_indices() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if end > 0 && measured.saturating_add(character_width) > width {
+            break;
+        }
+        end = index + character.len_utf8();
+        measured = measured.saturating_add(character_width);
+        if measured >= width {
+            break;
+        }
+    }
+    (end, measured)
+}
+
+fn wrapped_file_summary_height(files: &[RepoPath], width: usize, maximum: usize) -> usize {
+    if width == 0 || maximum == 0 {
+        return 0;
+    }
+    let mut rows = 0usize;
+    let mut line_width = 0usize;
+    for file in files {
+        let file = file.display();
+        let file_width = UnicodeWidthStr::width(file.as_str());
+        let separator_width = usize::from(line_width > 0) * 2;
+        if file_width <= width
+            && line_width
+                .saturating_add(separator_width)
+                .saturating_add(file_width)
+                <= width
+        {
+            line_width = line_width
+                .saturating_add(separator_width)
+                .saturating_add(file_width);
+            continue;
+        }
+        if line_width > 0 {
+            rows = rows.saturating_add(1);
+            if rows >= maximum {
+                return maximum;
+            }
+        }
+        let mut segment_width = 0usize;
+        for character in file.chars() {
+            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+            if segment_width > 0 && segment_width.saturating_add(character_width) > width {
+                rows = rows.saturating_add(1);
+                if rows >= maximum {
+                    return maximum;
+                }
+                segment_width = 0;
+            }
+            segment_width = segment_width.saturating_add(character_width);
+        }
+        line_width = segment_width;
+    }
+    rows.saturating_add(usize::from(line_width > 0))
+        .min(maximum)
 }

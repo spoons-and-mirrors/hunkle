@@ -86,12 +86,12 @@ impl KnownRepositoryStore {
         store
     }
 
-    pub(super) fn remember_and_save(
+    pub(super) fn remember(
         &mut self,
         common_dir: Option<PathBuf>,
         root: PathBuf,
         relevant: &[PathBuf],
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.ensure_writable()?;
         let previous_repositories = self.repositories.clone();
         let previous_recent = self.recent.clone();
@@ -117,14 +117,9 @@ impl KnownRepositoryStore {
         );
         self.enforce_limits(relevant);
         if self.repositories == previous_repositories && self.recent == previous_recent {
-            return Ok(());
+            return Ok(false);
         }
-        if let Err(error) = self.save() {
-            self.repositories = previous_repositories;
-            self.recent = previous_recent;
-            return Err(error);
-        }
-        Ok(())
+        Ok(true)
     }
 
     fn insert(&mut self, common_dir: PathBuf) -> bool {
@@ -141,12 +136,12 @@ impl KnownRepositoryStore {
         }
     }
 
-    pub(super) fn reconcile_and_save(
+    pub(super) fn reconcile(
         &mut self,
         discovered: Vec<PathBuf>,
         pruned: &[PathBuf],
         relevant: &[PathBuf],
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.ensure_writable()?;
         let previous_repositories = self.repositories.clone();
         let previous_recent = self.recent.clone();
@@ -161,14 +156,9 @@ impl KnownRepositoryStore {
         });
         self.enforce_limits(relevant);
         if self.repositories == previous_repositories && self.recent == previous_recent {
-            return Ok(());
+            return Ok(false);
         }
-        if let Err(error) = self.save() {
-            self.repositories = previous_repositories;
-            self.recent = previous_recent;
-            return Err(error);
-        }
-        Ok(())
+        Ok(true)
     }
 
     fn enforce_limits(&mut self, relevant: &[PathBuf]) {
@@ -251,13 +241,6 @@ impl KnownRepositoryStore {
             generation,
             state: Arc::clone(&self.persistence),
         }))
-    }
-
-    fn save(&self) -> Result<(), String> {
-        if let Some(request) = self.persistence_request()? {
-            persist(request)?;
-        }
-        Ok(())
     }
 
     fn ensure_writable(&self) -> Result<(), String> {

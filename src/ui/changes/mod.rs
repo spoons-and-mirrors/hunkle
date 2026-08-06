@@ -6,7 +6,7 @@ pub(super) use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph, Wrap},
 };
 pub(super) use ratatui_image::{Resize, StatefulImage};
-pub(super) use unicode_width::UnicodeWidthStr;
+pub(super) use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) use crate::{
     app::{
@@ -488,39 +488,9 @@ fn draw_detail(
             area.height.saturating_sub(12),
         )
     });
-    let live_summary = selected_change.map(|change| DiffSummary {
-        files: vec![change.path.clone()],
-        files_truncated: false,
-        additions: change.additions,
-        deletions: change.deletions,
-    });
-    let section_summary = selected_section.map(|section| {
-        let staged = section == WorktreeSection::Staged;
-        let changes = repo.changes.iter().filter(|change| change.staged == staged);
-        DiffSummary {
-            files: changes.clone().map(|change| change.path.clone()).collect(),
-            files_truncated: false,
-            additions: changes.clone().map(|change| change.additions).sum(),
-            deletions: changes.map(|change| change.deletions).sum(),
-        }
-    });
-    let directory_summary = selected_directory.map(|(section, directory)| {
-        let staged = section == WorktreeSection::Staged;
-        let changes = repo.changes.iter().filter(|change| {
-            change.staged == staged && change.path.as_path().starts_with(directory.as_path())
-        });
-        DiffSummary {
-            files: changes.clone().map(|change| change.path.clone()).collect(),
-            files_truncated: false,
-            additions: changes.clone().map(|change| change.additions).sum(),
-            deletions: changes.map(|change| change.deletions).sum(),
-        }
-    });
     let summary = selected_commit
         .and_then(|commit| app.commit_summaries.get(&commit.oid))
-        .or(live_summary.as_ref())
-        .or(section_summary.as_ref())
-        .or(directory_summary.as_ref());
+        .or_else(|| app.changes.selection_summary());
     let summary_unavailable =
         selected_commit.is_some_and(|commit| app.commit_summaries.failed(&commit.oid));
     let scrolled_commit = selected_commit.cloned();

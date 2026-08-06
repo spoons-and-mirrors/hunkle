@@ -148,7 +148,7 @@ struct InventoryCompletion {
 
 struct RepositoryStatsCompletion {
     generation: u64,
-    results: Vec<RepositoryStatsResult>,
+    result: Option<RepositoryStatsResult>,
 }
 
 struct RepositoryStatsResult {
@@ -473,16 +473,26 @@ impl LinkedWorktreeCatalog {
         common_dir: Option<&Path>,
         root: &Path,
     ) -> Result<(), String> {
-        self.store.remember_and_save(
+        let changed = self.store.remember(
             common_dir.map(Path::to_owned),
             root.to_owned(),
             &self.relevant_common_dirs,
-        )
+        )?;
+        if changed {
+            self.queue_store_persistence()?;
+        }
+        Ok(())
     }
 
     pub(crate) fn observe_herdr(&mut self, observation: LinkedWorktreeObservation) -> bool {
-        let candidates_changed = self.candidates != observation.candidates;
-        self.candidates = observation.candidates;
+        let mut seen = HashSet::new();
+        let candidates = observation
+            .candidates
+            .into_iter()
+            .filter(|candidate| seen.insert(candidate.path.clone()))
+            .collect::<Vec<_>>();
+        let candidates_changed = self.candidates != candidates;
+        self.candidates = candidates;
         candidates_changed
     }
 
@@ -652,12 +662,17 @@ impl LinkedWorktreeCatalog {
             }
             self.snapshot.repositories = completion.repositories;
             self.relevant_common_dirs = completion.relevant;
-            match self.store.reconcile_and_save(
+            match self.store.reconcile(
                 completion.discovered,
                 &completion.pruned,
                 &self.relevant_common_dirs,
             ) {
-                Ok(()) => {}
+                Ok(true) => {
+                    if let Err(error) = self.queue_store_persistence() {
+                        result.notice = Some(error);
+                    }
+                }
+                Ok(false) => {}
                 Err(error) => result.notice = Some(error),
             }
             result.changed = true;
@@ -666,17 +681,13 @@ impl LinkedWorktreeCatalog {
             if self.active_stats_generation != Some(completion.generation) {
                 continue;
             }
-            self.active_stats_generation = None;
             let now = Instant::now();
             let mut persisted = Vec::new();
-            for completion in completion.results {
-                let Some(interest) = self
+            let changed_stats = completion.result.and_then(|completion| {
+                let interest = self
                     .stats_in_flight
                     .remove(&completion.root)
-                    .filter(|interest| interest.revision == completion.revision)
-                else {
-                    continue;
-                };
+                    .filter(|interest| interest.revision == completion.revision)?;
                 let refresh_is_current = interest.refresh_generation.is_some_and(|generation| {
                     self.pending_refresh.is_none()
                         && self
@@ -685,13 +696,11 @@ impl LinkedWorktreeCatalog {
                             .is_some_and(|active| active.generation == generation)
                 });
                 if !interest.standalone && !refresh_is_current {
-                    continue;
+                    return None;
                 }
-                let Some(entry) = self.stats.get_mut(&completion.root) else {
-                    continue;
-                };
+                let entry = self.stats.get_mut(&completion.root)?;
                 if entry.revision != completion.revision {
-                    continue;
+                    return None;
                 }
                 entry.checked_at = Some(now);
                 match completion.result {
@@ -700,17 +709,22 @@ impl LinkedWorktreeCatalog {
                         entry.counts = Some(counts);
                         entry.signature = Some(signature);
                         entry.recheck_interval = MIN_STATS_INTERVAL;
-                        if changed {
-                            result.changed = true;
-                            persisted.push((completion.root, counts));
-                        }
+                        changed.then_some((completion.root, counts))
                     }
                     Ok((signature, None)) => {
                         entry.signature = Some(signature);
                         entry.back_off();
+                        None
                     }
-                    Err(_) => entry.back_off(),
+                    Err(_) => {
+                        entry.back_off();
+                        None
+                    }
                 }
+            });
+            if let Some(changed_stats) = changed_stats {
+                result.changed = true;
+                persisted.push(changed_stats);
             }
             if !persisted.is_empty() {
                 match self.store.update_stats(&persisted) {
@@ -723,7 +737,10 @@ impl LinkedWorktreeCatalog {
                     Err(error) => result.notice = Some(error),
                 }
             }
-            self.start_pending_stats();
+            if self.stats_in_flight.is_empty() {
+                self.active_stats_generation = None;
+                self.start_pending_stats();
+            }
         }
         while let Ok(completion) = self.persistence_receiver.try_recv() {
             if self.active_persistence_generation != Some(completion.generation) {
@@ -844,15 +861,29 @@ impl LinkedWorktreeCatalog {
         let loader = Arc::clone(&self.stats_loader);
         thread::spawn(move || {
             #[cfg(test)]
-            let results = load_repository_stats(requests, |root, previous| loader(root, previous));
+            stream_repository_stats(
+                requests,
+                |root, previous| loader(root, previous),
+                |result| {
+                    let _ = sender.send(RepositoryStatsCompletion {
+                        generation,
+                        result: Some(result),
+                    });
+                },
+            );
             #[cfg(not(test))]
-            let results = load_repository_stats(requests, |root, previous| {
-                git::load_change_line_counts(root, previous).map_err(|error| error.to_string())
-            });
-            let _ = sender.send(RepositoryStatsCompletion {
-                generation,
-                results,
-            });
+            stream_repository_stats(
+                requests,
+                |root, previous| {
+                    git::load_change_line_counts(root, previous).map_err(|error| error.to_string())
+                },
+                |result| {
+                    let _ = sender.send(RepositoryStatsCompletion {
+                        generation,
+                        result: Some(result),
+                    });
+                },
+            );
         });
     }
 
@@ -919,10 +950,11 @@ impl LinkedWorktreeCatalog {
     }
 }
 
-fn load_repository_stats(
+fn stream_repository_stats(
     requests: Vec<RepositoryStatsRequest>,
     load: impl Fn(&Path, Option<WorktreeSignature>) -> StatsLoadResult + Sync,
-) -> Vec<RepositoryStatsResult> {
+    emit: impl Fn(RepositoryStatsResult) + Sync,
+) {
     let worker_count = requests.len().min(
         thread::available_parallelism()
             .map(usize::from)
@@ -930,13 +962,12 @@ fn load_repository_stats(
             .min(4),
     );
     let next = AtomicUsize::new(0);
-    let (sender, receiver) = mpsc::channel();
     thread::scope(|scope| {
         for _ in 0..worker_count {
-            let sender = sender.clone();
             let next = &next;
             let requests = &requests;
             let load = &load;
+            let emit = &emit;
             scope.spawn(move || {
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
@@ -944,22 +975,15 @@ fn load_repository_stats(
                         break;
                     };
                     let result = load(&request.root, request.previous_signature);
-                    let _ = sender.send((
-                        index,
-                        RepositoryStatsResult {
-                            root: request.root.clone(),
-                            revision: request.revision,
-                            result,
-                        },
-                    ));
+                    emit(RepositoryStatsResult {
+                        root: request.root.clone(),
+                        revision: request.revision,
+                        result,
+                    });
                 }
             });
         }
     });
-    drop(sender);
-    let mut stats = receiver.into_iter().collect::<Vec<_>>();
-    stats.sort_by_key(|(index, _)| *index);
-    stats.into_iter().map(|(_, result)| result).collect()
 }
 
 fn recent_git_roots(recent: Vec<known_repositories::RecentRepository>) -> Vec<PathBuf> {

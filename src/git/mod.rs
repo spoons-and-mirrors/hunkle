@@ -8,6 +8,7 @@ pub(super) use std::{
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Arc,
     thread,
     time::{Duration, UNIX_EPOCH},
 };
@@ -126,7 +127,7 @@ pub struct RepositoryData {
     pub(crate) ignored_files: Vec<RepoPath>,
     pub directories: Vec<RepoPath>,
     pub history: Vec<Commit>,
-    pub commits: Vec<Commit>,
+    pub commits: Arc<Vec<Commit>>,
     pub files_fingerprint: u64,
     pub inventory_truncated: bool,
     pub changes_fingerprint: u64,
@@ -284,7 +285,7 @@ impl RepositoryData {
             self.history = history.commits;
         }
         if let Some(graph) = update.graph {
-            self.commits = graph.commits;
+            self.commits = Arc::new(graph.commits);
             self.graph_width = graph.width;
             self.graph_truncated = graph.truncated;
         }

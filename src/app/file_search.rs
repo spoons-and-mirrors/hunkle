@@ -29,6 +29,7 @@ const MAX_SEARCH_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MATCH_CONTEXT_BYTES: usize = 512;
 const SEARCH_BATCH_SIZE: usize = 64;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(100);
+const ASYNC_INDEX_THRESHOLD: usize = 2_048;
 
 #[derive(Debug, Clone)]
 struct IndexedFile {
@@ -128,9 +129,11 @@ pub(crate) struct FileSearch {
     file_matches: Vec<FileMatch>,
     text_matches: Vec<TextSearchMatch>,
     files_fingerprint: Option<u64>,
+    requested_files_fingerprint: Option<u64>,
     ignored_available: bool,
     rows_generation: u64,
     worker: SearchWorker,
+    index_worker: IndexWorker,
     pub(crate) preview_path: Option<RepoPath>,
     pub(crate) preview_line: Option<usize>,
     pub(crate) preview_match: Option<(usize, usize)>,
@@ -161,9 +164,11 @@ impl FileSearch {
             file_matches: Vec::new(),
             text_matches: Vec::new(),
             files_fingerprint: None,
+            requested_files_fingerprint: None,
             ignored_available: false,
             rows_generation: 0,
             worker: SearchWorker::new(),
+            index_worker: IndexWorker::new(),
             preview_path: None,
             preview_line: None,
             preview_match: None,
@@ -181,36 +186,31 @@ impl FileSearch {
         ignored_files: &[RepoPath],
         files_fingerprint: Option<u64>,
     ) {
-        if self.files_fingerprint == files_fingerprint {
+        if self.requested_files_fingerprint == files_fingerprint
+            && (files_fingerprint.is_some() || files.is_empty())
+        {
             return;
         }
+        self.requested_files_fingerprint = files_fingerprint;
         self.worker.cancel();
         self.text_matches.clear();
         self.text_match_count = 0;
         self.searching = false;
         self.search_truncated = false;
         self.error = None;
-        let _activity =
-            crate::diagnostics::activity("index-repo-search", format!("files={}", files.len()));
-        let index = files
-            .iter()
-            .map(|path| {
-                let path_lower = path.display().to_lowercase();
-                let name_start = path_lower.rfind('/').map_or(0, |index| index + 1);
-                IndexedFile {
-                    path: path.clone(),
-                    path_lower,
-                    name_start,
-                    ignored: ignored_files.binary_search(path).is_ok(),
-                }
-            })
-            .collect::<Vec<_>>();
-        self.ignored_available = index.iter().any(|file| file.ignored);
-        let previous = std::mem::replace(&mut self.index, Arc::new(index));
-        if previous.len() >= 10_000 {
-            crate::diagnostics::drop_in_background("repo-search-index", previous);
+        if files.len() >= ASYNC_INDEX_THRESHOLD {
+            self.index_worker.request(IndexRequest {
+                generation: 0,
+                fingerprint: files_fingerprint,
+                files: files.to_vec(),
+                ignored_files: ignored_files.to_vec(),
+            });
+        } else {
+            self.index_worker.cancel();
+            let index = build_file_index(files, ignored_files, || false)
+                .expect("synchronous index construction cannot be cancelled");
+            self.apply_index(index, files_fingerprint);
         }
-        self.files_fingerprint = files_fingerprint;
         self.file_matches.clear();
         self.match_count = 0;
         self.rebuild_rows(None);
@@ -231,12 +231,14 @@ impl FileSearch {
 
     pub(crate) fn invalidate(&mut self) {
         self.worker.cancel();
+        self.index_worker.cancel();
         self.options.include_ignored = false;
         let previous = std::mem::replace(&mut self.index, Arc::new(Vec::new()));
         if previous.len() >= 10_000 {
             crate::diagnostics::drop_in_background("repo-search-index", previous);
         }
         self.files_fingerprint = None;
+        self.requested_files_fingerprint = None;
         self.open(false);
     }
 
@@ -446,6 +448,20 @@ impl FileSearch {
 
     pub(crate) fn poll(&mut self, repository: Option<&RepositoryData>) -> bool {
         let mut changed = false;
+        while let Some(completion) = self.index_worker.poll() {
+            if completion.generation != self.index_worker.generation()
+                || completion.fingerprint != self.requested_files_fingerprint
+            {
+                continue;
+            }
+            self.apply_index(completion.index, completion.fingerprint);
+            if let Some(repository) = repository
+                && !self.query.text().trim().is_empty()
+            {
+                self.refresh(repository);
+            }
+            changed = true;
+        }
         let mut rows_changed = false;
         let mut text_matches_changed = false;
         let mut selected = None;
@@ -514,6 +530,7 @@ impl FileSearch {
 
     pub(crate) fn shutdown(&mut self) {
         self.worker.shutdown();
+        self.index_worker.shutdown();
         self.preview_worker.shutdown();
     }
 
@@ -527,6 +544,11 @@ impl FileSearch {
         self.error = None;
         if self.query.text().trim().is_empty() {
             self.searching = false;
+            self.rebuild_rows(None);
+            return;
+        }
+        if self.files_fingerprint != Some(repository.files_fingerprint) {
+            self.searching = true;
             self.rebuild_rows(None);
             return;
         }
@@ -622,6 +644,142 @@ impl FileSearch {
     fn bump_rows_generation(&mut self) {
         self.rows_generation = self.rows_generation.wrapping_add(1);
     }
+
+    fn apply_index(&mut self, index: Vec<IndexedFile>, fingerprint: Option<u64>) {
+        self.ignored_available = index.iter().any(|file| file.ignored);
+        let previous = std::mem::replace(&mut self.index, Arc::new(index));
+        if previous.len() >= 10_000 {
+            crate::diagnostics::drop_in_background("repo-search-index", previous);
+        }
+        self.files_fingerprint = fingerprint;
+    }
+}
+
+struct IndexRequest {
+    generation: u64,
+    fingerprint: Option<u64>,
+    files: Vec<RepoPath>,
+    ignored_files: Vec<RepoPath>,
+}
+
+struct IndexCompletion {
+    generation: u64,
+    fingerprint: Option<u64>,
+    index: Vec<IndexedFile>,
+}
+
+struct IndexWorker {
+    generation: Arc<AtomicU64>,
+    pending: Arc<Mutex<Option<IndexRequest>>>,
+    wake: Option<SyncSender<()>>,
+    receiver: Receiver<IndexCompletion>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl IndexWorker {
+    fn new() -> Self {
+        let generation = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(None::<IndexRequest>));
+        let worker_generation = Arc::clone(&generation);
+        let worker_pending = Arc::clone(&pending);
+        let (wake, wake_rx) = mpsc::sync_channel(1);
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            while wake_rx.recv().is_ok() {
+                let Some(request) = worker_pending.lock().ok().and_then(|mut slot| slot.take())
+                else {
+                    continue;
+                };
+                let generation = request.generation;
+                let fingerprint = request.fingerprint;
+                let Some(index) = build_file_index(&request.files, &request.ignored_files, || {
+                    worker_generation.load(AtomicOrdering::Acquire) != generation
+                }) else {
+                    continue;
+                };
+                if sender
+                    .send(IndexCompletion {
+                        generation,
+                        fingerprint,
+                        index,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Self {
+            generation,
+            pending,
+            wake: Some(wake),
+            receiver,
+            worker: Some(worker),
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(AtomicOrdering::Acquire)
+    }
+
+    fn request(&mut self, mut request: IndexRequest) {
+        self.cancel();
+        request.generation = self.generation();
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = Some(request);
+        }
+        if let Some(wake) = &self.wake {
+            let _ = wake.try_send(());
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.generation.fetch_add(1, AtomicOrdering::AcqRel);
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.take();
+        }
+    }
+
+    fn poll(&mut self) -> Option<IndexCompletion> {
+        self.receiver.try_recv().ok()
+    }
+
+    fn shutdown(&mut self) {
+        self.cancel();
+        self.wake.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn build_file_index(
+    files: &[RepoPath],
+    ignored_files: &[RepoPath],
+    mut cancelled: impl FnMut() -> bool,
+) -> Option<Vec<IndexedFile>> {
+    let mut ignored_index = 0usize;
+    let mut index = Vec::with_capacity(files.len());
+    for path in files {
+        if cancelled() {
+            return None;
+        }
+        while ignored_files
+            .get(ignored_index)
+            .is_some_and(|ignored| ignored < path)
+        {
+            ignored_index += 1;
+        }
+        let path_lower = path.display().to_lowercase();
+        let name_start = path_lower.rfind('/').map_or(0, |index| index + 1);
+        index.push(IndexedFile {
+            path: path.clone(),
+            path_lower,
+            name_start,
+            ignored: ignored_files.get(ignored_index) == Some(path),
+        });
+    }
+    Some(index)
 }
 
 struct SearchPreviewResult {
@@ -1163,8 +1321,8 @@ mod tests {
     use crate::{git, repo_path::RepoPath};
 
     use super::{
-        FileSearch, FileSearchRow, MAX_MATCH_CONTEXT_BYTES, SearchDestination, SearchOptions,
-        SearchScope, build_matcher, text_match,
+        ASYNC_INDEX_THRESHOLD, FileSearch, FileSearchRow, MAX_MATCH_CONTEXT_BYTES,
+        SearchDestination, SearchOptions, SearchScope, build_matcher, text_match,
     };
 
     #[test]
@@ -1334,6 +1492,25 @@ mod tests {
 
         assert_eq!(search.text_match_count, 500);
         assert!(search.search_truncated);
+    }
+
+    #[test]
+    fn builds_large_file_indexes_off_thread() {
+        let files = (0..=ASYNC_INDEX_THRESHOLD)
+            .map(|index| RepoPath::from(format!("src/file-{index:05}.rs")))
+            .collect::<Vec<_>>();
+        let mut search = FileSearch::new(&files, &[], Some(1));
+        assert!(search.index.is_empty());
+
+        for _ in 0..100 {
+            let _ = search.poll(None);
+            if search.files_fingerprint == Some(1) {
+                assert_eq!(search.index.len(), files.len());
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("file index did not complete");
     }
 
     fn wait_for_search(search: &mut FileSearch, repository: &git::RepositoryData) {
