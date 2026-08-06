@@ -40,10 +40,10 @@ pub(crate) use header_picker::{
 };
 pub(crate) use herdr_prompt::{HerdrPrompt, HerdrPromptPoll};
 pub(crate) use herdr_session::{
-    AgentActivityPreview, AgentEntryState, AgentKey, AgentPromptOutcome, AgentRequestPartPreview,
-    AgentRequestPreview, AgentStatus, AgentTranscript, AgentUserMessage, HerdrPaneLayout,
-    HerdrSession, ProjectTaskStatus, ScheduledRun, ScheduledRunStatus, ScheduledTask,
-    ScheduledTaskDestination, ScheduledTaskEdit,
+    AgentActivityPreview, AgentEntryState, AgentKey, AgentListMode, AgentPromptOutcome,
+    AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript, AgentUserMessage,
+    HerdrPaneLayout, HerdrSession, ProjectTaskStatus, ScheduledRun, ScheduledRunStatus,
+    ScheduledTask, ScheduledTaskDestination, ScheduledTaskEdit,
 };
 #[cfg(test)]
 pub(crate) use herdr_session::{HerdrPaneRect, StashedAgent};
@@ -155,7 +155,7 @@ pub struct App {
     commit_draft_rx: Option<Receiver<CommitDraftResult>>,
     pub dragging_splitter: bool,
     pub dragging_agents: bool,
-    pub(crate) agents_height_fit_for: Option<usize>,
+    pub(crate) agents_height_fit_for: Option<(AgentListMode, usize)>,
     pub dragging_diff_scrollbar: bool,
     pub(crate) dragging_graph_column: Option<GraphColumnDrag>,
     diff_scroll_drag_offset: u16,
@@ -1964,13 +1964,22 @@ impl App {
                         self.agents_visible = true;
                         self.herdr.show_live_agents();
                         "Agents shown"
-                    } else if !self.herdr.showing_stash {
-                        self.herdr.toggle_stash();
-                        "Agent stash shown"
                     } else {
-                        self.agents_visible = false;
-                        self.herdr.show_live_agents();
-                        "Agents hidden"
+                        match self.herdr.agent_list_mode() {
+                            AgentListMode::Agents => {
+                                self.herdr.cycle_agent_list_mode();
+                                "Scheduled runs shown"
+                            }
+                            AgentListMode::Scheduled => {
+                                self.herdr.cycle_agent_list_mode();
+                                "Agent stash shown"
+                            }
+                            AgentListMode::Stash => {
+                                self.agents_visible = false;
+                                self.herdr.show_live_agents();
+                                "Agents hidden"
+                            }
+                        }
                     }
                     .to_owned(),
                 );
@@ -2538,7 +2547,7 @@ impl App {
     }
 
     fn move_agent_panel_selection(&mut self, delta: isize) {
-        if self.herdr.showing_stash || self.herdr.agents.is_empty() {
+        if self.herdr.agent_list_mode() != AgentListMode::Agents || self.herdr.agents.is_empty() {
             self.herdr.scroll_agents(delta);
             return;
         }
@@ -2633,7 +2642,8 @@ impl App {
             Some(
                 HitTarget::Agent(_)
                     | HitTarget::AgentPaneId(_)
-                    | HitTarget::AgentStashToggle
+                    | HitTarget::AgentListModeToggle
+                    | HitTarget::AgentScheduledRun(_)
                     | HitTarget::AgentStash(_)
                     | HitTarget::StashedAgent(_)
                     | HitTarget::AgentPreviewPicker(_)

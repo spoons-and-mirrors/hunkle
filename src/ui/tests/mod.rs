@@ -12,11 +12,12 @@ pub(super) use ratatui::{
 pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::app::{
-    AgentActivityPreview, AgentPaneDirection, App, ChangesHitTarget, CommitMessageGenerator,
-    ExplorerHitTarget, FOOTER_MARQUEE_PAUSE, FOOTER_MARQUEE_STEP, GraphColumn, GraphHitTarget,
-    HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout, HerdrPaneRect, HerdrSession, HitTarget,
-    LeftPane, Mode, SchedulerHitTarget, ScrollTarget, Settings, SettingsHitTarget, SettingsPage,
-    SettingsStore, ShortcutAction, SqliteFocus, StashedAgent, View,
+    AgentActivityPreview, AgentListMode, AgentPaneDirection, App, ChangesHitTarget,
+    CommitMessageGenerator, ExplorerHitTarget, FOOTER_MARQUEE_PAUSE, FOOTER_MARQUEE_STEP,
+    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout,
+    HerdrPaneRect, HerdrSession, HitTarget, LeftPane, Mode, SchedulerHitTarget, ScrollTarget,
+    Settings, SettingsHitTarget, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus,
+    StashedAgent, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
@@ -438,11 +439,11 @@ fn renders_every_primary_surface() {
     let agents_header: String = (agents.x..agents.right())
         .map(|x| terminal.backend().buffer()[(x, agents.y)].symbol())
         .collect();
-    assert!(agents_header.contains(" STASH "));
+    assert!(agents_header.contains(" SCHEDULED "));
     assert!(!agents_header.contains("click focus"));
     let stash_toggle = app
         .regions
-        .hit_target_rect(HitTarget::AgentStashToggle)
+        .hit_target_rect(HitTarget::AgentListModeToggle)
         .unwrap();
     assert!(
         (agents.x..stash_toggle.x)
@@ -552,7 +553,11 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agents_list.is_some());
-    assert!(app.herdr.showing_stash);
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Scheduled);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.agents_list.is_some());
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Stash);
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agents_list.is_none());

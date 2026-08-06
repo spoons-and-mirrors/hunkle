@@ -1,5 +1,8 @@
 use super::*;
-use crate::app::{AgentKey, AgentPromptDelivery, AgentRequestPartPreview, AgentRequestPreview};
+use crate::app::{
+    AgentKey, AgentPromptDelivery, AgentRequestPartPreview, AgentRequestPreview, ScheduledRun,
+    ScheduledRunStatus,
+};
 use std::path::PathBuf;
 
 fn agent_snapshot() -> serde_json::Value {
@@ -325,7 +328,7 @@ fn fullscreen_agent_first_click_replaces_footer_path_with_activation_hint() {
 }
 
 #[test]
-fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
+fn panel_mode_toggle_reaches_stashed_agent_cards() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -371,14 +374,14 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     let header = app.regions.agents_splitter.unwrap();
     let toggle = app
         .regions
-        .hit_target_rect(HitTarget::AgentStashToggle)
+        .hit_target_rect(HitTarget::AgentListModeToggle)
         .unwrap();
     assert_eq!(toggle.right(), header.right());
     assert_eq!(toggle.y, header.y);
     let toggle_text = (toggle.x..toggle.right())
         .map(|x| terminal.backend().buffer()[(x, toggle.y)].symbol())
         .collect::<String>();
-    assert_eq!(toggle_text, " STASH ");
+    assert_eq!(toggle_text, " SCHEDULED ");
     let list = app.regions.agents_list.unwrap();
     assert!(
         (list.x..list.right())
@@ -386,8 +389,15 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     );
     click(&mut app, toggle.x, toggle.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Scheduled);
+    let toggle = app
+        .regions
+        .hit_target_rect(HitTarget::AgentListModeToggle)
+        .unwrap();
+    click(&mut app, toggle.x, toggle.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert!(app.herdr.showing_stash);
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Stash);
     assert_eq!(app.settings.agents_height, 8);
     assert!(app.settings.agents_height > live_height);
     assert!(
@@ -418,7 +428,66 @@ fn stash_toggle_replaces_live_cards_with_stashed_agent_cards() {
     assert!(screen.contains("feature/s"));
 
     click(&mut app, stashed_card.x, stashed_card.y);
-    assert!(!app.herdr.showing_stash);
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Agents);
+}
+
+#[test]
+fn scheduled_run_cards_cap_automatic_height_and_open_preview_on_any_click() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_scheduled_tasks_for_test(Vec::new());
+    app.herdr.set_scheduled_runs_for_test(
+        (1..=12)
+            .map(|id| ScheduledRun {
+                id,
+                task_id: 7,
+                created_at_ms: id,
+                status: ScheduledRunStatus::Completed,
+                pane_id: None,
+                terminal_id: None,
+                session_id: None,
+                error: Some("No session".to_owned()),
+            })
+            .collect(),
+    );
+    app.herdr.cycle_agent_list_mode();
+    let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Scheduled);
+    assert_eq!(app.settings.agents_height, 32);
+    let visible_runs = (1..=12)
+        .filter_map(|id| {
+            app.regions
+                .hit_target_rect(HitTarget::AgentScheduledRun(id))
+                .map(|area| (id, area))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(visible_runs.len(), 10);
+    let (run_id, card) = visible_runs[0];
+    click(&mut app, card.x, card.y);
+    assert_eq!(app.mode, Mode::AgentPreview);
+    assert_eq!(app.agent_preview_scheduled_run, Some(run_id));
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::AgentScheduledRun(run_id))
+        .unwrap();
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: card.x,
+        row: card.y,
+        modifiers: KeyModifiers::CONTROL,
+    });
+    assert_eq!(app.mode, Mode::AgentPreview);
+    assert_eq!(app.agent_preview_scheduled_run, Some(run_id));
 }
 
 #[test]

@@ -355,7 +355,7 @@ fn local_workspaces_reload_files_and_reject_git_actions() {
     }
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(app.agents_visible);
-    assert!(!app.herdr.showing_stash);
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Agents);
     assert!(!app.agents_pane_visible());
     assert_eq!(app.notice.as_deref(), Some("Not a Git repository"));
 
@@ -791,13 +791,16 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     assert!(app.agents_visible);
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(app.agents_visible);
-    assert!(app.herdr.showing_stash);
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    assert!(!app.agents_visible);
-    assert!(!app.herdr.showing_stash);
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Scheduled);
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(app.agents_visible);
-    assert!(!app.herdr.showing_stash);
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Stash);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(!app.agents_visible);
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Agents);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(app.agents_visible);
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Agents);
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.view(), View::Changes);

@@ -10,8 +10,8 @@ pub(super) use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) use crate::{
     app::{
-        App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, PreviewOrigin,
-        ScrollTarget, ShortcutAction, TextInput, View,
+        AgentListMode, App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode,
+        PreviewOrigin, ScrollTarget, ShortcutAction, TextInput, View,
     },
     git::{Change, Commit, DiffSummary},
     repo_path::{RepoPath, display_os_str},

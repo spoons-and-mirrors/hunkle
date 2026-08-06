@@ -1227,13 +1227,29 @@ impl App {
     }
 
     fn open_selected_scheduled_run_conversation(&mut self) {
+        let Some(run_id) = self.scheduler.selected_run_id else {
+            self.scheduler.error = Some("Select a run to open its conversation".to_owned());
+            return;
+        };
+        self.open_scheduled_run_conversation(run_id, Mode::Scheduler);
+    }
+
+    pub(super) fn open_scheduled_run_preview(&mut self, run_id: i64) {
+        if self.mode == Mode::Commit {
+            self.flush_commit_draft();
+        }
+        self.open_scheduled_run_conversation(run_id, Mode::Normal);
+    }
+
+    fn open_scheduled_run_conversation(&mut self, run_id: i64, return_mode: Mode) {
         let Some(run) = self
-            .scheduler
-            .selected_run_id
-            .and_then(|id| self.herdr.scheduled_runs().iter().find(|run| run.id == id))
+            .herdr
+            .scheduled_runs()
+            .iter()
+            .find(|run| run.id == run_id)
             .cloned()
         else {
-            self.scheduler.error = Some("Select a run to open its conversation".to_owned());
+            self.notice = Some("Scheduled run is no longer available".to_owned());
             return;
         };
         if let Some(session_id) = run.session_id.as_deref() {
@@ -1258,7 +1274,7 @@ impl App {
         self.scheduler.conversation_expanded_requests.clear();
         self.scheduler.error = None;
         self.agent_preview_scheduled_run = Some(run.id);
-        self.agent_preview_return_mode = Mode::Scheduler;
+        self.agent_preview_return_mode = return_mode;
         self.agent_preview_picker_open = false;
         self.mode = Mode::AgentPreview;
     }

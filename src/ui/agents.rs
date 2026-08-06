@@ -13,10 +13,10 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey, AgentPromptDelivery,
-    AgentPromptOutcome, AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript,
-    AgentUserMessage, HerdrSession, HitTarget, LinkedWorktreeCatalog, SchedulerHitTarget, Settings,
-    TextInput,
+    AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey, AgentListMode,
+    AgentPromptDelivery, AgentPromptOutcome, AgentRequestPartPreview, AgentRequestPreview,
+    AgentStatus, AgentTranscript, AgentUserMessage, HerdrSession, HitTarget, LinkedWorktreeCatalog,
+    ScheduledRunStatus, SchedulerHitTarget, Settings, TextInput,
 };
 use crate::theme::Palette;
 
@@ -223,10 +223,11 @@ pub(super) fn draw(
     if header.width == 0 || header.height == 0 {
         return (targets, false);
     }
-    let toggle_label = if herdr.showing_stash {
-        " LIVE "
-    } else {
-        " STASH "
+    let mode = herdr.agent_list_mode();
+    let (section_name, count, toggle_label) = match mode {
+        AgentListMode::Agents => ("AGENTS", herdr.agents.len(), " SCHEDULED "),
+        AgentListMode::Scheduled => ("SCHEDULED", herdr.scheduled_runs().len(), " STASH "),
+        AgentListMode::Stash => ("STASHED", herdr.stashed_agents().len(), " AGENTS "),
     };
     let toggle_width = u16::try_from(UnicodeWidthStr::width(toggle_label)).unwrap_or(0);
     let toggle = Rect::new(
@@ -238,11 +239,6 @@ pub(super) fn draw(
     if header.height == 0 || list.height == 0 {
         return (targets, false);
     }
-    let count = if herdr.showing_stash {
-        herdr.stashed_agents().len()
-    } else {
-        herdr.agents.len()
-    };
     let section_header = Rect::new(
         header.x,
         header.y,
@@ -250,14 +246,7 @@ pub(super) fn draw(
         1,
     );
     let title = truncate_width(
-        &format!(
-            "{} {count}",
-            if herdr.showing_stash {
-                "STASHED"
-            } else {
-                "AGENTS"
-            }
-        ),
+        &format!("{section_name} {count}"),
         usize::from(section_header.width),
     );
     let separator_width = usize::from(section_header.width)
@@ -283,12 +272,12 @@ pub(super) fn draw(
     frame.render_widget(
         Paragraph::new(toggle_label).style(
             Style::default()
-                .fg(if hovered == Some(HitTarget::AgentStashToggle) {
+                .fg(if hovered == Some(HitTarget::AgentListModeToggle) {
                     palette().canvas
                 } else {
                     palette().cyan
                 })
-                .bg(if hovered == Some(HitTarget::AgentStashToggle) {
+                .bg(if hovered == Some(HitTarget::AgentListModeToggle) {
                     palette().selected
                 } else {
                     palette().raised
@@ -297,10 +286,17 @@ pub(super) fn draw(
         ),
         toggle,
     );
-    targets.push((HitTarget::AgentStashToggle, toggle));
-    if herdr.showing_stash {
-        draw_stashed_agents(frame, herdr, list, hovered, &mut targets);
-        return (targets, false);
+    targets.push((HitTarget::AgentListModeToggle, toggle));
+    match mode {
+        AgentListMode::Agents => {}
+        AgentListMode::Scheduled => {
+            draw_scheduled_runs(frame, herdr, list, hovered, &mut targets);
+            return (targets, false);
+        }
+        AgentListMode::Stash => {
+            draw_stashed_agents(frame, herdr, list, hovered, &mut targets);
+            return (targets, false);
+        }
     }
     if herdr.agents.is_empty() {
         let message = herdr.error.as_deref().unwrap_or(if herdr.loading {
@@ -471,6 +467,150 @@ pub(super) fn draw(
         }
     }
     (targets, animation_presented)
+}
+
+fn draw_scheduled_runs(
+    frame: &mut Frame<'_>,
+    herdr: &mut HerdrSession,
+    list: Rect,
+    hovered: Option<HitTarget>,
+    targets: &mut Vec<(HitTarget, Rect)>,
+) {
+    if herdr.scheduled_runs().is_empty() {
+        frame.render_widget(
+            Paragraph::new("  No scheduled runs").style(
+                Style::default()
+                    .fg(palette().faint)
+                    .bg(palette().surface_alt),
+            ),
+            list,
+        );
+        return;
+    }
+    let card_height = if list.height >= 2 { 2 } else { 1 };
+    let card_gap = 1;
+    let top_padding = u16::from(list.height > card_height);
+    let card_list = Rect::new(
+        list.x,
+        list.y.saturating_add(top_padding),
+        list.width.saturating_sub(1),
+        list.height.saturating_sub(top_padding),
+    );
+    let item_step = card_height + card_gap;
+    let viewport = usize::from((card_list.height + card_gap) / item_step).max(1);
+    let scroll = herdr
+        .scheduled_run_scroll
+        .min(herdr.scheduled_runs().len().saturating_sub(viewport));
+    let hovered_run = match hovered {
+        Some(HitTarget::AgentScheduledRun(run_id)) => Some(run_id),
+        _ => None,
+    };
+    let mut last_card = None;
+    for (screen_row, run) in herdr
+        .scheduled_runs()
+        .iter()
+        .skip(scroll)
+        .take(viewport)
+        .enumerate()
+    {
+        let offset = u16::try_from(screen_row).unwrap_or(0) * item_step;
+        let row_area = Rect::new(
+            card_list.x,
+            card_list.y.saturating_add(offset),
+            card_list.width,
+            card_height.min(card_list.height.saturating_sub(offset)),
+        );
+        let full_row_area = Rect::new(list.x, row_area.y, list.width, row_area.height);
+        let hovered = hovered_run == Some(run.id);
+        let background = if hovered {
+            palette().selected
+        } else {
+            palette().surface_alt
+        };
+        if row_area.y > list.y {
+            draw_agent_gap(
+                frame,
+                Rect::new(list.x, row_area.y - 1, list.width, 1),
+                last_card.map_or(palette().panel, |(_, color)| color),
+                background,
+            );
+        }
+        fill(frame, full_row_area, background);
+        let task = herdr
+            .scheduled_tasks()
+            .iter()
+            .find(|task| task.id == run.task_id);
+        let title = task.map_or_else(
+            || format!("Scheduled run #{}", run.id),
+            |task| task.title.clone(),
+        );
+        let status = run.status.text().to_uppercase();
+        let status_width = u16::try_from(UnicodeWidthStr::width(status.as_str())).unwrap_or(0);
+        let title_width = row_area
+            .width
+            .saturating_sub(status_width.saturating_add(3));
+        frame.render_widget(
+            Paragraph::new(truncate_width(&title, usize::from(title_width))).style(
+                Style::default()
+                    .fg(palette().ink)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(row_area.x + 1, row_area.y, title_width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(status).style(
+                Style::default()
+                    .fg(scheduled_run_status_color(run.status))
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(
+                row_area.right().saturating_sub(status_width + 1),
+                row_area.y,
+                status_width,
+                1,
+            ),
+        );
+        if row_area.height > 1 {
+            let detail = task.map_or_else(
+                || format!("Run #{}", run.id),
+                |task| format!("Run #{}  {} / {}", run.id, task.repository, task.branch),
+            );
+            frame.render_widget(
+                Paragraph::new(truncate_width(
+                    &detail,
+                    usize::from(row_area.width.saturating_sub(2)),
+                ))
+                .style(Style::default().fg(palette().soft).bg(background)),
+                Rect::new(
+                    row_area.x + 1,
+                    row_area.y + 1,
+                    row_area.width.saturating_sub(2),
+                    1,
+                ),
+            );
+        }
+        targets.push((HitTarget::AgentScheduledRun(run.id), full_row_area));
+        last_card = Some((full_row_area, background));
+    }
+    if let Some((card, background)) = last_card {
+        let gap = Rect::new(card.x, card.bottom(), card.width, 1);
+        if gap.bottom() <= list.bottom() {
+            draw_agent_gap(frame, gap, background, palette().panel);
+        }
+    }
+}
+
+fn scheduled_run_status_color(status: ScheduledRunStatus) -> Color {
+    match status {
+        ScheduledRunStatus::Launching => palette().cyan,
+        ScheduledRunStatus::Working => palette().accent,
+        ScheduledRunStatus::Blocked => palette().yellow,
+        ScheduledRunStatus::Unknown => palette().faint,
+        ScheduledRunStatus::Completed => palette().green,
+        ScheduledRunStatus::Failed => palette().red,
+    }
 }
 
 fn draw_stashed_agents(

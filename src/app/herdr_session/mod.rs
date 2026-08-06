@@ -404,6 +404,23 @@ fn scheduled_conversation_identity(session_id: &str) -> OpenCodeConversationIden
     OpenCodeConversationIdentity::from_session_id(session_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentListMode {
+    Agents,
+    Scheduled,
+    Stash,
+}
+
+impl AgentListMode {
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Agents => Self::Scheduled,
+            Self::Scheduled => Self::Stash,
+            Self::Stash => Self::Agents,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentRequestPartPreview {
     Text(String),
@@ -453,8 +470,9 @@ pub(crate) struct HerdrSession {
     agent_layouts_path: Option<PathBuf>,
     displayed_agent_key: Option<AgentTimingKey>,
     stash: stash::AgentStashStore,
-    pub(crate) showing_stash: bool,
+    agent_list_mode: AgentListMode,
     pub(crate) stash_scroll: usize,
+    pub(crate) scheduled_run_scroll: usize,
     agent_stash_running: bool,
     pending_agent_stash: Option<PendingAgentStash>,
     stashed_pane_ids: HashSet<String>,
@@ -555,8 +573,9 @@ impl HerdrSession {
             agent_layouts_path: None,
             displayed_agent_key: None,
             stash: stash::AgentStashStore::new(agent_stash_path),
-            showing_stash: false,
+            agent_list_mode: AgentListMode::Agents,
             stash_scroll: 0,
+            scheduled_run_scroll: 0,
             agent_stash_running: false,
             pending_agent_stash: None,
             stashed_pane_ids: HashSet::new(),
@@ -1405,15 +1424,21 @@ impl HerdrSession {
         &self.stash.agents
     }
 
-    pub(crate) fn toggle_stash(&mut self) {
-        self.showing_stash = !self.showing_stash;
+    pub(crate) fn agent_list_mode(&self) -> AgentListMode {
+        self.agent_list_mode
+    }
+
+    pub(crate) fn cycle_agent_list_mode(&mut self) {
+        self.agent_list_mode = self.agent_list_mode.next();
         self.stash_scroll = 0;
+        self.scheduled_run_scroll = 0;
         self.agent_scroll = 0;
     }
 
     pub(crate) fn show_live_agents(&mut self) {
-        self.showing_stash = false;
+        self.agent_list_mode = AgentListMode::Agents;
         self.stash_scroll = 0;
+        self.scheduled_run_scroll = 0;
         self.agent_scroll = 0;
     }
 
@@ -1864,10 +1889,16 @@ impl HerdrSession {
     }
 
     pub(crate) fn scroll_agents(&mut self, delta: isize) {
-        if self.showing_stash {
-            self.stash_scroll = self.stash_scroll.saturating_add_signed(delta);
-        } else {
-            self.agent_scroll = self.agent_scroll.saturating_add_signed(delta);
+        match self.agent_list_mode {
+            AgentListMode::Agents => {
+                self.agent_scroll = self.agent_scroll.saturating_add_signed(delta);
+            }
+            AgentListMode::Scheduled => {
+                self.scheduled_run_scroll = self.scheduled_run_scroll.saturating_add_signed(delta);
+            }
+            AgentListMode::Stash => {
+                self.stash_scroll = self.stash_scroll.saturating_add_signed(delta);
+            }
         }
     }
 

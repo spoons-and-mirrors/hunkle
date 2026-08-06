@@ -388,7 +388,7 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
     shortcut!(
         ToggleAgents,
         "toggle-agents",
-        "Cycle agents / stash / off",
+        "Cycle agents / scheduled / stash / off",
         "Changes / files",
         MAIN,
         KeyCode::Char('a')

@@ -15,15 +15,16 @@ pub(super) fn layout_agents_pane(
         return Rect::new(content.x, list_y, content.width, available);
     }
 
-    let live_count = app.herdr.agent_card_count();
-    let agent_count = if app.herdr.showing_stash {
-        live_count.max(app.herdr.stashed_agents().len())
-    } else {
-        live_count
+    let mode = app.herdr.agent_list_mode();
+    let agent_count = match mode {
+        AgentListMode::Agents => app.herdr.agent_card_count(),
+        AgentListMode::Scheduled => app.herdr.scheduled_runs().len(),
+        AgentListMode::Stash => app.herdr.stashed_agents().len(),
     };
-    if app.agents_height_fit_for != Some(agent_count) {
-        app.agents_height_fit_for = Some(agent_count);
-        app.settings.agents_height = (3 * agent_count).saturating_add(2).clamp(5, 256) as u16;
+    let automatic_count = agent_count.min(10);
+    if app.agents_height_fit_for != Some((mode, automatic_count)) {
+        app.agents_height_fit_for = Some((mode, automatic_count));
+        app.settings.agents_height = (3 * automatic_count).saturating_add(2).clamp(5, 256) as u16;
     }
     let agents_height = app
         .settings
@@ -74,7 +75,8 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
             target,
             HitTarget::Agent(_)
                 | HitTarget::AgentPaneId(_)
-                | HitTarget::AgentStashToggle
+                | HitTarget::AgentListModeToggle
+                | HitTarget::AgentScheduledRun(_)
                 | HitTarget::AgentStash(_)
                 | HitTarget::StashedAgent(_)
                 | HitTarget::AgentPreviewPicker(_)

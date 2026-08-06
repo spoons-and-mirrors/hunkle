@@ -365,8 +365,12 @@ impl App {
                     }
                     return;
                 }
-                Some(HitTarget::AgentStashToggle) => {
-                    self.herdr.toggle_stash();
+                Some(HitTarget::AgentListModeToggle) => {
+                    self.herdr.cycle_agent_list_mode();
+                    return;
+                }
+                Some(HitTarget::AgentScheduledRun(run_id)) => {
+                    self.open_scheduled_run_preview(run_id);
                     return;
                 }
                 Some(HitTarget::AgentStash(key)) => {
@@ -997,8 +1001,12 @@ impl App {
                 self.activate_agent_card(key, index);
                 return;
             }
-            Some(HitTarget::AgentStashToggle) => {
-                self.herdr.toggle_stash();
+            Some(HitTarget::AgentListModeToggle) => {
+                self.herdr.cycle_agent_list_mode();
+                return;
+            }
+            Some(HitTarget::AgentScheduledRun(run_id)) => {
+                self.open_scheduled_run_preview(run_id);
                 return;
             }
             Some(HitTarget::AgentStash(key)) => {
