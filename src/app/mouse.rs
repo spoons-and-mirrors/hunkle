@@ -407,6 +407,19 @@ impl App {
                     self.toggle_agent_preview_request(agent, message, request);
                     return;
                 }
+                Some(
+                    HitTarget::AgentMessage { agent, message }
+                    | HitTarget::AgentExpandedMessage { agent, message },
+                ) => {
+                    self.toggle_agent_preview_user_message(agent, message);
+                    return;
+                }
+                Some(HitTarget::AgentScheduledMessage { run_id, .. }) => {
+                    if self.agent_preview.scheduled_run == Some(run_id) {
+                        self.agent_preview.toggle_scheduled_user_message();
+                    }
+                    return;
+                }
                 Some(HitTarget::AgentPreviewPrompt(key)) => {
                     if self.herdr.agent_index(&key).is_some() {
                         self.agent_preview.focus_agent(key);
@@ -685,6 +698,7 @@ impl App {
             Some(
                 HitTarget::AgentTooltip { agent, .. }
                 | HitTarget::AgentMessage { agent, .. }
+                | HitTarget::AgentExpandedMessage { agent, .. }
                 | HitTarget::AgentPreviewMessageTimeline(agent)
                 | HitTarget::AgentPreviewRequest { agent, .. },
             ) => Some(agent),
@@ -1077,7 +1091,12 @@ impl App {
                 }
                 return;
             }
-            Some(HitTarget::AgentTooltip { .. } | HitTarget::AgentMessage { .. }) => return,
+            Some(
+                HitTarget::AgentTooltip { .. }
+                | HitTarget::AgentMessage { .. }
+                | HitTarget::AgentExpandedMessage { .. }
+                | HitTarget::AgentScheduledMessage { .. },
+            ) => return,
             _ => {}
         }
         if self
@@ -1497,6 +1516,15 @@ impl App {
                 message,
                 request,
             }) => self.toggle_agent_preview_request(agent, message, request),
+            Some(
+                HitTarget::AgentMessage { agent, message }
+                | HitTarget::AgentExpandedMessage { agent, message },
+            ) => self.toggle_agent_preview_user_message(agent, message),
+            Some(HitTarget::AgentScheduledMessage { run_id, .. }) => {
+                if self.agent_preview.scheduled_run == Some(run_id) {
+                    self.agent_preview.toggle_scheduled_user_message();
+                }
+            }
             Some(HitTarget::AgentPreviewPicker(key)) => {
                 if self.herdr.agent_index(&key).is_some() {
                     self.agent_preview.toggle_picker(key);
@@ -1751,6 +1779,10 @@ impl App {
 
     fn toggle_agent_preview_request(&mut self, key: AgentKey, message: usize, request: usize) {
         self.agent_preview.toggle_request(key, message, request);
+    }
+
+    fn toggle_agent_preview_user_message(&mut self, agent: AgentKey, message: usize) {
+        self.agent_preview.toggle_user_message(agent, message);
     }
 
     pub(super) fn scroll_agent_preview_by(&mut self, delta: isize) {

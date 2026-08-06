@@ -2638,6 +2638,8 @@ impl App {
                     | HitTarget::AgentPreviewRequest { .. }
                     | HitTarget::AgentTooltip { .. }
                     | HitTarget::AgentMessage { .. }
+                    | HitTarget::AgentExpandedMessage { .. }
+                    | HitTarget::AgentScheduledMessage { .. }
             )
         ) {
             self.hovered_hit_target = None;
@@ -2901,6 +2903,20 @@ impl App {
             return &[];
         };
         self.agent_preview.expanded_requests(&agent, message)
+    }
+
+    pub(crate) fn agent_preview_user_message_expanded(&self, index: usize) -> bool {
+        let Some(agent) = self.herdr.agent_key(index) else {
+            return false;
+        };
+        let Some(message) = self.agent_preview_message(index).or_else(|| {
+            self.herdr
+                .agent_user_messages(index)
+                .and_then(|messages| messages.len().checked_sub(1))
+        }) else {
+            return false;
+        };
+        self.agent_preview.user_message_expanded(&agent, message)
     }
 
     pub(super) fn show_agents_pane(&mut self) {

@@ -596,7 +596,10 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
     app.agent_preview.set_scheduled_conversation_for_test(
         "ses_test",
         vec![AgentUserMessage {
-            text: "one user message".to_owned(),
+            text: (0..20)
+                .map(|line| format!("scheduled user line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             requests: vec![AgentRequestPreview {
                 parts: vec![AgentRequestPartPreview::Text(
                     (0..100)
@@ -626,6 +629,16 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
     );
     assert!(app.agent_preview.scheduled_scroll_max() > 0);
     assert_eq!(app.agent_preview.scheduled_scroll(), None);
+    let user_message = app
+        .regions
+        .hit_target_rect(HitTarget::AgentScheduledMessage {
+            run_id: 17,
+            message: 0,
+        })
+        .unwrap();
+    click(&mut app, user_message.x + 1, user_message.y + 1);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(screen_text(&terminal).contains("scheduled user line 19"));
     let transcript = app
         .regions
         .scroll_target_rect(ScrollTarget::SchedulerConversation)
@@ -930,11 +943,12 @@ fn renders_and_targets_agents_in_the_normal_view() {
     for _ in 0..100 {
         app.handle_mouse(mouse(
             MouseEventKind::ScrollUp,
-            user_message.x + 2,
-            transcript_row,
+            tooltip.x + 2,
+            tooltip.bottom().saturating_sub(2),
         ));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.agent_preview_scroll, 0);
     let user_message = app
         .regions
         .hit_target_rect(HitTarget::AgentMessage {
@@ -1196,6 +1210,46 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
     assert!(initial_screen.contains("tool_3"));
     assert!(!initial_screen.contains("⌄ more"));
     assert!(initial_screen.contains("user line 00"));
+    assert!(!initial_screen.contains("user line 39"));
+    let user_message = app
+        .regions
+        .hit_target_rect(HitTarget::AgentMessage {
+            agent: key.clone(),
+            message: 0,
+        })
+        .unwrap();
+    click(&mut app, user_message.x + 1, user_message.y + 1);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let expanded_message = app
+        .regions
+        .hit_target_rect(HitTarget::AgentExpandedMessage {
+            agent: key.clone(),
+            message: 0,
+        })
+        .unwrap();
+    assert!(app.agent_preview_user_message_expanded(0));
+    assert_eq!(
+        app.regions.scroll_target_at(Position::new(
+            expanded_message.x + 1,
+            expanded_message.y + 1,
+        )),
+        Some(ScrollTarget::AgentTranscript(key.clone()))
+    );
+    for _ in 0..10 {
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            expanded_message.x + 1,
+            expanded_message.y + 1,
+        ));
+    }
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        app.regions.agent_preview_scroll,
+        app.regions.agent_preview_scroll_max
+    );
+    assert!(screen_text(&terminal).contains("user line 39"));
+    click(&mut app, expanded_message.x + 1, expanded_message.y + 1);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let preview = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {

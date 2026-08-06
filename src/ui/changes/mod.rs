@@ -822,6 +822,7 @@ pub(super) fn draw_agent_history_pane(
     let selected_message = app.agent_preview_message(index);
     let transcript_scroll = app.agent_preview_transcript_scroll(index);
     let expanded_requests = app.agent_preview_expanded_requests(index).to_vec();
+    let user_message_expanded = app.agent_preview_user_message_expanded(index);
     let picker_open = app.agent_preview_picker_open();
     let hovered = app.hovered_hit_target.clone();
     let (targets, scroll_max, scroll, animation_presented) = agents::draw_history(
@@ -832,6 +833,7 @@ pub(super) fn draw_agent_history_pane(
         selected_message,
         transcript_scroll,
         &expanded_requests,
+        user_message_expanded,
         picker_open,
         hovered,
         &app.agent_preview.prompt,

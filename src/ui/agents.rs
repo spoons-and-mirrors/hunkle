@@ -767,6 +767,7 @@ pub(super) fn draw_history(
     selected_message: Option<usize>,
     transcript_scroll: Option<usize>,
     expanded_requests: &[usize],
+    user_message_expanded: bool,
     picker_open: bool,
     hovered: Option<HitTarget>,
     prompt: &TextInput,
@@ -952,13 +953,15 @@ pub(super) fn draw_history(
         mode: AgentTranscriptMode::Agent,
     });
     let user_top_padding = u16::from(cached.user_elapsed.is_some());
-    let desired_user_height = cached
-        .user_lines
-        .len()
-        .saturating_add(2)
-        .min(8)
-        .max(3)
-        .saturating_add(usize::from(user_top_padding));
+    let full_user_card_height = cached.user_lines.len().saturating_add(2).max(3);
+    let desired_user_height = full_user_card_height;
+    let desired_user_height = if user_message_expanded {
+        desired_user_height
+    } else {
+        desired_user_height.min(8)
+    }
+    .max(3)
+    .saturating_add(usize::from(user_top_padding));
     let user_y = message_selector.bottom();
     let user_height = u16::try_from(desired_user_height)
         .unwrap_or(u16::MAX)
@@ -982,10 +985,18 @@ pub(super) fn draw_history(
         main.width.saturating_sub(1),
         viewport.height,
     );
-    let scroll_max = cached
-        .request_height
-        .saturating_sub(usize::from(viewport.height));
-    let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
+    let scroll_max = if user_message_expanded {
+        full_user_card_height.saturating_sub(usize::from(user_cards.height))
+    } else {
+        cached
+            .request_height
+            .saturating_sub(usize::from(viewport.height))
+    };
+    let scroll = if user_message_expanded {
+        transcript_scroll.unwrap_or(0).min(scroll_max)
+    } else {
+        transcript_scroll.unwrap_or(scroll_max).min(scroll_max)
+    };
     let mut targets = vec![(
         HitTarget::AgentTooltip {
             agent: agent_key.clone(),
@@ -1016,7 +1027,11 @@ pub(super) fn draw_history(
         lines: cached.user_lines.clone(),
         animated_rows: Arc::default(),
         start: 0,
-        height: usize::from(user_cards.height),
+        height: if user_message_expanded {
+            full_user_card_height
+        } else {
+            usize::from(user_cards.height)
+        },
         elapsed: cached.user_elapsed.clone(),
         request_count: cached.request_count,
         request: None,
@@ -1027,18 +1042,25 @@ pub(super) fn draw_history(
         &user_block,
         user_cards,
         user_cards,
-        0,
+        if user_message_expanded { scroll } else { 0 },
         herdr.spinner_frame(),
     ) {
         targets.push((
-            HitTarget::AgentMessage {
-                agent: agent_key.clone(),
-                message: selected_message,
+            if user_message_expanded {
+                HitTarget::AgentExpandedMessage {
+                    agent: agent_key.clone(),
+                    message: selected_message,
+                }
+            } else {
+                HitTarget::AgentMessage {
+                    agent: agent_key.clone(),
+                    message: selected_message,
+                }
             },
             rect,
         ));
     }
-    for block in &cached.blocks {
+    for block in cached.blocks.iter().filter(|_| !user_message_expanded) {
         if let Some((rect, block_animation_presented)) =
             draw_transcript_card(frame, block, cards, viewport, scroll, herdr.spinner_frame())
         {
@@ -1160,6 +1182,7 @@ pub(super) fn draw_scheduled_history(
     selected_message: Option<usize>,
     transcript_scroll: Option<usize>,
     expanded_requests: &[usize],
+    user_message_expanded: bool,
     prompt: &TextInput,
     prompt_focused: bool,
     prompt_error: Option<&str>,
@@ -1240,17 +1263,18 @@ pub(super) fn draw_scheduled_history(
         mode: AgentTranscriptMode::Scheduled,
     });
     let user_top_padding = u16::from(cached.user_elapsed.is_some());
-    let user_height = u16::try_from(
-        cached
-            .user_lines
-            .len()
-            .saturating_add(2)
-            .min(8)
-            .max(3)
-            .saturating_add(usize::from(user_top_padding)),
-    )
-    .unwrap_or(u16::MAX)
-    .min(area.bottom().saturating_sub(selector.bottom()));
+    let full_user_card_height = cached.user_lines.len().saturating_add(2).max(3);
+    let desired_user_height = full_user_card_height;
+    let desired_user_height = if user_message_expanded {
+        desired_user_height
+    } else {
+        desired_user_height.min(8)
+    }
+    .max(3)
+    .saturating_add(usize::from(user_top_padding));
+    let user_height = u16::try_from(desired_user_height)
+        .unwrap_or(u16::MAX)
+        .min(area.bottom().saturating_sub(selector.bottom()));
     let user_viewport = Rect::new(
         area.x.saturating_sub(1),
         selector.bottom(),
@@ -1270,10 +1294,18 @@ pub(super) fn draw_scheduled_history(
         user_viewport.height.saturating_sub(user_top_padding),
     );
     let cards = Rect::new(area.x, viewport.y, area.width, viewport.height);
-    let scroll_max = cached
-        .request_height
-        .saturating_sub(usize::from(viewport.height));
-    let scroll = transcript_scroll.unwrap_or(scroll_max).min(scroll_max);
+    let scroll_max = if user_message_expanded {
+        full_user_card_height.saturating_sub(usize::from(user_cards.height))
+    } else {
+        cached
+            .request_height
+            .saturating_sub(usize::from(viewport.height))
+    };
+    let scroll = if user_message_expanded {
+        transcript_scroll.unwrap_or(0).min(scroll_max)
+    } else {
+        transcript_scroll.unwrap_or(scroll_max).min(scroll_max)
+    };
     draw_message_timeline(
         frame,
         selector,
@@ -1288,14 +1320,33 @@ pub(super) fn draw_scheduled_history(
         lines: cached.user_lines.clone(),
         animated_rows: Arc::default(),
         start: 0,
-        height: usize::from(user_cards.height),
+        height: if user_message_expanded {
+            full_user_card_height
+        } else {
+            usize::from(user_cards.height)
+        },
         elapsed: cached.user_elapsed.clone(),
         request_count: cached.request_count,
         request: None,
         expandable: false,
     };
-    draw_transcript_card(frame, &user_block, user_cards, user_cards, 0, 0);
-    for block in &cached.blocks {
+    if let Some((rect, _)) = draw_transcript_card(
+        frame,
+        &user_block,
+        user_cards,
+        user_cards,
+        if user_message_expanded { scroll } else { 0 },
+        0,
+    ) {
+        targets.push((
+            HitTarget::AgentScheduledMessage {
+                run_id,
+                message: selected_message,
+            },
+            rect,
+        ));
+    }
+    for block in cached.blocks.iter().filter(|_| !user_message_expanded) {
         if let Some((rect, _)) = draw_transcript_card(frame, block, cards, viewport, scroll, 0)
             && block.expandable
             && let Some(request) = block.request
@@ -1448,6 +1499,21 @@ fn build_request_transcript_counted(
     let mut document_height = 0usize;
     let request_count = message.requests.len();
     for (request_index, request) in message.requests.iter().enumerate() {
+        let headerless_response = request
+            .parts
+            .iter()
+            .any(|part| matches!(part, AgentRequestPartPreview::Text(_)))
+            && !request.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning)
+                )
+            });
+        let extra_rows = if headerless_response {
+            1
+        } else {
+            REQUEST_CARD_EXTRA_ROWS
+        };
         let final_request = request_index + 1 == request_count;
         let request_live = live && request_index + 1 == request_count;
         let expanded = expanded_requests.contains(&request_index);
@@ -1456,9 +1522,7 @@ fn build_request_transcript_counted(
                 request_content(Some(request), width, request_live, stats);
             (
                 lines,
-                content_height
-                    .max(1)
-                    .saturating_add(REQUEST_CARD_EXTRA_ROWS),
+                content_height.max(1).saturating_add(extra_rows),
                 animated_rows,
                 false,
             )
@@ -1498,16 +1562,14 @@ fn build_request_transcript_counted(
                         .fg(palette().cyan)
                         .add_modifier(Modifier::BOLD),
                 ));
-                let height = lines.len().saturating_add(REQUEST_CARD_EXTRA_ROWS);
+                let height = lines.len().saturating_add(extra_rows);
                 (lines, height, animated_rows, true)
             } else {
                 let (lines, content_height, animated_rows) =
                     request_content(Some(request), width, request_live, stats);
                 (
                     lines,
-                    content_height
-                        .max(1)
-                        .saturating_add(REQUEST_CARD_EXTRA_ROWS),
+                    content_height.max(1).saturating_add(extra_rows),
                     animated_rows,
                     hidden,
                 )
@@ -1517,16 +1579,7 @@ fn build_request_transcript_counted(
         document_height = document_height.saturating_add(usize::from(elapsed.is_some()));
         blocks.push(TranscriptBlock {
             user: false,
-            headerless_response: request
-                .parts
-                .iter()
-                .any(|part| matches!(part, AgentRequestPartPreview::Text(_)))
-                && !request.parts.iter().any(|part| {
-                    matches!(
-                        part,
-                        AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning)
-                    )
-                }),
+            headerless_response,
             lines: lines.into(),
             animated_rows: animated_rows.into(),
             start: document_height,
@@ -1725,7 +1778,8 @@ fn draw_transcript_card(
     } else {
         palette().cyan
     };
-    let middle_start = local_start.max(1);
+    let content_offset = usize::from(!block.headerless_response);
+    let middle_start = local_start.max(content_offset);
     let middle_end = local_end.min(block.height.saturating_sub(1));
     if middle_start < middle_end {
         let middle = Rect::new(
@@ -1745,12 +1799,8 @@ fn draw_transcript_card(
             Rect::new(middle.x, middle.y, 1, middle.height),
         );
     }
-    if local_start == 0 {
-        if block.headerless_response {
-            let top = Rect::new(cards.x, y, cards.width, 1);
-            frame.render_widget(Clear, top);
-            fill(frame, top, background);
-        } else {
+    if local_start == 0 && !block.headerless_response {
+        {
             frame.render_widget(
                 Paragraph::new("▄".repeat(usize::from(cards.width)))
                     .style(Style::default().fg(background).bg(palette().panel)),
@@ -1799,7 +1849,6 @@ fn draw_transcript_card(
             }
         }
     }
-    let content_offset = 1;
     let mut animation_presented = false;
     let content_start = local_start.max(content_offset);
     let content_end = local_end.min(block.height.saturating_sub(content_offset));
@@ -1905,8 +1954,8 @@ fn draw_transcript_card(
         }
     }
     if block.headerless_response
-        && local_start <= 1
-        && local_end > 1
+        && local_start == 0
+        && local_end > 0
         && let Some(elapsed) = block.elapsed.as_deref()
     {
         let width = u16::try_from(UnicodeWidthStr::width(elapsed)).unwrap_or(u16::MAX);
@@ -1920,9 +1969,7 @@ fn draw_transcript_card(
                 ),
                 Rect::new(
                     cards.right().saturating_sub(width).saturating_sub(2),
-                    y.saturating_add(
-                        u16::try_from(1usize.saturating_sub(local_start)).unwrap_or(0),
-                    ),
+                    y,
                     width,
                     1,
                 ),
@@ -3122,9 +3169,10 @@ mod tests {
                 .collect::<String>()
         };
         let top = u16::try_from(block.start).unwrap();
+        assert_eq!(block.height, block.lines.len() + 1);
         assert!(!row(top).contains('▄'));
-        assert!(!row(top).contains("1s"));
-        assert!(row(top + 1).contains("1s"));
+        assert!(row(top).contains("1s"));
+        assert!(row(top + 1).contains("response"));
         assert!(
             block
                 .lines

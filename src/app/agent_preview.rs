@@ -33,12 +33,19 @@ struct ExpandedRequests {
     requests: Vec<usize>,
 }
 
+#[derive(Debug)]
+struct ExpandedUserMessage {
+    agent: AgentKey,
+    message: usize,
+}
+
 #[derive(Default)]
 struct ScheduledConversationState {
     scroll: Option<usize>,
     scroll_max: usize,
     message: Option<usize>,
     expanded_requests: Vec<usize>,
+    user_expanded: bool,
 }
 
 impl ScheduledConversationState {
@@ -47,6 +54,7 @@ impl ScheduledConversationState {
         self.scroll_max = 0;
         self.message = None;
         self.expanded_requests.clear();
+        self.user_expanded = false;
     }
 
     fn scroll_by(&mut self, delta: isize) {
@@ -66,6 +74,7 @@ impl ScheduledConversationState {
         );
         self.scroll = None;
         self.expanded_requests.clear();
+        self.user_expanded = false;
     }
 
     fn toggle_request(&mut self, request: usize) {
@@ -114,6 +123,7 @@ pub(crate) struct ScheduledPreviewRenderState<'a> {
     pub(crate) prompt_focused: bool,
     pub(crate) prompt_error: Option<&'a str>,
     pub(crate) conversation_error: Option<&'a str>,
+    pub(crate) user_message_expanded: bool,
 }
 
 pub(crate) struct AgentPreview {
@@ -121,6 +131,7 @@ pub(crate) struct AgentPreview {
     transcript_scroll: Option<TranscriptScroll>,
     message_selection: Option<MessageSelection>,
     expanded_requests: Option<ExpandedRequests>,
+    expanded_user_message: Option<ExpandedUserMessage>,
     pub(crate) presentation: crate::ui::AgentTranscriptPresentation,
     pub(crate) picker_open: bool,
     pub(crate) prompt: TextInput,
@@ -151,6 +162,7 @@ impl Default for AgentPreview {
             transcript_scroll: None,
             message_selection: None,
             expanded_requests: None,
+            expanded_user_message: None,
             presentation: crate::ui::AgentTranscriptPresentation::default(),
             picker_open: false,
             prompt: TextInput::default(),
@@ -215,6 +227,7 @@ impl AgentPreview {
         self.transcript_scroll = None;
         self.message_selection = None;
         self.expanded_requests = None;
+        self.expanded_user_message = None;
         self.picker_open = false;
         self.scheduled.reset();
         self.reset_prompt();
@@ -297,6 +310,12 @@ impl AgentPreview {
             .map_or(&[], |expanded| expanded.requests.as_slice())
     }
 
+    pub(crate) fn user_message_expanded(&self, key: &AgentKey, message: usize) -> bool {
+        self.expanded_user_message
+            .as_ref()
+            .is_some_and(|expanded| &expanded.agent == key && expanded.message == message)
+    }
+
     pub(crate) fn select_message(
         &mut self,
         key: AgentKey,
@@ -319,6 +338,7 @@ impl AgentPreview {
             message: selected,
         });
         self.expanded_requests = None;
+        self.expanded_user_message = None;
         self.transcript_scroll = Some(TranscriptScroll {
             agent: key,
             message: selected,
@@ -355,6 +375,23 @@ impl AgentPreview {
         }
     }
 
+    pub(crate) fn toggle_user_message(&mut self, key: AgentKey, message: usize) {
+        if self.user_message_expanded(&key, message) {
+            self.expanded_user_message = None;
+            self.transcript_scroll = None;
+        } else {
+            self.expanded_user_message = Some(ExpandedUserMessage {
+                agent: key.clone(),
+                message,
+            });
+            self.transcript_scroll = Some(TranscriptScroll {
+                agent: key,
+                message,
+                offset: 0,
+            });
+        }
+    }
+
     pub(crate) fn scroll_transcript(
         &mut self,
         key: AgentKey,
@@ -367,11 +404,13 @@ impl AgentPreview {
             .unwrap_or(maximum)
             .saturating_add_signed(delta)
             .min(maximum);
-        self.transcript_scroll = (offset < maximum).then_some(TranscriptScroll {
-            agent: key,
-            message,
-            offset,
-        });
+        let user_message_expanded = self.user_message_expanded(&key, message);
+        self.transcript_scroll =
+            (user_message_expanded || offset < maximum).then_some(TranscriptScroll {
+                agent: key,
+                message,
+                offset,
+            });
     }
 
     pub(crate) fn set_scheduled_scroll_max(&mut self, maximum: usize) {
@@ -399,6 +438,11 @@ impl AgentPreview {
 
     pub(crate) fn toggle_scheduled_request(&mut self, request: usize) {
         self.scheduled.toggle_request(request);
+    }
+
+    pub(crate) fn toggle_scheduled_user_message(&mut self) {
+        self.scheduled.user_expanded = !self.scheduled.user_expanded;
+        self.scheduled.scroll = self.scheduled.user_expanded.then_some(0);
     }
 
     pub(crate) fn scheduled_message_count(&self) -> usize {
@@ -536,6 +580,7 @@ impl AgentPreview {
             prompt_focused: self.prompt_focused,
             prompt_error: self.prompt_error.as_deref(),
             conversation_error,
+            user_message_expanded: self.scheduled.user_expanded,
         }
     }
 
