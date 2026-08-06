@@ -58,11 +58,13 @@ pub(crate) use scheduler::{
     ScheduledTaskComposer, SchedulerDestinationCard, SchedulerField, SchedulerState,
     SchedulerSurface,
 };
+#[cfg(test)]
+pub use settings::AgentCardClickAction;
+pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use settings::{
     DiscordWebhookConfig, DiscordWebhookEditor, DiscordWebhookStore, SettingsStore,
     valid_discord_webhook_url, valid_opencode_model,
 };
-pub use settings::{OpenCodeReasoning, Settings};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
 
 pub(super) use std::{
@@ -75,8 +77,8 @@ pub(super) use std::{
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
-const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 7, 8];
-const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
+const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 8, 9];
+const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
 #[derive(Debug)]

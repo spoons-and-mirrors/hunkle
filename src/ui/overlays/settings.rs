@@ -501,15 +501,16 @@ pub(crate) fn draw_settings(
     let interface_header_y = if compact { 8 } else { 14 };
     let cross_workspace_y = if compact { 9 } else { 15 };
     let agent_y = if compact { 10 } else { 17 };
-    let agent_time_y = if compact { 11 } else { 19 };
-    let clear_timings_y = if compact { 12 } else { 21 };
+    let agent_card_click_y = if compact { 11 } else { 19 };
+    let agent_time_y = if compact { 12 } else { 21 };
+    let clear_timings_y = if compact { 13 } else { 23 };
     let media_y = if herdr_available {
-        if compact { 13 } else { 23 }
+        if compact { 14 } else { 25 }
     } else {
         cross_workspace_y
     };
     let editor_y = if herdr_available {
-        if compact { 14 } else { 25 }
+        if compact { 15 } else { 27 }
     } else {
         agent_y
     };
@@ -528,6 +529,12 @@ pub(crate) fn draw_settings(
         1,
     );
     let agent_harness_row = Rect::new(inner.x, area.y.saturating_add(agent_y), inner.width, 1);
+    let agent_card_click_row = Rect::new(
+        inner.x,
+        area.y.saturating_add(agent_card_click_y),
+        inner.width,
+        1,
+    );
     let agent_time_row = Rect::new(inner.x, area.y.saturating_add(agent_time_y), inner.width, 1);
     let clear_agent_timings_row = Rect::new(
         inner.x,
@@ -557,7 +564,7 @@ pub(crate) fn draw_settings(
             ),
             Span::styled(media_protocol_label, Style::default().fg(palette().accent)),
         ]))
-        .style(Style::default().bg(if selection == 7 {
+        .style(Style::default().bg(if selection == 8 {
             palette().selected
         } else {
             palette().surface_alt
@@ -746,6 +753,23 @@ pub(crate) fn draw_settings(
             agent_harness_row,
         );
 
+        let agent_card_click = settings.agent_card_click_action.label();
+        let agent_card_click_padding = usize::from(agent_card_click_row.width)
+            .saturating_sub("Agent card click".len() + agent_card_click.len());
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Agent card click", Style::default().fg(palette().ink)),
+                Span::raw(" ".repeat(agent_card_click_padding)),
+                Span::styled(agent_card_click, Style::default().fg(palette().accent)),
+            ]))
+            .style(Style::default().bg(if selection == 5 {
+                palette().selected
+            } else {
+                palette().surface_alt
+            })),
+            agent_card_click_row,
+        );
+
         let agent_time_label = settings.agent_time_display.label();
         let agent_time_padding = usize::from(agent_time_row.width)
             .saturating_sub("Agent time".len() + agent_time_label.len());
@@ -755,7 +779,7 @@ pub(crate) fn draw_settings(
                 Span::raw(" ".repeat(agent_time_padding)),
                 Span::styled(agent_time_label, Style::default().fg(palette().accent)),
             ]))
-            .style(Style::default().bg(if selection == 5 {
+            .style(Style::default().bg(if selection == 6 {
                 palette().selected
             } else {
                 palette().surface_alt
@@ -772,7 +796,7 @@ pub(crate) fn draw_settings(
                 Span::raw(" ".repeat(clear_padding)),
                 Span::styled(clear_label, Style::default().fg(palette().orange)),
             ]))
-            .style(Style::default().bg(if selection == 6 {
+            .style(Style::default().bg(if selection == 7 {
                 palette().selected
             } else {
                 palette().surface_alt
@@ -801,7 +825,7 @@ pub(crate) fn draw_settings(
                 }),
             ),
         ]))
-        .style(Style::default().bg(if selection == 8 {
+        .style(Style::default().bg(if selection == 9 {
             palette().selected
         } else {
             palette().surface_alt
@@ -842,6 +866,10 @@ pub(crate) fn draw_settings(
             (
                 HitTarget::Settings(SettingsHitTarget::AgentHarness),
                 agent_harness_row,
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::AgentCardClick),
+                agent_card_click_row,
             ),
             (
                 HitTarget::Settings(SettingsHitTarget::AgentTime),

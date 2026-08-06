@@ -452,6 +452,7 @@ impl App {
             SettingsHitTarget::FormatOnSave => self.toggle_format_on_save(),
             SettingsHitTarget::CrossWorkspaceAgents => self.toggle_cross_workspace_agents(),
             SettingsHitTarget::AgentHarness => self.toggle_agent_harness(),
+            SettingsHitTarget::AgentCardClick => self.toggle_agent_card_click_action(),
             SettingsHitTarget::AgentTime => self.toggle_agent_time_display(),
             SettingsHitTarget::ClearAgentTimings => self.clear_agent_timing_history(),
             SettingsHitTarget::MediaPreview => self.toggle_media_preview_protocol(),
@@ -517,6 +518,11 @@ impl App {
 
     pub(crate) fn toggle_agent_harness(&mut self) {
         self.settings.show_agent_harness = !self.settings.show_agent_harness;
+        self.settings_changed();
+    }
+
+    pub(crate) fn toggle_agent_card_click_action(&mut self) {
+        self.settings.agent_card_click_action = self.settings.agent_card_click_action.toggled();
         self.settings_changed();
     }
 

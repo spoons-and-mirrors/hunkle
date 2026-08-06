@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::{
-    AgentKey, AgentPromptDelivery, AgentRequestPartPreview, AgentRequestPreview, ScheduledRun,
-    ScheduledRunStatus,
+    AgentCardClickAction, AgentKey, AgentPromptDelivery, AgentRequestPartPreview,
+    AgentRequestPreview, ScheduledRun, ScheduledRunStatus,
 };
 use std::path::PathBuf;
 
@@ -184,6 +184,53 @@ fn control_click_opens_the_live_agent_preview_modal() {
         column: 0,
         row: 0,
         modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
+fn agent_card_click_setting_swaps_plain_and_control_actions() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.settings.agent_card_click_action = AgentCardClickAction::OpenPreview;
+    let key = agent_key(&app, 0);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(key.clone()))
+        .unwrap();
+    let point = (card.y..card.bottom())
+        .flat_map(|y| (card.x..card.right()).map(move |x| (x, y)))
+        .find(|(x, y)| {
+            app.regions.hit_target_at(Position::new(*x, *y)) == Some(HitTarget::Agent(key.clone()))
+        })
+        .unwrap();
+
+    click(&mut app, point.0, point.1);
+    assert_eq!(app.mode, Mode::AgentPreview);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let key = agent_key(&app, 0);
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(key.clone()))
+        .unwrap();
+    let point = (card.y..card.bottom())
+        .flat_map(|y| (card.x..card.right()).map(move |x| (x, y)))
+        .find(|(x, y)| {
+            app.regions.hit_target_at(Position::new(*x, *y)) == Some(HitTarget::Agent(key.clone()))
+        })
+        .unwrap();
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::CONTROL,
     });
     assert_eq!(app.mode, Mode::Normal);
 }

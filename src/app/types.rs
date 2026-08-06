@@ -461,6 +461,7 @@ pub(crate) enum SettingsHitTarget {
     FormatOnSave,
     CrossWorkspaceAgents,
     AgentHarness,
+    AgentCardClick,
     AgentTime,
     ClearAgentTimings,
     MediaPreview,
@@ -498,6 +499,7 @@ impl SettingsHitTarget {
             Self::FormatOnSave,
             Self::CrossWorkspaceAgents,
             Self::AgentHarness,
+            Self::AgentCardClick,
             Self::AgentTime,
             Self::ClearAgentTimings,
             Self::MediaPreview,
@@ -514,10 +516,11 @@ impl SettingsHitTarget {
             Self::FormatOnSave => Some(2),
             Self::CrossWorkspaceAgents => Some(3),
             Self::AgentHarness => Some(4),
-            Self::AgentTime => Some(5),
-            Self::ClearAgentTimings => Some(6),
-            Self::MediaPreview => Some(7),
-            Self::Editor => Some(8),
+            Self::AgentCardClick => Some(5),
+            Self::AgentTime => Some(6),
+            Self::ClearAgentTimings => Some(7),
+            Self::MediaPreview => Some(8),
+            Self::Editor => Some(9),
             Self::Overlay
             | Self::Page(_)
             | Self::Shortcut(_)

@@ -359,11 +359,11 @@ impl App {
                         return;
                     };
                     self.selection.clear();
-                    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
-                        self.open_agent_preview_modal(index);
-                    } else {
-                        self.activate_agent_card(key, index);
-                    }
+                    self.handle_agent_card_action(
+                        key,
+                        index,
+                        mouse.modifiers.contains(KeyModifiers::CONTROL),
+                    );
                     return;
                 }
                 Some(HitTarget::AgentListModeToggle) => {
@@ -999,7 +999,7 @@ impl App {
                 let Some(index) = self.herdr.agent_index(&key) else {
                     return;
                 };
-                self.activate_agent_card(key, index);
+                self.handle_agent_card_action(key, index, false);
                 return;
             }
             Some(HitTarget::AgentListModeToggle) => {
@@ -1375,6 +1375,14 @@ impl App {
             self.open_agent_detail(index);
         } else {
             self.show_agent(index);
+        }
+    }
+
+    fn handle_agent_card_action(&mut self, key: AgentKey, index: usize, control: bool) {
+        if self.settings.agent_card_click_action.opens_preview(control) {
+            self.open_agent_preview_modal(index);
+        } else {
+            self.activate_agent_card(key, index);
         }
     }
 

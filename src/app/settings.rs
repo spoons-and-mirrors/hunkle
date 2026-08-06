@@ -18,6 +18,39 @@ pub enum AgentTimeDisplay {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCardClickAction {
+    ChangeLayout,
+    OpenPreview,
+}
+
+impl AgentCardClickAction {
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::ChangeLayout => Self::OpenPreview,
+            Self::OpenPreview => Self::ChangeLayout,
+        }
+    }
+
+    pub(crate) fn opens_preview(self, control: bool) -> bool {
+        control == (self == Self::ChangeLayout)
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ChangeLayout => "layout",
+            Self::OpenPreview => "preview",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ChangeLayout => "Layout · Ctrl preview",
+            Self::OpenPreview => "Preview · Ctrl layout",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenCodeReasoning {
     Default,
     Minimal,
@@ -110,6 +143,7 @@ pub struct Settings {
     pub worktree_width: u16,
     pub cross_workspace_agents: bool,
     pub show_agent_harness: bool,
+    pub agent_card_click_action: AgentCardClickAction,
     pub agent_time_display: AgentTimeDisplay,
     pub agents_height: u16,
     pub graph_lane_width: u16,
@@ -164,6 +198,7 @@ impl Default for Settings {
             worktree_width: 38,
             cross_workspace_agents: false,
             show_agent_harness: false,
+            agent_card_click_action: AgentCardClickAction::ChangeLayout,
             agent_time_display: AgentTimeDisplay::LatestLoop,
             agents_height: 7,
             graph_lane_width: 0,
@@ -443,13 +478,14 @@ impl SettingsStore {
             fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\ncross_workspace_agents={}\nshow_agent_harness={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nopencode_model={}\nopencode_reasoning={}\nmedia_preview_protocol={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\ncross_workspace_agents={}\nshow_agent_harness={}\nagent_card_click_action={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nopencode_model={}\nopencode_reasoning={}\nmedia_preview_protocol={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.format_on_save,
             settings.worktree_width,
             settings.cross_workspace_agents,
             settings.show_agent_harness,
+            settings.agent_card_click_action.as_str(),
             settings.agent_time_display.as_str(),
             settings.agents_height,
             settings.graph_lane_width,
@@ -522,6 +558,12 @@ fn load(path: &Path) -> Settings {
             }
             "show_agent_harness" => {
                 settings.show_agent_harness = value.trim() == "true";
+            }
+            "agent_card_click_action" => {
+                settings.agent_card_click_action = match value.trim() {
+                    "preview" => AgentCardClickAction::OpenPreview,
+                    _ => AgentCardClickAction::ChangeLayout,
+                };
             }
             "agent_time_display" => {
                 settings.agent_time_display = match value.trim() {
@@ -684,6 +726,7 @@ mod tests {
             worktree_width: 61,
             cross_workspace_agents: true,
             show_agent_harness: true,
+            agent_card_click_action: AgentCardClickAction::OpenPreview,
             agent_time_display: AgentTimeDisplay::AgentTotal,
             agents_height: 9,
             graph_lane_width: 12,
@@ -749,5 +792,13 @@ mod tests {
             loaded.media_preview_protocol,
             MediaPreviewProtocol::Halfblocks
         );
+    }
+
+    #[test]
+    fn agent_card_click_action_keeps_control_as_the_inverse() {
+        assert!(!AgentCardClickAction::ChangeLayout.opens_preview(false));
+        assert!(AgentCardClickAction::ChangeLayout.opens_preview(true));
+        assert!(AgentCardClickAction::OpenPreview.opens_preview(false));
+        assert!(!AgentCardClickAction::OpenPreview.opens_preview(true));
     }
 }
