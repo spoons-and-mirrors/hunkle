@@ -11,6 +11,10 @@ pub(crate) struct SettingsView<'a> {
     pub(crate) opencode_selection: usize,
     pub(crate) opencode_model_input: Option<&'a str>,
     pub(crate) opencode_error: Option<&'a str>,
+    pub(crate) discord_selection: usize,
+    pub(crate) discord_webhook_input: Option<&'a TextInput>,
+    pub(crate) discord_webhook_configured: bool,
+    pub(crate) discord_webhook_error: Option<&'a str>,
     pub(crate) herdr_available: bool,
 }
 
@@ -30,6 +34,10 @@ pub(crate) fn draw_settings(
         opencode_selection,
         opencode_model_input,
         opencode_error,
+        discord_selection,
+        discord_webhook_input,
+        discord_webhook_configured,
+        discord_webhook_error,
         herdr_available,
     } = view;
     let area = centered_min(frame.area(), 58, 0, 48, 30);
@@ -46,18 +54,12 @@ pub(crate) fn draw_settings(
         palette().surface_alt,
     );
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "SETTINGS",
-                Style::default()
-                    .fg(palette().ink)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "  Application preferences",
-                Style::default().fg(palette().faint),
-            ),
-        ])),
+        Paragraph::new(Line::from(vec![Span::styled(
+            "SETTINGS",
+            Style::default()
+                .fg(palette().ink)
+                .add_modifier(Modifier::BOLD),
+        )])),
         Rect::new(
             area.x.saturating_add(2),
             area.y.saturating_add(1),
@@ -71,8 +73,9 @@ pub(crate) fn draw_settings(
         12,
         1,
     );
-    let opencode_tab = Rect::new(shortcuts_tab.x.saturating_sub(13), shortcuts_tab.y, 12, 1);
-    let general_tab = Rect::new(opencode_tab.x.saturating_sub(11), opencode_tab.y, 10, 1);
+    let discord_tab = Rect::new(shortcuts_tab.x.saturating_sub(11), shortcuts_tab.y, 10, 1);
+    let opencode_tab = Rect::new(discord_tab.x.saturating_sub(8), discord_tab.y, 7, 1);
+    let general_tab = Rect::new(opencode_tab.x.saturating_sub(10), opencode_tab.y, 9, 1);
     let mut targets = vec![
         (HitTarget::Settings(SettingsHitTarget::Overlay), area),
         (
@@ -84,13 +87,18 @@ pub(crate) fn draw_settings(
             opencode_tab,
         ),
         (
+            HitTarget::Settings(SettingsHitTarget::Page(SettingsPage::Discord)),
+            discord_tab,
+        ),
+        (
             HitTarget::Settings(SettingsHitTarget::Page(SettingsPage::Shortcuts)),
             shortcuts_tab,
         ),
     ];
     for (label, rect, active) in [
         (" General ", general_tab, page == SettingsPage::General),
-        (" OpenCode ", opencode_tab, page == SettingsPage::OpenCode),
+        (" Code ", opencode_tab, page == SettingsPage::OpenCode),
+        (" Discord ", discord_tab, page == SettingsPage::Discord),
         (
             " Shortcuts ",
             shortcuts_tab,
@@ -300,6 +308,139 @@ pub(crate) fn draw_settings(
             (
                 HitTarget::Settings(SettingsHitTarget::OpenCodeReasoning),
                 reasoning_row,
+            ),
+        ]);
+        return targets;
+    }
+    if page == SettingsPage::Discord {
+        let inner = Rect::new(
+            area.x.saturating_add(2),
+            area.y,
+            area.width.saturating_sub(4),
+            area.height,
+        );
+        let webhook_row = Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1);
+        let test_row = Rect::new(inner.x, area.y.saturating_add(11), inner.width, 1);
+        let remove_row = Rect::new(inner.x, area.y.saturating_add(13), inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "SCHEDULED TASK DELIVERY",
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("Publishes every completed scheduled task to one Discord channel.")
+                .style(Style::default().fg(palette().faint)),
+            Rect::new(inner.x, area.y.saturating_add(5), inner.width, 1),
+        );
+
+        let webhook_status = if discord_webhook_input.is_some() {
+            "Editing"
+        } else if discord_webhook_configured {
+            "Configured"
+        } else {
+            "Not configured"
+        };
+        let webhook_padding = usize::from(webhook_row.width)
+            .saturating_sub("Webhook URL".len() + webhook_status.len());
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Webhook URL", Style::default().fg(palette().ink)),
+                Span::raw(" ".repeat(webhook_padding)),
+                Span::styled(webhook_status, Style::default().fg(palette().accent)),
+            ]))
+            .style(Style::default().bg(if discord_selection == 0 {
+                palette().selected
+            } else {
+                palette().surface_alt
+            })),
+            webhook_row,
+        );
+        let value_row = Rect::new(inner.x, area.y.saturating_add(8), inner.width, 1);
+        if let Some(input) = discord_webhook_input {
+            frame.render_widget(Paragraph::new(masked_input_line(input)), value_row);
+        } else {
+            frame.render_widget(
+                Paragraph::new(if discord_webhook_configured {
+                    "••••••••••••••••••••••••"
+                } else {
+                    "Select Webhook URL to paste a Discord webhook"
+                })
+                .style(Style::default().fg(palette().faint)),
+                value_row,
+            );
+        }
+
+        for (label, rect, selected, enabled) in [
+            (
+                "Send test message",
+                test_row,
+                discord_selection == 1,
+                discord_webhook_configured,
+            ),
+            (
+                "Remove webhook",
+                remove_row,
+                discord_selection == 2,
+                discord_webhook_configured,
+            ),
+        ] {
+            frame.render_widget(
+                Paragraph::new(label).style(
+                    Style::default()
+                        .fg(if enabled {
+                            palette().ink
+                        } else {
+                            palette().faint
+                        })
+                        .bg(if selected {
+                            palette().selected
+                        } else {
+                            palette().surface_alt
+                        }),
+                ),
+                rect,
+            );
+        }
+
+        let footer = discord_webhook_error.unwrap_or(if discord_webhook_input.is_some() {
+            "Enter save   Ctrl+U clear   Esc cancel"
+        } else {
+            "Enter select   Tab next   Esc close"
+        });
+        frame.render_widget(
+            Paragraph::new(truncate_width(
+                footer,
+                usize::from(area.width.saturating_sub(4)),
+            ))
+            .style(Style::default().fg(if discord_webhook_error.is_some() {
+                palette().red
+            } else {
+                palette().muted
+            }))
+            .alignment(Alignment::Right),
+            Rect::new(
+                area.x.saturating_add(2),
+                area.bottom().saturating_sub(1),
+                area.width.saturating_sub(4),
+                1,
+            ),
+        );
+        targets.extend([
+            (
+                HitTarget::Settings(SettingsHitTarget::DiscordWebhook),
+                Rect::new(webhook_row.x, webhook_row.y, webhook_row.width, 2),
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::DiscordTest),
+                test_row,
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::DiscordRemove),
+                remove_row,
             ),
         ]);
         return targets;
@@ -683,6 +824,35 @@ pub(crate) fn draw_settings(
         ]);
     }
     targets
+}
+
+fn masked_input_line(input: &TextInput) -> Line<'static> {
+    let selection = input.selection();
+    let mut spans = input
+        .text()
+        .char_indices()
+        .map(|(index, _)| {
+            let style = if input.cursor_visible() && input.cursor() == index {
+                Style::default().fg(palette().canvas).bg(palette().accent)
+            } else if selection.is_some_and(|(start, end)| start <= index && index < end) {
+                Style::default().fg(palette().ink).bg(palette().selected)
+            } else {
+                Style::default().fg(palette().ink)
+            };
+            Span::styled("•", style)
+        })
+        .collect::<Vec<_>>();
+    if input.cursor() == input.text().len() {
+        spans.push(Span::styled(
+            " ",
+            if input.cursor_visible() {
+                Style::default().bg(palette().accent)
+            } else {
+                Style::default()
+            },
+        ));
+    }
+    Line::from(spans)
 }
 
 fn media_preview_protocol_label(protocol: crate::media::MediaPreviewProtocol) -> &'static str {

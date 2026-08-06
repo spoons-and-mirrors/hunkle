@@ -2,6 +2,10 @@ use super::super::*;
 
 impl App {
     pub(crate) fn handle_settings(&mut self, key: KeyEvent) {
+        if self.discord_webhook_input.is_some() {
+            self.handle_discord_webhook_input(key);
+            return;
+        }
         if self.opencode_model_input.is_some() {
             self.handle_opencode_model_input(key);
             return;
@@ -48,6 +52,10 @@ impl App {
         }
         if self.settings_page == SettingsPage::OpenCode {
             self.handle_opencode_settings(key);
+            return;
+        }
+        if self.settings_page == SettingsPage::Discord {
+            self.handle_discord_settings(key);
             return;
         }
         match key.code {
@@ -180,6 +188,97 @@ impl App {
         self.opencode_error = None;
     }
 
+    fn handle_discord_settings(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_settings(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.discord_selection = (self.discord_selection + 1) % 3;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.discord_selection = (self.discord_selection + 2) % 3;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => match self.discord_selection {
+                0 => self.begin_discord_webhook_input(),
+                1 => self.test_discord_webhook(),
+                2 => self.remove_discord_webhook(),
+                _ => unreachable!(),
+            },
+            _ => {}
+        }
+    }
+
+    fn handle_discord_webhook_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.discord_webhook_input = None;
+                self.discord_webhook_error = None;
+            }
+            KeyCode::Enter => self.save_discord_webhook(),
+            _ => {
+                if self
+                    .discord_webhook_input
+                    .as_mut()
+                    .is_some_and(|input| input.handle_edit_key(key) != EditOutcome::Unhandled)
+                {
+                    self.discord_webhook_error = None;
+                }
+            }
+        }
+    }
+
+    fn begin_discord_webhook_input(&mut self) {
+        let mut input = TextInput::default();
+        input.set(self.discord_webhook_url.clone().unwrap_or_default());
+        input.focus();
+        self.discord_webhook_input = Some(input);
+        self.discord_webhook_error = None;
+    }
+
+    fn save_discord_webhook(&mut self) {
+        let webhook_url = self
+            .discord_webhook_input
+            .as_ref()
+            .map(|input| input.text().trim().to_owned())
+            .unwrap_or_default();
+        if !valid_discord_webhook_url(&webhook_url) {
+            self.discord_webhook_error = Some("Enter a Discord HTTPS webhook URL".to_owned());
+            return;
+        }
+        if let Err(error) = self.discord_webhook_store.save(Some(&webhook_url)) {
+            self.discord_webhook_error = Some(format!("Could not save webhook: {error}"));
+            return;
+        }
+        self.discord_webhook_url = Some(webhook_url.clone());
+        self.discord_webhook_input = None;
+        self.discord_webhook_error = None;
+        match self.herdr.configure_discord_webhook(Some(webhook_url)) {
+            Ok(()) => self.notice = Some("Discord webhook saved".to_owned()),
+            Err(error) => self.notice = Some(format!("Could not configure Discord: {error}")),
+        }
+    }
+
+    fn test_discord_webhook(&mut self) {
+        self.discord_webhook_error = None;
+        match self.herdr.test_discord_webhook() {
+            Ok(()) => self.notice = Some("Sending Discord test message…".to_owned()),
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    fn remove_discord_webhook(&mut self) {
+        if let Err(error) = self.discord_webhook_store.save(None) {
+            self.discord_webhook_error = Some(format!("Could not remove webhook: {error}"));
+            return;
+        }
+        self.discord_webhook_url = None;
+        self.discord_webhook_input = None;
+        self.discord_webhook_error = None;
+        match self.herdr.configure_discord_webhook(None) {
+            Ok(()) => self.notice = Some("Discord webhook removed".to_owned()),
+            Err(error) => self.notice = Some(format!("Could not configure Discord: {error}")),
+        }
+    }
+
     pub(crate) fn change_opencode_reasoning(&mut self, delta: isize) {
         self.settings.opencode_reasoning = self.settings.opencode_reasoning.next(delta);
         self.opencode_error = None;
@@ -202,6 +301,8 @@ impl App {
         self.shortcut_error = None;
         self.opencode_model_input = None;
         self.opencode_error = None;
+        self.discord_webhook_input = None;
+        self.discord_webhook_error = None;
     }
 
     pub(crate) fn close_settings(&mut self) {
@@ -232,6 +333,18 @@ impl App {
             SettingsHitTarget::OpenCodeReasoning => {
                 self.opencode_selection = 1;
                 self.change_opencode_reasoning(1);
+            }
+            SettingsHitTarget::DiscordWebhook => {
+                self.discord_selection = 0;
+                self.begin_discord_webhook_input();
+            }
+            SettingsHitTarget::DiscordTest => {
+                self.discord_selection = 1;
+                self.test_discord_webhook();
+            }
+            SettingsHitTarget::DiscordRemove => {
+                self.discord_selection = 2;
+                self.remove_discord_webhook();
             }
             SettingsHitTarget::AutoFetch => self.toggle_auto_fetch(),
             SettingsHitTarget::FetchIntervalDown => self.change_fetch_interval(-1),

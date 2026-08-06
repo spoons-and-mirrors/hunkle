@@ -107,6 +107,12 @@ OpenCode's `provider/model` syntax. Leave it empty to use OpenCode's configured 
 or `d`. `destination` is the agent's worktree path; `repository` and `branch` label
 that checkout. The Markdown body is the task prompt.
 
+Open **Settings > Discord** to save, test, or remove a channel-specific webhook.
+When configured, Hunkle publishes every completed scheduled run's final assistant
+response. Discord mentions are disabled and responses longer than one Discord message
+are truncated. Delivery failures do not fail or rerun the task; they appear on the
+run, and **Refresh** retries the delivery.
+
 ## Keys
 
 These are the default bindings. Open Settings and select **Shortcuts** to

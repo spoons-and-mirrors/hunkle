@@ -14,7 +14,7 @@ pub(super) use crate::app::{
     FileSearchRow, HerdrPrompt, HitTarget, LayoutProfile, PickerAction, PickerEntry,
     ScheduledRunStatus, SchedulerDestinationCard, SchedulerField, SchedulerHitTarget,
     SchedulerSurface, ScrollTarget, SearchScope, Settings, SettingsHitTarget, SettingsPage,
-    ShortcutAction, Shortcuts, SurroundingEntry,
+    ShortcutAction, Shortcuts, SurroundingEntry, TextInput,
 };
 
 pub(super) use super::{

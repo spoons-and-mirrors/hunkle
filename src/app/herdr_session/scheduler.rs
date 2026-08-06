@@ -10,6 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
+    app::valid_discord_webhook_url,
     filesystem::{
         atomic_write_if_unchanged, atomic_write_workspace, ensure_workspace_directory,
         read_optional_workspace_directory, read_workspace_file, remove_workspace_file,
@@ -27,6 +28,10 @@ use super::{
 };
 
 const MAX_RUNS: i64 = 50;
+const DISCORD_DELIVERY_ERROR: &str = "Discord delivery failed: ";
+const DISCORD_MESSAGE_BYTES: usize = 1_900;
+const RESULT_FETCH_ATTEMPTS: usize = 20;
+const RESULT_FETCH_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScheduledTask {
@@ -133,13 +138,21 @@ pub(crate) struct SchedulerService {
     pub(crate) runs: Vec<ScheduledRun>,
     commands: Sender<Command>,
     updates: Receiver<Update>,
+    notices: Receiver<String>,
     worker: Option<JoinHandle<()>>,
     files_root: Option<PathBuf>,
 }
 
 impl SchedulerService {
-    pub(crate) fn open(path: Option<PathBuf>, files_root: Option<PathBuf>) -> Result<Self, String> {
+    pub(crate) fn open(
+        path: Option<PathBuf>,
+        files_root: Option<PathBuf>,
+        discord_webhook_url: Option<String>,
+    ) -> Result<Self, String> {
         let enabled = path.is_some();
+        let discord_webhook = discord_webhook_url
+            .filter(|url| !url.trim().is_empty())
+            .map(DiscordWebhook::new);
         let files_root = files_root
             .map(|root| {
                 std::fs::create_dir_all(&root)
@@ -156,11 +169,22 @@ impl SchedulerService {
         let (tasks, runs) = load_state(&db)?;
         let (commands, command_rx) = mpsc::channel();
         let (update_tx, updates) = mpsc::channel();
+        let (notice_tx, notices) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("hunkle-scheduler".to_owned())
             .spawn({
                 let files_root = files_root.clone();
-                move || worker(db, command_rx, update_tx, enabled, files_root)
+                move || {
+                    worker(
+                        db,
+                        command_rx,
+                        update_tx,
+                        enabled,
+                        files_root,
+                        discord_webhook,
+                        notice_tx,
+                    )
+                }
             })
             .map_err(|error| format!("Could not start scheduler worker: {error}"))?;
         Ok(Self {
@@ -168,6 +192,7 @@ impl SchedulerService {
             runs,
             commands,
             updates,
+            notices,
             worker: Some(worker),
             files_root,
         })
@@ -308,6 +333,17 @@ impl SchedulerService {
         self.send(Command::Refresh(id))
     }
 
+    pub(crate) fn configure_discord_webhook(
+        &self,
+        webhook_url: Option<String>,
+    ) -> Result<(), String> {
+        self.send(Command::ConfigureDiscord(webhook_url))
+    }
+
+    pub(crate) fn test_discord_webhook(&self) -> Result<(), String> {
+        self.send(Command::TestDiscord)
+    }
+
     pub(crate) fn bind_agent(&mut self, id: i64, pane_id: String, terminal_id: String) {
         let Some(run) = self
             .runs
@@ -346,6 +382,9 @@ impl SchedulerService {
                 Err(update_error) => error = Some(update_error),
             }
         }
+        while let Ok(notice) = self.notices.try_recv() {
+            error = Some(notice);
+        }
         (changed, error)
     }
 
@@ -378,6 +417,8 @@ enum Command {
     Refresh(i64),
     BindAgent(i64, String, String),
     BindSession(i64, String),
+    ConfigureDiscord(Option<String>),
+    TestDiscord,
     Shutdown,
 }
 
@@ -390,12 +431,45 @@ struct Claim {
     destination: PathBuf,
 }
 
+struct DiscordWebhook {
+    url: String,
+    agent: ureq::Agent,
+}
+
+impl DiscordWebhook {
+    fn new(url: String) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build();
+        Self {
+            url: url.trim().to_owned(),
+            agent: config.into(),
+        }
+    }
+
+    fn publish(&self, title: &str, output: &str) -> Result<(), String> {
+        if !valid_discord_webhook_url(&self.url) {
+            return Err("Discord webhook URL is invalid".to_owned());
+        }
+        self.agent
+            .post(&self.url)
+            .send_json(serde_json::json!({
+                "content": discord_message(title, output),
+                "allowed_mentions": { "parse": [] },
+            }))
+            .map(|_| ())
+            .map_err(|_| "Discord webhook request failed".to_owned())
+    }
+}
+
 fn worker(
     mut db: Connection,
     commands: Receiver<Command>,
     updates: Sender<Update>,
     enabled: bool,
     files_root: Option<PathBuf>,
+    mut discord_webhook: Option<DiscordWebhook>,
+    notices: Sender<String>,
 ) {
     loop {
         match commands.recv_timeout(Duration::from_secs(if enabled { 2 } else { 30 })) {
@@ -422,13 +496,29 @@ fn worker(
                                 &db,
                                 run,
                                 &mut scheduler_launch,
+                                &mut |db, run_id| {
+                                    complete_run(db, run_id, discord_webhook.as_ref())
+                                },
                                 &updates,
                             )
                         }),
                     Command::RunNow(_) => {
                         Err("scheduler execution is disabled for an in-memory service".to_owned())
                     }
-                    Command::Refresh(id) => refresh(&db, Some(id), &mut scheduler_observe),
+                    Command::Refresh(id) => match retry_delivery(&db, id, &mut |db, run_id| {
+                        complete_run(db, run_id, discord_webhook.as_ref())
+                    }) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => refresh(
+                            &db,
+                            Some(id),
+                            &mut scheduler_observe,
+                            &mut |db, run_id| {
+                                complete_run(db, run_id, discord_webhook.as_ref())
+                            },
+                        ),
+                        Err(error) => Err(error),
+                    },
                     Command::BindAgent(id, pane_id, terminal_id) => db
                         .execute(
                             "UPDATE scheduled_runs SET pane_id = ?2, terminal_id = ?3 WHERE id = ?1 AND terminal_id IS NULL",
@@ -443,6 +533,26 @@ fn worker(
                         )
                         .map(|_| ())
                         .map_err(db_error),
+                    Command::ConfigureDiscord(webhook_url) => {
+                        discord_webhook = webhook_url
+                            .filter(|url| !url.trim().is_empty())
+                            .map(DiscordWebhook::new);
+                        Ok(())
+                    }
+                    Command::TestDiscord => {
+                        let notice = match discord_webhook.as_ref() {
+                            Some(webhook) => match webhook.publish(
+                                "Hunkle Discord integration",
+                                "Test message delivered successfully.",
+                            ) {
+                                Ok(()) => "Discord test message sent".to_owned(),
+                                Err(error) => format!("Discord test failed: {error}"),
+                            },
+                            None => "Discord webhook is not configured".to_owned(),
+                        };
+                        let _ = notices.send(notice);
+                        Ok(())
+                    }
                     Command::Shutdown => unreachable!(),
                 };
                 publish(&db, &updates, result);
@@ -451,9 +561,19 @@ fn worker(
                 let result = if enabled {
                     (|| {
                         while let Some(run) = claim(&mut db, None, now_ms())? {
-                            execute_claim_with_update(&db, run, &mut scheduler_launch, &updates)?;
+                            execute_claim_with_update(
+                                &db,
+                                run,
+                                &mut scheduler_launch,
+                                &mut |db, run_id| {
+                                    complete_run(db, run_id, discord_webhook.as_ref())
+                                },
+                                &updates,
+                            )?;
                         }
-                        refresh(&db, None, &mut scheduler_observe)
+                        refresh(&db, None, &mut scheduler_observe, &mut |db, run_id| {
+                            complete_run(db, run_id, discord_webhook.as_ref())
+                        })
                     })()
                 } else {
                     Ok(())
@@ -462,6 +582,22 @@ fn worker(
             }
         }
     }
+}
+
+fn complete_run(
+    db: &Connection,
+    run_id: i64,
+    discord_webhook: Option<&DiscordWebhook>,
+) -> Result<(), String> {
+    let Some(webhook) = discord_webhook else {
+        return Ok(());
+    };
+    finalize_completed_run(
+        db,
+        run_id,
+        &mut fetch_scheduled_result,
+        &mut |title, output| webhook.publish(title, output),
+    )
 }
 
 fn publish(db: &Connection, updates: &Sender<Update>, result: Result<(), String>) {
@@ -1020,6 +1156,7 @@ fn execute_claim(
     db: &Connection,
     claim: Claim,
     launch: &mut impl FnMut(SchedulerLaunchRequest) -> SchedulerLaunchResult,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
 ) -> Result<(), String> {
     if let Err(error) = validate_destination(&claim.destination) {
         return fail_run(db, claim.run_id, &error);
@@ -1057,6 +1194,9 @@ fn execute_claim(
         ],
     )
     .map_err(db_error)?;
+    if status == ScheduledRunStatus::Completed {
+        complete(db, claim.run_id)?;
+    }
     Ok(())
 }
 
@@ -1064,17 +1204,19 @@ fn execute_claim_with_update(
     db: &Connection,
     claim: Claim,
     launch: &mut impl FnMut(SchedulerLaunchRequest) -> SchedulerLaunchResult,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
     updates: &Sender<Update>,
 ) -> Result<(), String> {
     // Publish the claimed row before the Herdr launch, which can take several seconds.
     let _ = updates.send(load_state(db));
-    execute_claim(db, claim, launch)
+    execute_claim(db, claim, launch, complete)
 }
 
 fn refresh(
     db: &Connection,
     requested: Option<i64>,
     observe: &mut impl FnMut(&str, Option<&str>) -> SchedulerObserveResult,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut statement = db
         .prepare("SELECT id, pane_id, terminal_id, session_id, created_at_ms FROM scheduled_runs WHERE (?1 IS NULL AND status IN ('working', 'blocked', 'unknown') AND pane_id IS NOT NULL) OR id = ?1")
@@ -1117,10 +1259,11 @@ fn refresh(
                     SchedulerObserveResult::Unavailable(
                         "Waiting for OpenCode to report this run's session".to_owned(),
                     ),
+                    complete,
                 )?;
             }
         } else {
-            apply_observation(db, id, observation)?;
+            apply_observation(db, id, observation, complete)?;
         }
     }
     Ok(())
@@ -1130,7 +1273,18 @@ fn apply_observation(
     db: &Connection,
     run_id: i64,
     result: SchedulerObserveResult,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
 ) -> Result<(), String> {
+    let delivery_error = db
+        .query_row(
+            "SELECT error FROM scheduled_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .flatten()
+        .filter(|error| error.starts_with(DISCORD_DELIVERY_ERROR));
     let (status, output, error) = match result {
         SchedulerObserveResult::Missing(error) => {
             return fail_run(db, run_id, &error);
@@ -1138,14 +1292,134 @@ fn apply_observation(
         SchedulerObserveResult::Unavailable(error) => {
             (ScheduledRunStatus::Unknown, None::<String>, Some(error))
         }
-        SchedulerObserveResult::Observed(status) => (agent_status(status), None, None),
+        SchedulerObserveResult::Observed(status) => (agent_status(status), None, delivery_error),
     };
     db.execute(
         "UPDATE scheduled_runs SET status = ?2, output = COALESCE(?3, output), error = ?4 WHERE id = ?1",
         params![run_id, status.text(), output, error],
     )
     .map_err(db_error)?;
+    if status == ScheduledRunStatus::Completed {
+        complete(db, run_id)?;
+    }
     Ok(())
+}
+
+fn fetch_scheduled_result(session_id: &str) -> Result<String, String> {
+    let mut result = Err("OpenCode session has no assistant response".to_owned());
+    for attempt in 0..RESULT_FETCH_ATTEMPTS {
+        result = super::latest_message::final_assistant_text(session_id);
+        if result.is_ok() || attempt + 1 == RESULT_FETCH_ATTEMPTS {
+            break;
+        }
+        thread::sleep(RESULT_FETCH_RETRY_DELAY);
+    }
+    result
+}
+
+fn finalize_completed_run(
+    db: &Connection,
+    run_id: i64,
+    final_text: &mut impl FnMut(&str) -> Result<String, String>,
+    publish: &mut impl FnMut(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    let (title, session_id, stored_output, error) = db
+        .query_row(
+            "SELECT task.title, run.session_id, run.output, run.error FROM scheduled_runs run JOIN scheduled_tasks task ON task.id = run.task_id WHERE run.id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .map_err(db_error)?;
+    let retrying = error
+        .as_deref()
+        .is_some_and(|error| error.starts_with(DISCORD_DELIVERY_ERROR));
+    if !stored_output.is_empty() && !retrying {
+        return Ok(());
+    }
+    let output = if stored_output.is_empty() {
+        let Some(session_id) = session_id else {
+            return record_delivery_error(db, run_id, None, "OpenCode session is unavailable");
+        };
+        match final_text(&session_id) {
+            Ok(output) => output,
+            Err(error) => return record_delivery_error(db, run_id, None, &error),
+        }
+    } else {
+        stored_output
+    };
+    if let Err(error) = publish(&title, &output) {
+        return record_delivery_error(db, run_id, Some(&output), &error);
+    }
+    db.execute(
+        "UPDATE scheduled_runs SET output = ?2, error = NULL WHERE id = ?1",
+        params![run_id, output],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+fn retry_delivery(
+    db: &Connection,
+    run_id: i64,
+    complete: &mut impl FnMut(&Connection, i64) -> Result<(), String>,
+) -> Result<bool, String> {
+    let retrying = db
+        .query_row(
+            "SELECT error FROM scheduled_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .flatten()
+        .is_some_and(|error| error.starts_with(DISCORD_DELIVERY_ERROR));
+    if retrying {
+        complete(db, run_id)?;
+    }
+    Ok(retrying)
+}
+
+fn record_delivery_error(
+    db: &Connection,
+    run_id: i64,
+    output: Option<&str>,
+    error: &str,
+) -> Result<(), String> {
+    let error = format!("{DISCORD_DELIVERY_ERROR}{error}");
+    db.execute(
+        "UPDATE scheduled_runs SET output = COALESCE(?2, output), error = ?3 WHERE id = ?1",
+        params![run_id, output, error],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+fn discord_message(title: &str, output: &str) -> String {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = truncate_utf8(&title, 160);
+    let prefix = format!("Hunkle scheduled task: {title}\n\n");
+    let output = output.trim();
+    if prefix.len().saturating_add(output.len()) <= DISCORD_MESSAGE_BYTES {
+        return format!("{prefix}{output}");
+    }
+    let suffix = "\n\n[Result truncated by Hunkle]";
+    let available = DISCORD_MESSAGE_BYTES.saturating_sub(prefix.len() + suffix.len());
+    format!("{prefix}{}{suffix}", truncate_utf8(output, available))
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(value.len());
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    &value[..end]
 }
 
 fn agent_status(status: AgentStatus) -> ScheduledRunStatus {
@@ -1369,6 +1643,24 @@ fn query_all<T>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn discord_test_reports_missing_configuration() {
+        let mut scheduler = SchedulerService::open(None, None, None).unwrap();
+        scheduler.test_discord_webhook().unwrap();
+
+        let mut notice = None;
+        for _ in 0..20 {
+            let (_, next) = scheduler.poll_completions();
+            notice = notice.or(next);
+            if notice.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(notice.as_deref(), Some("Discord webhook is not configured"));
+    }
+
     fn destination(path: &Path) -> ScheduledTaskDestination {
         ScheduledTaskDestination {
             path: path.to_owned(),
@@ -1514,7 +1806,8 @@ Summarize risks.
             "---\nstatus: enabled\nfrequency: 1h\ntitle: Review\ndescription: Check changes\n---\n\nReview the repository.\n",
         )
         .unwrap();
-        let mut scheduler = SchedulerService::open(None, Some(files.path().to_owned())).unwrap();
+        let mut scheduler =
+            SchedulerService::open(None, Some(files.path().to_owned()), None).unwrap();
         scheduler
             .sync_task_files(vec![
                 ScheduledTaskDestination {
@@ -1604,6 +1897,7 @@ Summarize risks.
                 session_id: Some("ses-1".into()),
                 status: Ok(AgentStatus::Working),
             },
+            &mut |_, _| Ok(()),
             &updates,
         )
         .unwrap();
@@ -1627,6 +1921,7 @@ Summarize risks.
                 session_id: None,
                 status: Ok(AgentStatus::Done),
             },
+            &mut |_, _| Ok(()),
         )
         .unwrap();
         let missing_session = load_state(&first)
@@ -1642,9 +1937,12 @@ Summarize risks.
                 .unwrap()
                 .contains("did not report a session")
         );
-        refresh(&first, None, &mut |_, _| {
-            SchedulerObserveResult::Observed(AgentStatus::Done)
-        })
+        refresh(
+            &first,
+            None,
+            &mut |_, _| SchedulerObserveResult::Observed(AgentStatus::Done),
+            &mut |_, _| Ok(()),
+        )
         .unwrap();
         let missing_session = load_state(&first)
             .unwrap()
@@ -1692,6 +1990,113 @@ Summarize risks.
         }
         delete_task(&first, 1).unwrap();
         assert_eq!(load_state(&first).unwrap(), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn completed_run_publishes_once_and_persists_the_result() {
+        let (db, run_id) = completed_run_database();
+        let mut fetches = 0;
+        let mut deliveries = Vec::new();
+        let mut fetch = |session_id: &str| {
+            fetches += 1;
+            assert_eq!(session_id, "ses-result");
+            Ok("Final report".to_owned())
+        };
+        let mut publish = |title: &str, output: &str| {
+            deliveries.push((title.to_owned(), output.to_owned()));
+            Ok(())
+        };
+
+        finalize_completed_run(&db, run_id, &mut fetch, &mut publish).unwrap();
+        finalize_completed_run(&db, run_id, &mut fetch, &mut publish).unwrap();
+
+        assert_eq!(fetches, 1);
+        assert_eq!(
+            deliveries,
+            [("Review".to_owned(), "Final report".to_owned())]
+        );
+        let (output, error) = db
+            .query_row(
+                "SELECT output, error FROM scheduled_runs WHERE id = ?1",
+                [run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(output, "Final report");
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn failed_delivery_retries_the_persisted_result() {
+        let (db, run_id) = completed_run_database();
+        let mut fetches = 0;
+        let mut fetch = |_: &str| {
+            fetches += 1;
+            Ok("Final report".to_owned())
+        };
+        finalize_completed_run(&db, run_id, &mut fetch, &mut |_, _| {
+            Err("offline".to_owned())
+        })
+        .unwrap();
+        let error = db
+            .query_row(
+                "SELECT error FROM scheduled_runs WHERE id = ?1",
+                [run_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(error.as_deref(), Some("Discord delivery failed: offline"));
+        assert!(retry_delivery(&db, run_id, &mut |_, _| Ok(())).unwrap());
+
+        let mut delivered = false;
+        finalize_completed_run(&db, run_id, &mut fetch, &mut |_, output| {
+            delivered = output == "Final report";
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(delivered);
+        assert_eq!(fetches, 1);
+        assert!(!retry_delivery(&db, run_id, &mut |_, _| Ok(())).unwrap());
+    }
+
+    #[test]
+    fn discord_message_is_bounded_and_collapses_title_whitespace() {
+        let message = discord_message("  Nightly\n review  ", &"é".repeat(2_000));
+
+        assert!(message.starts_with("Hunkle scheduled task: Nightly review\n\n"));
+        assert!(message.ends_with("\n\n[Result truncated by Hunkle]"));
+        assert!(message.len() <= DISCORD_MESSAGE_BYTES);
+    }
+
+    fn completed_run_database() -> (Connection, i64) {
+        let mut db = Connection::open_in_memory().unwrap();
+        prepare_database(&mut db).unwrap();
+        save_task(
+            &db,
+            None,
+            ScheduledTaskEdit {
+                title: "Review".to_owned(),
+                description: String::new(),
+                prompt: "Review it".to_owned(),
+                model: String::new(),
+                destination: std::env::temp_dir(),
+                repository: "repo".to_owned(),
+                branch: "main".to_owned(),
+                enabled: true,
+                interval_minutes: 60,
+                source: None,
+            },
+            1,
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO scheduled_runs (task_id, scheduled_for_ms, status, created_at_ms, session_id) VALUES (1, 1, 'completed', 1, 'ses-result')",
+            [],
+        )
+        .unwrap();
+        let run_id = db.last_insert_rowid();
+        (db, run_id)
     }
 
     #[test]

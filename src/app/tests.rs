@@ -1209,6 +1209,33 @@ fn opencode_settings_edit_model_reasoning_and_persist() {
 }
 
 #[test]
+fn discord_settings_paste_save_and_remove_the_webhook() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("discord-webhook");
+    let mut app = App::new(directory.path().to_path_buf());
+    app.discord_webhook_store = DiscordWebhookStore::at(path.clone());
+    app.mode = Mode::Settings;
+    app.settings_page = SettingsPage::Discord;
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.handle_paste("https://discord.com/api/webhooks/123456/token");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(path.exists());
+    assert_eq!(
+        app.discord_webhook_url.as_deref(),
+        Some("https://discord.com/api/webhooks/123456/token")
+    );
+    assert!(app.discord_webhook_input.is_none());
+
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!path.exists());
+    assert!(app.discord_webhook_url.is_none());
+}
+
+#[test]
 fn auto_fetch_runs_without_blocking_the_app() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

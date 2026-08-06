@@ -1973,6 +1973,39 @@ fn renders_every_primary_surface() {
     assert!(app.opencode_model_input.is_some());
     app.opencode_model_input = None;
 
+    app.settings_page = SettingsPage::Discord;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let discord_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(discord_screen.contains("SCHEDULED TASK DELIVERY"));
+    assert!(discord_screen.contains("Not configured"));
+    let webhook_row = app
+        .regions
+        .hit_target_rect(HitTarget::Settings(SettingsHitTarget::DiscordWebhook))
+        .unwrap();
+    click(&mut app, webhook_row.x + 1, webhook_row.y);
+    assert!(app.discord_webhook_input.is_some());
+    app.discord_webhook_input
+        .as_mut()
+        .unwrap()
+        .set("https://discord.com/api/webhooks/123456/token");
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let masked_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(!masked_screen.contains("discord.com"));
+    assert!(!masked_screen.contains("token"));
+    app.discord_webhook_input = None;
+
     app.settings_page = SettingsPage::Shortcuts;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let shortcuts_screen = terminal

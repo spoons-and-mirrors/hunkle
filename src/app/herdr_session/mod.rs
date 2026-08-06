@@ -449,7 +449,7 @@ pub(crate) struct HerdrSession {
 }
 
 impl HerdrSession {
-    pub(crate) fn detect(config_dir: Option<&Path>) -> Self {
+    pub(crate) fn detect(config_dir: Option<&Path>, discord_webhook_url: Option<String>) -> Self {
         #[cfg(test)]
         let environment: Option<client::Environment> = None;
         #[cfg(not(test))]
@@ -477,6 +477,7 @@ impl HerdrSession {
                 scheduler::SchedulerService::open(
                     config_dir.map(|path| path.join("scheduler.sqlite3")),
                     Some(files_root),
+                    discord_webhook_url,
                 )
             }) {
                 Ok(scheduler) => session.scheduler = Some(scheduler),
@@ -596,6 +597,20 @@ impl HerdrSession {
 
     pub(crate) fn refresh_scheduled_run(&self, id: i64) -> Result<(), String> {
         self.scheduler_service()?.refresh_run(id)
+    }
+
+    pub(crate) fn configure_discord_webhook(
+        &self,
+        webhook_url: Option<String>,
+    ) -> Result<(), String> {
+        let Some(scheduler) = self.scheduler.as_ref() else {
+            return Ok(());
+        };
+        scheduler.configure_discord_webhook(webhook_url)
+    }
+
+    pub(crate) fn test_discord_webhook(&self) -> Result<(), String> {
+        self.scheduler_service()?.test_discord_webhook()
     }
 
     pub(crate) fn resolve_scheduled_run_session(
@@ -1791,7 +1806,7 @@ impl HerdrSession {
 
     #[cfg(test)]
     pub(crate) fn set_scheduled_tasks_for_test(&mut self, tasks: Vec<ScheduledTask>) {
-        let mut scheduler = scheduler::SchedulerService::open(None, None).unwrap();
+        let mut scheduler = scheduler::SchedulerService::open(None, None, None).unwrap();
         scheduler.tasks = tasks;
         self.scheduler = Some(scheduler);
     }
@@ -2214,7 +2229,7 @@ mod latest_user_message_cache_tests {
     #[test]
     fn binds_a_scheduled_run_to_its_live_terminal_and_session() {
         let mut session = HerdrSession::new(true, None, None);
-        session.scheduler = Some(scheduler::SchedulerService::open(None, None).unwrap());
+        session.scheduler = Some(scheduler::SchedulerService::open(None, None, None).unwrap());
         let scheduler = session.scheduler.as_mut().unwrap();
         scheduler.tasks.push(scheduler::ScheduledTask {
             id: 7,

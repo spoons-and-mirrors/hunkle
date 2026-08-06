@@ -72,6 +72,21 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     file.commit()
 }
 
+#[cfg(unix)]
+pub(crate) fn atomic_write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut options = atomic_write_file::OpenOptions::new();
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    atomic_write_file::unix::OpenOptionsExt::preserve_mode(&mut options, false);
+    let mut file = options.open(path)?;
+    file.write_all(content)?;
+    file.commit()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn atomic_write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    atomic_write(path, content)
+}
+
 pub(crate) fn read_workspace_file(root: &Path, relative: &RepoPath) -> Result<Vec<u8>> {
     let path = safe_regular_file(root, relative)?;
     fs::read(&path).with_context(|| format!("could not read {}", relative.display()))

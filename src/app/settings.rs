@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{filesystem::atomic_write, media::MediaPreviewProtocol};
+use crate::{
+    filesystem::{atomic_write, atomic_write_private},
+    media::MediaPreviewProtocol,
+};
 
 use super::{GraphColumn, Shortcuts, explorer::MINIMUM_EXPLORER_PANE_WIDTH};
 
@@ -181,6 +184,83 @@ impl Default for Settings {
 
 pub(crate) struct SettingsStore {
     path: Option<PathBuf>,
+}
+
+pub(crate) struct DiscordWebhookStore {
+    path: Option<PathBuf>,
+}
+
+impl DiscordWebhookStore {
+    pub(crate) fn new(config_dir: Option<&Path>) -> Self {
+        Self {
+            path: config_dir.map(|path| path.join("discord-webhook")),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    pub(crate) fn load(&self) -> std::io::Result<Option<String>> {
+        let Some(path) = self.path.as_deref() else {
+            return Ok(None);
+        };
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let url = contents.trim();
+        if url.is_empty() {
+            return Ok(None);
+        }
+        if !valid_discord_webhook_url(url) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stored Discord webhook URL is invalid",
+            ));
+        }
+        Ok(Some(url.to_owned()))
+    }
+
+    pub(crate) fn save(&self, url: Option<&str>) -> std::io::Result<()> {
+        let Some(path) = self.path.as_deref() else {
+            return Ok(());
+        };
+        let Some(url) = url else {
+            return match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+        };
+        let url = url.trim();
+        if !valid_discord_webhook_url(url) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Discord webhook URL is invalid",
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        atomic_write_private(path, url.as_bytes())
+    }
+}
+
+pub(crate) fn valid_discord_webhook_url(value: &str) -> bool {
+    let value = value.trim();
+    if value.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let path = value
+        .strip_prefix("https://discord.com/api/webhooks/")
+        .or_else(|| value.strip_prefix("https://discordapp.com/api/webhooks/"));
+    let Some((id, token)) = path.and_then(|path| path.split_once('/')) else {
+        return false;
+    };
+    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) && !token.is_empty()
 }
 
 impl SettingsStore {
@@ -403,6 +483,29 @@ pub(crate) fn valid_opencode_model(model: &str) -> bool {
 mod tests {
     use super::*;
     use crate::app::{KeyChord, ShortcutAction};
+
+    #[test]
+    fn discord_webhook_store_validates_and_removes_the_secret() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested/discord-webhook");
+        let store = DiscordWebhookStore::at(path.clone());
+        let webhook = "https://discord.com/api/webhooks/123456/token";
+
+        assert_eq!(store.load().unwrap(), None);
+        assert!(store.save(Some("https://example.com/not-discord")).is_err());
+        store.save(Some(webhook)).unwrap();
+        assert_eq!(store.load().unwrap().as_deref(), Some(webhook));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        store.save(None).unwrap();
+        assert!(!path.exists());
+    }
 
     #[test]
     fn saves_loads_and_clamps_settings() {
