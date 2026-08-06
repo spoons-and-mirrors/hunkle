@@ -339,13 +339,29 @@ fn parse_rows(rows: &[Value]) -> Result<Vec<AgentUserMessage>, String> {
             ));
         }
     }
-    let messages = messages
-        .into_iter()
-        .map(|(_, _, _, message)| message)
-        .collect::<Vec<_>>();
-    (!messages.is_empty())
-        .then_some(messages)
+    let mut grouped = Vec::<AgentUserMessage>::new();
+    for message in messages.into_iter().map(|(_, _, _, message)| message) {
+        if let Some(pending) = grouped
+            .last_mut()
+            .filter(|message| waiting_for_agent_output(message))
+        {
+            pending.text.push_str("\n\n");
+            pending.text.push_str(&message.text);
+            pending.requests = message.requests;
+        } else {
+            grouped.push(message);
+        }
+    }
+    (!grouped.is_empty())
+        .then_some(grouped)
         .ok_or_else(|| "OpenCode session has no user message".to_owned())
+}
+
+fn waiting_for_agent_output(message: &AgentUserMessage) -> bool {
+    message
+        .requests
+        .iter()
+        .all(|request| request.parts.is_empty())
 }
 
 fn request(row: &Value, now_ms: u64) -> AgentRequestPreview {
@@ -593,6 +609,86 @@ mod tests {
             ]
         );
         assert!(messages[1].requests[1].reasoning_active);
+    }
+
+    #[test]
+    fn groups_queued_user_messages_with_the_final_response() {
+        let rows = serde_json::json!([
+            {
+                "message_id": "completed",
+                "user_part_id": "completed-user",
+                "text": "Completed request",
+                "response_id": "completed-response",
+                "response_parts": serde_json::json!([
+                    {"type":"text","text":"Completed response"}
+                ]).to_string()
+            },
+            {
+                "message_id": "queued-one",
+                "user_part_id": "queued-one-user",
+                "text": "First queued prompt",
+                "response_id": "queued-one-response",
+                "response_parts": "[]"
+            },
+            {
+                "message_id": "queued-two",
+                "user_part_id": "queued-two-user",
+                "text": "Second queued prompt",
+                "response_id": "queued-two-response",
+                "response_parts": "[]"
+            },
+            {
+                "message_id": "queued-three",
+                "user_part_id": "queued-three-user",
+                "text": "Third queued prompt",
+                "response_id": "queued-response",
+                "response_parts": serde_json::json!([
+                    {"type":"text","text":"Combined response"}
+                ]).to_string()
+            }
+        ]);
+
+        let messages = parse(&serde_json::to_vec(&rows).unwrap()).unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "Completed request");
+        assert_eq!(messages[0].requests.len(), 1);
+        assert_eq!(
+            messages[1].text,
+            "First queued prompt\n\nSecond queued prompt\n\nThird queued prompt"
+        );
+        assert_eq!(messages[1].requests.len(), 1);
+        assert_eq!(
+            messages[1].requests[0].parts,
+            vec![AgentRequestPartPreview::Text(
+                "Combined response".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn groups_queued_user_messages_before_output_starts() {
+        let rows = serde_json::json!([
+            {
+                "message_id": "queued-one",
+                "user_part_id": "queued-one-user",
+                "text": "First queued prompt"
+            },
+            {
+                "message_id": "queued-two",
+                "user_part_id": "queued-two-user",
+                "text": "Second queued prompt"
+            }
+        ]);
+
+        let messages = parse(&serde_json::to_vec(&rows).unwrap()).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].text,
+            "First queued prompt\n\nSecond queued prompt"
+        );
+        assert!(messages[0].requests.is_empty());
     }
 
     #[test]
