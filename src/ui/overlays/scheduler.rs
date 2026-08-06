@@ -801,11 +801,16 @@ fn draw_destination_picker(
 ) {
     let card = composer.destination_card;
     let selected = composer.destinations.get(composer.destination);
+    let total_rows = composer.destination_picker.items.len();
+    let capacity = location_picker_capacity(frame.area(), bounds, anchor);
+    let start = composer.destination_picker.visible_start();
     let rows = composer
         .destination_picker
         .items
         .iter()
         .enumerate()
+        .skip(start)
+        .take(capacity)
         .filter_map(|(index, item)| {
             let destination = composer.destination_index_for_item(item)?;
             location_picker_row(
@@ -831,7 +836,7 @@ fn draw_destination_picker(
             query: &composer.destination_picker.query,
             placeholder,
             rows: &rows,
-            visible_start: composer.destination_picker.visible_start(),
+            total_rows,
             actions: &[],
             maximum_width,
             overlay_target: HitTarget::Scheduler(Target::DestinationPickerOverlay),

@@ -191,16 +191,42 @@ pub(crate) fn draw_command(frame: &mut Frame<'_>, actions: &mut ActionsState) ->
             .saturating_sub(area.y.saturating_add(4))
             .saturating_sub(1),
     );
-    let lines = command_lines(actions.status, &actions.transcript, &actions.stderr);
-    let rendered_height = rendered_height(&lines, usize::from(output.width));
-    actions.scroll_max = rendered_height
+    ensure_command_layout(actions, usize::from(output.width));
+    actions.scroll_max = actions
+        .command_layout
+        .height
         .saturating_sub(usize::from(output.height))
         .min(usize::from(u16::MAX)) as u16;
     actions.scroll = actions.scroll.min(actions.scroll_max);
+    let scroll = usize::from(actions.scroll);
+    let first = actions
+        .command_layout
+        .starts
+        .partition_point(|start| *start <= scroll)
+        .saturating_sub(1);
+    let rendered_end = scroll.saturating_add(usize::from(output.height));
+    let end = actions
+        .command_layout
+        .starts
+        .partition_point(|start| *start < rendered_end)
+        .max(first.saturating_add(1))
+        .min(actions.command_layout.sources.len());
+    let lines = actions.command_layout.sources[first..end]
+        .iter()
+        .map(|source| command_line(actions, source))
+        .collect::<Vec<_>>();
+    let local_scroll = scroll.saturating_sub(
+        actions
+            .command_layout
+            .starts
+            .get(first)
+            .copied()
+            .unwrap_or_default(),
+    );
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((actions.scroll, 0))
+            .scroll((u16::try_from(local_scroll).unwrap_or(u16::MAX), 0))
             .style(Style::default().fg(palette().ink)),
         output,
     );

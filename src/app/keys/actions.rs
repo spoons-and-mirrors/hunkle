@@ -24,7 +24,7 @@ impl App {
             match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.actions.input.clear();
-                    self.actions.stderr.clear();
+                    self.actions.clear_error();
                 }
                 KeyCode::Enter => {
                     let input = if self.actions.input.trim().is_empty()
@@ -36,10 +36,7 @@ impl App {
                     };
                     match parse_git_args(&input) {
                         Ok(args) => self.start_git_command("Git command".to_owned(), args),
-                        Err(error) => {
-                            self.actions.status = CommandStatus::Input;
-                            self.actions.stderr = error;
-                        }
+                        Err(error) => self.actions.set_input_error(error),
                     }
                 }
                 KeyCode::Down if matches!(self.actions.status, CommandStatus::Complete { .. }) => {
@@ -60,21 +57,15 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     self.actions.input.pop();
-                    if self.actions.status == CommandStatus::Input {
-                        self.actions.stderr.clear();
-                    }
+                    self.actions.clear_input_error();
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.actions.input.clear();
-                    if self.actions.status == CommandStatus::Input {
-                        self.actions.stderr.clear();
-                    }
+                    self.actions.clear_input_error();
                 }
                 KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.actions.input.push(character);
-                    if self.actions.status == CommandStatus::Input {
-                        self.actions.stderr.clear();
-                    }
+                    self.actions.clear_input_error();
                 }
                 _ => {}
             }

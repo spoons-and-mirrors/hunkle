@@ -536,14 +536,21 @@ pub(crate) fn draw_explorer(
             };
             frame.render_widget(explorer_empty_list(message), left_list);
         } else {
+            let (visible, mut visible_state) = visible_list_state(
+                &mut explorer.match_state,
+                explorer.matches.len(),
+                usize::from(left_list.height),
+            );
             let items = explorer
                 .matches
+                .get(visible)
+                .unwrap_or_default()
                 .iter()
                 .map(|entry| explorer_item(entry, usize::from(left_list.width)));
             frame.render_stateful_widget(
                 List::new(items).highlight_style(Style::default().bg(palette().selected)),
                 left_list,
-                &mut explorer.match_state,
+                &mut visible_state,
             );
         }
         if explorer.preview_entries.is_empty() {
@@ -559,6 +566,7 @@ pub(crate) fn draw_explorer(
             let preview = explorer
                 .preview_entries
                 .iter()
+                .take(usize::from(right_list.height))
                 .map(|entry| explorer_item(entry, usize::from(right_list.width)));
             frame.render_widget(List::new(preview), right_list);
         }
@@ -571,8 +579,15 @@ pub(crate) fn draw_explorer(
             };
             frame.render_widget(explorer_empty_list(message), left_list);
         } else {
+            let (visible, mut visible_state) = visible_list_state(
+                &mut explorer.surroundings_state,
+                explorer.surroundings.len(),
+                usize::from(left_list.height),
+            );
             let surroundings = explorer
                 .surroundings
+                .get(visible)
+                .unwrap_or_default()
                 .iter()
                 .map(|entry| surrounding_item(entry, usize::from(left_list.width)));
             frame.render_stateful_widget(
@@ -584,7 +599,7 @@ pub(crate) fn draw_explorer(
                     },
                 )),
                 left_list,
-                &mut explorer.surroundings_state,
+                &mut visible_state,
             );
         }
         if explorer.entries.is_empty() {
@@ -595,8 +610,15 @@ pub(crate) fn draw_explorer(
             };
             frame.render_widget(explorer_empty_list(message), right_list);
         } else {
+            let (visible, mut visible_state) = visible_list_state(
+                &mut explorer.state,
+                explorer.entries.len(),
+                usize::from(right_list.height),
+            );
             let items = explorer
                 .entries
+                .get(visible)
+                .unwrap_or_default()
                 .iter()
                 .map(|entry| explorer_item(entry, usize::from(right_list.width)));
             frame.render_stateful_widget(
@@ -608,7 +630,7 @@ pub(crate) fn draw_explorer(
                     },
                 )),
                 right_list,
-                &mut explorer.state,
+                &mut visible_state,
             );
         }
     }
@@ -729,6 +751,32 @@ pub(crate) fn draw_explorer(
         }
     }
     targets
+}
+
+fn visible_list_state(
+    state: &mut ListState,
+    item_count: usize,
+    viewport_rows: usize,
+) -> (std::ops::Range<usize>, ListState) {
+    let viewport_rows = viewport_rows.max(1);
+    let mut offset = state.offset().min(item_count.saturating_sub(viewport_rows));
+    if let Some(selected) = state.selected().filter(|selected| *selected < item_count) {
+        if selected < offset {
+            offset = selected;
+        } else if selected >= offset.saturating_add(viewport_rows) {
+            offset = selected.saturating_add(1).saturating_sub(viewport_rows);
+        }
+    }
+    *state.offset_mut() = offset;
+    let end = offset.saturating_add(viewport_rows).min(item_count);
+    let mut visible_state = ListState::default();
+    visible_state.select(
+        state
+            .selected()
+            .filter(|selected| (*selected >= offset) && (*selected < end))
+            .map(|selected| selected - offset),
+    );
+    (offset..end, visible_state)
 }
 
 pub(crate) fn draw_file_search(
@@ -1369,9 +1417,22 @@ mod file_search_tests {
     use ratatui::{
         style::{Modifier, Style},
         text::{Line, Span},
+        widgets::ListState,
     };
 
-    use super::{fuzzy_highlight_spans, highlight_preview_match, palette};
+    use super::{fuzzy_highlight_spans, highlight_preview_match, palette, visible_list_state};
+
+    #[test]
+    fn large_lists_materialize_only_the_selected_viewport() {
+        let mut state = ListState::default();
+        state.select(Some(9_999));
+
+        let (visible, visible_state) = visible_list_state(&mut state, 10_000, 20);
+
+        assert_eq!(visible, 9_980..10_000);
+        assert_eq!(state.offset(), 9_980);
+        assert_eq!(visible_state.selected(), Some(19));
+    }
 
     #[test]
     fn highlights_slash_separated_path_query_segments() {

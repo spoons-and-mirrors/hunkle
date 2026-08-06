@@ -13,18 +13,41 @@ const MAX_EDITABLE_BYTES: usize = 1024 * 1024;
 const MAX_HISTORY_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const TAB_WIDTH: usize = 4;
 
-#[derive(Clone)]
-struct Snapshot {
-    text: String,
+#[derive(Clone, Copy)]
+struct EditorState {
     cursor: usize,
     selection_anchor: Option<usize>,
     preferred_column: Option<usize>,
-    changed_lines: BTreeSet<usize>,
 }
 
-impl Snapshot {
+struct TextEdit {
+    start: usize,
+    removed: String,
+    inserted: String,
+}
+
+struct HistoryEntry {
+    edits: Vec<TextEdit>,
+    before: EditorState,
+    after: EditorState,
+    changed_from_line: usize,
+    changed_lines_added: Vec<usize>,
+}
+
+impl HistoryEntry {
     fn memory_size(&self) -> usize {
-        self.text.len()
+        self.edits
+            .iter()
+            .fold(std::mem::size_of::<Self>(), |size, edit| {
+                size.saturating_add(std::mem::size_of::<TextEdit>())
+                    .saturating_add(edit.removed.capacity())
+                    .saturating_add(edit.inserted.capacity())
+            })
+            .saturating_add(
+                self.changed_lines_added
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            )
     }
 }
 
@@ -42,8 +65,8 @@ pub(crate) struct FileEditor {
     cursor: usize,
     selection_anchor: Option<usize>,
     preferred_column: Option<usize>,
-    undo: VecDeque<Snapshot>,
-    redo: VecDeque<Snapshot>,
+    undo: VecDeque<HistoryEntry>,
+    redo: VecDeque<HistoryEntry>,
     history_bytes: usize,
     changed_lines: BTreeSet<usize>,
     pub(crate) scroll_line: usize,
@@ -73,8 +96,9 @@ impl FileEditor {
         if original.contains(&0) {
             bail!("{} is a binary file", path.display());
         }
-        let text = String::from_utf8(original.clone())
+        let mut text = String::from_utf8(original.clone())
             .with_context(|| format!("{} is not valid UTF-8", path.display()))?;
+        reserve_edit_capacity(&mut text);
         let line_ending = preferred_line_ending(&text);
         let line_starts = source_line_starts(&text);
         let mut editor = Self {
@@ -242,8 +266,14 @@ impl FileEditor {
         if bytes.contains(&0) {
             bail!("{} is a binary file", self.path.display());
         }
-        let text = String::from_utf8(bytes.clone())
+        let mut text = String::from_utf8(bytes.clone())
             .with_context(|| format!("{} is not valid UTF-8", self.path.display()))?;
+        reserve_edit_capacity(&mut text);
+        let undo_target = self.undo.back().map(|entry| {
+            let mut target = self.text.clone();
+            apply_undo_edits(&mut target, &entry.edits);
+            target
+        });
         let (line, column) = self.cursor_position();
         self.original = bytes;
         self.text = text;
@@ -253,10 +283,24 @@ impl FileEditor {
         self.line_ending = preferred_line_ending(&self.text);
         self.changed_lines.clear();
         self.set_cursor(line, column);
+        let refreshed_state = self.editor_state();
+        if let (Some(target), Some(entry)) = (undo_target, self.undo.back_mut()) {
+            self.history_bytes = self.history_bytes.saturating_sub(entry.memory_size());
+            entry.edits = vec![TextEdit {
+                start: 0,
+                removed: target,
+                inserted: self.text.clone(),
+            }];
+            entry.after = refreshed_state;
+            entry.changed_from_line = 0;
+            entry.changed_lines_added.clear();
+            self.history_bytes = self.history_bytes.saturating_add(entry.memory_size());
+        }
         self.history_bytes = self
             .history_bytes
-            .saturating_sub(self.redo.iter().map(Snapshot::memory_size).sum());
+            .saturating_sub(self.redo.iter().map(HistoryEntry::memory_size).sum());
         self.redo.clear();
+        self.trim_history();
         Ok(())
     }
 
@@ -419,17 +463,29 @@ impl FileEditor {
         if !uncomment {
             self.validate_insertion(&insertion.repeat(lines.len()))?;
         }
-        self.record_edit();
+        let before = self.editor_state();
+        let mut history_edits = Vec::with_capacity(lines.len());
         for (start, end) in lines.into_iter().rev() {
             if uncomment {
                 let marker_end = start + marker.len();
                 let remove_end =
                     marker_end + usize::from(self.text.as_bytes().get(marker_end) == Some(&b' '));
-                self.text.replace_range(start..remove_end.min(end), "");
+                let remove_end = remove_end.min(end);
+                history_edits.push(TextEdit {
+                    start,
+                    removed: self.text[start..remove_end].to_owned(),
+                    inserted: String::new(),
+                });
+                self.text.replace_range(start..remove_end, "");
                 if start < self.cursor {
                     self.cursor -= (remove_end - start).min(self.cursor - start);
                 }
             } else {
+                history_edits.push(TextEdit {
+                    start,
+                    removed: String::new(),
+                    inserted: insertion.clone(),
+                });
                 self.text.insert_str(start, &insertion);
                 if start <= self.cursor {
                     self.cursor += insertion.len();
@@ -438,8 +494,10 @@ impl FileEditor {
         }
         self.rebuild_line_starts();
         self.selection_anchor = None;
-        self.mark_changed_lines(first_line, last_line);
+        history_edits.sort_unstable_by_key(|edit| edit.start);
+        let changed_lines_added = self.mark_changed_lines(first_line, last_line);
         self.changed_from_line(first_line);
+        self.record_history(before, history_edits, first_line, changed_lines_added);
         Ok(())
     }
 
@@ -492,9 +550,15 @@ impl FileEditor {
             bail!("file would exceed the 1 MiB inline editing limit");
         }
 
-        self.record_edit();
+        let before = self.editor_state();
+        let mut history_edits = Vec::with_capacity(edits.len());
         for (start, end, inserted) in edits.into_iter().rev() {
             let value = if inserted == 0 { "" } else { "\t" };
+            history_edits.push(TextEdit {
+                start,
+                removed: self.text[start..end].to_owned(),
+                inserted: value.to_owned(),
+            });
             self.text.replace_range(start..end, value);
             adjust_offset(&mut self.cursor, start, end, inserted);
             if let Some(anchor) = &mut self.selection_anchor {
@@ -502,8 +566,10 @@ impl FileEditor {
             }
         }
         self.rebuild_line_starts();
-        self.mark_changed_lines(first_line, last_line);
+        history_edits.sort_unstable_by_key(|edit| edit.start);
+        let changed_lines_added = self.mark_changed_lines(first_line, last_line);
         self.changed_from_line(first_line);
+        self.record_history(before, history_edits, first_line, changed_lines_added);
         Ok(())
     }
 
@@ -570,28 +636,27 @@ impl FileEditor {
     }
 
     pub(crate) fn undo(&mut self) -> bool {
-        let Some(snapshot) = self.undo.pop_back() else {
+        let Some(entry) = self.undo.pop_back() else {
             return false;
         };
-        self.history_bytes = self.history_bytes.saturating_sub(snapshot.memory_size());
-        let current = self.snapshot();
-        self.history_bytes = self.history_bytes.saturating_add(current.memory_size());
-        self.redo.push_back(current);
-        self.restore_snapshot(snapshot);
-        self.trim_history();
+        apply_undo_edits(&mut self.text, &entry.edits);
+        for line in &entry.changed_lines_added {
+            self.changed_lines.remove(line);
+        }
+        self.restore_editor_state(entry.before, entry.changed_from_line);
+        self.redo.push_back(entry);
         true
     }
 
     pub(crate) fn redo(&mut self) -> bool {
-        let Some(snapshot) = self.redo.pop_back() else {
+        let Some(entry) = self.redo.pop_back() else {
             return false;
         };
-        self.history_bytes = self.history_bytes.saturating_sub(snapshot.memory_size());
-        let current = self.snapshot();
-        self.history_bytes = self.history_bytes.saturating_add(current.memory_size());
-        self.undo.push_back(current);
-        self.restore_snapshot(snapshot);
-        self.trim_history();
+        apply_redo_edits(&mut self.text, &entry.edits);
+        self.changed_lines
+            .extend(entry.changed_lines_added.iter().copied());
+        self.restore_editor_state(entry.after, entry.changed_from_line);
+        self.undo.push_back(entry);
         true
     }
 
@@ -626,13 +691,20 @@ impl FileEditor {
 
     fn replace_range(&mut self, start: usize, end: usize, value: &str) {
         let first_line = self.line_number_at(start);
-        self.record_edit();
+        let before = self.editor_state();
+        let edit = TextEdit {
+            start,
+            removed: self.text[start..end].to_owned(),
+            inserted: value.to_owned(),
+        };
         self.text.replace_range(start..end, value);
         update_line_starts_after_replace(&mut self.line_starts, start, end, value);
         self.cursor = start.saturating_add(value.len());
         self.selection_anchor = None;
-        self.mark_changed_lines(first_line, self.line_number_at(self.cursor));
+        let changed_lines_added =
+            self.mark_changed_lines(first_line, self.line_number_at(self.cursor));
         self.changed_from_line(first_line);
+        self.record_history(before, vec![edit], first_line, changed_lines_added);
     }
 
     fn validate_replacement(&self, start: usize, end: usize, value: &str) -> Result<()> {
@@ -668,49 +740,57 @@ impl FileEditor {
         self.cursor_follow = true;
     }
 
-    fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            text: self.text.clone(),
+    fn editor_state(&self) -> EditorState {
+        EditorState {
             cursor: self.cursor,
             selection_anchor: self.selection_anchor,
             preferred_column: self.preferred_column,
-            changed_lines: self.changed_lines.clone(),
         }
     }
 
-    fn restore_snapshot(&mut self, snapshot: Snapshot) {
-        self.text = snapshot.text;
+    fn restore_editor_state(&mut self, state: EditorState, changed_from_line: usize) {
         self.rebuild_line_starts();
-        self.advance_revision_from_line(0);
+        self.advance_revision_from_line(changed_from_line);
         self.dirty = self.text.as_bytes() != self.original;
-        self.cursor = snapshot.cursor.min(self.text.len());
-        self.selection_anchor = snapshot
+        self.cursor = state.cursor.min(self.text.len());
+        self.selection_anchor = state
             .selection_anchor
             .filter(|anchor| *anchor <= self.text.len());
-        self.preferred_column = snapshot.preferred_column;
-        self.changed_lines = snapshot.changed_lines;
+        self.preferred_column = state.preferred_column;
         self.cursor_follow = true;
         self.discard_armed = false;
     }
 
-    fn record_edit(&mut self) {
-        let snapshot = self.snapshot();
-        self.history_bytes = self.history_bytes.saturating_add(snapshot.memory_size());
-        self.undo.push_back(snapshot);
+    fn record_history(
+        &mut self,
+        before: EditorState,
+        edits: Vec<TextEdit>,
+        changed_from_line: usize,
+        changed_lines_added: Vec<usize>,
+    ) {
+        let entry = HistoryEntry {
+            edits,
+            before,
+            after: self.editor_state(),
+            changed_from_line,
+            changed_lines_added,
+        };
+        self.history_bytes = self.history_bytes.saturating_add(entry.memory_size());
+        self.undo.push_back(entry);
         self.history_bytes = self
             .history_bytes
-            .saturating_sub(self.redo.iter().map(Snapshot::memory_size).sum());
+            .saturating_sub(self.redo.iter().map(HistoryEntry::memory_size).sum());
         self.redo.clear();
         self.trim_history();
     }
 
     fn trim_history(&mut self) {
         while self.history_bytes > MAX_HISTORY_BYTES {
-            let snapshot = self.undo.pop_front().or_else(|| self.redo.pop_front());
-            let Some(snapshot) = snapshot else {
+            let entry = self.undo.pop_front().or_else(|| self.redo.pop_front());
+            let Some(entry) = entry else {
                 break;
             };
-            self.history_bytes = self.history_bytes.saturating_sub(snapshot.memory_size());
+            self.history_bytes = self.history_bytes.saturating_sub(entry.memory_size());
         }
     }
 
@@ -730,10 +810,14 @@ impl FileEditor {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    fn mark_changed_lines(&mut self, first_line: usize, last_line: usize) {
+    fn mark_changed_lines(&mut self, first_line: usize, last_line: usize) -> Vec<usize> {
+        let mut added = Vec::new();
         for line in first_line..=last_line.min(self.visible_line_count().saturating_sub(1)) {
-            self.changed_lines.insert(line);
+            if self.changed_lines.insert(line) {
+                added.push(line);
+            }
         }
+        added
     }
 
     fn moved_horizontally(&mut self) {
@@ -914,6 +998,33 @@ fn normalize_newlines(value: &str, ending: &str) -> String {
         .replace('\n', ending)
 }
 
+fn apply_undo_edits(text: &mut String, edits: &[TextEdit]) {
+    for edit in edits {
+        text.replace_range(
+            edit.start..edit.start.saturating_add(edit.inserted.len()),
+            &edit.removed,
+        );
+    }
+}
+
+fn apply_redo_edits(text: &mut String, edits: &[TextEdit]) {
+    for edit in edits.iter().rev() {
+        text.replace_range(
+            edit.start..edit.start.saturating_add(edit.removed.len()),
+            &edit.inserted,
+        );
+    }
+}
+
+fn reserve_edit_capacity(text: &mut String) {
+    const EDIT_HEADROOM: usize = 8 * 1024;
+    text.reserve_exact(
+        MAX_EDITABLE_BYTES
+            .saturating_sub(text.len())
+            .min(EDIT_HEADROOM),
+    );
+}
+
 fn preferred_line_ending(text: &str) -> &'static str {
     let crlf = text
         .as_bytes()
@@ -1068,6 +1179,21 @@ mod tests {
         assert_eq!(second.text(), "changed other\n");
         assert!(first.redo());
         assert_eq!(first.text(), "one text\n");
+    }
+
+    #[test]
+    fn small_edits_store_delta_sized_history() {
+        let content = format!("{}\n", "x".repeat(1_000_000));
+        let (_directory, mut editor) = editor(&content);
+        editor.set_cursor(0, 0);
+
+        editor.insert("y").unwrap();
+
+        assert!(editor.history_bytes < 1_024, "{}", editor.history_bytes);
+        assert!(editor.undo());
+        assert_eq!(editor.text(), content);
+        assert!(editor.redo());
+        assert_eq!(editor.text().len(), content.len() + 1);
     }
 
     #[test]

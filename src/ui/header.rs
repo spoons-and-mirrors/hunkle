@@ -893,12 +893,19 @@ fn draw_header_location_picker(
     anchor: Rect,
     kind: HeaderPickerKind,
 ) {
-    let current_root = app.repository().map(|repository| repository.root.as_path());
+    let current_root = app.repository().map(|repository| repository.root.clone());
+    let total_rows = app.header_picker.items.len();
+    let capacity = location_picker_capacity(frame.area(), frame.area(), anchor);
+    app.header_picker
+        .set_viewport_rows(total_rows.min(capacity).max(1));
+    let start = app.header_picker.visible_start();
     let rows = app
         .header_picker
         .items
         .iter()
         .enumerate()
+        .skip(start)
+        .take(capacity)
         .filter_map(|(index, item)| {
             let hovered = matches!(
                 app.hovered_hit_target,
@@ -910,7 +917,9 @@ fn draw_header_location_picker(
             let delete_target = match item {
                 HeaderPickerItem::Worktree { worktree, .. }
                     if !worktree.is_main
-                        && !current_root.is_some_and(|root| root == worktree.path) =>
+                        && !current_root
+                            .as_deref()
+                            .is_some_and(|root| root == worktree.path) =>
                 {
                     Some(HitTarget::HeaderPickerDeleteWorktree(index))
                 }
@@ -922,7 +931,7 @@ fn draw_header_location_picker(
             location_picker_row(
                 item,
                 HitTarget::HeaderPickerItem(index),
-                current_root,
+                current_root.as_deref(),
                 app.header_picker.selected == index,
                 hovered,
                 delete_target,
@@ -966,9 +975,6 @@ fn draw_header_location_picker(
         }
         _ => Vec::new(),
     };
-    let capacity = location_picker_capacity(frame.area(), frame.area(), anchor);
-    app.header_picker
-        .set_viewport_rows(rows.len().min(capacity).max(1));
     let placeholder = match kind {
         HeaderPickerKind::Repositories => "Search repositories...",
         HeaderPickerKind::Worktrees => "Search worktrees...",
@@ -987,7 +993,7 @@ fn draw_header_location_picker(
             query: &app.header_picker.query,
             placeholder,
             rows: &rows,
-            visible_start: app.header_picker.visible_start(),
+            total_rows,
             actions: &actions,
             maximum_width: if kind == HeaderPickerKind::Repositories {
                 80

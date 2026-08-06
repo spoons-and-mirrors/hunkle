@@ -20,7 +20,9 @@ mod settings;
 mod shortcuts;
 mod text_input;
 
-pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandRecord, CommandStatus};
+pub(crate) use actions::{
+    ACTION_ITEMS, ActionsState, CommandLayout, CommandLineSource, CommandStatus,
+};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub(crate) use changes::{ChangesHitTarget, PreviewOrigin, SqliteFocus, SqlitePage};
 pub use changes::{ChangesState, LeftPane};
@@ -888,9 +890,7 @@ impl App {
             Mode::Explorer => self.workspace_explorer.paste(text),
             Mode::Command if self.actions.status != CommandStatus::Running => {
                 self.actions.input.push_str(text);
-                if self.actions.status == CommandStatus::Input {
-                    self.actions.stderr.clear();
-                }
+                self.actions.clear_input_error();
             }
             Mode::HerdrPrompt if !self.herdr_prompt.sending => {
                 self.herdr_prompt.input.insert(text);

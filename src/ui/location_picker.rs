@@ -30,7 +30,7 @@ pub(super) struct LocationPickerView<'a> {
     pub(super) query: &'a TextInput,
     pub(super) placeholder: &'a str,
     pub(super) rows: &'a [LocationPickerRow],
-    pub(super) visible_start: usize,
+    pub(super) total_rows: usize,
     pub(super) actions: &'a [LocationPickerAction<'a>],
     pub(super) maximum_width: u16,
     pub(super) overlay_target: HitTarget,
@@ -167,8 +167,7 @@ pub(super) fn draw_location_picker(
     view: LocationPickerView<'_>,
 ) -> (Vec<(HitTarget, Rect)>, Rect) {
     let visible_rows =
-        view.rows
-            .len()
+        view.total_rows
             .max(1)
             .min(location_picker_capacity(frame.area(), bounds, anchor));
     let width = bounds
@@ -225,13 +224,7 @@ pub(super) fn draw_location_picker(
         area.width,
         u16::try_from(visible_rows).unwrap_or(u16::MAX),
     );
-    for (row, item) in view
-        .rows
-        .iter()
-        .skip(view.visible_start)
-        .take(visible_rows)
-        .enumerate()
-    {
+    for (row, item) in view.rows.iter().take(visible_rows).enumerate() {
         let rect = Rect::new(scroll.x, scroll.y + row as u16, scroll.width, 1);
         let background = if item.selected || item.hovered {
             palette().selected
