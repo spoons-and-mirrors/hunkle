@@ -840,6 +840,10 @@ pub(super) fn draw_agent_history_pane(
         app.agent_preview.prompt_error.as_deref(),
         app.agent_preview.prompt_delivery,
         tabs_trailing,
+        None,
+        2,
+        1,
+        false,
         history,
     );
     app.regions.agent_animation_presented |= animation_presented;
@@ -860,7 +864,7 @@ pub(super) fn draw_agent_history_pane(
     }
 }
 
-fn slide_agent_preview(frame: &mut Frame<'_>, area: Rect, offset: i32, neighbor: &str) {
+pub(super) fn slide_agent_preview(frame: &mut Frame<'_>, area: Rect, offset: i32, neighbor: &str) {
     let maximum = i32::from(area.width / 2);
     let offset = offset.clamp(-maximum, maximum);
     if offset == 0 || area.is_empty() {

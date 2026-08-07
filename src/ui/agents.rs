@@ -27,6 +27,18 @@ use super::{
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MAX_AGENT_TRANSCRIPT_PRESENTATIONS: usize = 8;
+const MIN_EXPANDED_USER_RESPONSE_ROWS: u16 = 3;
+const EXPANDED_USER_RESPONSE_ROWS: u16 = 6;
+
+fn expanded_user_response_rows(user_height: usize, available: u16, fallback: u16) -> u16 {
+    let minimum = MIN_EXPANDED_USER_RESPONSE_ROWS.min(available);
+    let full_height = u16::try_from(user_height).unwrap_or(u16::MAX);
+    if full_height <= available.saturating_sub(minimum) {
+        minimum
+    } else {
+        fallback.min(available)
+    }
+}
 
 struct TranscriptBlock {
     user: bool,
@@ -774,6 +786,10 @@ pub(super) fn draw_history(
     prompt_error: Option<&str>,
     prompt_delivery: AgentPromptDelivery,
     status_area: Rect,
+    repository_area: Option<Rect>,
+    prompt_bottom_padding: u16,
+    card_left_inset: u16,
+    prompt_delivery_inside: bool,
     area: Rect,
 ) -> (Vec<(HitTarget, Rect)>, usize, usize, bool) {
     if area.width < 24 || area.height < 4 {
@@ -791,7 +807,9 @@ pub(super) fn draw_history(
         .max(3);
     let maximum_prompt_height = area.height.saturating_sub(11).max(3).min(area.height);
     let prompt_height = desired_prompt_height.min(maximum_prompt_height);
-    let prompt_space = prompt_height.saturating_add(4).min(area.height);
+    let prompt_space = prompt_height
+        .saturating_add(prompt_bottom_padding.saturating_mul(2))
+        .min(area.height);
     let prompt_bottom_padding = prompt_space.saturating_sub(prompt_height) / 2;
     let prompt_area = Rect::new(
         area.x,
@@ -816,23 +834,50 @@ pub(super) fn draw_history(
     let delivery_label = match prompt_pending {
         Some(AgentPromptOutcome::Queued) => "waiting for idle",
         Some(AgentPromptOutcome::Sending) => "sending",
+        None if prompt_delivery_inside => match prompt_delivery {
+            AgentPromptDelivery::NextRequest => "now",
+            AgentPromptDelivery::OnIdle => "on idle",
+        },
         None => prompt_delivery.label(),
     };
-    let delivery_width = badge_width(delivery_label).min(area.width.saturating_sub(2));
-    let delivery_area = Rect::new(
-        area.right()
-            .saturating_sub(delivery_width)
-            .saturating_sub(1),
-        prompt_area.y.saturating_sub(1),
-        delivery_width,
-        1,
-    );
+    let delivery_label = if prompt_delivery_inside {
+        format!(" {delivery_label} ")
+    } else {
+        delivery_label.to_owned()
+    };
+    let delivery_width = badge_width(&delivery_label).min(area.width.saturating_sub(2));
+    let delivery_area = if prompt_delivery_inside {
+        Rect::new(
+            prompt_area.right().saturating_sub(delivery_width),
+            prompt_area.bottom().saturating_sub(1),
+            delivery_width,
+            1,
+        )
+    } else {
+        Rect::new(
+            area.right()
+                .saturating_sub(delivery_width)
+                .saturating_sub(1),
+            prompt_area.y.saturating_sub(1),
+            delivery_width,
+            1,
+        )
+    };
+    let delivery_background = if prompt_delivery_inside {
+        if prompt_focused && prompt_pending.is_none() {
+            palette().selected
+        } else {
+            palette().surface_alt
+        }
+    } else {
+        palette().panel
+    };
     draw_badge(
         frame,
         delivery_area,
-        delivery_label,
+        &delivery_label,
         palette().cyan,
-        palette().panel,
+        delivery_background,
     );
     let area = Rect::new(
         area.x,
@@ -869,13 +914,15 @@ pub(super) fn draw_history(
     };
     let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
     let repository_width = badge_width(repository).min(area.width);
-    let repository_area = Rect::new(
-        area.x
-            .saturating_add(area.width.saturating_sub(repository_width) / 2),
-        area.y.saturating_sub(1),
-        repository_width,
-        1,
-    );
+    let repository_area = repository_area.unwrap_or_else(|| {
+        Rect::new(
+            area.x
+                .saturating_add(area.width.saturating_sub(repository_width) / 2),
+            area.y.saturating_sub(1),
+            repository_width,
+            1,
+        )
+    });
     if let Some((phase, phase_color)) = phase {
         let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
         let phase_area = Rect::new(status_area.x, status_area.y, status_area.width, 1);
@@ -962,9 +1009,19 @@ pub(super) fn draw_history(
     .max(3)
     .saturating_add(usize::from(user_top_padding));
     let user_y = message_selector.bottom();
-    let user_height = u16::try_from(desired_user_height)
-        .unwrap_or(u16::MAX)
-        .min(main.bottom().saturating_sub(user_y));
+    let user_height = u16::try_from(desired_user_height).unwrap_or(u16::MAX).min(
+        main.bottom()
+            .saturating_sub(user_y)
+            .saturating_sub(if user_message_expanded {
+                expanded_user_response_rows(
+                    desired_user_height,
+                    main.bottom().saturating_sub(user_y),
+                    EXPANDED_USER_RESPONSE_ROWS,
+                )
+            } else {
+                0
+            }),
+    );
     let user_viewport = Rect::new(main.x.saturating_sub(1), user_y, main.width, user_height);
     let viewport = Rect::new(
         main.x.saturating_sub(1),
@@ -973,15 +1030,15 @@ pub(super) fn draw_history(
         main.bottom().saturating_sub(user_viewport.bottom()),
     );
     let user_cards = Rect::new(
-        main.x.saturating_add(1),
+        main.x.saturating_add(card_left_inset),
         user_viewport.y.saturating_add(user_top_padding),
-        main.width.saturating_sub(1),
+        main.width.saturating_sub(card_left_inset),
         user_viewport.height.saturating_sub(user_top_padding),
     );
     let cards = Rect::new(
-        main.x.saturating_add(1),
+        main.x.saturating_add(card_left_inset),
         viewport.y,
-        main.width.saturating_sub(1),
+        main.width.saturating_sub(card_left_inset),
         viewport.height,
     );
     let scroll_max = if user_message_expanded {
@@ -1006,7 +1063,12 @@ pub(super) fn draw_history(
     let mut animation_presented = false;
     draw_message_timeline(
         frame,
-        message_selector,
+        Rect::new(
+            message_selector.x,
+            message_selector.y.saturating_add(1),
+            message_selector.width,
+            message_selector.height.saturating_sub(1).min(1),
+        ),
         Some(agent_key.clone()),
         selected_message,
         messages.len(),
@@ -1059,10 +1121,16 @@ pub(super) fn draw_history(
             rect,
         ));
     }
-    for block in cached.blocks.iter().filter(|_| !user_message_expanded) {
-        if let Some((rect, block_animation_presented)) =
-            draw_transcript_card(frame, block, cards, viewport, scroll, herdr.spinner_frame())
-        {
+    let request_scroll = if user_message_expanded { 0 } else { scroll };
+    for block in &cached.blocks {
+        if let Some((rect, block_animation_presented)) = draw_transcript_card(
+            frame,
+            block,
+            cards,
+            viewport,
+            request_scroll,
+            herdr.spinner_frame(),
+        ) {
             animation_presented |= block_animation_presented;
             if block.expandable
                 && let Some(request) = block.request
@@ -1188,6 +1256,8 @@ pub(super) fn draw_scheduled_history(
     prompt_sending: bool,
     prompt_available: bool,
     conversation_message: Option<&str>,
+    prompt_bottom_padding: u16,
+    prompt_delivery_inside: bool,
     mut area: Rect,
 ) -> (Vec<(HitTarget, Rect)>, usize, usize) {
     fill(frame, area, palette().panel);
@@ -1201,7 +1271,9 @@ pub(super) fn draw_scheduled_history(
             .max(3);
         let prompt_height =
             desired_prompt_height.min(area.height.saturating_sub(11).max(3).min(area.height));
-        let prompt_space = prompt_height.saturating_add(4).min(area.height);
+        let prompt_space = prompt_height
+            .saturating_add(prompt_bottom_padding.saturating_mul(2))
+            .min(area.height);
         let prompt_area = Rect::new(
             area.x,
             area.bottom()
@@ -1221,9 +1293,20 @@ pub(super) fn draw_scheduled_history(
             prompt_area,
         );
         let delivery_label = if prompt_sending { "sending" } else { "now" };
-        let delivery_width = badge_width(delivery_label).min(area.width.saturating_sub(2));
-        draw_badge(
-            frame,
+        let delivery_label = if prompt_delivery_inside {
+            format!(" {delivery_label} ")
+        } else {
+            delivery_label.to_owned()
+        };
+        let delivery_width = badge_width(&delivery_label).min(area.width.saturating_sub(2));
+        let delivery_area = if prompt_delivery_inside {
+            Rect::new(
+                prompt_area.right().saturating_sub(delivery_width),
+                prompt_area.bottom().saturating_sub(1),
+                delivery_width,
+                1,
+            )
+        } else {
             Rect::new(
                 area.right()
                     .saturating_sub(delivery_width)
@@ -1231,10 +1314,23 @@ pub(super) fn draw_scheduled_history(
                 prompt_area.y.saturating_sub(1),
                 delivery_width,
                 1,
-            ),
-            delivery_label,
+            )
+        };
+        let delivery_background = if prompt_delivery_inside {
+            if prompt_focused && !prompt_sending {
+                palette().selected
+            } else {
+                palette().surface_alt
+            }
+        } else {
+            palette().panel
+        };
+        draw_badge(
+            frame,
+            delivery_area,
+            &delivery_label,
             palette().cyan,
-            palette().panel,
+            delivery_background,
         );
         targets.push((HitTarget::AgentPreviewScheduledPrompt(run_id), prompt_area));
         area.height = area.height.saturating_sub(prompt_space);
@@ -1271,9 +1367,19 @@ pub(super) fn draw_scheduled_history(
     }
     .max(3)
     .saturating_add(usize::from(user_top_padding));
-    let user_height = u16::try_from(desired_user_height)
-        .unwrap_or(u16::MAX)
-        .min(area.bottom().saturating_sub(selector.bottom()));
+    let user_height = u16::try_from(desired_user_height).unwrap_or(u16::MAX).min(
+        area.bottom()
+            .saturating_sub(selector.bottom())
+            .saturating_sub(if user_message_expanded {
+                expanded_user_response_rows(
+                    desired_user_height,
+                    area.bottom().saturating_sub(selector.bottom()),
+                    0,
+                )
+            } else {
+                0
+            }),
+    );
     let user_viewport = Rect::new(
         area.x.saturating_sub(1),
         selector.bottom(),
@@ -1307,7 +1413,12 @@ pub(super) fn draw_scheduled_history(
     };
     draw_message_timeline(
         frame,
-        selector,
+        Rect::new(
+            selector.x,
+            selector.y.saturating_add(1),
+            selector.width,
+            selector.height.saturating_sub(1).min(1),
+        ),
         None,
         selected_message,
         messages.len(),
@@ -1345,8 +1456,10 @@ pub(super) fn draw_scheduled_history(
             rect,
         ));
     }
-    for block in cached.blocks.iter().filter(|_| !user_message_expanded) {
-        if let Some((rect, _)) = draw_transcript_card(frame, block, cards, viewport, scroll, 0)
+    let request_scroll = if user_message_expanded { 0 } else { scroll };
+    for block in &cached.blocks {
+        if let Some((rect, _)) =
+            draw_transcript_card(frame, block, cards, viewport, request_scroll, 0)
             && block.expandable
             && let Some(request) = block.request
         {
@@ -2614,11 +2727,11 @@ fn draw_agent_gap(frame: &mut Frame<'_>, gap: Rect, above: Color, below: Color) 
     }
 }
 
-fn badge_width(label: &str) -> u16 {
+pub(super) fn badge_width(label: &str) -> u16 {
     u16::try_from(UnicodeWidthStr::width(label).saturating_add(2)).unwrap_or(u16::MAX)
 }
 
-fn draw_badge(
+pub(super) fn draw_badge(
     frame: &mut Frame<'_>,
     area: Rect,
     label: &str,

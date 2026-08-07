@@ -1745,7 +1745,7 @@ impl App {
                 }
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                     if let Some(index) = self.agents_pane_index() {
-                        self.open_agent_detail(index);
+                        self.open_agent_preview_modal(index);
                     }
                     return;
                 }
@@ -2532,11 +2532,6 @@ impl App {
             self.herdr.agent_scroll = self.herdr.agent_card_index(index).unwrap_or(0);
         }
         self.select_agent_preview(index);
-    }
-
-    fn open_agent_detail(&mut self, index: usize) {
-        self.select_agent_preview(index);
-        self.navigation.show_agent_detail();
     }
 
     pub(super) fn open_agent_preview_modal(&mut self, index: usize) {

@@ -17,6 +17,9 @@ const HEADER_SCROLL_THRESHOLD: u16 = 2;
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         if self.mode == Mode::AgentPreview {
+            if self.layout_profile().is_single() && self.handle_mobile_scroll_gesture(mouse) {
+                return;
+            }
             let point = Position::new(mouse.column, mouse.row);
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -666,7 +669,7 @@ impl App {
         if !self.regions.has_hard_scroll_capture() && self.begin_mouse_control(point) {
             return true;
         }
-        let agent_preview = (!self.regions.has_scroll_capture())
+        let agent_preview = (self.mode == Mode::AgentPreview || !self.regions.has_scroll_capture())
             .then(|| self.agent_preview_at(point))
             .flatten();
         self.mobile_scroll_drag = Some(MobileScrollDrag {
@@ -682,7 +685,9 @@ impl App {
     }
 
     fn agent_preview_at(&self, point: Position) -> Option<AgentKey> {
-        if !self.agents_pane_visible() || !self.single_panel_detail_visible() {
+        if !self.agents_pane_visible()
+            || (!self.single_panel_detail_visible() && self.mode != Mode::AgentPreview)
+        {
             return None;
         }
         match self.regions.hit_target_at(point) {
@@ -1427,7 +1432,7 @@ impl App {
 
         self.last_agent_click = None;
         if self.layout_profile().is_single() && self.agents_pane_visible() {
-            self.open_agent_detail(index);
+            self.open_agent_preview_modal(index);
         } else {
             self.show_agent(index);
         }

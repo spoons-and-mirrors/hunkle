@@ -1238,6 +1238,7 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
         })
         .unwrap();
     assert!(app.agent_preview_user_message_expanded(0));
+    assert!(screen_text(&terminal).contains("agent line 00"));
     assert_eq!(
         app.regions.scroll_target_at(Position::new(
             expanded_message.x + 1,
@@ -1427,7 +1428,7 @@ fn mobile_agent_preview_swipes_between_agents() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    let live_x = first_screen.find("LIVE").unwrap();
+    assert!(!first_screen.contains("LIVE"));
     let drag_start = first.right().saturating_sub(3);
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
@@ -1447,7 +1448,7 @@ fn mobile_agent_preview_swipes_between_agents() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert_eq!(dragging_screen.find("LIVE").unwrap(), live_x);
+    assert!(!dragging_screen.contains("LIVE"));
     app.handle_mouse(mouse(MouseEventKind::Moved, drag_start, first.y + 8));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let returned_screen = terminal
@@ -1457,7 +1458,7 @@ fn mobile_agent_preview_swipes_between_agents() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert_eq!(returned_screen.find("LIVE").unwrap(), live_x);
+    assert!(!returned_screen.contains("LIVE"));
     app.handle_mouse(mouse(
         MouseEventKind::Up(MouseButton::Left),
         drag_start,
@@ -1484,8 +1485,7 @@ fn mobile_agent_preview_swipes_between_agents() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert_eq!(dragging_screen.find("LIVE").unwrap(), live_x);
-    assert_eq!(dragging_screen.matches("LIVE").count(), 1);
+    assert!(!dragging_screen.contains("LIVE"));
     assert!(dragging_screen.contains("second-repo"));
     assert!(
         app.regions
@@ -1578,7 +1578,7 @@ fn mobile_agent_preview_swipes_between_agents() {
 }
 
 #[test]
-fn narrow_agents_drill_from_the_list_into_conversation_history() {
+fn narrow_agent_card_opens_a_full_screen_preview() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -1591,6 +1591,9 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
     );
     let key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(!app.regions.agent_cards_presented);
 
     open_agents_pane(&mut app);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1612,16 +1615,28 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
 
     click(&mut app, pane_id.right().saturating_add(2), agent.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.agents_list.is_none());
-    assert!(app.regions.changes.is_none());
-    let agents_tab = app
+    assert_eq!(app.mode, Mode::AgentPreview);
+    let overlay = app
         .regions
-        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::AgentsTab))
+        .hit_target_rect(HitTarget::AgentPreviewModalOverlay)
         .unwrap();
+    assert_eq!(overlay, Rect::new(0, 0, 49, 48));
+    assert_eq!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewModalBackdrop),
+        Some(overlay)
+    );
+    let back = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewModalClose)
+        .unwrap();
+    assert!(app.regions.changes.is_none());
     let repository = app
         .regions
         .hit_target_rect(HitTarget::AgentPreviewPicker(key.clone()))
         .unwrap();
+    assert_eq!(back.y, repository.y);
+    assert!(back.right() < repository.x);
     let history = app
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
@@ -1629,11 +1644,27 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
             message: 0,
         })
         .unwrap();
-    assert_eq!(repository.y, agents_tab.y.saturating_add(2));
-    assert_eq!(
-        repository.x,
-        history.x + history.width.saturating_sub(repository.width) / 2
-    );
+    let timeline = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewMessageTimeline(key.clone()))
+        .unwrap();
+    let prompt = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPrompt(key.clone()))
+        .unwrap();
+    let delivery = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewPromptDelivery(key.clone()))
+        .unwrap();
+    assert!(repository.x >= overlay.x);
+    assert!(repository.right() <= overlay.right());
+    assert!(history.x >= overlay.x);
+    assert!(history.right() <= overlay.right());
+    assert_eq!(history.x, overlay.x + 2);
+    assert_eq!(timeline.y, history.y + 1);
+    assert_eq!(delivery.right(), prompt.right());
+    assert!(delivery.y >= prompt.y);
+    assert!(delivery.bottom() <= prompt.bottom());
     let screen = terminal
         .backend()
         .buffer()
@@ -1643,21 +1674,15 @@ fn narrow_agents_drill_from_the_list_into_conversation_history() {
         .collect::<String>();
     assert!(screen.contains("Make mobile useful"));
     assert!(screen.contains("Working on it"));
-    let footer = terminal.backend().buffer().content[47 * 49..]
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(!footer.contains(root.to_string_lossy().as_ref()));
-
-    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    assert!(screen.contains("BACK"));
+    assert!(screen.contains("▐ now ▌"));
+    assert!(!screen.contains("AGENT PREVIEW"));
+    assert!(!screen.contains("Structured OpenCode conversation"));
+    assert!(!screen.contains("Enter message"));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.hit_target_rect(HitTarget::Agent(key)).is_some());
     assert!(app.regions.changes.is_none());
-    let footer = terminal.backend().buffer().content[47 * 49..]
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(footer.contains(root.to_string_lossy().as_ref()));
 }
 
 #[test]
