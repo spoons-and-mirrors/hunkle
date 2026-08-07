@@ -296,7 +296,6 @@ fn agent_preview_modal_routes_message_and_agent_scroll_gestures() {
     app.herdr
         .set_agent_user_messages_for_test(1, &[("Other agent", Some("Other response"), 1, 0)]);
     let first_key = agent_key(&app, 0);
-    let second_key = agent_key(&app, 1);
     let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let card = app
@@ -340,23 +339,23 @@ fn agent_preview_modal_routes_message_and_agent_scroll_gestures() {
     let first_message = app
         .regions
         .hit_target_rect(HitTarget::AgentMessage {
-            agent: first_key,
+            agent: first_key.clone(),
             message: 0,
         })
         .unwrap();
 
     app.handle_mouse(mouse(
-        MouseEventKind::ScrollRight,
+        MouseEventKind::ScrollLeft,
         first_message.x + 2,
         first_message.y + 1,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
-            .hit_target_rect(HitTarget::AgentPreviewPicker(second_key))
+            .hit_target_rect(HitTarget::AgentPreviewPicker(first_key))
             .is_some()
     );
-    assert!(screen_text(&terminal).contains("Other response"));
+    assert!(screen_text(&terminal).contains("First response"));
 }
 
 #[test]
@@ -874,9 +873,9 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .collect::<String>();
     assert_eq!(timeline_symbols.trim(), "○ ○ ○ ○ ●");
     assert_eq!(message_timeline.width, history.width);
-    assert_eq!(message_timeline.height, 2);
-    assert_eq!(message_timeline.y, history.y);
-    assert_eq!(repository.y, message_timeline.y.saturating_sub(1));
+    assert_eq!(message_timeline.height, 1);
+    assert_eq!(message_timeline.y, history.y + 1);
+    assert_eq!(repository.y, message_timeline.y.saturating_sub(2));
     assert_eq!(
         repository.x,
         history.x + history.width.saturating_sub(repository.width) / 2
@@ -887,7 +886,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     app.handle_mouse(mouse(
         MouseEventKind::ScrollUp,
         message_timeline.x,
-        message_timeline.y + 1,
+        message_timeline.y,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let previous_screen = terminal
@@ -972,7 +971,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         .unwrap();
     assert_eq!(agent_preview_scroll(&app).0, 0);
     assert_eq!(user_message.x, tooltip.x + 1);
-    assert_eq!(user_message.y, message_timeline.y + 3);
+    assert_eq!(user_message.y, message_timeline.y + 2);
     assert_eq!(
         terminal.backend().buffer()[(user_message.x, user_message.y - 1)].symbol(),
         " "
@@ -1362,7 +1361,7 @@ fn agent_preview_scrolls_a_bounded_user_message_with_requests() {
 }
 
 #[test]
-fn mobile_agent_preview_swipes_between_agents() {
+fn mobile_agent_preview_swipes_between_messages() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -1401,12 +1400,16 @@ fn mobile_agent_preview_swipes_between_agents() {
     ]);
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&snapshot);
-    app.herdr
-        .set_agent_user_messages_for_test(0, &[("First request", Some("First reply"), 1, 0)]);
+    app.herdr.set_agent_user_messages_for_test(
+        0,
+        &[
+            ("First request", Some("First reply"), 1, 0),
+            ("Second request", Some("Second reply"), 1, 0),
+        ],
+    );
     app.herdr
         .set_agent_user_messages_for_test(1, &[("Second request", Some("Second reply"), 1, 0)]);
     let first_key = agent_key(&app, 0);
-    let second_key = agent_key(&app, 1);
     let mut terminal = Terminal::new(TestBackend::new(49, 48)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     open_agents_pane(&mut app);
@@ -1418,7 +1421,7 @@ fn mobile_agent_preview_swipes_between_agents() {
         .regions
         .hit_target_rect(HitTarget::AgentTooltip {
             agent: first_key.clone(),
-            message: 0,
+            message: 1,
         })
         .unwrap();
     let first_screen = terminal
@@ -1429,17 +1432,13 @@ fn mobile_agent_preview_swipes_between_agents() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(!first_screen.contains("LIVE"));
-    let drag_start = first.right().saturating_sub(3);
+    let drag_start = first.x + 8;
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
         drag_start,
         first.y + 8,
     ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Moved,
-        first.x.saturating_add(1),
-        first.y + 8,
-    ));
+    app.handle_mouse(mouse(MouseEventKind::Moved, first.x + 20, first.y + 24));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let dragging_screen = terminal
         .backend()
@@ -1449,98 +1448,45 @@ fn mobile_agent_preview_swipes_between_agents() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(!dragging_screen.contains("LIVE"));
-    app.handle_mouse(mouse(MouseEventKind::Moved, drag_start, first.y + 8));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let returned_screen = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(!returned_screen.contains("LIVE"));
+    assert!(dragging_screen.contains("message 1"));
     app.handle_mouse(mouse(
         MouseEventKind::Up(MouseButton::Left),
-        drag_start,
-        first.y + 8,
-    ));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
-            .is_some()
-    );
-
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
         first.x + 20,
-        first.y + 8,
+        first.y + 24,
     ));
-    app.handle_mouse(mouse(MouseEventKind::Moved, first.x + 8, first.y + 9));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let dragging_screen = terminal
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
+            .is_some()
+    );
+    let first_message_screen = terminal
         .backend()
         .buffer()
         .content
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(!dragging_screen.contains("LIVE"));
-    assert!(dragging_screen.contains("second-repo"));
+    assert!(first_message_screen.contains("First reply"));
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
             .is_some()
-    );
-    app.handle_mouse(mouse(
-        MouseEventKind::Up(MouseButton::Left),
-        first.x + 8,
-        first.y + 9,
-    ));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::AgentPreviewPicker(second_key.clone()))
-            .is_some()
-    );
-    assert!(
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-            .contains("Second reply")
     );
 
-    let second = app
-        .regions
-        .hit_target_rect(HitTarget::AgentTooltip {
-            agent: second_key.clone(),
-            message: 0,
-        })
-        .unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        second.x + 8,
-        second.y + 8,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Drag(MouseButton::Left),
-        second.x + 20,
-        second.y + 7,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Up(MouseButton::Left),
-        second.x + 20,
-        second.y + 7,
-    ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
-            .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
+            .hit_target_rect(HitTarget::AgentTooltip {
+                agent: first_key.clone(),
+                message: 0,
+            })
             .is_some()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewPicker(agent_key(&app, 1)))
+            .is_none()
     );
 
     let first = app
@@ -1550,31 +1496,40 @@ fn mobile_agent_preview_swipes_between_agents() {
             message: 0,
         })
         .unwrap();
-    app.handle_mouse(mouse(MouseEventKind::ScrollRight, first.x + 8, first.y + 8));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::AgentPreviewPicker(second_key.clone()))
-            .is_some()
-    );
-    let second = app
-        .regions
-        .hit_target_rect(HitTarget::AgentTooltip {
-            agent: second_key,
-            message: 0,
-        })
-        .unwrap();
     app.handle_mouse(mouse(
-        MouseEventKind::ScrollLeft,
-        second.x + 8,
-        second.y + 8,
+        MouseEventKind::Down(MouseButton::Left),
+        first.x + 20,
+        first.y + 8,
+    ));
+    app.handle_mouse(mouse(MouseEventKind::Moved, first.x + 8, first.y + 24));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let next_drag_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(next_drag_screen.contains("message 2"));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        first.x + 8,
+        first.y + 24,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
-            .hit_target_rect(HitTarget::AgentPreviewPicker(first_key))
+            .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
             .is_some()
     );
+    let second_message_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(second_message_screen.contains("Second reply"));
 }
 
 #[test]

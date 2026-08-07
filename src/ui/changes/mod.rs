@@ -858,13 +858,13 @@ pub(super) fn draw_agent_history_pane(
             scroll_max,
         );
     }
-    if let Some((offset, neighbor)) = app.agent_preview_swipe(index) {
-        let repository = app.herdr.agent_repository_name(neighbor).unwrap_or("agent");
-        slide_agent_preview(frame, history, offset, repository);
+    if let Some((offset, neighbor)) = app.agent_preview_message_swipe(index) {
+        let label = format!("message {}", neighbor + 1);
+        slide_message_preview(frame, history, offset, &label);
     }
 }
 
-pub(super) fn slide_agent_preview(frame: &mut Frame<'_>, area: Rect, offset: i32, neighbor: &str) {
+pub(super) fn slide_message_preview(frame: &mut Frame<'_>, area: Rect, offset: i32, label: &str) {
     let maximum = i32::from(area.width / 2);
     let offset = offset.clamp(-maximum, maximum);
     if offset == 0 || area.is_empty() {
@@ -895,9 +895,9 @@ pub(super) fn slide_agent_preview(frame: &mut Frame<'_>, area: Rect, offset: i32
     };
     let direction = if offset > 0 { "‹" } else { "›" };
     let label = if offset > 0 {
-        format!("{direction} {neighbor}")
+        format!("{direction} {label}")
     } else {
-        format!("{neighbor} {direction}")
+        format!("{label} {direction}")
     };
     frame.render_widget(
         Paragraph::new(truncate_width(&label, usize::from(reveal.width)))

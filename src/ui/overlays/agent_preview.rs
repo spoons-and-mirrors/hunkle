@@ -260,9 +260,9 @@ pub(in crate::ui) fn draw_agent_preview_modal(
     let scroll_target =
         key.map(|key| (ScrollTarget::AgentTranscript(key), body, scroll, scroll_max));
 
-    if let Some((offset, neighbor)) = app.agent_preview_swipe(index) {
-        let repository = app.herdr.agent_repository_name(neighbor).unwrap_or("agent");
-        changes::slide_agent_preview(frame, body, offset, repository);
+    if let Some((offset, neighbor)) = app.agent_preview_message_swipe(index) {
+        let label = format!("message {}", neighbor + 1);
+        changes::slide_message_preview(frame, body, offset, &label);
     }
 
     if let Some(repository_area) = repository_area {

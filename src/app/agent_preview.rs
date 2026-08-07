@@ -128,7 +128,6 @@ pub(crate) enum AgentPreviewEffect {
     SubmitPrompt,
     PromptEdited,
     SelectAgent(AgentKey),
-    CycleAgent { current: AgentKey, forward: bool },
     TogglePromptDelivery(AgentKey),
     MessageSelected { agent: AgentKey, message: usize },
     TogglePicker(AgentKey),
@@ -390,17 +389,18 @@ impl AgentPreview {
     }
 
     pub(crate) fn handle_horizontal_scroll(
-        &self,
+        &mut self,
         target: &ScrollTarget,
         forward: bool,
+        live: Option<LiveAgentPreviewContext>,
     ) -> AgentPreviewEffect {
         match target {
-            ScrollTarget::AgentTimeline(current) | ScrollTarget::AgentTranscript(current) => {
-                AgentPreviewEffect::CycleAgent {
-                    current: current.clone(),
-                    forward,
-                }
-            }
+            ScrollTarget::AgentTimeline(current) | ScrollTarget::AgentTranscript(current) => live
+                .as_ref()
+                .filter(|live| &live.key == current)
+                .map_or(AgentPreviewEffect::Handled, |live| {
+                    self.move_live_message(live, forward)
+                }),
             _ => AgentPreviewEffect::Handled,
         }
     }

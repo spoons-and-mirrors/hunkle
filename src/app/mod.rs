@@ -2759,19 +2759,6 @@ impl App {
                     self.select_agent_preview(index);
                 }
             }
-            AgentPreviewEffect::CycleAgent { current, forward } => {
-                let count = self.herdr.agents.len();
-                if let Some(current) = self.herdr.agent_index(&current)
-                    && count > 0
-                {
-                    let index = if forward {
-                        (current + 1) % count
-                    } else {
-                        (current + count - 1) % count
-                    };
-                    self.select_agent_preview(index);
-                }
-            }
             AgentPreviewEffect::TogglePromptDelivery(key) => {
                 if self.herdr.agent_index(&key).is_some() {
                     self.agent_preview.focus_agent(key);
@@ -2899,26 +2886,26 @@ impl App {
         self.agent_preview.transcript_scroll(&key, message)
     }
 
-    pub(crate) fn agent_preview_swipe(&self, index: usize) -> Option<(i32, usize)> {
+    pub(crate) fn agent_preview_message_swipe(&self, index: usize) -> Option<(i32, usize)> {
         let drag = self.mobile_scroll_drag.as_ref()?;
         let key = self.herdr.agent_key(index)?;
-        if drag.agent_preview.as_ref() != Some(&key)
-            || drag.axis == Some(MobileDragAxis::Vertical)
-            || self.herdr.agents.len() < 2
+        if drag.agent_preview.as_ref() != Some(&key) || drag.axis == Some(MobileDragAxis::Vertical)
         {
             return None;
         }
         let offset = i32::from(drag.previous.x) - i32::from(drag.start.x);
-        let vertical = drag.start.y.abs_diff(drag.previous.y);
-        if offset == 0 || (drag.axis.is_none() && offset.unsigned_abs() <= u32::from(vertical)) {
+        if offset == 0 {
             return None;
         }
+        let message_count = self.herdr.agent_user_messages(index)?.len();
+        let last = message_count.checked_sub(1)?;
+        let current = self.agent_preview_message(index).unwrap_or(last);
         let neighbor = if offset < 0 {
-            (index + 1) % self.herdr.agents.len()
+            current.saturating_add(1).min(last)
         } else {
-            (index + self.herdr.agents.len() - 1) % self.herdr.agents.len()
+            current.saturating_sub(1)
         };
-        Some((offset, neighbor))
+        (neighbor != current).then_some((offset, neighbor))
     }
 
     pub(crate) fn agent_preview_message(&self, index: usize) -> Option<usize> {

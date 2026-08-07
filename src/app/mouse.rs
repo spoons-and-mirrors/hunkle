@@ -49,9 +49,11 @@ impl App {
                                 | ScrollTarget::AgentScheduledTranscript(_)
                         )
                     {
+                        let live = self.agent_preview_live_context_for_scroll_target(&target);
                         let effect = self.agent_preview.handle_horizontal_scroll(
                             &target,
                             mouse.kind == MouseEventKind::ScrollRight,
+                            live,
                         );
                         self.apply_agent_preview_effect(effect);
                     }
@@ -359,9 +361,12 @@ impl App {
                         | ScrollTarget::AgentScheduledTranscript(_)
                 )
             {
-                let effect = self
-                    .agent_preview
-                    .handle_horizontal_scroll(&target, mouse.kind == MouseEventKind::ScrollRight);
+                let live = self.agent_preview_live_context_for_scroll_target(&target);
+                let effect = self.agent_preview.handle_horizontal_scroll(
+                    &target,
+                    mouse.kind == MouseEventKind::ScrollRight,
+                    live,
+                );
                 self.apply_agent_preview_effect(effect);
                 return;
             }
@@ -574,8 +579,7 @@ impl App {
                         let vertical_threshold = if header { HEADER_SCROLL_THRESHOLD } else { 1 };
                         if drag.axis.is_none() {
                             drag.axis = if (drag.agent_preview.is_some()
-                                && horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD
-                                && horizontal > vertical)
+                                && horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD)
                                 || (header
                                     && horizontal >= HEADER_SCROLL_THRESHOLD
                                     && horizontal > vertical)
@@ -623,15 +627,17 @@ impl App {
                         self.mobile_scroll_drag = None;
                         if drag.axis == Some(MobileDragAxis::Horizontal) {
                             let horizontal = drag.start.x.abs_diff(point.x);
-                            let vertical = drag.start.y.abs_diff(point.y);
                             if horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD
-                                && horizontal > vertical
                                 && let Some(agent) = drag.agent_preview.as_ref()
                             {
                                 let target = ScrollTarget::AgentTimeline(agent.clone());
-                                let effect = self
-                                    .agent_preview
-                                    .handle_horizontal_scroll(&target, point.x < drag.start.x);
+                                let live =
+                                    self.agent_preview_live_context_for_scroll_target(&target);
+                                let effect = self.agent_preview.handle_horizontal_scroll(
+                                    &target,
+                                    point.x < drag.start.x,
+                                    live,
+                                );
                                 self.apply_agent_preview_effect(effect);
                             }
                         } else if !drag.moved {
@@ -698,6 +704,18 @@ impl App {
                 | HitTarget::AgentPreviewMessageTimeline(agent)
                 | HitTarget::AgentPreviewRequest { agent, .. },
             ) => Some(agent),
+            _ => None,
+        }
+    }
+
+    fn agent_preview_live_context_for_scroll_target(
+        &self,
+        target: &ScrollTarget,
+    ) -> Option<super::LiveAgentPreviewContext> {
+        match target {
+            ScrollTarget::AgentTimeline(key) | ScrollTarget::AgentTranscript(key) => {
+                self.agent_preview_live_context_for_key(key)
+            }
             _ => None,
         }
     }
