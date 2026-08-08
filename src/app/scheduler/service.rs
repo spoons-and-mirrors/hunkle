@@ -2228,6 +2228,8 @@ fn prepare_database(db: &mut Connection) -> Result<(), String> {
         8 => "",
         9 => "",
         10 => "",
+        // ACP-enabled builds add an adapter_id column without changing the shared fields.
+        11 => "",
         _ => return Err(format!("scheduler database version {version} is newer than supported")),
     };
     tx.execute_batch(sql).map_err(db_error)?;
@@ -3270,5 +3272,25 @@ Summarize risks.
             10
         );
         assert!(db.prepare("SELECT session_id FROM scheduled_runs").is_ok());
+    }
+
+    #[test]
+    fn opens_v11_database_with_additive_adapter_column() {
+        let mut db = Connection::open_in_memory().unwrap();
+        prepare_database(&mut db).unwrap();
+        db.execute_batch(
+            "ALTER TABLE scheduled_runs ADD COLUMN adapter_id TEXT NOT NULL DEFAULT 'legacy';
+             PRAGMA user_version = 11;",
+        )
+        .unwrap();
+
+        prepare_database(&mut db).unwrap();
+
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            11
+        );
+        assert_eq!(load_state(&db).unwrap(), (Vec::new(), Vec::new()));
     }
 }
