@@ -32,9 +32,9 @@ pub(crate) use client::{HerdrPaneLayout, SchedulerObserveResult};
 pub(crate) use client::{HerdrPaneRect, SchedulerLaunchRequest, SchedulerLaunchResult};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-#[cfg(not(test))]
 const BACKGROUND_PROBE_ATTEMPTS: u8 = 3;
 const BACKGROUND_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const BACKGROUND_FAILURES_BEFORE_DETACH: u8 = 3;
 const AGENT_MESSAGE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const TIMING_LAST_SEEN_INTERVAL_MS: u64 = 60_000;
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
@@ -443,6 +443,7 @@ pub(crate) struct HerdrSession {
     background_attached: bool,
     background_detection: bool,
     background_probe_attempts: u8,
+    background_snapshot_failures: u8,
     snapshot_request_generation: u64,
     snapshot_generation: u64,
     pub(crate) workspaces: Vec<HerdrWorkspace>,
@@ -536,6 +537,7 @@ impl HerdrSession {
             background_attached: false,
             background_detection: false,
             background_probe_attempts: 0,
+            background_snapshot_failures: 0,
             snapshot_request_generation: 0,
             snapshot_generation: 0,
             workspaces: Vec::new(),
@@ -592,6 +594,10 @@ impl HerdrSession {
 
     pub(crate) fn is_background_attached(&self) -> bool {
         self.background_attached
+    }
+
+    pub(crate) fn agent_stash_running(&self) -> bool {
+        self.agent_stash_running
     }
 
     pub(crate) fn should_poll(&self) -> bool {
@@ -678,31 +684,33 @@ impl HerdrSession {
                     self.loading = false;
                     match result {
                         Ok(snapshot) => {
+                            self.background_snapshot_failures = 0;
                             self.snapshot_generation =
                                 self.snapshot_generation.max(request_generation);
                             if self.enabled {
-                                if self.background_attached
+                                let attachment_lost = self.background_attached
                                     && !snapshot.workspaces.iter().any(|workspace| {
                                         Some(workspace.id.as_str())
                                             == self.host_workspace_id.as_deref()
-                                    })
-                                {
+                                    });
+                                if attachment_lost {
                                     if let Some(workspace_id) =
                                         snapshot.focused_workspace_id.clone()
                                     {
                                         self.host_workspace_id = Some(workspace_id);
                                     } else {
-                                        self.enabled = false;
-                                        self.background_attached = false;
-                                        self.background_detection = true;
-                                        self.host_workspace_id = None;
-                                        self.next_refresh =
-                                            Instant::now() + BACKGROUND_RETRY_INTERVAL;
+                                        self.detach_background(observed_at_ms);
+                                        poll.notice = Some(
+                                            "Herdr workspace disappeared; continuing standalone"
+                                                .to_owned(),
+                                        );
                                     }
                                 }
-                                self.workspaces = snapshot.workspaces;
-                                self.apply_agent_snapshot_at(snapshot.agents, observed_at_ms);
-                                self.error = None;
+                                if self.enabled {
+                                    self.workspaces = snapshot.workspaces;
+                                    self.apply_agent_snapshot_at(snapshot.agents, observed_at_ms);
+                                    self.error = None;
+                                }
                             } else if let Some(workspace_id) = snapshot.focused_workspace_id {
                                 self.enabled = true;
                                 self.background_attached = true;
@@ -722,7 +730,20 @@ impl HerdrSession {
                             }
                         }
                         Err(error) => {
-                            if self.enabled {
+                            if self.background_attached {
+                                self.background_snapshot_failures =
+                                    self.background_snapshot_failures.saturating_add(1);
+                                if self.background_snapshot_failures
+                                    >= BACKGROUND_FAILURES_BEFORE_DETACH
+                                {
+                                    self.detach_background(observed_at_ms);
+                                    poll.notice = Some(
+                                        "Herdr disconnected; continuing standalone".to_owned(),
+                                    );
+                                } else {
+                                    self.error = Some(error);
+                                }
+                            } else if self.enabled {
                                 self.error = Some(error);
                             } else if self.background_probe_attempts == 0 {
                                 self.next_refresh = Instant::now() + BACKGROUND_RETRY_INTERVAL;
@@ -917,6 +938,21 @@ impl HerdrSession {
         }
         poll.changed |= self.poll_spinner(Instant::now(), agent_animation_presented);
         poll
+    }
+
+    fn detach_background(&mut self, observed_at_ms: u64) {
+        self.enabled = false;
+        self.background_attached = false;
+        self.background_detection = true;
+        self.background_probe_attempts = BACKGROUND_PROBE_ATTEMPTS;
+        self.background_snapshot_failures = 0;
+        self.host_workspace_id = None;
+        self.host_tab_id = None;
+        self.host_pane_id = None;
+        self.workspaces.clear();
+        self.apply_agent_snapshot_at(Vec::new(), observed_at_ms);
+        self.error = None;
+        self.next_refresh = Instant::now() + BACKGROUND_RETRY_INTERVAL;
     }
 
     fn apply_agent_snapshot_at(&mut self, agents: Vec<AgentPane>, now_ms: u64) {
@@ -1859,9 +1895,12 @@ impl HerdrSession {
             self.background_probe_attempts = self.background_probe_attempts.saturating_sub(1);
         }
         let sender = self.sender.clone();
+        let background_attached = self.background_attached;
         thread::spawn(move || {
             let result = if probing {
                 client::probe_session_snapshot()
+            } else if background_attached {
+                client::background_session_snapshot()
             } else {
                 client::session_snapshot()
             }
@@ -1881,7 +1920,8 @@ impl HerdrSession {
     pub(crate) fn ready_for_test(value: &Value) -> Self {
         let mut session = Self::new(true, None, None);
         session.cross_workspace_agents = true;
-        let (mut workspaces, agents) = client::parse_snapshot(value).unwrap();
+        let value = client::complete_snapshot_for_test(value);
+        let (mut workspaces, agents) = client::parse_snapshot(&value).unwrap();
         populate_workspace_branches(&mut workspaces);
         session.workspaces = workspaces;
         session.apply_agent_snapshot_at(agents, unix_time_ms());
@@ -1892,7 +1932,8 @@ impl HerdrSession {
 
     #[cfg(test)]
     pub(crate) fn apply_snapshot_for_test(&mut self, value: &Value) {
-        let (mut workspaces, agents) = client::parse_snapshot(value).unwrap();
+        let value = client::complete_snapshot_for_test(value);
+        let (mut workspaces, agents) = client::parse_snapshot(&value).unwrap();
         populate_workspace_branches(&mut workspaces);
         self.workspaces = workspaces;
         self.apply_agent_snapshot_at(agents, unix_time_ms());
@@ -2286,6 +2327,67 @@ mod presentation_interest_tests {
 
         session.poll(false);
         assert_eq!(session.background_workspace_id(), Some("w2"));
+    }
+
+    #[test]
+    fn repeated_background_snapshot_failures_return_to_standalone_discovery() {
+        let mut session = HerdrSession::new(false, None, None);
+        session.enabled = true;
+        session.background_attached = true;
+        session.host_workspace_id = Some("w1".to_owned());
+        session.workspaces = vec![test_workspace("w1")];
+        session.agents = vec![working_agent(None)];
+        session.observed_agents = session.agents.clone();
+        for request_generation in 1..=u64::from(BACKGROUND_FAILURES_BEFORE_DETACH) {
+            session
+                .sender
+                .send(Completion::Snapshot {
+                    result: Err("Herdr is unavailable".to_owned()),
+                    observed_at_ms: unix_time_ms(),
+                    request_generation,
+                })
+                .unwrap();
+        }
+
+        let poll = session.poll(false);
+
+        assert!(!session.is_enabled());
+        assert!(!session.is_background_attached());
+        assert!(session.should_poll());
+        assert!(session.workspaces.is_empty());
+        assert!(session.agents.is_empty());
+        assert_eq!(
+            poll.notice.as_deref(),
+            Some("Herdr disconnected; continuing standalone")
+        );
+    }
+
+    #[test]
+    fn vanished_background_workspace_without_a_new_focus_clears_stale_agents() {
+        let mut session = HerdrSession::new(false, None, None);
+        session.enabled = true;
+        session.background_attached = true;
+        session.host_workspace_id = Some("w1".to_owned());
+        session.agents = vec![working_agent(None)];
+        session.observed_agents = session.agents.clone();
+        session
+            .sender
+            .send(Completion::Snapshot {
+                result: Ok(client::SessionSnapshot {
+                    workspaces: vec![test_workspace("w2")],
+                    agents: vec![working_agent(None)],
+                    focused_workspace_id: None,
+                }),
+                observed_at_ms: unix_time_ms(),
+                request_generation: 1,
+            })
+            .unwrap();
+
+        session.poll(false);
+
+        assert!(!session.is_enabled());
+        assert!(session.workspaces.is_empty());
+        assert!(session.agents.is_empty());
     }
 
     #[test]

@@ -301,6 +301,10 @@ impl App {
         if !self.herdr_available() {
             return;
         }
+        if self.herdr.agent_stash_running() || self.pending_agent_preview_pane.is_some() {
+            self.notice = Some("Another agent operation is still in progress".to_owned());
+            return;
+        }
         self.header_picker.close();
         let Some(path) = self.agent_destination_for_start() else {
             self.notice = Some("Open a workspace first".to_owned());

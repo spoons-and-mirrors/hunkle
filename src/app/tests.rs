@@ -267,6 +267,89 @@ fn background_agent_preview_handoff_expires_when_the_agent_disappears() {
 }
 
 #[test]
+fn agent_creation_blocks_controlled_quit_and_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr_prompt.sending = true;
+
+    assert!(!app.can_restart());
+    app.request_quit();
+
+    assert!(!app.should_quit);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("An agent operation is still running")
+    );
+
+    app.herdr_prompt.sending = false;
+    app.pending_agent_preview_pane = Some((
+        "w1:p2".to_owned(),
+        std::time::Instant::now() + Duration::from_secs(30),
+        app.herdr.snapshot_request_generation(),
+    ));
+    assert!(!app.can_restart());
+    app.request_quit();
+    assert!(!app.should_quit);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("The new agent preview is still opening")
+    );
+}
+
+#[test]
+fn herdr_disconnect_reconciles_settings_selections() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.settings_state.selection = 5;
+    app.settings_state.shortcut_capture = true;
+    app.settings_state.shortcut_selection = Shortcuts::definitions(true, true)
+        .position(|definition| definition.action == ShortcutAction::OpenHerdr)
+        .unwrap();
+
+    app.reconcile_settings_after_herdr_capability_change(Some(ShortcutAction::OpenHerdr));
+
+    assert!(!app.settings_state.shortcut_capture);
+    assert_ne!(app.settings_state.selection, 5);
+    assert_eq!(
+        app.settings_state.shortcut_scroll,
+        app.settings_state.shortcut_selection
+    );
+    assert!(
+        Shortcuts::definitions(false, false)
+            .nth(app.settings_state.shortcut_selection)
+            .is_some()
+    );
+}
+
+#[test]
+fn herdr_reconnect_preserves_the_selected_shortcut_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    let selected = ShortcutAction::Quit;
+    app.settings_state.shortcut_capture = true;
+    app.settings_state.shortcut_selection = Shortcuts::definitions(false, false)
+        .position(|definition| definition.action == selected)
+        .unwrap();
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "Workspace" }],
+            "agents": []
+        }}
+    }));
+    app.herdr.set_background_attached_for_test("w1");
+
+    app.reconcile_settings_after_herdr_capability_change(Some(selected));
+
+    assert!(app.settings_state.shortcut_capture);
+    assert_eq!(
+        Shortcuts::definitions(true, false)
+            .nth(app.settings_state.shortcut_selection)
+            .map(|definition| definition.action),
+        Some(selected)
+    );
+}
+
+#[test]
 fn background_agent_activation_always_opens_the_preview() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();

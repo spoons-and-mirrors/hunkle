@@ -769,7 +769,11 @@ pub(crate) fn draw_settings(
             agent_harness_row,
         );
 
-        let agent_card_click = settings.agent_card_click_action.label();
+        let agent_card_click = if herdr_embedded {
+            settings.agent_card_click_action.label()
+        } else {
+            "Preview only"
+        };
         let agent_card_click_padding = usize::from(agent_card_click_row.width)
             .saturating_sub("Agent card click".len() + agent_card_click.len());
         frame.render_widget(
@@ -884,10 +888,6 @@ pub(crate) fn draw_settings(
                 agent_harness_row,
             ),
             (
-                HitTarget::Settings(SettingsHitTarget::AgentCardClick),
-                agent_card_click_row,
-            ),
-            (
                 HitTarget::Settings(SettingsHitTarget::AgentTime),
                 agent_time_row,
             ),
@@ -896,6 +896,12 @@ pub(crate) fn draw_settings(
                 clear_agent_timings_row,
             ),
         ]);
+        if herdr_embedded {
+            targets.push((
+                HitTarget::Settings(SettingsHitTarget::AgentCardClick),
+                agent_card_click_row,
+            ));
+        }
     }
     SettingsRegions {
         targets,

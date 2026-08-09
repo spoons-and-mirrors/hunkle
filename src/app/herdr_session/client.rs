@@ -324,6 +324,15 @@ pub(super) fn session_snapshot() -> Result<SessionSnapshot, String> {
     session_snapshot_with(run(&["api".to_owned(), "snapshot".to_owned()])?)
 }
 
+pub(super) fn background_session_snapshot() -> Result<SessionSnapshot, String> {
+    let args = ["api".to_owned(), "snapshot".to_owned()];
+    let output = run_output_with_timeout(&args, 4 * 1024 * 1024, Duration::from_secs(5))
+        .map_err(|error| error.message)?;
+    let value = decode_response(&output.stdout, &output.stderr, output.status.success())
+        .map_err(|error| error.message)?;
+    session_snapshot_with(value)
+}
+
 pub(super) fn probe_session_snapshot() -> Result<SessionSnapshot, String> {
     let args = ["api".to_owned(), "snapshot".to_owned()];
     let output = run_output_with_timeout(&args, 4 * 1024 * 1024, Duration::from_secs(1))
@@ -336,12 +345,20 @@ pub(super) fn probe_session_snapshot() -> Result<SessionSnapshot, String> {
 fn session_snapshot_with(value: Value) -> Result<SessionSnapshot, String> {
     let (workspaces, agents) = parse_snapshot(&value)?;
     let snapshot = value.pointer("/result/snapshot");
-    let focused_workspace_id =
-        match snapshot.and_then(|snapshot| snapshot.get("focused_workspace_id")) {
-            Some(value) => value.as_str().map(str::to_owned),
-            None => derived_focused_workspace_id(&value)
-                .or_else(|| (workspaces.len() == 1).then(|| workspaces[0].id.clone())),
-        };
+    let focused_workspace_id = match snapshot
+        .and_then(|snapshot| snapshot.get("focused_workspace_id"))
+    {
+        Some(Value::String(value)) if workspaces.iter().any(|workspace| workspace.id == *value) => {
+            Some(value.clone())
+        }
+        Some(Value::String(_)) => {
+            return Err("Herdr snapshot focused workspace is unknown".to_owned());
+        }
+        Some(Value::Null) => None,
+        Some(_) => return Err("Herdr snapshot focused workspace is malformed".to_owned()),
+        None => derived_focused_workspace_id(&value)
+            .or_else(|| (workspaces.len() == 1).then(|| workspaces[0].id.clone())),
+    };
     Ok(SessionSnapshot {
         workspaces,
         agents,
@@ -1785,20 +1802,22 @@ fn create_tab_with_agent_with(
 ) -> Result<String, String> {
     let mut runner = runner;
     opencode_command(session_id.as_deref())?;
+    let cwd = path
+        .to_str()
+        .ok_or_else(|| "Released Herdr cannot create an agent from a non-UTF-8 path".to_owned())?;
     let label = path
         .file_name()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| OsStr::new("agent"))
         .to_string_lossy()
         .into_owned();
-    let cwd = path.into_os_string();
     let created = runner(&[
         "tab".into(),
         "create".into(),
         "--workspace".into(),
         workspace_id.into(),
         "--cwd".into(),
-        cwd,
+        cwd.into(),
         "--label".into(),
         label.into(),
         "--no-focus".into(),
@@ -2103,6 +2122,11 @@ pub(super) fn parse_snapshot(
         .get("result")
         .and_then(|result| result.get("snapshot"))
         .ok_or_else(|| "Herdr returned an invalid session snapshot".to_owned())?;
+    for collection in ["workspaces", "tabs", "panes", "layouts", "agents"] {
+        if !snapshot.get(collection).is_some_and(Value::is_array) {
+            return Err(format!("Herdr snapshot {collection} are malformed"));
+        }
+    }
     let mut workspaces: Vec<ParsedWorkspace> = snapshot
         .get("workspaces")
         .and_then(Value::as_array)
@@ -2115,19 +2139,25 @@ pub(super) fn parse_snapshot(
         })
         .collect::<Result<_, _>>()?;
     assign_worktree_parents(&mut workspaces);
-    let mut agents = match snapshot.get("agents") {
-        None => Vec::new(),
-        Some(agents) => agents
-            .as_array()
-            .ok_or_else(|| "Herdr snapshot agents are malformed".to_owned())?
-            .iter()
-            .enumerate()
-            .map(|(index, agent)| {
-                parse_agent_pane(agent, snapshot)
-                    .ok_or_else(|| format!("Herdr snapshot agent {index} is malformed"))
-            })
-            .collect::<Result<_, _>>()?,
-    };
+    let mut agents: Vec<AgentPane> = snapshot
+        .get("agents")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Herdr snapshot agents are malformed".to_owned())?
+        .iter()
+        .enumerate()
+        .filter_map(|(index, agent)| {
+            if !agent.is_object() {
+                return Some(Err(format!("Herdr snapshot agent {index} is malformed")));
+            }
+            match agent.get("agent") {
+                None | Some(Value::Null) => None,
+                Some(_) => Some(
+                    parse_agent_pane(agent, snapshot)
+                        .ok_or_else(|| format!("Herdr snapshot agent {index} is malformed")),
+                ),
+            }
+        })
+        .collect::<Result<_, _>>()?;
     if let Some(focused_pane_id) = snapshot.get("focused_pane_id").and_then(Value::as_str) {
         for agent in &mut agents {
             agent.focused = agent.pane_id == focused_pane_id;
@@ -2140,6 +2170,23 @@ pub(super) fn parse_snapshot(
             .collect(),
         agents,
     ))
+}
+
+#[cfg(test)]
+pub(super) fn complete_snapshot_for_test(value: &Value) -> Value {
+    let mut value = value.clone();
+    let Some(snapshot) = value.pointer_mut("/result/snapshot") else {
+        return value;
+    };
+    let Some(snapshot) = snapshot.as_object_mut() else {
+        return value;
+    };
+    for collection in ["workspaces", "tabs", "panes", "layouts", "agents"] {
+        snapshot
+            .entry(collection)
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+    value
 }
 
 fn derived_focused_workspace_id(value: &Value) -> Option<String> {
@@ -3643,26 +3690,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn preserves_non_utf8_background_agent_paths() {
+    fn rejects_non_utf8_background_agent_paths_before_running_herdr() {
         use std::os::unix::ffi::OsStringExt;
 
         let path = OsString::from_vec(b"/tmp/feature-\xff".to_vec());
-        let expected_path = path.clone();
         let mut calls = Vec::new();
-        create_tab_with_agent_with(PathBuf::from(path), "w1".to_owned(), None, |args| {
-            calls.push(args.to_vec());
-            Ok(if calls.len() == 1 {
-                serde_json::json!({
-                    "result": { "root_pane": { "pane_id": "w1:p4" } }
-                })
-            } else {
-                Value::Null
+        let error =
+            create_tab_with_agent_with(PathBuf::from(path), "w1".to_owned(), None, |args| {
+                calls.push(args.to_vec());
+                Ok(Value::Null)
             })
-        })
-        .unwrap();
+            .unwrap_err();
 
-        assert_eq!(calls[0][5], expected_path);
-        assert!(calls[0][7].to_str().is_some());
+        assert!(calls.is_empty());
+        assert_eq!(
+            error,
+            "Released Herdr cannot create an agent from a non-UTF-8 path"
+        );
     }
 
     #[test]
@@ -3907,7 +3951,7 @@ mod tests {
 
     #[test]
     fn parses_paths_statuses_and_repo_key_parent_fallback() {
-        let value = serde_json::json!({
+        let value = complete_snapshot_for_test(&serde_json::json!({
             "result": { "snapshot": {
                 "focused_workspace_id": "child",
                 "focused_pane_id": "pane-3",
@@ -3970,7 +4014,7 @@ mod tests {
                 }],
                 "layouts": []
             }}
-        });
+        }));
 
         let (workspaces, agents) = parse_snapshot(&value).unwrap();
         assert_eq!(
@@ -4011,22 +4055,52 @@ mod tests {
 
     #[test]
     fn preserves_an_authoritative_unfocused_workspace() {
-        let snapshot = session_snapshot_with(serde_json::json!({
+        let snapshot = session_snapshot_with(complete_snapshot_for_test(&serde_json::json!({
             "result": { "snapshot": {
                 "focused_workspace_id": null,
                 "workspaces": [{ "workspace_id": "w1", "label": "Only" }],
                 "agents": [],
                 "panes": []
             }}
-        }))
+        })))
         .unwrap();
 
         assert_eq!(snapshot.focused_workspace_id, None);
     }
 
     #[test]
+    fn rejects_a_malformed_authoritative_focused_workspace() {
+        let error = session_snapshot_with(complete_snapshot_for_test(&serde_json::json!({
+            "result": { "snapshot": {
+                "focused_workspace_id": 42,
+                "workspaces": [],
+                "agents": []
+            }}
+        })))
+        .err()
+        .unwrap();
+
+        assert_eq!(error, "Herdr snapshot focused workspace is malformed");
+    }
+
+    #[test]
+    fn rejects_an_unknown_authoritative_focused_workspace() {
+        let error = session_snapshot_with(complete_snapshot_for_test(&serde_json::json!({
+            "result": { "snapshot": {
+                "focused_workspace_id": "missing",
+                "workspaces": [{ "workspace_id": "w1", "label": "Workspace" }],
+                "agents": []
+            }}
+        })))
+        .err()
+        .unwrap();
+
+        assert_eq!(error, "Herdr snapshot focused workspace is unknown");
+    }
+
+    #[test]
     fn rejects_partial_snapshots_instead_of_dropping_records() {
-        let value = serde_json::json!({
+        let value = complete_snapshot_for_test(&serde_json::json!({
             "result": {"snapshot": {
                 "workspaces": [
                     {"workspace_id": "valid", "label": "Valid"},
@@ -4034,11 +4108,57 @@ mod tests {
                 ],
                 "agents": []
             }}
-        });
+        }));
 
         assert_eq!(
             parse_snapshot(&value).unwrap_err(),
             "Herdr snapshot workspace 1 is malformed"
+        );
+    }
+
+    #[test]
+    fn ignores_agents_that_herdr_has_not_detected_yet() {
+        let value = complete_snapshot_for_test(&serde_json::json!({
+            "result": { "snapshot": {
+                "workspaces": [{ "workspace_id": "w1", "label": "Workspace" }],
+                "agents": [
+                    { "pane_id": "w1:p1", "agent": null },
+                    { "pane_id": "w1:p2" }
+                ],
+                "panes": [
+                    { "pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1" },
+                    { "pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t2" }
+                ]
+            }}
+        }));
+
+        let (_, agents) = parse_snapshot(&value).unwrap();
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn rejects_missing_or_non_object_agent_collections() {
+        let missing = serde_json::json!({
+            "result": { "snapshot": {
+                "workspaces": [{ "workspace_id": "w1", "label": "Workspace" }]
+                ,"tabs": [], "panes": [], "layouts": []
+            }}
+        });
+        let malformed = serde_json::json!({
+            "result": { "snapshot": {
+                "workspaces": [{ "workspace_id": "w1", "label": "Workspace" }],
+                "tabs": [], "panes": [], "layouts": [],
+                "agents": [null]
+            }}
+        });
+
+        assert_eq!(
+            parse_snapshot(&missing).unwrap_err(),
+            "Herdr snapshot agents are malformed"
+        );
+        assert_eq!(
+            parse_snapshot(&malformed).unwrap_err(),
+            "Herdr snapshot agent 0 is malformed"
         );
     }
 
@@ -4083,6 +4203,8 @@ mod tests {
                                 "label": "Existing workspace",
                                 "worktree": { "checkout_path": destination }
                             }],
+                            "tabs": [],
+                            "agents": [],
                             "panes": [],
                             "layouts": []
                         }}
@@ -4179,6 +4301,7 @@ mod tests {
             Ok(if args[0] == "api" {
                 serde_json::json!({"result": {"snapshot": {
                     "workspaces": [{"workspace_id": "w3", "label": "Scheduled"}],
+                    "tabs": [],
                     "agents": [{
                         "agent": "opencode",
                         "agent_status": "done",

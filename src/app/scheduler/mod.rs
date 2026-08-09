@@ -1493,6 +1493,10 @@ impl App {
     }
 
     pub(super) fn promote_scheduled_run(&mut self, run_id: i64) {
+        if self.herdr.agent_stash_running() || self.pending_agent_preview_pane.is_some() {
+            self.notice = Some("Another agent operation is still in progress".to_owned());
+            return;
+        }
         let (destination, session_id) = match self.scheduled_run_promotion(run_id) {
             Ok(promotion) => promotion,
             Err(error) => {

@@ -80,6 +80,7 @@ pub(super) use std::{
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 8, 9];
+const BACKGROUND_HERDR_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 6, 7, 8, 9];
 const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 const AGENT_PREVIEW_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
@@ -472,8 +473,10 @@ impl App {
     }
 
     pub(crate) fn general_settings(&self) -> &'static [usize] {
-        if self.herdr_available() {
+        if self.herdr_embedded() {
             ALL_SETTINGS
+        } else if self.herdr_available() {
+            BACKGROUND_HERDR_SETTINGS
         } else {
             STANDALONE_SETTINGS
         }
@@ -614,7 +617,20 @@ impl App {
     pub(crate) fn can_restart(&self) -> bool {
         self.session.can_restart()
             && !self.commit_message_running()
+            && !self.herdr_prompt.sending
+            && !self.herdr.agent_stash_running()
+            && self.pending_agent_preview_pane.is_none()
             && !self.file_editor.as_ref().is_some_and(FileEditor::dirty)
+    }
+
+    fn request_quit(&mut self) {
+        if self.herdr_prompt.sending || self.herdr.agent_stash_running() {
+            self.notice = Some("An agent operation is still running".to_owned());
+        } else if self.pending_agent_preview_pane.is_some() {
+            self.notice = Some("The new agent preview is still opening".to_owned());
+        } else {
+            self.should_quit = true;
+        }
     }
 
     fn queue_local_build_restart(&mut self) {
@@ -686,7 +702,7 @@ impl App {
         }
         if self.herdr_prompt.agent_pane_picker_open() {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                self.should_quit = true;
+                self.request_quit();
             } else {
                 match key.code {
                     KeyCode::Esc => {
@@ -726,7 +742,7 @@ impl App {
             && key.code == KeyCode::Char('c')
             && !self.text_field_focused()
         {
-            self.should_quit = true;
+            self.request_quit();
             return;
         }
         if self.agent_preview.prompt_focused {
@@ -971,6 +987,12 @@ impl App {
         }
         let mut herdr_changed = false;
         if self.herdr.should_poll() {
+            let herdr_was_available = self.herdr_available();
+            let herdr_was_embedded = self.herdr_embedded();
+            let selected_shortcut =
+                Shortcuts::definitions(herdr_was_available, self.herdr_embedded())
+                    .nth(self.settings_state.shortcut_selection)
+                    .map(|definition| definition.action);
             if self.herdr_available() {
                 for index in self.visible_agent_message_indices() {
                     self.herdr.request_agent_latest_user_message(index);
@@ -987,6 +1009,20 @@ impl App {
             }
             if let Some(error) = herdr_poll.notice {
                 self.notice = Some(error);
+            }
+            if (herdr_was_available, herdr_was_embedded)
+                != (self.herdr_available(), self.herdr_embedded())
+            {
+                self.reconcile_settings_after_herdr_capability_change(selected_shortcut);
+                if !herdr_was_available
+                    && self.herdr_available()
+                    && self.notice.as_deref().is_some_and(|notice| {
+                        notice.starts_with("Herdr disconnected")
+                            || notice.starts_with("Herdr workspace disappeared")
+                    })
+                {
+                    self.notice = Some("Reconnected to Herdr".to_owned());
+                }
             }
             if let Some(result) = herdr_poll.fullscreen_result {
                 let pending = self.pending_fullscreen_agent.take();
@@ -1021,6 +1057,9 @@ impl App {
                 self.pending_agent_preview_pane = None;
                 self.notice =
                     Some("The new Herdr agent exited before its preview opened".to_owned());
+            } else if self.pending_agent_preview_pane.is_some() && !self.herdr_available() {
+                self.pending_agent_preview_pane = None;
+                self.notice = Some("Herdr disconnected before the agent preview opened".to_owned());
             }
         }
         if scheduled_tasks_changed || herdr_changed {
@@ -1640,6 +1679,41 @@ impl App {
         changed
     }
 
+    fn reconcile_settings_after_herdr_capability_change(
+        &mut self,
+        selected_shortcut: Option<ShortcutAction>,
+    ) {
+        let selected_shortcut_index = selected_shortcut.and_then(|action| {
+            Shortcuts::definitions(self.herdr_available(), self.herdr_embedded())
+                .position(|definition| definition.action == action)
+        });
+        if let Some(index) = selected_shortcut_index {
+            self.settings_state.shortcut_selection = index;
+        } else {
+            let count =
+                Shortcuts::definitions(self.herdr_available(), self.herdr_embedded()).count();
+            self.settings_state.shortcut_selection = self
+                .settings_state
+                .shortcut_selection
+                .min(count.saturating_sub(1));
+            self.settings_state.shortcut_capture = false;
+            self.settings_state.shortcut_error = None;
+        }
+        self.settings_state.shortcut_scroll = self.settings_state.shortcut_selection;
+
+        if !self
+            .general_settings()
+            .contains(&self.settings_state.selection)
+            && let Some(selection) = self
+                .general_settings()
+                .iter()
+                .copied()
+                .min_by_key(|index| index.abs_diff(self.settings_state.selection))
+        {
+            self.settings_state.selection = selection;
+        }
+    }
+
     pub(crate) fn reset_media_presentation(&mut self) {
         self.changes.preview_presentation.hide_media();
     }
@@ -1934,7 +2008,7 @@ impl App {
             ShortcutAction::Quit if self.commit_running() || self.session.command_running() => {
                 self.notice = Some("A Git operation is still running".to_owned());
             }
-            ShortcutAction::Quit => self.should_quit = true,
+            ShortcutAction::Quit => self.request_quit(),
             ShortcutAction::OpenHerdr => self.open_herdr_prompt(),
             ShortcutAction::StartAgent => self.start_header_agent(),
             ShortcutAction::Refresh => self.reload(RefreshScope::ALL),
@@ -2650,6 +2724,10 @@ impl App {
     }
 
     fn stash_agent(&mut self, index: usize) {
+        if self.herdr_prompt.sending {
+            self.notice = Some("Another agent operation is still in progress".to_owned());
+            return;
+        }
         let Some(path) = self.herdr.agent_destination(index).map(Path::to_path_buf) else {
             self.notice =
                 Some("Could not stash agent: working directory was not reported".to_owned());
@@ -2682,6 +2760,10 @@ impl App {
     }
 
     fn restore_stashed_agent(&mut self, index: usize) {
+        if self.herdr.agent_stash_running() || self.pending_agent_preview_pane.is_some() {
+            self.notice = Some("Another agent operation is still in progress".to_owned());
+            return;
+        }
         let Some(agent) = self.herdr.stashed_agents().get(index).cloned() else {
             self.notice = Some("Stashed agent is no longer available".to_owned());
             return;
