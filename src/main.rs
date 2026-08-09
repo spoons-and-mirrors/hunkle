@@ -81,10 +81,10 @@ fn main() -> Result<()> {
     let mut app = App::opening(path.clone());
     app.set_workspace_state(startup.state);
     let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
-    if app.herdr_available() {
+    if app.herdr_embedded() {
         picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
     }
-    app.configure_media_picker(picker, auto_kitty_supported(app.herdr_available()));
+    app.configure_media_picker(picker, auto_kitty_supported(app.herdr_embedded()));
     #[cfg(unix)]
     let mut stdin_nonblocking = NonblockingStdin::enable()?;
     let mut dirty = true;

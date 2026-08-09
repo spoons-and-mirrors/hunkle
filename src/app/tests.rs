@@ -196,6 +196,52 @@ fn successful_agent_creation_opens_its_destination() {
     assert_eq!(app.mode, Mode::Normal);
 }
 
+#[test]
+fn background_agent_creation_opens_its_preview_without_changing_layout() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE" }],
+            "agents": [{
+                "agent": "opencode",
+                "agent_status": "idle",
+                "pane_id": "w1:p2"
+            }],
+            "panes": [{
+                "pane_id": "w1:p2",
+                "tab_id": "w1:t2",
+                "workspace_id": "w1",
+                "cwd": directory.path()
+            }]
+        } }
+    }));
+    app.herdr.set_background_attached_for_test("w1");
+    app.herdr_prompt.complete_background_agent_for_test("w1:p2");
+
+    app.poll_worker();
+
+    assert_eq!(app.mode, Mode::AgentPreview);
+    assert!(!app.herdr.agent_layout_running());
+}
+
+#[test]
+fn background_agent_activation_always_opens_the_preview() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let mut app = fullscreen_agent_app(first.path(), second.path());
+    app.herdr.set_fullscreen_for_test(false);
+    app.herdr.set_background_attached_for_test("w1");
+    let key = app.herdr.agent_key(0).unwrap();
+
+    assert!(!app.herdr_embedded());
+
+    app.activate_agent_card(key, 0);
+
+    assert_eq!(app.mode, Mode::AgentPreview);
+    assert!(!app.herdr.agent_layout_running());
+}
+
 fn fullscreen_agent_app(source: &Path, destination: &Path) -> App {
     let mut app = App::new(source.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&serde_json::json!({

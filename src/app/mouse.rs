@@ -1420,6 +1420,10 @@ impl App {
     }
 
     pub(super) fn activate_agent_card(&mut self, key: AgentKey, index: usize) {
+        if self.herdr.is_background_attached() {
+            self.open_agent_preview_modal(index);
+            return;
+        }
         if self.herdr.fullscreen() {
             let double_click = self
                 .last_agent_click

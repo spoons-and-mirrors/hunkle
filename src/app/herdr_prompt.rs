@@ -14,6 +14,7 @@ pub(crate) struct HerdrPromptPoll {
 pub(crate) struct HerdrPromptCompletion {
     pub(crate) message: String,
     pub(crate) reopen_path: Option<PathBuf>,
+    pub(crate) preview_pane_id: Option<String>,
 }
 
 pub(crate) struct HerdrPrompt {
@@ -66,6 +67,19 @@ impl HerdrPrompt {
             .send(Ok(HerdrPromptCompletion {
                 message: message.into(),
                 reopen_path,
+                preview_pane_id: None,
+            }))
+            .unwrap();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_background_agent_for_test(&self, pane_id: impl Into<String>) {
+        let pane_id = pane_id.into();
+        self.sender
+            .send(Ok(HerdrPromptCompletion {
+                message: format!("Started agent in new Herdr tab ({pane_id})"),
+                reopen_path: None,
+                preview_pane_id: Some(pane_id),
             }))
             .unwrap();
     }
@@ -117,33 +131,60 @@ impl HerdrPrompt {
                 herdr_session::send_command_below(command).map(|pane_id| HerdrPromptCompletion {
                     message: format!("Sent to Herdr pane {pane_id}"),
                     reopen_path: None,
+                    preview_pane_id: None,
                 });
             let _ = sender.send(result);
         });
     }
 
-    pub(crate) fn prepare_agent(&mut self, path: PathBuf) -> Result<(), String> {
-        self.prepare_agent_session(path, None)
+    pub(crate) fn prepare_agent(
+        &mut self,
+        path: PathBuf,
+        background_workspace_id: Option<String>,
+    ) -> Result<(), String> {
+        self.prepare_agent_session(path, None, background_workspace_id)
     }
 
     pub(crate) fn prepare_stashed_agent(
         &mut self,
         path: PathBuf,
         session_id: String,
+        background_workspace_id: Option<String>,
     ) -> Result<(), String> {
-        self.prepare_agent_session(path, Some(session_id))
+        self.prepare_agent_session(path, Some(session_id), background_workspace_id)
     }
 
     fn prepare_agent_session(
         &mut self,
         path: PathBuf,
         session_id: Option<String>,
+        background_workspace_id: Option<String>,
     ) -> Result<(), String> {
         if self.sending {
             return Err("Another Herdr command is still running".to_owned());
         }
         if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
-            return Err("Agents can only be started inside Herdr".to_owned());
+            let workspace_id = background_workspace_id.ok_or_else(|| {
+                "Herdr did not identify the workspace for the new agent".to_owned()
+            })?;
+            let sender = self.sender.clone();
+            self.error = None;
+            self.sending = true;
+            thread::spawn(move || {
+                crate::diagnostics::event(format!(
+                    "new background agent workspace={} path={}",
+                    workspace_id,
+                    path.display()
+                ));
+                let result = herdr_session::create_tab_with_agent(path, workspace_id, session_id)
+                    .map(|pane_id| HerdrPromptCompletion {
+                        message: format!("Started agent in new Herdr tab ({pane_id})"),
+                        reopen_path: None,
+                        preview_pane_id: Some(pane_id),
+                    });
+                let _ = sender.send(result);
+            });
+            return Ok(());
         }
         let host_pane_id = std::env::var("HERDR_PANE_ID")
             .map_err(|_| "Herdr did not identify Hunkle's pane".to_owned())?;
@@ -309,6 +350,7 @@ impl HerdrPrompt {
                     .map(|pane_id| HerdrPromptCompletion {
                         message: format!("Started agent in Herdr pane {pane_id}"),
                         reopen_path: Some(reopen_path),
+                        preview_pane_id: None,
                     });
             let _ = sender.send(result);
         });
@@ -352,6 +394,7 @@ impl HerdrPrompt {
                 .map(|pane_id| HerdrPromptCompletion {
                     message: format!("Started agent in new Herdr pane {pane_id}"),
                     reopen_path: Some(reopen_path),
+                    preview_pane_id: None,
                 });
             let _ = sender.send(result);
         });

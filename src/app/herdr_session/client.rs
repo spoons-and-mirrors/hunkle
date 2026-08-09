@@ -3,7 +3,8 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use std::collections::HashMap;
@@ -31,6 +32,12 @@ pub(super) struct Environment {
     pub(super) workspace_id: Option<String>,
     pub(super) tab_id: Option<String>,
     pub(super) pane_id: Option<String>,
+}
+
+pub(super) struct SessionSnapshot {
+    pub(super) workspaces: Vec<HerdrWorkspace>,
+    pub(super) agents: Vec<AgentPane>,
+    pub(super) focused_workspace_id: Option<String>,
 }
 
 pub(super) struct DisplayAgentRequest {
@@ -314,8 +321,28 @@ pub(super) fn environment() -> Option<Environment> {
     )
 }
 
-pub(super) fn session_snapshot() -> Result<(Vec<HerdrWorkspace>, Vec<AgentPane>), String> {
-    run(&["api".to_owned(), "snapshot".to_owned()]).and_then(|value| parse_snapshot(&value))
+pub(super) fn session_snapshot() -> Result<SessionSnapshot, String> {
+    session_snapshot_with(run(&["api".to_owned(), "snapshot".to_owned()])?)
+}
+
+pub(super) fn probe_session_snapshot() -> Result<SessionSnapshot, String> {
+    let args = ["api".to_owned(), "snapshot".to_owned()];
+    let output = run_output_with_timeout(&args, 4 * 1024 * 1024, Duration::from_secs(1))
+        .map_err(|error| error.message)?;
+    let value = decode_response(&output.stdout, &output.stderr, output.status.success())
+        .map_err(|error| error.message)?;
+    session_snapshot_with(value)
+}
+
+fn session_snapshot_with(value: Value) -> Result<SessionSnapshot, String> {
+    let (workspaces, agents) = parse_snapshot(&value)?;
+    let focused_workspace_id = focused_workspace_id(&value)
+        .or_else(|| (workspaces.len() == 1).then(|| workspaces[0].id.clone()));
+    Ok(SessionSnapshot {
+        workspaces,
+        agents,
+        focused_workspace_id,
+    })
 }
 
 pub(super) fn prompt_agent(pane_id: String, prompt: String) -> Result<(), String> {
@@ -1682,6 +1709,44 @@ pub(super) fn split_pane_with_agent(
     focus_agent_pane(pane_id, api_request)
 }
 
+pub(super) fn create_tab_with_agent(
+    path: PathBuf,
+    workspace_id: String,
+    session_id: Option<String>,
+) -> Result<String, String> {
+    let pane_id = create_tab_with_agent_with(path, workspace_id, session_id, run)?;
+    if let Err(error) = wait_for_agent(&pane_id) {
+        return match close_pane(pane_id) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}; could not close the new tab: {cleanup}")),
+        };
+    }
+    Ok(pane_id)
+}
+
+fn wait_for_agent(pane_id: &str) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last_error = None;
+    loop {
+        match probe_session_snapshot() {
+            Ok(snapshot) if snapshot.agents.iter().any(|agent| agent.pane_id == pane_id) => {
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(error) => last_error = Some(error),
+        }
+        if Instant::now() >= deadline {
+            let detail = last_error
+                .map(|error| format!(": {error}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "OpenCode did not start in Herdr pane {pane_id}{detail}"
+            ));
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
 fn focus_agent_pane<A>(pane_id: String, mut api: A) -> Result<String, String>
 where
     A: FnMut(&str, &Value) -> Result<Value, String>,
@@ -1691,9 +1756,6 @@ where
 }
 
 pub(super) fn close_pane(pane_id: String) -> Result<(), String> {
-    if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
-        return Err("Agents can only be managed inside Herdr".to_owned());
-    }
     close_pane_with(pane_id, run)
 }
 
@@ -1737,6 +1799,50 @@ fn split_pane_with_agent_with(
     if let Err(error) = runner(&run_args) {
         let _ = runner(&["pane".to_owned(), "close".to_owned(), pane_id]);
         return Err(error);
+    }
+    Ok(pane_id)
+}
+
+fn create_tab_with_agent_with(
+    path: PathBuf,
+    workspace_id: String,
+    session_id: Option<String>,
+    runner: impl FnMut(&[OsString]) -> Result<Value, String>,
+) -> Result<String, String> {
+    let mut runner = runner;
+    let command = opencode_command(session_id.as_deref())?;
+    let label = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| OsStr::new("agent"))
+        .to_os_string();
+    let cwd = path.into_os_string();
+    let created = runner(&[
+        "tab".into(),
+        "create".into(),
+        "--workspace".into(),
+        workspace_id.into(),
+        "--cwd".into(),
+        cwd,
+        "--label".into(),
+        label,
+        "--no-focus".into(),
+    ])?;
+    let pane_id = created
+        .pointer("/result/root_pane/pane_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Herdr did not identify the new tab's pane".to_owned())?;
+    if let Err(error) = runner(&[
+        "pane".into(),
+        "run".into(),
+        pane_id.clone().into(),
+        command.into(),
+    ]) {
+        return match runner(&["pane".into(), "close".into(), pane_id.into()]) {
+            Ok(_) => Err(error),
+            Err(cleanup) => Err(format!("{error}; could not close the new tab: {cleanup}")),
+        };
     }
     Ok(pane_id)
 }
@@ -1898,7 +2004,7 @@ fn environment_from(
     })
 }
 
-fn run(args: &[String]) -> Result<Value, String> {
+fn run<S: AsRef<OsStr>>(args: &[S]) -> Result<Value, String> {
     run_json(args).map_err(|error| error.message)
 }
 
@@ -1920,9 +2026,17 @@ fn run_output<S: AsRef<OsStr>>(
     args: &[S],
     stdout_limit: usize,
 ) -> Result<process::Output, CommandError> {
+    run_output_with_timeout(args, stdout_limit, Duration::from_secs(60))
+}
+
+fn run_output_with_timeout<S: AsRef<OsStr>>(
+    args: &[S],
+    stdout_limit: usize,
+    timeout: Duration,
+) -> Result<process::Output, CommandError> {
     let output = process::run(
         Command::new("herdr").args(args),
-        Limits::new(stdout_limit, 256 * 1024, Duration::from_secs(60)),
+        Limits::new(stdout_limit, 256 * 1024, timeout),
     )
     .map_err(|error| CommandError::unavailable(format!("Herdr unavailable: {error}")))?;
     if output.timed_out {
@@ -2031,6 +2145,19 @@ pub(super) fn parse_snapshot(
             .collect(),
         agents,
     ))
+}
+
+fn focused_workspace_id(value: &Value) -> Option<String> {
+    let snapshot = value.get("result")?.get("snapshot")?;
+    let focused_pane_id = snapshot.get("focused_pane_id")?.as_str()?;
+    snapshot
+        .get("panes")?
+        .as_array()?
+        .iter()
+        .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(focused_pane_id))?
+        .get("workspace_id")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn parse_workspace(value: &Value, snapshot: &Value) -> Option<ParsedWorkspace> {
@@ -3447,6 +3574,73 @@ mod tests {
     }
 
     #[test]
+    fn creates_a_background_agent_tab_without_focus() {
+        let mut calls = Vec::new();
+        let pane_id = create_tab_with_agent_with(
+            PathBuf::from("/tmp/feature"),
+            "w1".to_owned(),
+            Some("ses_123".to_owned()),
+            |args| {
+                calls.push(args.to_vec());
+                Ok(if calls.len() == 1 {
+                    serde_json::json!({
+                        "result": { "root_pane": { "pane_id": "w1:p4" } }
+                    })
+                } else {
+                    Value::Null
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(pane_id, "w1:p4");
+        assert_eq!(
+            calls,
+            vec![
+                [
+                    "tab",
+                    "create",
+                    "--workspace",
+                    "w1",
+                    "--cwd",
+                    "/tmp/feature",
+                    "--label",
+                    "feature",
+                    "--no-focus",
+                ]
+                .map(OsString::from)
+                .to_vec(),
+                ["pane", "run", "w1:p4", "opencode --session ses_123"]
+                    .map(OsString::from)
+                    .to_vec(),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_non_utf8_background_agent_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = OsString::from_vec(b"/tmp/feature-\xff".to_vec());
+        let expected_path = path.clone();
+        let mut calls = Vec::new();
+        create_tab_with_agent_with(PathBuf::from(path), "w1".to_owned(), None, |args| {
+            calls.push(args.to_vec());
+            Ok(if calls.len() == 1 {
+                serde_json::json!({
+                    "result": { "root_pane": { "pane_id": "w1:p4" } }
+                })
+            } else {
+                Value::Null
+            })
+        })
+        .unwrap();
+
+        assert_eq!(calls[0][5], expected_path);
+    }
+
+    #[test]
     fn focuses_a_new_opencode_agent_pane() {
         let mut calls = Vec::new();
         let pane_id = focus_agent_pane("w1:p4".to_owned(), |method, params| {
@@ -3753,6 +3947,7 @@ mod tests {
         });
 
         let (workspaces, agents) = parse_snapshot(&value).unwrap();
+        assert_eq!(focused_workspace_id(&value).as_deref(), Some("pane-path"));
         assert_eq!(workspaces[1].parent_workspace_id.as_deref(), Some("parent"));
         assert_eq!(
             workspaces[2].path.as_deref(),

@@ -1500,10 +1500,15 @@ impl App {
                 return;
             }
         };
-        match self
-            .herdr_prompt
-            .prepare_stashed_agent(destination, session_id)
-        {
+        let background_workspace_id = self.herdr.background_workspace_id().map(str::to_owned);
+        match self.herdr_prompt.prepare_stashed_agent(
+            destination,
+            session_id,
+            background_workspace_id,
+        ) {
+            Ok(()) if self.herdr.is_background_attached() => {
+                self.notice = Some("Starting agent in a new Herdr tab".to_owned())
+            }
             Ok(()) => self.notice = Some("Loading active Herdr tab layout".to_owned()),
             Err(error) => self.notice = Some(format!("Could not open scheduled agent: {error}")),
         }

@@ -180,6 +180,7 @@ pub struct App {
     file_drag: Option<FileDrag>,
     last_agent_click: Option<(AgentKey, Instant)>,
     pending_fullscreen_agent: Option<AgentKey>,
+    pending_agent_preview_pane: Option<String>,
     last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
     last_explorer_file_click: Option<(RepoPath, Instant)>,
     last_file_editor_click: Option<(Position, Instant)>,
@@ -349,6 +350,7 @@ impl App {
             file_drag: None,
             last_agent_click: None,
             pending_fullscreen_agent: None,
+            pending_agent_preview_pane: None,
             last_worktree_file_click: None,
             last_explorer_file_click: None,
             last_file_editor_click: None,
@@ -462,6 +464,10 @@ impl App {
 
     pub(crate) fn herdr_available(&self) -> bool {
         self.herdr.is_enabled()
+    }
+
+    pub(crate) fn herdr_embedded(&self) -> bool {
+        self.herdr.is_enabled() && !self.herdr.is_background_attached()
     }
 
     pub(crate) fn general_settings(&self) -> &'static [usize] {
@@ -963,9 +969,11 @@ impl App {
             self.scheduled_tasks.bind_session(run_id, session_id);
         }
         let mut herdr_changed = false;
-        if self.herdr_available() {
-            for index in self.visible_agent_message_indices() {
-                self.herdr.request_agent_latest_user_message(index);
+        if self.herdr.should_poll() {
+            if self.herdr_available() {
+                for index in self.visible_agent_message_indices() {
+                    self.herdr.request_agent_latest_user_message(index);
+                }
             }
             let herdr_poll = {
                 let _activity = diagnostics::activity("poll-herdr-session", "");
@@ -991,6 +999,19 @@ impl App {
             if let Some(path) = herdr_poll.reopen_path {
                 diagnostics::event(format!("opening repository path={}", path.display()));
                 self.queue_workspace_restore(path);
+            }
+            if let Some(index) = self
+                .pending_agent_preview_pane
+                .as_ref()
+                .and_then(|pane_id| {
+                    self.herdr
+                        .agents
+                        .iter()
+                        .position(|agent| &agent.pane_id == pane_id)
+                })
+            {
+                self.pending_agent_preview_pane = None;
+                self.open_agent_preview_modal(index);
             }
         }
         if scheduled_tasks_changed || herdr_changed {
@@ -1187,6 +1208,19 @@ impl App {
                             path.display()
                         ));
                         self.queue_workspace_restore(path);
+                    }
+                    if let Some(pane_id) = completion.preview_pane_id {
+                        if let Some(index) = self
+                            .herdr
+                            .agents
+                            .iter()
+                            .position(|agent| agent.pane_id == pane_id)
+                        {
+                            self.open_agent_preview_modal(index);
+                        } else {
+                            self.pending_agent_preview_pane = Some(pane_id);
+                            self.herdr.request_refresh();
+                        }
                     }
                     self.notice = Some(completion.message);
                 }
@@ -2640,10 +2674,15 @@ impl App {
             return;
         };
         self.herdr.show_live_agents();
-        match self
-            .herdr_prompt
-            .prepare_stashed_agent(agent.worktree, agent.session_id)
-        {
+        let background_workspace_id = self.herdr.background_workspace_id().map(str::to_owned);
+        match self.herdr_prompt.prepare_stashed_agent(
+            agent.worktree,
+            agent.session_id,
+            background_workspace_id,
+        ) {
+            Ok(()) if self.herdr.is_background_attached() => {
+                self.notice = Some("Starting agent in a new Herdr tab".to_owned())
+            }
             Ok(()) => self.notice = Some("Loading active Herdr tab layout".to_owned()),
             Err(error) => self.notice = Some(format!("Could not restore agent: {error}")),
         }

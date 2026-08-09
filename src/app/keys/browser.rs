@@ -306,8 +306,14 @@ impl App {
             self.notice = Some("Open a workspace first".to_owned());
             return;
         };
-        if let Err(error) = self.herdr_prompt.prepare_agent(path) {
+        let background_workspace_id = self.herdr.background_workspace_id().map(str::to_owned);
+        if let Err(error) = self
+            .herdr_prompt
+            .prepare_agent(path, background_workspace_id)
+        {
             self.notice = Some(error);
+        } else if self.herdr.is_background_attached() {
+            self.notice = Some("Starting agent in a new Herdr tab".to_owned());
         } else {
             self.notice = Some("Loading active Herdr tab layout".to_owned());
         }
