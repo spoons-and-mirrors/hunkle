@@ -212,6 +212,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     discord_webhook_editor: app.settings_state.discord_webhook_editor.as_ref(),
                     discord_webhook_error: app.settings_state.discord_webhook_error.as_deref(),
                     herdr_available: app.herdr_available(),
+                    herdr_embedded: app.herdr_embedded(),
                 },
                 app.fetch_running(),
             );
@@ -220,9 +221,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     && target == HitTarget::Settings(crate::app::SettingsHitTarget::Overlay)
                 {
                     let viewport = settings_regions.shortcut_viewport.unwrap_or(1);
-                    let maximum = crate::app::Shortcuts::definitions(app.herdr_available())
-                        .count()
-                        .saturating_sub(viewport);
+                    let maximum = crate::app::Shortcuts::definitions(
+                        app.herdr_available(),
+                        app.herdr_embedded(),
+                    )
+                    .count()
+                    .saturating_sub(viewport);
                     app.regions.register_scroll_target_with_state(
                         ScrollTarget::SettingsShortcuts,
                         rect,
@@ -314,7 +318,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Help => {
             dim(frame);
-            overlays::draw_help(frame, &app.settings.shortcuts, app.herdr_available());
+            overlays::draw_help(
+                frame,
+                &app.settings.shortcuts,
+                app.herdr_available(),
+                app.herdr_embedded(),
+            );
         }
         Mode::Scheduler => {
             dim(frame);

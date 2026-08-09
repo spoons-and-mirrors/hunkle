@@ -48,6 +48,15 @@ impl ShortcutAction {
                 | Self::ToggleAgents
         )
     }
+
+    pub(crate) fn requires_embedded_herdr(self) -> bool {
+        matches!(self, Self::ToggleFullscreen | Self::OpenHerdr)
+    }
+
+    fn is_available(self, herdr_available: bool, herdr_embedded: bool) -> bool {
+        (!self.requires_herdr() || herdr_available)
+            && (!self.requires_embedded_herdr() || herdr_embedded)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,10 +479,13 @@ pub struct Shortcuts {
 impl Shortcuts {
     pub(crate) fn definitions(
         herdr_available: bool,
+        herdr_embedded: bool,
     ) -> impl Iterator<Item = &'static ShortcutDefinition> {
-        SHORTCUTS
-            .iter()
-            .filter(move |definition| herdr_available || !definition.action.requires_herdr())
+        SHORTCUTS.iter().filter(move |definition| {
+            definition
+                .action
+                .is_available(herdr_available, herdr_embedded)
+        })
     }
 
     pub(crate) fn binding(&self, action: ShortcutAction) -> KeyChord {
@@ -495,11 +507,14 @@ impl Shortcuts {
         &self,
         event: KeyEvent,
         herdr_available: bool,
+        herdr_embedded: bool,
     ) -> Option<ShortcutAction> {
         let chord = KeyChord::from_event(event);
         SHORTCUTS.iter().find_map(|definition| {
             (definition.scope & MAIN != 0
-                && (herdr_available || !definition.action.requires_herdr())
+                && definition
+                    .action
+                    .is_available(herdr_available, herdr_embedded)
                 && self.binding(definition.action) == chord)
                 .then_some(definition.action)
         })
@@ -675,7 +690,7 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
 
         assert_eq!(
-            shortcuts.main_action(key, true),
+            shortcuts.main_action(key, true, true),
             Some(ShortcutAction::StartAgent)
         );
         assert_eq!(shortcuts.label(ShortcutAction::StartAgent), "Ctrl+Space");
@@ -686,7 +701,7 @@ mod tests {
         let mut shortcuts = Shortcuts::default();
 
         assert_eq!(
-            shortcuts.main_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), true),
+            shortcuts.main_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), true, true),
             Some(ShortcutAction::ToggleFullscreen)
         );
         shortcuts.load_override("toggle-pane", "Alt+f");
@@ -698,15 +713,15 @@ mod tests {
         let shortcuts = Shortcuts::default();
 
         assert_eq!(
-            shortcuts.main_action(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE), true),
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE), true, true),
             Some(ShortcutAction::ShowChanges)
         );
         assert_eq!(
-            shortcuts.main_action(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE), true),
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE), true, true),
             Some(ShortcutAction::ShowFiles)
         );
         assert_eq!(
-            shortcuts.main_action(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE), true),
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE), true, true),
             Some(ShortcutAction::ShowAgents)
         );
     }
@@ -716,7 +731,8 @@ mod tests {
         let shortcuts = Shortcuts::default();
 
         assert!(
-            Shortcuts::definitions(false).all(|definition| !definition.action.requires_herdr())
+            Shortcuts::definitions(false, false)
+                .all(|definition| !definition.action.requires_herdr())
         );
         for key in [
             KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
@@ -725,8 +741,33 @@ mod tests {
             KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
         ] {
-            assert_eq!(shortcuts.main_action(key, false), None);
+            assert_eq!(shortcuts.main_action(key, false, false), None);
         }
+    }
+
+    #[test]
+    fn detached_herdr_keeps_agent_shortcuts_but_hides_embedded_actions() {
+        let shortcuts = Shortcuts::default();
+        let actions = Shortcuts::definitions(true, false)
+            .map(|definition| definition.action)
+            .collect::<Vec<_>>();
+
+        assert!(actions.contains(&ShortcutAction::ShowAgents));
+        assert!(actions.contains(&ShortcutAction::StartAgent));
+        assert!(!actions.contains(&ShortcutAction::ToggleFullscreen));
+        assert!(!actions.contains(&ShortcutAction::OpenHerdr));
+        assert_eq!(
+            shortcuts.main_action(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+                true,
+                false,
+            ),
+            Some(ShortcutAction::StartAgent)
+        );
+        assert_eq!(
+            shortcuts.main_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), true, false),
+            None
+        );
     }
 
     #[test]

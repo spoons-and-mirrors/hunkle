@@ -1,6 +1,11 @@
 use super::*;
 
-pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts, herdr_available: bool) {
+pub(crate) fn draw_help(
+    frame: &mut Frame<'_>,
+    shortcuts: &Shortcuts,
+    herdr_available: bool,
+    herdr_embedded: bool,
+) {
     let area = centered_min(frame.area(), 72, 0, 58, 24);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
@@ -86,7 +91,7 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts, herdr_avai
             "Toggle preview wrapping",
         ),
     ];
-    if herdr_available {
+    if herdr_embedded {
         navigation.insert(
             1,
             shortcut_help(
@@ -95,15 +100,17 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts, herdr_avai
                 "Toggle fullscreen",
             ),
         );
-        navigation.insert(
-            4,
-            shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Show Agents"),
-        );
         navigation.push(shortcut_help(
             shortcuts,
             ShortcutAction::OpenHerdr,
             "Send to Herdr pane below",
         ));
+    }
+    if herdr_available {
+        navigation.insert(
+            4,
+            shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Show Agents"),
+        );
         navigation.push(shortcut_help(
             shortcuts,
             ShortcutAction::StartAgent,

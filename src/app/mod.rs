@@ -82,6 +82,7 @@ const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 8, 9];
 const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+const AGENT_PREVIEW_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) use ratatui::{
@@ -180,7 +181,7 @@ pub struct App {
     file_drag: Option<FileDrag>,
     last_agent_click: Option<(AgentKey, Instant)>,
     pending_fullscreen_agent: Option<AgentKey>,
-    pending_agent_preview_pane: Option<String>,
+    pending_agent_preview_pane: Option<(String, Instant, u64)>,
     last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
     last_explorer_file_click: Option<(RepoPath, Instant)>,
     last_file_editor_click: Option<(Position, Instant)>,
@@ -763,7 +764,7 @@ impl App {
             return;
         }
         if matches!(self.mode, Mode::Normal | Mode::Commit)
-            && self.herdr_available()
+            && self.herdr_embedded()
             && self
                 .settings
                 .shortcuts
@@ -1000,18 +1001,26 @@ impl App {
                 diagnostics::event(format!("opening repository path={}", path.display()));
                 self.queue_workspace_restore(path);
             }
-            if let Some(index) = self
-                .pending_agent_preview_pane
-                .as_ref()
-                .and_then(|pane_id| {
-                    self.herdr
-                        .agents
-                        .iter()
-                        .position(|agent| &agent.pane_id == pane_id)
-                })
+            if let Some(index) =
+                self.pending_agent_preview_pane
+                    .as_ref()
+                    .and_then(|(pane_id, _, _)| {
+                        self.herdr
+                            .agents
+                            .iter()
+                            .position(|agent| &agent.pane_id == pane_id)
+                    })
             {
                 self.pending_agent_preview_pane = None;
                 self.open_agent_preview_modal(index);
+            } else if self.pending_agent_preview_pane.as_ref().is_some_and(
+                |(_, deadline, generation)| {
+                    Instant::now() >= *deadline && self.herdr.snapshot_generation() > *generation
+                },
+            ) {
+                self.pending_agent_preview_pane = None;
+                self.notice =
+                    Some("The new Herdr agent exited before its preview opened".to_owned());
             }
         }
         if scheduled_tasks_changed || herdr_changed {
@@ -1218,7 +1227,11 @@ impl App {
                         {
                             self.open_agent_preview_modal(index);
                         } else {
-                            self.pending_agent_preview_pane = Some(pane_id);
+                            self.pending_agent_preview_pane = Some((
+                                pane_id,
+                                Instant::now() + AGENT_PREVIEW_HANDOFF_TIMEOUT,
+                                self.herdr.snapshot_request_generation(),
+                            ));
                             self.herdr.request_refresh();
                         }
                     }
@@ -1899,10 +1912,10 @@ impl App {
     }
 
     fn handle_normal_shortcut(&mut self, key: KeyEvent) -> bool {
-        let Some(action) = self
-            .settings
-            .shortcuts
-            .main_action(key, self.herdr_available())
+        let Some(action) =
+            self.settings
+                .shortcuts
+                .main_action(key, self.herdr_available(), self.herdr_embedded())
         else {
             return false;
         };
@@ -2478,11 +2491,11 @@ impl App {
     }
 
     fn handle_main_navigation(&mut self, key: KeyEvent) -> bool {
-        match self
-            .settings
-            .shortcuts
-            .main_action(key, self.herdr_available())
-        {
+        match self.settings.shortcuts.main_action(
+            key,
+            self.herdr_available(),
+            self.herdr_embedded(),
+        ) {
             Some(ShortcutAction::ShowChanges) => self.show_sidebar_pane(LeftPane::Worktree),
             Some(ShortcutAction::ShowFiles) => self.show_sidebar_pane(LeftPane::Files),
             Some(ShortcutAction::ShowAgents) => self.show_agents_pane(),

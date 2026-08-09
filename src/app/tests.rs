@@ -226,6 +226,47 @@ fn background_agent_creation_opens_its_preview_without_changing_layout() {
 }
 
 #[test]
+fn background_agent_preview_handoff_expires_when_the_agent_disappears() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
+        "result": { "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE" }],
+            "agents": [],
+            "panes": []
+        } }
+    }));
+    app.herdr.set_background_attached_for_test("w1");
+    app.pending_agent_preview_pane = Some((
+        "w1:p2".to_owned(),
+        std::time::Instant::now(),
+        app.herdr.snapshot_request_generation(),
+    ));
+
+    app.poll_worker();
+
+    assert!(app.pending_agent_preview_pane.is_some());
+    assert_ne!(
+        app.notice.as_deref(),
+        Some("The new Herdr agent exited before its preview opened")
+    );
+
+    app.pending_agent_preview_pane = Some((
+        "w1:p2".to_owned(),
+        std::time::Instant::now(),
+        app.herdr.snapshot_generation().saturating_sub(1),
+    ));
+
+    app.poll_worker();
+
+    assert_eq!(app.pending_agent_preview_pane, None);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("The new Herdr agent exited before its preview opened")
+    );
+}
+
+#[test]
 fn background_agent_activation_always_opens_the_preview() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
@@ -1387,9 +1428,10 @@ fn shortcut_settings_rebind_reset_and_persist_commands() {
     app.settings_store = SettingsStore::at(path);
     app.mode = Mode::Settings;
     app.settings_state.page = SettingsPage::Shortcuts;
-    app.settings_state.shortcut_selection = Shortcuts::definitions(app.herdr_available())
-        .position(|definition| definition.action == ShortcutAction::OpenExplorer)
-        .unwrap();
+    app.settings_state.shortcut_selection =
+        Shortcuts::definitions(app.herdr_available(), app.herdr_embedded())
+            .position(|definition| definition.action == ShortcutAction::OpenExplorer)
+            .unwrap();
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));

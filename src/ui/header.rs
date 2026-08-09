@@ -6,6 +6,7 @@ pub(super) fn draw_header(
     profile: LayoutProfile,
 ) {
     let herdr_available = app.herdr_available();
+    let herdr_embedded = app.herdr_embedded();
     let row = area;
     let content_y = area.bottom().saturating_sub(1);
     let card_gap = if profile.is_single() { " " } else { "  " };
@@ -14,7 +15,7 @@ pub(super) fn draw_header(
         Block::default().style(Style::default().bg(palette().canvas)),
         row,
     );
-    let fullscreen_rect = (herdr_available && !profile.is_single()).then(|| {
+    let fullscreen_rect = (herdr_embedded && !profile.is_single()).then(|| {
         let label = " ⛶ ";
         let width = UnicodeWidthStr::width(label) as u16;
         let rect = Rect::new(area.right().saturating_sub(width), content_y, width, 1);
