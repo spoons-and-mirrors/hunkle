@@ -19,6 +19,7 @@ pub(crate) struct GraphSearch {
     root: Option<PathBuf>,
     corpus_key: Option<GraphCorpusKey>,
     searchable_commits: Vec<String>,
+    head_index: Option<usize>,
     visible_indices: Vec<usize>,
     match_positions: Vec<usize>,
     terms: Vec<String>,
@@ -47,6 +48,7 @@ impl Default for GraphSearch {
             root: None,
             corpus_key: None,
             searchable_commits: Vec::new(),
+            head_index: None,
             visible_indices: Vec::new(),
             match_positions: Vec::new(),
             terms: Vec::new(),
@@ -64,6 +66,7 @@ impl GraphSearch {
         commits: &Arc<Vec<Commit>>,
         author_visible: &[usize],
     ) {
+        self.head_index = commits.iter().position(commit_is_head);
         if self.root.as_deref() != Some(root) {
             self.root = Some(root.to_path_buf());
             self.input.clear();
@@ -114,6 +117,7 @@ impl GraphSearch {
     }
 
     pub(crate) fn apply(&mut self, author_visible: &[usize]) {
+        let head_query = self.input.text().trim().eq_ignore_ascii_case("HEAD");
         let terms = self
             .input
             .text()
@@ -134,6 +138,11 @@ impl GraphSearch {
         self.visible_indices.extend_from_slice(author_visible);
         self.match_positions = if terms.is_empty() {
             Vec::new()
+        } else if head_query {
+            self.head_index
+                .and_then(|head_index| author_visible.iter().position(|index| *index == head_index))
+                .into_iter()
+                .collect()
         } else if let Some(candidates) = candidates {
             candidates
                 .into_iter()
@@ -323,6 +332,13 @@ fn searchable_commit_text(commit: &Commit) -> String {
     ))
 }
 
+fn commit_is_head(commit: &Commit) -> bool {
+    commit
+        .refs
+        .iter()
+        .any(|reference| reference == "HEAD" || reference.starts_with("HEAD -> "))
+}
+
 fn numeric_month(date: &str) -> Option<&'static str> {
     match date.split_whitespace().nth(1)? {
         "Jan" => Some("01"),
@@ -461,6 +477,39 @@ mod tests {
 
         assert_eq!(search.match_status(), Some((1, 1)));
         assert_eq!(search.current_match_position(), Some(0));
+    }
+
+    #[test]
+    fn exact_head_query_selects_the_active_commit_instead_of_text_matches() {
+        let mut active = commit("def", "Ada", "02 Aug", "Older work", "");
+        active.refs = vec!["HEAD -> older-branch".to_owned()];
+        let commits = Arc::new(vec![
+            commit("abc", "Ada", "03 Aug", "Move ahead", "mentions HEAD"),
+            active,
+        ]);
+        let mut search = GraphSearch::default();
+        search.sync(Path::new("/repo"), &commits, &[0, 1]);
+
+        search.input.set("head");
+        search.apply(&[0, 1]);
+
+        assert_eq!(search.current_match_position(), Some(1));
+        assert_eq!(search.match_status(), Some((1, 1)));
+    }
+
+    #[test]
+    fn exact_head_query_finds_a_detached_head() {
+        let mut active = commit("abc", "Ada", "03 Aug", "Detached work", "");
+        active.refs = vec!["HEAD".to_owned(), "tag: snapshot".to_owned()];
+        let commits = Arc::new(vec![active]);
+        let mut search = GraphSearch::default();
+        search.sync(Path::new("/repo"), &commits, &[0]);
+
+        search.input.set(" HEAD ");
+        search.apply(&[0]);
+
+        assert_eq!(search.current_match_position(), Some(0));
+        assert_eq!(search.match_status(), Some((1, 1)));
     }
 
     #[test]
