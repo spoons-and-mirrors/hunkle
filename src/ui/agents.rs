@@ -349,16 +349,16 @@ pub(super) fn draw(
 
     let card_height = if list.height >= 2 { 2 } else { 1 };
     let card_gap = 1;
-    let card_groups = herdr.agent_card_groups();
+    let item_step = card_height + card_gap;
     let top_padding = u16::from(list.height > card_height);
+    let card_groups = herdr.agent_card_groups();
     let card_list = Rect::new(
         list.x,
         list.y.saturating_add(top_padding),
         list.width.saturating_sub(1),
         list.height.saturating_sub(top_padding),
     );
-    let item_step = card_height + card_gap;
-    let viewport = usize::from((card_list.height + card_gap) / item_step).max(1);
+    let viewport = complete_card_viewport(card_list.height, item_step);
     let scroll = herdr
         .agent_scroll
         .min(card_groups.len().saturating_sub(viewport));
@@ -483,9 +483,7 @@ pub(super) fn draw(
     }
     if let Some((card, background)) = last_card {
         let gap = Rect::new(card.x, card.bottom(), card.width, 1);
-        if gap.bottom() <= list.bottom() {
-            draw_agent_gap(frame, gap, background, palette().panel);
-        }
+        draw_trailing_agent_gap(frame, gap, list, background);
     }
     (targets, animation_presented)
 }
@@ -512,6 +510,7 @@ fn draw_scheduled_runs(
     }
     let card_height = if list.height >= 2 { 2 } else { 1 };
     let card_gap = 1;
+    let item_step = card_height + card_gap;
     let top_padding = u16::from(list.height > card_height);
     let card_list = Rect::new(
         list.x,
@@ -519,8 +518,7 @@ fn draw_scheduled_runs(
         list.width.saturating_sub(1),
         list.height.saturating_sub(top_padding),
     );
-    let item_step = card_height + card_gap;
-    let viewport = usize::from((card_list.height + card_gap) / item_step).max(1);
+    let viewport = complete_card_viewport(card_list.height, item_step);
     let scroll = herdr
         .scheduled_run_scroll
         .min(scheduled_runs.len().saturating_sub(viewport));
@@ -626,9 +624,7 @@ fn draw_scheduled_runs(
     }
     if let Some((card, background)) = last_card {
         let gap = Rect::new(card.x, card.bottom(), card.width, 1);
-        if gap.bottom() <= list.bottom() {
-            draw_agent_gap(frame, gap, background, palette().panel);
-        }
+        draw_trailing_agent_gap(frame, gap, list, background);
     }
     animation_presented
 }
@@ -679,6 +675,7 @@ fn draw_stashed_agents(
     }
     let card_height = if list.height >= 2 { 2 } else { 1 };
     let card_gap = 1;
+    let item_step = card_height + card_gap;
     let top_padding = u16::from(list.height > card_height);
     let card_list = Rect::new(
         list.x,
@@ -686,8 +683,7 @@ fn draw_stashed_agents(
         list.width.saturating_sub(1),
         list.height.saturating_sub(top_padding),
     );
-    let item_step = card_height + card_gap;
-    let viewport = usize::from((card_list.height + card_gap) / item_step).max(1);
+    let viewport = complete_card_viewport(card_list.height, item_step);
     let scroll = herdr
         .stash_scroll
         .min(herdr.stashed_agents().len().saturating_sub(viewport));
@@ -764,9 +760,7 @@ fn draw_stashed_agents(
     }
     if let Some((card, background)) = last_card {
         let gap = Rect::new(card.x, card.bottom(), card.width, 1);
-        if gap.bottom() <= list.bottom() {
-            draw_agent_gap(frame, gap, background, palette().panel);
-        }
+        draw_trailing_agent_gap(frame, gap, list, background);
     }
 }
 
@@ -2725,6 +2719,21 @@ fn draw_agent_gap(frame: &mut Frame<'_>, gap: Rect, above: Color, below: Color) 
             gap,
         );
     }
+}
+
+fn complete_card_viewport(height: u16, item_step: u16) -> usize {
+    usize::from(height.saturating_add(1) / item_step).max(1)
+}
+
+fn draw_trailing_agent_gap(frame: &mut Frame<'_>, gap: Rect, list: Rect, background: Color) {
+    let below = if gap.y < list.bottom() {
+        palette().panel
+    } else if gap.y == list.bottom() {
+        palette().canvas
+    } else {
+        return;
+    };
+    draw_agent_gap(frame, gap, background, below);
 }
 
 pub(super) fn badge_width(label: &str) -> u16 {

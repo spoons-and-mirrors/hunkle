@@ -127,20 +127,23 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         && app.workspace_detail_open()
         && app.agents_pane_visible()
         && !app.notice.as_deref().is_some_and(notice_is_error);
+    let footer_height = u16::from(!hide_navigation);
     let layout = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(6),
-        Constraint::Length(u16::from(!hide_navigation)),
+        Constraint::Length(footer_height),
+        Constraint::Length(footer_height),
     ])
     .split(frame.area());
 
     draw_header(frame, app, layout[0], profile);
+    draw_workspace_bottom_padding(frame, layout[2]);
     let content = layout[1];
     let main_content = content;
     if app.workspace_loading_initial_state() {
         app.reset_media_presentation();
         draw_empty(frame, main_content, "Loading workspace…");
-        draw_navigation(frame, app, layout[2], profile);
+        draw_navigation(frame, app, layout[3], profile);
         draw_agent_pane_picker_overlay(frame, app);
         finish_selection(frame, app);
         return;
@@ -148,7 +151,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     workspace::draw(frame, app, main_content, profile);
     draw_main_top_padding(frame, app, layout[1], profile);
     draw_header_card_bottom_padding(frame, app);
-    draw_navigation(frame, app, layout[2], profile);
+    clear_workspace_bottom_splitter(frame, app, layout[2]);
+    draw_navigation(frame, app, layout[3], profile);
     if matches!(
         app.mode,
         Mode::Explorer
@@ -636,6 +640,18 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
         Paragraph::new(Line::from(spans)),
         Rect::new(start_x, area.y, area.right().saturating_sub(start_x), 1),
     );
+}
+
+fn draw_workspace_bottom_padding(frame: &mut Frame<'_>, area: Rect) {
+    draw_half_padding(frame, area, '▀', palette().panel, palette().canvas);
+}
+
+fn clear_workspace_bottom_splitter(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if let Some(splitter) = app.regions.splitter {
+        let splitter = Rect::new(splitter.x, area.y, splitter.width, area.height);
+        frame.render_widget(Clear, splitter);
+        fill(frame, splitter, palette().canvas);
+    }
 }
 
 fn notice_is_error(notice: &str) -> bool {

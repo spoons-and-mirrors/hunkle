@@ -430,7 +430,7 @@ fn panel_mode_toggle_reaches_stashed_agent_cards() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let live_height = app.settings.agents_height;
-    assert_eq!(live_height, 5);
+    assert_eq!(live_height, 4);
     let live_card = app
         .regions
         .hit_target_rect(HitTarget::Agent(live_key.clone()))
@@ -449,7 +449,7 @@ fn panel_mode_toggle_reaches_stashed_agent_cards() {
     let list = app.regions.agents_list.unwrap();
     assert!(
         (list.x..list.right())
-            .any(|x| terminal.backend().buffer()[(x, list.bottom() - 1)].symbol() == "▀")
+            .any(|x| terminal.backend().buffer()[(x, list.bottom())].symbol() == "▀")
     );
     click(&mut app, toggle.x, toggle.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -462,7 +462,7 @@ fn panel_mode_toggle_reaches_stashed_agent_cards() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Stash);
-    assert_eq!(app.settings.agents_height, 8);
+    assert_eq!(app.settings.agents_height, 7);
     assert!(app.settings.agents_height > live_height);
     assert!(
         app.regions
@@ -545,7 +545,7 @@ fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewi
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Scheduled);
-    assert_eq!(app.settings.agents_height, 32);
+    assert_eq!(app.settings.agents_height, 31);
     let visible_runs = (1..=12)
         .filter_map(|id| {
             app.regions
@@ -2162,7 +2162,7 @@ fn collapses_agents_sharing_a_tab_into_one_card() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert_eq!(app.settings.agents_height, 5);
+    assert_eq!(app.settings.agents_height, 4);
     assert!(
         app.regions
             .hit_target_rect(HitTarget::Agent(first_key))
@@ -2295,10 +2295,39 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
 
     app.herdr = HerdrSession::ready_for_test(&snapshot(1));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.settings.agents_height, 5);
+    assert_eq!(app.settings.agents_height, 4);
     app.herdr = HerdrSession::ready_for_test(&snapshot(2));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.settings.agents_height, 8);
+    assert_eq!(app.settings.agents_height, 7);
+    let second = agent_key(&app, 1);
+    let fitted_second_card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(second.clone()))
+        .unwrap();
+    let fitted_list = app.regions.agents_list.unwrap();
+    assert_eq!(fitted_second_card.bottom(), fitted_list.bottom());
+    assert_eq!(
+        terminal.backend().buffer()[(fitted_second_card.x, fitted_second_card.bottom())].bg,
+        palette().canvas
+    );
+
+    app.settings.agents_height = 8;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let second_card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(second))
+        .unwrap();
+    let list = app.regions.agents_list.unwrap();
+    assert_eq!(fitted_second_card.y, second_card.y + 1);
+    assert!(second_card.bottom() < list.bottom());
+    assert_eq!(
+        terminal.backend().buffer()[(second_card.x, second_card.bottom())].symbol(),
+        "▀"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(second_card.x, second_card.bottom())].bg,
+        palette().panel
+    );
 
     let splitter = app.regions.agents_splitter.unwrap();
     let bounds = app.regions.agents_bounds.unwrap();
@@ -2335,12 +2364,12 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
         column,
         bounds.bottom(),
     ));
-    assert_eq!(app.settings.agents_height, 5);
+    assert_eq!(app.settings.agents_height, 4);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let list = app.regions.agents_list.unwrap();
     assert!(
         (list.x..list.right())
-            .any(|x| terminal.backend().buffer()[(x, list.bottom() - 1)].symbol() == "▀")
+            .any(|x| terminal.backend().buffer()[(x, list.bottom())].symbol() == "▀")
     );
 }

@@ -11,7 +11,7 @@ pub(super) fn layout_agents_pane(
     app.regions.agents_bounds = None;
 
     let available = content.bottom().saturating_sub(list_y);
-    if !show_agents || available < 5 {
+    if !show_agents || available < 4 {
         return Rect::new(content.x, list_y, content.width, available);
     }
 
@@ -24,12 +24,12 @@ pub(super) fn layout_agents_pane(
     let automatic_count = agent_count.min(10);
     if app.agents_height_fit_for != Some((mode, automatic_count)) {
         app.agents_height_fit_for = Some((mode, automatic_count));
-        app.settings.agents_height = (3 * automatic_count).saturating_add(2).clamp(5, 256) as u16;
+        app.settings.agents_height = (3 * automatic_count).saturating_add(1).clamp(4, 256) as u16;
     }
     let agents_height = app
         .settings
         .agents_height
-        .clamp(5, available.saturating_sub(1).max(5));
+        .clamp(4, available.saturating_sub(1).max(4));
     let agents_area = Rect::new(
         content.x,
         content.bottom().saturating_sub(agents_height),

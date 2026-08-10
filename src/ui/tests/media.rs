@@ -24,13 +24,16 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     wait_for_halfblock_render(&mut terminal, &mut app);
     let preview_body = app.regions.diff.unwrap();
+    let transition_y = usize::from(preview_body.bottom());
     let image_cells: Vec<_> = terminal
         .backend()
         .buffer()
         .content
         .iter()
         .enumerate()
-        .filter(|(index, cell)| cell.symbol() == "▀" && index / 100 != 2)
+        .filter(|(index, cell)| {
+            cell.symbol() == "▀" && index / 100 != 2 && index / 100 != transition_y
+        })
         .collect();
     assert!(!image_cells.is_empty());
     assert!(image_cells.iter().all(|(index, _)| {
@@ -51,7 +54,9 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
             .content
             .iter()
             .enumerate()
-            .any(|(index, cell)| cell.symbol() == "▀" && index / 100 != 2)
+            .any(|(index, cell)| {
+                cell.symbol() == "▀" && index / 100 != 2 && index / 100 != transition_y
+            })
     );
 
     app.mode = Mode::Normal;
@@ -76,7 +81,9 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
             .content
             .iter()
             .enumerate()
-            .any(|(index, cell)| cell.symbol() == "▀" && index / 100 != 2)
+            .any(|(index, cell)| {
+                cell.symbol() == "▀" && index / 100 != 2 && index / 100 != transition_y
+            })
     );
 }
 

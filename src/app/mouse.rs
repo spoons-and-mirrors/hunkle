@@ -1783,8 +1783,8 @@ impl App {
         let Some(bounds) = self.regions.agents_bounds else {
             return;
         };
-        let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(5));
-        self.settings.agents_height = bounds.bottom().saturating_sub(top).max(5);
+        let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(4));
+        self.settings.agents_height = bounds.bottom().saturating_sub(top).max(4);
     }
 
     fn resize_graph_column(&mut self, drag: GraphColumnDrag, column: u16) {

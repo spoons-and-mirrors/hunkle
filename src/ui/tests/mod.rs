@@ -404,11 +404,24 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.diff.unwrap().right(), 120);
     let left = app.regions.worktree.unwrap();
     let right = app.regions.diff.unwrap();
+    let footer_y = terminal.backend().buffer().area.height - 1;
+    let transition_y = footer_y - 1;
+    assert_eq!(left.bottom(), transition_y);
+    assert_eq!(right.bottom(), transition_y);
     for point in [(left.x, left.y), (right.right().saturating_sub(1), right.y)] {
         let cell = &terminal.backend().buffer()[point];
         assert_eq!(cell.symbol(), " ");
         assert_eq!(cell.bg, super::palette().canvas);
     }
+    for x in [left.x, right.right().saturating_sub(1)] {
+        let cell = &terminal.backend().buffer()[(x, transition_y)];
+        assert_eq!(cell.symbol(), "▀");
+        assert_eq!(cell.fg, super::palette().panel);
+        assert_eq!(cell.bg, super::palette().canvas);
+    }
+    let transition_splitter = &terminal.backend().buffer()[(left.right(), transition_y)];
+    assert_eq!(transition_splitter.symbol(), " ");
+    assert_eq!(transition_splitter.bg, super::palette().canvas);
     let splitter_top = &terminal.backend().buffer()[(left.right(), left.y)];
     assert_eq!(splitter_top.bg, super::palette().canvas);
     app.dragging_splitter = true;
@@ -2112,12 +2125,17 @@ fn wait_for_halfblock_render(terminal: &mut Terminal<TestBackend>, app: &mut App
         terminal.draw(|frame| draw(frame, app)).unwrap();
         let buffer = terminal.backend().buffer();
         let width = usize::from(buffer.area.width);
-        if buffer
-            .content
-            .iter()
-            .enumerate()
-            .any(|(index, cell)| cell.symbol() == "▀" && index / width != 2)
-        {
+        let preview = app.regions.diff.unwrap();
+        if buffer.content.iter().enumerate().any(|(index, cell)| {
+            let x = (index % width) as u16;
+            let y = (index / width) as u16;
+            cell.symbol() == "▀"
+                && y != 2
+                && x >= preview.x
+                && x < preview.right()
+                && y >= preview.y
+                && y < preview.bottom()
+        }) {
             return;
         }
         if std::time::Instant::now() >= deadline {
