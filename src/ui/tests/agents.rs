@@ -588,7 +588,7 @@ fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewi
 }
 
 #[test]
-fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
+fn scheduled_preview_navigates_messages_and_mouse_scrolls() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -608,24 +608,38 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
     }]);
     app.agent_preview.set_scheduled_conversation_for_test(
         "ses_test",
-        vec![AgentUserMessage {
-            text: (0..20)
-                .map(|line| format!("scheduled user line {line}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            requests: vec![AgentRequestPreview {
-                parts: vec![AgentRequestPartPreview::Text(
-                    (0..100)
-                        .map(|line| format!("response line {line}"))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )],
-                reasoning_active: false,
-                duration_ms: None,
-                reasoning_duration_ms: None,
-                tool_call_count: 0,
-            }],
-        }],
+        vec![
+            AgentUserMessage {
+                text: (0..20)
+                    .map(|line| format!("scheduled user line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                requests: vec![AgentRequestPreview {
+                    parts: vec![AgentRequestPartPreview::Text(
+                        (0..100)
+                            .map(|line| format!("response line {line}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )],
+                    reasoning_active: false,
+                    duration_ms: None,
+                    reasoning_duration_ms: None,
+                    tool_call_count: 0,
+                }],
+            },
+            AgentUserMessage {
+                text: "latest scheduled request".to_owned(),
+                requests: vec![AgentRequestPreview {
+                    parts: vec![AgentRequestPartPreview::Text(
+                        "latest scheduled response".to_owned(),
+                    )],
+                    reasoning_active: false,
+                    duration_ms: None,
+                    reasoning_duration_ms: None,
+                    tool_call_count: 0,
+                }],
+            },
+        ],
     );
     // Exercise the scheduled fallback while retaining the authoritative observed agent.
     app.herdr.agents.clear();
@@ -640,8 +654,17 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
             .hit_target_rect(HitTarget::AgentPreviewScheduledPrompt(17))
             .is_some()
     );
-    assert!(agent_preview_scroll(&app).1 > 0);
     assert_eq!(app.agent_preview.scheduled_scroll(), None);
+    let previous = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewScheduledMessageStep {
+            run_id: 17,
+            forward: false,
+        })
+        .unwrap();
+    click(&mut app, previous.x + 1, previous.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(agent_preview_scroll(&app).1 > 0);
     let user_message = app
         .regions
         .hit_target_rect(HitTarget::AgentScheduledMessage {
@@ -663,6 +686,16 @@ fn scheduled_preview_with_one_user_message_has_prompt_and_mouse_scroll() {
         modifiers: KeyModifiers::NONE,
     });
     assert!(app.agent_preview.scheduled_scroll().is_some());
+    let next = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewScheduledMessageStep {
+            run_id: 17,
+            forward: true,
+        })
+        .unwrap();
+    click(&mut app, next.x + 1, next.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(screen_text(&terminal).contains("latest scheduled response"));
 }
 
 #[test]
@@ -872,7 +905,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
         })
         .collect::<String>();
     assert_eq!(timeline_symbols.trim(), "○ ○ ○ ○ ●");
-    assert_eq!(message_timeline.width, history.width);
+    assert_eq!(message_timeline.x, history.x + 3);
+    assert_eq!(message_timeline.width, history.width.saturating_sub(6));
     assert_eq!(message_timeline.height, 1);
     assert_eq!(message_timeline.y, history.y + 1);
     assert_eq!(repository.y, message_timeline.y.saturating_sub(2));
@@ -1522,6 +1556,60 @@ fn mobile_agent_preview_swipes_between_messages() {
             .hit_target_rect(HitTarget::AgentPreviewPicker(first_key.clone()))
             .is_some()
     );
+    let second_message_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(second_message_screen.contains("Second reply"));
+
+    let previous = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewMessageStep {
+            agent: first_key.clone(),
+            forward: false,
+        })
+        .unwrap();
+    assert_eq!(previous.width, 3);
+    assert_eq!(
+        terminal.backend().buffer()[(previous.x + 1, previous.y)].symbol(),
+        "←"
+    );
+    assert_eq!(
+        app.regions
+            .hit_target_at(Position::new(previous.x + 1, previous.y)),
+        Some(HitTarget::AgentPreviewMessageStep {
+            agent: first_key.clone(),
+            forward: false,
+        })
+    );
+    click(&mut app, previous.x + 1, previous.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let first_message_screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(first_message_screen.contains("First reply"));
+
+    let next = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewMessageStep {
+            agent: first_key,
+            forward: true,
+        })
+        .unwrap();
+    assert_eq!(next.width, 3);
+    assert_eq!(
+        terminal.backend().buffer()[(next.x + 1, next.y)].symbol(),
+        "→"
+    );
+    click(&mut app, next.x + 1, next.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let second_message_screen = terminal
         .backend()
         .buffer()

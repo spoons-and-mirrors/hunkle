@@ -2709,6 +2709,8 @@ impl App {
                     | HitTarget::AgentPreviewPicker(_)
                     | HitTarget::AgentPreviewPickerItem(_)
                     | HitTarget::AgentPreviewMessageTimeline(_)
+                    | HitTarget::AgentPreviewMessageStep { .. }
+                    | HitTarget::AgentPreviewScheduledMessageStep { .. }
                     | HitTarget::AgentPreviewPrompt(_)
                     | HitTarget::AgentPreviewPromptDelivery(_)
                     | HitTarget::AgentPreviewScheduledPrompt(_)
@@ -2902,6 +2904,41 @@ impl App {
             AgentPreviewEffect::MessageSelected { agent, message } => {
                 self.hovered_hit_target = Some(HitTarget::AgentTooltip { agent, message });
             }
+            AgentPreviewEffect::MoveMessage { agent, forward } => {
+                let Some(index) = self.herdr.agent_index(&agent) else {
+                    return;
+                };
+                let Some(message_count) = self
+                    .herdr
+                    .agent_user_messages(index)
+                    .map(|messages| messages.len())
+                else {
+                    return;
+                };
+                let Some(last) = message_count.checked_sub(1) else {
+                    return;
+                };
+                let message = self
+                    .agent_preview
+                    .selected_message(&agent, last)
+                    .unwrap_or(last);
+                if let Some(message) = self.agent_preview.select_message(
+                    agent.clone(),
+                    message_count,
+                    message,
+                    forward,
+                ) {
+                    self.hovered_hit_target = Some(HitTarget::AgentTooltip { agent, message });
+                }
+            }
+            AgentPreviewEffect::MoveScheduledMessage { run_id, forward } => {
+                if self.agent_preview.scheduled_run == Some(run_id) {
+                    self.agent_preview.move_scheduled_message(
+                        if forward { 1 } else { -1 },
+                        self.agent_preview.scheduled_message_count(),
+                    );
+                }
+            }
             AgentPreviewEffect::TogglePicker(key) => {
                 if self.herdr.agent_index(&key).is_some() {
                     self.agent_preview.toggle_picker(key);
@@ -2921,6 +2958,7 @@ impl App {
                 | HitTarget::AgentPreviewPicker(key)
                 | HitTarget::AgentPreviewPickerItem(key)
                 | HitTarget::AgentPreviewMessageTimeline(key)
+                | HitTarget::AgentPreviewMessageStep { agent: key, .. }
                 | HitTarget::AgentPreviewPrompt(key)
                 | HitTarget::AgentPreviewPromptDelivery(key)
                 | HitTarget::AgentPreviewRequest { agent: key, .. }

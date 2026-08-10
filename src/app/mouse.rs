@@ -118,6 +118,7 @@ impl App {
                     HitTarget::AgentPreviewPicker(agent)
                     | HitTarget::AgentPreviewPickerItem(agent)
                     | HitTarget::AgentPreviewMessageTimeline(agent)
+                    | HitTarget::AgentPreviewMessageStep { agent, .. }
                     | HitTarget::AgentPreviewPrompt(agent)
                     | HitTarget::AgentPreviewPromptDelivery(agent)
                     | HitTarget::AgentPreviewRequest { agent, .. }
@@ -567,6 +568,18 @@ impl App {
             return false;
         }
         let point = Position::new(mouse.column, mouse.row);
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && matches!(
+                self.regions.hit_target_at(point),
+                Some(
+                    HitTarget::AgentPreviewMessageStep { .. }
+                        | HitTarget::AgentPreviewScheduledMessageStep { .. }
+                )
+            )
+        {
+            self.handle_mouse_inner(mouse);
+            return true;
+        }
         if let Some(mut drag) = self.mobile_scroll_drag.clone() {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left)
@@ -702,6 +715,7 @@ impl App {
                 | HitTarget::AgentMessage { agent, .. }
                 | HitTarget::AgentExpandedMessage { agent, .. }
                 | HitTarget::AgentPreviewMessageTimeline(agent)
+                | HitTarget::AgentPreviewMessageStep { agent, .. }
                 | HitTarget::AgentPreviewRequest { agent, .. },
             ) => Some(agent),
             _ => None,

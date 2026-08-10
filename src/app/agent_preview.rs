@@ -130,6 +130,8 @@ pub(crate) enum AgentPreviewEffect {
     SelectAgent(AgentKey),
     TogglePromptDelivery(AgentKey),
     MessageSelected { agent: AgentKey, message: usize },
+    MoveMessage { agent: AgentKey, forward: bool },
+    MoveScheduledMessage { run_id: i64, forward: bool },
     TogglePicker(AgentKey),
 }
 
@@ -340,6 +342,20 @@ impl AgentPreview {
             }
             HitTarget::AgentPreviewPicker(key) => AgentPreviewEffect::TogglePicker(key.clone()),
             HitTarget::AgentPreviewPickerItem(key) => AgentPreviewEffect::SelectAgent(key.clone()),
+            HitTarget::AgentPreviewMessageStep { agent, forward } => {
+                AgentPreviewEffect::MoveMessage {
+                    agent: agent.clone(),
+                    forward: *forward,
+                }
+            }
+            HitTarget::AgentPreviewScheduledMessageStep { run_id, forward }
+                if self.scheduled_run == Some(*run_id) =>
+            {
+                AgentPreviewEffect::MoveScheduledMessage {
+                    run_id: *run_id,
+                    forward: *forward,
+                }
+            }
             _ => AgentPreviewEffect::Handled,
         }
     }
@@ -360,6 +376,8 @@ impl AgentPreview {
                 | HitTarget::AgentScheduledMessage { .. }
                 | HitTarget::AgentPreviewPicker(_)
                 | HitTarget::AgentPreviewPickerItem(_)
+                | HitTarget::AgentPreviewMessageStep { .. }
+                | HitTarget::AgentPreviewScheduledMessageStep { .. }
         )
     }
 

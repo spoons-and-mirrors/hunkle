@@ -400,6 +400,14 @@ pub(crate) enum HitTarget {
     AgentPreviewPicker(AgentKey),
     AgentPreviewPickerItem(AgentKey),
     AgentPreviewMessageTimeline(AgentKey),
+    AgentPreviewMessageStep {
+        agent: AgentKey,
+        forward: bool,
+    },
+    AgentPreviewScheduledMessageStep {
+        run_id: i64,
+        forward: bool,
+    },
     AgentPreviewPrompt(AgentKey),
     AgentPreviewPromptDelivery(AgentKey),
     AgentPreviewScheduledPrompt(i64),
@@ -905,6 +913,7 @@ impl Regions {
             | HitTarget::HeaderPickerDeleteBranch(_)
             | HitTarget::HeaderPickerDeleteWorktree(_) => Some(ScrollTarget::HeaderPicker),
             HitTarget::AgentPreviewMessageTimeline(agent)
+            | HitTarget::AgentPreviewMessageStep { agent, .. }
             | HitTarget::AgentMessage { agent, .. } => {
                 Some(ScrollTarget::AgentTimeline(agent.clone()))
             }
@@ -917,6 +926,7 @@ impl Regions {
                 Some(ScrollTarget::AgentTranscript(agent.clone()))
             }
             HitTarget::AgentScheduledMessage { run_id, .. }
+            | HitTarget::AgentPreviewScheduledMessageStep { run_id, .. }
             | HitTarget::AgentPreviewScheduledRequest { run_id, .. } => {
                 Some(ScrollTarget::AgentScheduledTranscript(*run_id))
             }

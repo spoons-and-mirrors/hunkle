@@ -1063,7 +1063,7 @@ pub(super) fn draw_history(
             message_selector.width,
             message_selector.height.saturating_sub(1).min(1),
         ),
-        Some(agent_key.clone()),
+        MessageTimelineOwner::Live(agent_key.clone()),
         selected_message,
         messages.len(),
         &mut targets,
@@ -1413,7 +1413,7 @@ pub(super) fn draw_scheduled_history(
             selector.width,
             selector.height.saturating_sub(1).min(1),
         ),
-        None,
+        MessageTimelineOwner::Scheduled(run_id),
         selected_message,
         messages.len(),
         &mut targets,
@@ -2361,10 +2361,15 @@ fn push_truncated_span(
     spans.push(Span::styled(value, style));
 }
 
+enum MessageTimelineOwner {
+    Live(AgentKey),
+    Scheduled(i64),
+}
+
 fn draw_message_timeline(
     frame: &mut Frame<'_>,
     area: Rect,
-    agent: Option<AgentKey>,
+    owner: MessageTimelineOwner,
     message: usize,
     message_count: usize,
     targets: &mut Vec<(HitTarget, Rect)>,
@@ -2372,17 +2377,35 @@ fn draw_message_timeline(
     if area.height == 0 || area.width == 0 || message_count == 0 {
         return;
     }
-    let capacity = usize::from(area.width).div_ceil(2).max(1);
+    let button_width = 3.min(area.width / 2);
+    let previous = Rect::new(area.x, area.y, button_width, 1);
+    let next = Rect::new(
+        area.right().saturating_sub(button_width),
+        area.y,
+        button_width,
+        1,
+    );
+    let timeline_area = Rect::new(
+        previous.right(),
+        area.y,
+        area.width.saturating_sub(button_width.saturating_mul(2)),
+        1,
+    );
+    draw_message_timeline_button(frame, previous, "←", message > 0);
+    draw_message_timeline_button(frame, next, "→", message + 1 < message_count);
+
+    let capacity = usize::from(timeline_area.width).div_ceil(2).max(1);
     let visible = message_count.min(capacity);
     let start = message
         .saturating_sub(visible / 2)
         .min(message_count.saturating_sub(visible));
     let timeline_width = u16::try_from(visible.saturating_mul(2).saturating_sub(1))
         .unwrap_or(u16::MAX)
-        .min(area.width);
+        .min(timeline_area.width);
     let timeline = Rect::new(
-        area.x
-            .saturating_add(area.width.saturating_sub(timeline_width) / 2),
+        timeline_area
+            .x
+            .saturating_add(timeline_area.width.saturating_sub(timeline_width) / 2),
         area.y,
         timeline_width,
         1,
@@ -2412,9 +2435,65 @@ fn draw_message_timeline(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().panel)),
         timeline,
     );
-    if let Some(agent) = agent {
-        targets.push((HitTarget::AgentPreviewMessageTimeline(agent), area));
+    match owner {
+        MessageTimelineOwner::Live(agent) => {
+            targets.push((
+                HitTarget::AgentPreviewMessageTimeline(agent.clone()),
+                timeline_area,
+            ));
+            if message > 0 {
+                targets.push((
+                    HitTarget::AgentPreviewMessageStep {
+                        agent: agent.clone(),
+                        forward: false,
+                    },
+                    previous,
+                ));
+            }
+            if message + 1 < message_count {
+                targets.push((
+                    HitTarget::AgentPreviewMessageStep {
+                        agent,
+                        forward: true,
+                    },
+                    next,
+                ));
+            }
+        }
+        MessageTimelineOwner::Scheduled(run_id) => {
+            if message > 0 {
+                targets.push((
+                    HitTarget::AgentPreviewScheduledMessageStep {
+                        run_id,
+                        forward: false,
+                    },
+                    previous,
+                ));
+            }
+            if message + 1 < message_count {
+                targets.push((
+                    HitTarget::AgentPreviewScheduledMessageStep {
+                        run_id,
+                        forward: true,
+                    },
+                    next,
+                ));
+            }
+        }
     }
+}
+
+fn draw_message_timeline_button(frame: &mut Frame<'_>, area: Rect, label: &str, enabled: bool) {
+    frame.render_widget(
+        Paragraph::new(label)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(if enabled {
+                palette().cyan
+            } else {
+                palette().faint
+            })),
+        area,
+    );
 }
 
 fn message_total_duration(message: &AgentUserMessage) -> Option<u64> {
