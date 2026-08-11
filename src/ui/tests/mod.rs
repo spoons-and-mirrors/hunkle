@@ -357,6 +357,7 @@ fn standalone_hides_herdr_surfaces() {
         "Cross-workspace agents",
         "Agent harness",
         "Agent card click",
+        "Agent preview split",
         "Agent time",
         "Agent timing history",
     ] {
@@ -366,6 +367,7 @@ fn standalone_hides_herdr_surfaces() {
         SettingsHitTarget::CrossWorkspaceAgents,
         SettingsHitTarget::AgentHarness,
         SettingsHitTarget::AgentCardClick,
+        SettingsHitTarget::AgentPreviewSplit,
         SettingsHitTarget::AgentTime,
         SettingsHitTarget::ClearAgentTimings,
     ] {
@@ -1974,6 +1976,8 @@ fn renders_every_primary_surface() {
     assert!(settings_screen.contains("Agent harness"));
     assert!(settings_screen.contains("Agent card click"));
     assert!(settings_screen.contains("Layout · Ctrl preview"));
+    assert!(settings_screen.contains("Agent preview split"));
+    assert!(settings_screen.contains("120 cols"));
     assert!(settings_screen.contains("Agent time"));
     assert!(settings_screen.contains("Latest loop"));
     assert!(settings_screen.contains("Agent timing history"));
@@ -2006,6 +2010,7 @@ fn renders_every_primary_surface() {
     let cross_workspace_setting = setting_rect(SettingsHitTarget::CrossWorkspaceAgents);
     let agent_harness_setting = setting_rect(SettingsHitTarget::AgentHarness);
     let agent_card_click_setting = setting_rect(SettingsHitTarget::AgentCardClick);
+    let agent_preview_split_setting = setting_rect(SettingsHitTarget::AgentPreviewSplit);
     let agent_time_setting = setting_rect(SettingsHitTarget::AgentTime);
     let clear_agent_timings_setting = setting_rect(SettingsHitTarget::ClearAgentTimings);
     let media_preview_setting = setting_rect(SettingsHitTarget::MediaPreview);
@@ -2013,7 +2018,11 @@ fn renders_every_primary_surface() {
     assert_eq!(cross_workspace_setting.y, format_on_save_setting.y + 4);
     assert_eq!(agent_harness_setting.y, cross_workspace_setting.y + 2);
     assert_eq!(agent_card_click_setting.y, agent_harness_setting.y + 2);
-    assert_eq!(agent_time_setting.y, agent_card_click_setting.y + 2);
+    assert_eq!(
+        agent_preview_split_setting.y,
+        agent_card_click_setting.y + 2
+    );
+    assert_eq!(agent_time_setting.y, agent_preview_split_setting.y + 2);
     assert_eq!(clear_agent_timings_setting.y, agent_time_setting.y + 2);
     assert_eq!(media_preview_setting.y, clear_agent_timings_setting.y + 2);
     assert_eq!(editor_setting.y, media_preview_setting.y + 2);

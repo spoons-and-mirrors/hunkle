@@ -350,9 +350,10 @@ fn herdr_reconnect_preserves_the_selected_shortcut_identity() {
 }
 
 #[test]
-fn background_agent_activation_always_opens_the_preview() {
+fn background_agent_activation_opens_the_agents_workspace() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
+    let destination = fs::canonicalize(second.path()).unwrap();
     let mut app = fullscreen_agent_app(first.path(), second.path());
     app.herdr.set_fullscreen_for_test(false);
     app.herdr.set_background_attached_for_test("w1");
@@ -361,8 +362,14 @@ fn background_agent_activation_always_opens_the_preview() {
     assert!(!app.herdr_embedded());
 
     app.activate_agent_card(key, 0);
+    wait_for_state(&mut app, |app| {
+        !app.session.open_running()
+            && app
+                .repository()
+                .is_some_and(|repository| repository.root == destination)
+    });
 
-    assert_eq!(app.mode, Mode::AgentPreview);
+    assert_eq!(app.mode, Mode::Normal);
     assert!(!app.herdr.agent_layout_running());
 }
 
@@ -1030,6 +1037,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
             fetch_interval_minutes: 6,
             format_on_save: true,
             worktree_width: 38,
+            agent_preview_split_width: 120,
             cross_workspace_agents: false,
             show_agent_harness: false,
             agent_card_click_action: settings::AgentCardClickAction::ChangeLayout,
@@ -1070,6 +1078,10 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     );
     assert_eq!(app.settings_store.load(), app.settings);
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(app.settings.agent_preview_split_width, 130);
+    assert_eq!(app.settings_store.load(), app.settings);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(
         app.settings.agent_time_display,
@@ -1107,6 +1119,29 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
     assert!(app.changes.diff_wrap);
     assert_eq!(app.changes.diff_scroll, 37);
+}
+
+#[test]
+fn agent_preview_split_setting_adjusts_and_persists() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config");
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    enable_herdr(&mut app);
+    app.settings = Settings::default();
+    app.settings_store = SettingsStore::at(path);
+    app.mode = Mode::Settings;
+    app.settings_state.selection = 6;
+
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+
+    assert_eq!(app.settings.agent_preview_split_width, 110);
+    assert_eq!(app.settings_store.load().agent_preview_split_width, 110);
+
+    app.activate_settings_target(SettingsHitTarget::AgentPreviewSplitUp);
+
+    assert_eq!(app.settings.agent_preview_split_width, 120);
+    assert_eq!(app.settings_store.load().agent_preview_split_width, 120);
 }
 
 #[test]

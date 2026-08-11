@@ -243,6 +243,55 @@ fn standalone_agent_click_opens_the_agents_workspace() {
 }
 
 #[test]
+fn wide_workspace_docks_agent_preview_and_control_click_keeps_it_docked() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let mut app = App::new(directory.path().to_path_buf());
+    app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_agent_user_messages_for_test(
+        0,
+        &[("Inspect the wide layout", Some("Preview is docked"), 1, 0)],
+    );
+    let key = agent_key(&app, 0);
+    let mut terminal = Terminal::new(TestBackend::new(180, 42)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let companion = app.regions.agent_preview_companion.unwrap();
+    let detail = app.regions.diff.unwrap();
+    assert!(companion.x > detail.right());
+    assert!(screen_text(&terminal).contains("Inspect the wide layout"));
+    assert!(screen_text(&terminal).contains("Preview is docked"));
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(key.clone()))
+        .unwrap();
+    let point = (card.y..card.bottom())
+        .flat_map(|y| (card.x..card.right()).map(move |x| (x, y)))
+        .find(|(x, y)| {
+            app.regions.hit_target_at(Position::new(*x, *y)) == Some(HitTarget::Agent(key.clone()))
+        })
+        .unwrap();
+
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::CONTROL,
+    });
+
+    assert_eq!(app.mode, Mode::Normal);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentPreviewModalOverlay)
+            .is_none()
+    );
+    assert!(app.regions.agent_preview_companion.is_some());
+}
+
+#[test]
 fn agent_card_click_setting_swaps_plain_and_control_actions() {
     let directory = tempfile::tempdir().unwrap();
     run_git(directory.path(), &["init", "-b", "main"]);

@@ -79,6 +79,14 @@ impl App {
             {
                 self.change_fetch_interval(1);
             }
+            KeyCode::Left | KeyCode::Char('-') if self.settings_state.selection == 6 => {
+                self.change_agent_preview_split(-10);
+            }
+            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=')
+                if self.settings_state.selection == 6 =>
+            {
+                self.change_agent_preview_split(10);
+            }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(target) =
                     SettingsHitTarget::from_general_index(self.settings_state.selection)
@@ -428,6 +436,8 @@ impl App {
             SettingsEffect::ToggleAutoFetch => self.toggle_auto_fetch(),
             SettingsEffect::DecreaseFetchInterval => self.change_fetch_interval(-1),
             SettingsEffect::IncreaseFetchInterval => self.change_fetch_interval(1),
+            SettingsEffect::DecreaseAgentPreviewSplit => self.change_agent_preview_split(-10),
+            SettingsEffect::IncreaseAgentPreviewSplit => self.change_agent_preview_split(10),
             SettingsEffect::ToggleFormatOnSave => self.toggle_format_on_save(),
             SettingsEffect::ToggleCrossWorkspaceAgents => self.toggle_cross_workspace_agents(),
             SettingsEffect::ToggleAgentHarness => self.toggle_agent_harness(),
@@ -532,6 +542,12 @@ impl App {
     pub(crate) fn change_fetch_interval(&mut self, delta: i16) {
         self.settings.fetch_interval_minutes =
             (self.settings.fetch_interval_minutes as i16 + delta).clamp(1, 1440) as u16;
+        self.settings_changed();
+    }
+
+    pub(crate) fn change_agent_preview_split(&mut self, delta: i32) {
+        self.settings.agent_preview_split_width =
+            (i32::from(self.settings.agent_preview_split_width) + delta).clamp(60, 4096) as u16;
         self.settings_changed();
     }
 

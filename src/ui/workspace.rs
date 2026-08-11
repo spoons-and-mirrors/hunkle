@@ -14,6 +14,7 @@ enum WorkspacePlan {
         sidebar_pane: LeftPane,
         detail: DetailSurface,
         agents: changes::ColumnAgents,
+        companion: Option<Rect>,
     },
 }
 
@@ -41,6 +42,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
             sidebar_pane,
             detail,
             agents,
+            companion,
         } => {
             let preview_pane = match detail {
                 DetailSurface::Preview(pane) => pane,
@@ -59,6 +61,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
             );
             if matches!(detail, DetailSurface::Graph) {
                 draw_graph(frame, app, areas[1]);
+            }
+            if let Some(area) = companion {
+                changes::draw_agent_preview_companion(frame, app, area);
             }
         }
     }
@@ -107,32 +112,65 @@ fn plan(app: &App, area: Rect, profile: LayoutProfile) -> WorkspacePlan {
     } else {
         DetailSurface::Preview(preview_pane)
     };
+    let columns = column_areas(
+        app.settings.worktree_width,
+        area,
+        (app.herdr_available() && app.agent_preview_index().is_some())
+            .then_some(app.settings.agent_preview_split_width),
+    );
     let agents = if !app.herdr_available() || !app.agents_visible {
         changes::ColumnAgents::Hidden
     } else if app.agents_pane_visible() {
-        changes::ColumnAgents::MasterDetail
+        if columns.companion.is_some() {
+            changes::ColumnAgents::Master
+        } else {
+            changes::ColumnAgents::MasterDetail
+        }
     } else {
         changes::ColumnAgents::Master
     };
     WorkspacePlan::Columns {
-        areas: column_areas(app.settings.worktree_width, area),
+        areas: columns.primary,
         sidebar_pane,
         detail,
         agents,
+        companion: columns.companion,
     }
 }
 
-fn column_areas(worktree_width: u16, area: Rect) -> [Rect; 2] {
+struct ColumnAreas {
+    primary: [Rect; 2],
+    companion: Option<Rect>,
+}
+
+fn column_areas(worktree_width: u16, area: Rect, companion_min_width: Option<u16>) -> ColumnAreas {
     let left_width = worktree_width.clamp(24, area.width.saturating_sub(25));
-    [
-        Rect::new(area.x, area.y, left_width, area.height),
-        Rect::new(
-            area.x.saturating_add(left_width).saturating_add(1),
-            area.y,
-            area.width.saturating_sub(left_width).saturating_sub(1),
-            area.height,
-        ),
-    ]
+    let master = Rect::new(area.x, area.y, left_width, area.height);
+    let viewer = Rect::new(
+        master.right().saturating_add(1),
+        area.y,
+        area.width.saturating_sub(left_width).saturating_sub(1),
+        area.height,
+    );
+    let (detail, companion) = if companion_min_width.is_some_and(|width| viewer.width >= width) {
+        let detail_width = viewer.width.saturating_sub(1) / 2;
+        let detail = Rect::new(viewer.x, viewer.y, detail_width, viewer.height);
+        let companion = Rect::new(
+            detail.right().saturating_add(1),
+            viewer.y,
+            viewer
+                .right()
+                .saturating_sub(detail.right().saturating_add(1)),
+            viewer.height,
+        );
+        (detail, Some(companion))
+    } else {
+        (viewer, None)
+    };
+    ColumnAreas {
+        primary: [master, detail],
+        companion,
+    }
 }
 
 fn draw_single(frame: &mut Frame<'_>, app: &mut App, area: Rect, surface: SingleSurface) {
@@ -197,10 +235,35 @@ mod tests {
 
     #[test]
     fn columns_respect_the_persisted_master_width() {
-        let areas = column_areas(31, Rect::new(2, 3, 100, 40));
+        let areas = column_areas(31, Rect::new(2, 3, 100, 40), None).primary;
 
         assert_eq!(areas[0], Rect::new(2, 3, 31, 40));
         assert_eq!(areas[1], Rect::new(34, 3, 68, 40));
+    }
+
+    #[test]
+    fn wide_viewer_adds_an_equal_companion_column() {
+        let columns = column_areas(38, Rect::new(0, 0, 180, 40), Some(120));
+
+        assert_eq!(columns.primary[0], Rect::new(0, 0, 38, 40));
+        assert_eq!(columns.primary[1], Rect::new(39, 0, 70, 40));
+        assert_eq!(columns.companion, Some(Rect::new(110, 0, 70, 40)));
+    }
+
+    #[test]
+    fn companion_waits_for_usable_main_viewer_width() {
+        let columns = column_areas(38, Rect::new(0, 0, 158, 40), Some(120));
+
+        assert_eq!(columns.primary[1], Rect::new(39, 0, 119, 40));
+        assert_eq!(columns.companion, None);
+    }
+
+    #[test]
+    fn companion_threshold_uses_the_configured_viewer_width() {
+        let columns = column_areas(38, Rect::new(0, 0, 158, 40), Some(100));
+
+        assert_eq!(columns.primary[1], Rect::new(39, 0, 59, 40));
+        assert_eq!(columns.companion, Some(Rect::new(99, 0, 59, 40)));
     }
 
     #[test]
@@ -211,6 +274,7 @@ mod tests {
             sidebar_pane: LeftPane::Worktree,
             detail: DetailSurface::Preview(LeftPane::Worktree),
             agents,
+            companion: None,
         };
 
         assert!(WorkspacePlan::Single(SingleSurface::Agents).agent_cards_presented(false));

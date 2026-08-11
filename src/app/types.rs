@@ -480,6 +480,9 @@ pub(crate) enum SettingsHitTarget {
     FetchInterval,
     FetchIntervalDown,
     FetchIntervalUp,
+    AgentPreviewSplit,
+    AgentPreviewSplitDown,
+    AgentPreviewSplitUp,
     FormatOnSave,
     CrossWorkspaceAgents,
     AgentHarness,
@@ -521,6 +524,7 @@ impl SettingsHitTarget {
             Self::CrossWorkspaceAgents,
             Self::AgentHarness,
             Self::AgentCardClick,
+            Self::AgentPreviewSplit,
             Self::AgentTime,
             Self::ClearAgentTimings,
             Self::MediaPreview,
@@ -538,10 +542,13 @@ impl SettingsHitTarget {
             Self::CrossWorkspaceAgents => Some(3),
             Self::AgentHarness => Some(4),
             Self::AgentCardClick => Some(5),
-            Self::AgentTime => Some(6),
-            Self::ClearAgentTimings => Some(7),
-            Self::MediaPreview => Some(8),
-            Self::Editor => Some(9),
+            Self::AgentPreviewSplit | Self::AgentPreviewSplitDown | Self::AgentPreviewSplitUp => {
+                Some(6)
+            }
+            Self::AgentTime => Some(7),
+            Self::ClearAgentTimings => Some(8),
+            Self::MediaPreview => Some(9),
+            Self::Editor => Some(10),
             Self::Overlay
             | Self::Page(_)
             | Self::Shortcut(_)
@@ -741,6 +748,7 @@ pub struct Regions {
     pub agents_bounds: Option<Rect>,
     pub(crate) agent_cards_presented: bool,
     pub(crate) agent_animation_presented: bool,
+    pub(crate) agent_preview_companion: Option<Rect>,
     pub diff: Option<Rect>,
     pub preview_body: Option<Rect>,
     pub preview_path: Option<RepoPath>,

@@ -818,6 +818,55 @@ pub(super) fn draw_agent_history_pane(
         );
         return;
     };
+    draw_agent_history_content(frame, app, index, tabs_trailing, history);
+}
+
+pub(super) fn draw_agent_preview_companion(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    app.regions.clear_targets_in(area);
+    app.regions.agent_preview_companion = Some(area);
+    let content = area.inner(Margin::new(1, 0));
+    let header = Rect::new(
+        content.x,
+        content.y.saturating_add(1),
+        content.width,
+        u16::from(content.height > 1),
+    );
+    frame.render_widget(
+        Paragraph::new("AGENT PREVIEW").style(
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        header,
+    );
+    let history_y = header.bottom().saturating_add(2);
+    let history = Rect::new(
+        content.x,
+        history_y,
+        content.width,
+        content.bottom().saturating_sub(history_y),
+    );
+    let Some(index) = app.agent_preview_index() else {
+        frame.render_widget(
+            Paragraph::new("NO AGENT SELECTED")
+                .style(Style::default().fg(palette().faint))
+                .alignment(Alignment::Center),
+            history,
+        );
+        return;
+    };
+    draw_agent_history_content(frame, app, index, header, history);
+}
+
+fn draw_agent_history_content(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    index: usize,
+    status_area: Rect,
+    history: Rect,
+) {
     let selected_message = app.agent_preview_message(index);
     let transcript_scroll = app.agent_preview_transcript_scroll(index);
     let expanded_requests = app.agent_preview_expanded_requests(index).to_vec();
@@ -839,7 +888,7 @@ pub(super) fn draw_agent_history_pane(
         app.agent_preview.prompt_focused,
         app.agent_preview.prompt_error.as_deref(),
         app.agent_preview.prompt_delivery,
-        tabs_trailing,
+        status_area,
         None,
         2,
         1,

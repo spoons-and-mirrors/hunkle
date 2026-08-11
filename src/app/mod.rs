@@ -81,9 +81,9 @@ pub(super) use std::{
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
-const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 8, 9];
-const BACKGROUND_HERDR_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 6, 7, 8, 9];
-const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 9, 10];
+const BACKGROUND_HERDR_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 6, 7, 8, 9, 10];
+const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 const AGENT_PREVIEW_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -2733,6 +2733,10 @@ impl App {
             self.flush_commit_draft();
         }
         self.select_agent_preview(index);
+        if self.regions.agent_preview_companion.is_some() {
+            self.mode = Mode::Normal;
+            return;
+        }
         self.agent_preview.set_return_mode(Mode::Normal);
         self.mode = Mode::AgentPreview;
     }

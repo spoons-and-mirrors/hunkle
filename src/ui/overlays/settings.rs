@@ -49,7 +49,7 @@ pub(crate) fn draw_settings(
         herdr_available,
         herdr_embedded,
     } = view;
-    let area = centered_min(frame.area(), 58, 0, 48, 30);
+    let area = centered_min(frame.area(), 58, 0, 48, 32);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -492,7 +492,7 @@ pub(crate) fn draw_settings(
         };
     }
     frame.render_widget(
-        Paragraph::new("Space toggle   ←/→ interval   Enter edit   Esc close")
+        Paragraph::new("Space toggle   ←/→ adjust   Enter edit   Esc close")
             .style(Style::default().fg(palette().muted))
             .alignment(Alignment::Right),
         Rect::new(
@@ -509,7 +509,7 @@ pub(crate) fn draw_settings(
         area.width.saturating_sub(4),
         area.height,
     );
-    let compact = area.height < 28;
+    let compact = area.height < 30;
     let automation_header_y = if compact { 3 } else { 4 };
     let auto_y = if compact { 4 } else { 7 };
     let interval_y = if compact { 5 } else { 9 };
@@ -518,15 +518,16 @@ pub(crate) fn draw_settings(
     let cross_workspace_y = if compact { 9 } else { 15 };
     let agent_y = if compact { 10 } else { 17 };
     let agent_card_click_y = if compact { 11 } else { 19 };
-    let agent_time_y = if compact { 12 } else { 21 };
-    let clear_timings_y = if compact { 13 } else { 23 };
+    let agent_preview_split_y = if compact { 12 } else { 21 };
+    let agent_time_y = if compact { 13 } else { 23 };
+    let clear_timings_y = if compact { 14 } else { 25 };
     let media_y = if herdr_available {
-        if compact { 14 } else { 25 }
+        if compact { 15 } else { 27 }
     } else {
         cross_workspace_y
     };
     let editor_y = if herdr_available {
-        if compact { 15 } else { 27 }
+        if compact { 16 } else { 29 }
     } else {
         agent_y
     };
@@ -551,6 +552,12 @@ pub(crate) fn draw_settings(
         inner.width,
         1,
     );
+    let agent_preview_split_row = Rect::new(
+        inner.x,
+        area.y.saturating_add(agent_preview_split_y),
+        inner.width,
+        1,
+    );
     let agent_time_row = Rect::new(inner.x, area.y.saturating_add(agent_time_y), inner.width, 1);
     let clear_agent_timings_row = Rect::new(
         inner.x,
@@ -567,6 +574,18 @@ pub(crate) fn draw_settings(
         1,
     );
     let interval_up = Rect::new(interval_row.right().saturating_sub(3), interval_row.y, 3, 1);
+    let agent_preview_split_down = Rect::new(
+        agent_preview_split_row.right().saturating_sub(17),
+        agent_preview_split_row.y,
+        3,
+        1,
+    );
+    let agent_preview_split_up = Rect::new(
+        agent_preview_split_row.right().saturating_sub(3),
+        agent_preview_split_row.y,
+        3,
+        1,
+    );
 
     let media_protocol_label = media_preview_protocol_label(settings.media_preview_protocol);
     frame.render_widget(
@@ -580,7 +599,7 @@ pub(crate) fn draw_settings(
             ),
             Span::styled(media_protocol_label, Style::default().fg(palette().accent)),
         ]))
-        .style(Style::default().bg(if selection == 8 {
+        .style(Style::default().bg(if selection == 9 {
             palette().selected
         } else {
             palette().surface_alt
@@ -790,6 +809,27 @@ pub(crate) fn draw_settings(
             agent_card_click_row,
         );
 
+        let agent_preview_split_control =
+            format!("[-] {:>4} cols [+]", settings.agent_preview_split_width);
+        let agent_preview_split_padding = usize::from(agent_preview_split_row.width)
+            .saturating_sub("Agent preview split".len() + agent_preview_split_control.len());
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Agent preview split", Style::default().fg(palette().ink)),
+                Span::raw(" ".repeat(agent_preview_split_padding)),
+                Span::styled(
+                    agent_preview_split_control,
+                    Style::default().fg(palette().accent),
+                ),
+            ]))
+            .style(Style::default().bg(if selection == 6 {
+                palette().selected
+            } else {
+                palette().surface_alt
+            })),
+            agent_preview_split_row,
+        );
+
         let agent_time_label = settings.agent_time_display.label();
         let agent_time_padding = usize::from(agent_time_row.width)
             .saturating_sub("Agent time".len() + agent_time_label.len());
@@ -799,7 +839,7 @@ pub(crate) fn draw_settings(
                 Span::raw(" ".repeat(agent_time_padding)),
                 Span::styled(agent_time_label, Style::default().fg(palette().accent)),
             ]))
-            .style(Style::default().bg(if selection == 6 {
+            .style(Style::default().bg(if selection == 7 {
                 palette().selected
             } else {
                 palette().surface_alt
@@ -816,7 +856,7 @@ pub(crate) fn draw_settings(
                 Span::raw(" ".repeat(clear_padding)),
                 Span::styled(clear_label, Style::default().fg(palette().orange)),
             ]))
-            .style(Style::default().bg(if selection == 7 {
+            .style(Style::default().bg(if selection == 8 {
                 palette().selected
             } else {
                 palette().surface_alt
@@ -845,7 +885,7 @@ pub(crate) fn draw_settings(
                 }),
             ),
         ]))
-        .style(Style::default().bg(if selection == 9 {
+        .style(Style::default().bg(if selection == 10 {
             palette().selected
         } else {
             palette().surface_alt
@@ -894,6 +934,18 @@ pub(crate) fn draw_settings(
             (
                 HitTarget::Settings(SettingsHitTarget::ClearAgentTimings),
                 clear_agent_timings_row,
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::AgentPreviewSplit),
+                agent_preview_split_row,
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::AgentPreviewSplitDown),
+                agent_preview_split_down,
+            ),
+            (
+                HitTarget::Settings(SettingsHitTarget::AgentPreviewSplitUp),
+                agent_preview_split_up,
             ),
         ]);
         if herdr_embedded {

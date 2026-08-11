@@ -52,6 +52,8 @@ pub(crate) enum SettingsEffect {
     ToggleAutoFetch,
     DecreaseFetchInterval,
     IncreaseFetchInterval,
+    DecreaseAgentPreviewSplit,
+    IncreaseAgentPreviewSplit,
     ToggleFormatOnSave,
     ToggleCrossWorkspaceAgents,
     ToggleAgentHarness,
@@ -165,9 +167,9 @@ impl SettingsState {
             self.selection = index;
         }
         match target {
-            super::SettingsHitTarget::Overlay | super::SettingsHitTarget::FetchInterval => {
-                SettingsEffect::Handled
-            }
+            super::SettingsHitTarget::Overlay
+            | super::SettingsHitTarget::FetchInterval
+            | super::SettingsHitTarget::AgentPreviewSplit => SettingsEffect::Handled,
             super::SettingsHitTarget::Page(page) => {
                 self.set_page(page);
                 SettingsEffect::Handled
@@ -219,6 +221,12 @@ impl SettingsState {
             super::SettingsHitTarget::AutoFetch => SettingsEffect::ToggleAutoFetch,
             super::SettingsHitTarget::FetchIntervalDown => SettingsEffect::DecreaseFetchInterval,
             super::SettingsHitTarget::FetchIntervalUp => SettingsEffect::IncreaseFetchInterval,
+            super::SettingsHitTarget::AgentPreviewSplitDown => {
+                SettingsEffect::DecreaseAgentPreviewSplit
+            }
+            super::SettingsHitTarget::AgentPreviewSplitUp => {
+                SettingsEffect::IncreaseAgentPreviewSplit
+            }
             super::SettingsHitTarget::FormatOnSave => SettingsEffect::ToggleFormatOnSave,
             super::SettingsHitTarget::CrossWorkspaceAgents => {
                 SettingsEffect::ToggleCrossWorkspaceAgents
@@ -363,6 +371,7 @@ pub struct Settings {
     pub fetch_interval_minutes: u16,
     pub format_on_save: bool,
     pub worktree_width: u16,
+    pub agent_preview_split_width: u16,
     pub cross_workspace_agents: bool,
     pub show_agent_harness: bool,
     pub agent_card_click_action: AgentCardClickAction,
@@ -418,6 +427,7 @@ impl Default for Settings {
             fetch_interval_minutes: 5,
             format_on_save: true,
             worktree_width: 38,
+            agent_preview_split_width: 120,
             cross_workspace_agents: false,
             show_agent_harness: false,
             agent_card_click_action: AgentCardClickAction::ChangeLayout,
@@ -700,11 +710,12 @@ impl SettingsStore {
             fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\ncross_workspace_agents={}\nshow_agent_harness={}\nagent_card_click_action={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nopencode_model={}\nopencode_reasoning={}\nmedia_preview_protocol={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nagent_preview_split_width={}\ncross_workspace_agents={}\nshow_agent_harness={}\nagent_card_click_action={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nopencode_model={}\nopencode_reasoning={}\nmedia_preview_protocol={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.format_on_save,
             settings.worktree_width,
+            settings.agent_preview_split_width,
             settings.cross_workspace_agents,
             settings.show_agent_harness,
             settings.agent_card_click_action.as_str(),
@@ -773,6 +784,11 @@ fn load(path: &Path) -> Settings {
             "worktree_width" => {
                 if let Ok(width) = value.trim().parse::<u16>() {
                     settings.worktree_width = width.clamp(24, 4096);
+                }
+            }
+            "agent_preview_split_width" => {
+                if let Ok(width) = value.trim().parse::<u16>() {
+                    settings.agent_preview_split_width = width.clamp(60, 4096);
                 }
             }
             "cross_workspace_agents" => {
@@ -962,6 +978,7 @@ mod tests {
             fetch_interval_minutes: 17,
             format_on_save: false,
             worktree_width: 61,
+            agent_preview_split_width: 140,
             cross_workspace_agents: true,
             show_agent_harness: true,
             agent_card_click_action: AgentCardClickAction::OpenPreview,
@@ -1014,13 +1031,14 @@ mod tests {
 
         fs::write(
             path,
-            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nhistory_height=1\nexplorer_left_pane_width=2\nmedia_preview_protocol=unknown\n",
+            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nagent_preview_split_width=20\nhistory_height=1\nexplorer_left_pane_width=2\nmedia_preview_protocol=unknown\n",
         )
         .unwrap();
         let loaded = store.load();
         assert!(loaded.format_on_save);
         assert_eq!(loaded.fetch_interval_minutes, 1);
         assert_eq!(loaded.worktree_width, 24);
+        assert_eq!(loaded.agent_preview_split_width, 60);
         assert_eq!(loaded.agents_height, 4);
         assert_eq!(
             loaded.explorer_left_pane_width,
