@@ -1440,7 +1440,15 @@ impl App {
 
     pub(super) fn activate_agent_card(&mut self, key: AgentKey, index: usize) {
         if self.herdr.is_background_attached() {
-            self.open_agent_preview_modal(index);
+            if let Some(path) = self
+                .herdr
+                .agent_destination(index)
+                .map(|path| path.to_path_buf())
+            {
+                self.queue_workspace_restore(path);
+            } else {
+                self.notice = Some("Agent has not reported its working directory".to_owned());
+            }
             return;
         }
         if self.herdr.fullscreen() {

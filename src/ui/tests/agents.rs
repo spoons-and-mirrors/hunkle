@@ -204,6 +204,45 @@ fn control_click_opens_the_live_agent_preview_modal() {
 }
 
 #[test]
+fn standalone_agent_click_opens_the_agents_workspace() {
+    let current = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    run_git(current.path(), &["init", "-b", "main"]);
+    run_git(destination.path(), &["init", "-b", "main"]);
+    let destination = fs::canonicalize(destination.path()).unwrap();
+    let mut app = App::new(current.path().to_path_buf());
+    app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_background_attached_for_test("w1");
+    app.herdr.agents[0].destination_cwd = Some(destination.clone());
+    let key = agent_key(&app, 0);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::Agent(key.clone()))
+        .unwrap();
+    let point = (card.y..card.bottom())
+        .flat_map(|y| (card.x..card.right()).map(move |x| (x, y)))
+        .find(|(x, y)| {
+            app.regions.hit_target_at(Position::new(*x, *y)) == Some(HitTarget::Agent(key.clone()))
+        })
+        .unwrap();
+
+    click(&mut app, point.0, point.1);
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.session.open_running());
+    assert_eq!(app.notice.as_deref(), Some("Opening workspace…"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while app.session.open_running() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+        let _ = app.poll_worker();
+    }
+    assert_eq!(app.repository().unwrap().root, destination);
+}
+
+#[test]
 fn agent_card_click_setting_swaps_plain_and_control_actions() {
     let directory = tempfile::tempdir().unwrap();
     run_git(directory.path(), &["init", "-b", "main"]);
