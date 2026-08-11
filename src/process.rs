@@ -24,6 +24,7 @@ pub(crate) struct Limits {
     pub(crate) stdout_bytes: usize,
     pub(crate) stderr_bytes: usize,
     pub(crate) timeout: Duration,
+    pub(crate) stop_at_stdout_limit: bool,
 }
 
 impl Limits {
@@ -32,7 +33,13 @@ impl Limits {
             stdout_bytes,
             stderr_bytes,
             timeout,
+            stop_at_stdout_limit: false,
         }
+    }
+
+    pub(crate) const fn stopping_at_stdout_limit(mut self) -> Self {
+        self.stop_at_stdout_limit = true;
+        self
     }
 }
 
@@ -44,6 +51,7 @@ pub(crate) struct Output {
     pub(crate) stdout_truncated: bool,
     pub(crate) stderr_truncated: bool,
     pub(crate) timed_out: bool,
+    pub(crate) stdout_limit_reached: bool,
 }
 
 pub(crate) fn run(command: &mut Command, limits: Limits) -> io::Result<Output> {
@@ -110,12 +118,17 @@ fn run_inner(
         let stdout_limit = limits.stdout_bytes;
         let stderr_limit = limits.stderr_bytes;
         let (stdout_sender, stdout_receiver) = mpsc::sync_channel(1);
+        let (stdout_limit_sender, stdout_limit_receiver) = mpsc::sync_channel(1);
         let (stderr_sender, stderr_receiver) = mpsc::sync_channel(1);
         thread::spawn(move || {
-            let _ = stdout_sender.send(read_bounded(stdout, stdout_limit));
+            let _ = stdout_sender.send(read_bounded(
+                stdout,
+                stdout_limit,
+                Some(stdout_limit_sender),
+            ));
         });
         thread::spawn(move || {
-            let _ = stderr_sender.send(read_bounded(stderr, stderr_limit));
+            let _ = stderr_sender.send(read_bounded(stderr, stderr_limit, None));
         });
         let input_receiver = input.map(|input| {
             let mut stdin = child.stdin().take().expect("piped stdin was requested");
@@ -132,7 +145,9 @@ fn run_inner(
         let mut stderr_result = None;
         let mut input_finished = input_receiver.is_none();
         let mut process_cancelled = false;
-        let timed_out = loop {
+        let mut stdout_limit_reached = false;
+        let mut timed_out = false;
+        let terminated_early = loop {
             if status.is_none() {
                 status = child.try_wait()?;
             }
@@ -159,7 +174,13 @@ fn run_inner(
                 break false;
             }
             let was_cancelled = cancelled.is_some_and(|cancelled| cancelled());
-            if was_cancelled || started.elapsed() >= limits.timeout {
+            if !stdout_limit_reached
+                && limits.stop_at_stdout_limit
+                && stdout_limit_receiver.try_recv().is_ok()
+            {
+                stdout_limit_reached = true;
+            }
+            if was_cancelled || stdout_limit_reached || started.elapsed() >= limits.timeout {
                 match child.start_kill() {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -171,6 +192,8 @@ fn run_inner(
                 if was_cancelled {
                     process_cancelled = true;
                 }
+                timed_out =
+                    !was_cancelled && !stdout_limit_reached && started.elapsed() >= limits.timeout;
                 break true;
             }
             let elapsed = started.elapsed();
@@ -179,7 +202,7 @@ fn run_inner(
             );
         };
 
-        if timed_out {
+        if terminated_early {
             let deadline = Instant::now() + Duration::from_secs(1);
             while (stdout_result.is_none() || stderr_result.is_none() || !input_finished)
                 && Instant::now() < deadline
@@ -226,6 +249,7 @@ fn run_inner(
             stdout_truncated,
             stderr_truncated,
             timed_out,
+            stdout_limit_reached,
         })
     })();
     if result.is_err() {
@@ -263,7 +287,11 @@ fn receive_result<T>(
     Ok(())
 }
 
-fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<(Vec<u8>, bool)> {
+fn read_bounded(
+    mut reader: impl Read,
+    limit: usize,
+    limit_sender: Option<mpsc::SyncSender<()>>,
+) -> io::Result<(Vec<u8>, bool)> {
     let mut retained = Vec::with_capacity(limit.min(64 * 1024));
     let mut buffer = [0_u8; 16 * 1024];
     let mut truncated = false;
@@ -275,7 +303,12 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<(Vec<u8>, boo
         let available = limit.saturating_sub(retained.len());
         let keep = available.min(read);
         retained.extend_from_slice(&buffer[..keep]);
-        truncated |= keep < read;
+        if keep < read && !truncated {
+            if let Some(sender) = &limit_sender {
+                let _ = sender.try_send(());
+            }
+            truncated = true;
+        }
     }
     Ok((retained, truncated))
 }
@@ -304,10 +337,31 @@ mod tests {
 
     #[test]
     fn drains_input_while_retaining_only_the_limit() {
-        let (retained, truncated) = read_bounded(Cursor::new(b"abcdef"), 4).unwrap();
+        let (retained, truncated) = read_bounded(Cursor::new(b"abcdef"), 4, None).unwrap();
 
         assert_eq!(retained, b"abcd");
         assert!(truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_stdout_limit_stops_the_process() {
+        use std::{process::Command, time::Duration};
+
+        use super::{Limits, run};
+
+        let started = std::time::Instant::now();
+        let output = run(
+            Command::new("sh").args(["-c", "while :; do printf 1234567890; done"]),
+            Limits::new(1024, 1024, Duration::from_secs(10)).stopping_at_stdout_limit(),
+        )
+        .unwrap();
+
+        assert!(output.stdout_limit_reached);
+        assert!(output.stdout_truncated);
+        assert!(!output.timed_out);
+        assert_eq!(output.stdout.len(), 1024);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[cfg(unix)]

@@ -167,6 +167,20 @@ fn issue_picker_renders_searchable_rows_and_scope_control() {
     assert!(row_text.contains("+345"), "rendered row: {row_text:?}");
     assert!(row_text.contains("-67"), "rendered row: {row_text:?}");
     assert!(row_text.contains("@octoca"), "rendered row: {row_text:?}");
+    let checkout = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerCheckoutPullRequest(0))
+        .unwrap();
+    assert_eq!(checkout.right(), row.right());
+    let checkout_text = (checkout.x..checkout.right())
+        .map(|x| terminal.backend().buffer()[(x, checkout.y)].symbol())
+        .collect::<String>();
+    assert_eq!(checkout_text.trim(), "checkout");
+    assert_eq!(
+        app.regions
+            .hit_target_at(Position::new(checkout.x, checkout.y)),
+        Some(HitTarget::HeaderPickerCheckoutPullRequest(0))
+    );
     for (label, color) in [("PR", palette().purple), ("READY", palette().green)] {
         let x = row.x + u16::try_from(row_text.find(label).unwrap()).unwrap();
         let cell = &terminal.backend().buffer()[(x, row.y)];
@@ -255,6 +269,12 @@ fn issue_picker_uses_readable_stacked_rows_on_mobile() {
     assert_eq!(overlay.width, 49);
     assert_eq!(first.height, 3);
     assert_eq!(second.y, first.bottom());
+    let checkout = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderPickerCheckoutPullRequest(0))
+        .unwrap();
+    assert_eq!(checkout.right(), first.right());
+    assert_eq!(checkout.y, first.bottom() - 1);
     let worktree = app.regions.worktree_list.unwrap();
     let outside_picker = Position::new(worktree.x, worktree.bottom() - 1);
     assert!(!overlay.contains(outside_picker));
@@ -294,7 +314,7 @@ fn issue_picker_uses_readable_stacked_rows_on_mobile() {
         "12 files",
         "+345",
         "-67",
-        "performance",
+        "checkout",
     ] {
         assert!(first_text.contains(text), "rendered row: {first_text:?}");
     }

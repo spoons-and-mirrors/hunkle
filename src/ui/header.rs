@@ -918,15 +918,28 @@ fn draw_header_issue_picker(
             area.width,
             u16::try_from(item_height).unwrap_or(1),
         );
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderPickerItem(index));
+        let checkout_hovered =
+            app.hovered_hit_target == Some(HitTarget::HeaderPickerCheckoutPullRequest(index));
+        let hovered =
+            app.hovered_hit_target == Some(HitTarget::HeaderPickerItem(index)) || checkout_hovered;
         let background = if app.header_picker.selected == index || hovered {
             palette().selected
         } else {
             palette().surface_alt
         };
-        draw_issue_picker_row(frame, rect, &app.header_picker.items[index], background);
+        let checkout = draw_issue_picker_row(
+            frame,
+            rect,
+            &app.header_picker.items[index],
+            background,
+            checkout_hovered,
+        );
         app.regions
             .register_hit_target(HitTarget::HeaderPickerItem(index), rect);
+        if let Some(checkout) = checkout {
+            app.regions
+                .register_hit_target(HitTarget::HeaderPickerCheckoutPullRequest(index), checkout);
+        }
     }
 }
 
@@ -1056,7 +1069,8 @@ fn draw_issue_picker_row(
     area: Rect,
     item: &HeaderPickerItem,
     background: Color,
-) {
+    checkout_hovered: bool,
+) -> Option<Rect> {
     let HeaderPickerItem::Issue {
         number,
         title,
@@ -1070,7 +1084,7 @@ fn draw_issue_picker_row(
         ..
     } = item
     else {
-        return;
+        return None;
     };
     let (kind, kind_color) = if *pull_request {
         ("PR", palette().purple)
@@ -1162,35 +1176,49 @@ fn draw_issue_picker_row(
                 Style::default().fg(palette().soft),
             ));
         }
+        let checkout_area = pull_request.then(|| {
+            Rect::new(
+                area.right().saturating_sub(10),
+                area.y.saturating_add(2),
+                10.min(area.width),
+                1,
+            )
+        });
         frame.render_widget(
             Paragraph::new(Line::from(metadata)).style(Style::default().bg(background)),
             Rect::new(
                 area.x.saturating_add(1),
                 area.y.saturating_add(2),
-                area.width.saturating_sub(2),
+                area.width
+                    .saturating_sub(2 + u16::from(checkout_area.is_some()) * 10),
                 1,
             ),
         );
-        return;
+        if let Some(checkout_area) = checkout_area {
+            draw_pull_request_checkout(frame, checkout_area, checkout_hovered);
+        }
+        return checkout_area;
     }
-    const NUMBER_WIDTH: u16 = 7;
-    const KIND_WIDTH: u16 = 7;
+    const NUMBER_WIDTH: u16 = 6;
+    const KIND_WIDTH: u16 = 6;
     const STATUS_WIDTH: u16 = 8;
     const AUTHOR_WIDTH: u16 = 8;
-    const COLUMN_GAPS: u16 = 7;
+    const CHECKOUT_WIDTH: u16 = 10;
+    const COLUMN_GAPS: u16 = 8;
 
     fill(frame, area, background);
     let spacious = area.width >= 80;
     let outer_padding = u16::from(spacious);
     let gutter = u16::from(spacious);
-    let files_width = if spacious { 10 } else { 8 };
-    let loc_width = if spacious { 9 } else { 7 };
+    let files_width = if spacious && !pull_request { 10 } else { 8 };
+    let loc_width = if spacious && !pull_request { 9 } else { 7 };
     let fixed_width = NUMBER_WIDTH
         + KIND_WIDTH
         + STATUS_WIDTH
         + files_width
         + loc_width * 2
         + AUTHOR_WIDTH
+        + u16::from(*pull_request) * CHECKOUT_WIDTH
         + outer_padding * 2
         + gutter * COLUMN_GAPS;
     let title_width = area.width.saturating_sub(fixed_width);
@@ -1208,6 +1236,14 @@ fn draw_issue_picker_row(
     let additions_area = column(&mut column_x, loc_width);
     let deletions_area = column(&mut column_x, loc_width);
     let author_area = column(&mut column_x, AUTHOR_WIDTH);
+    let checkout_area = pull_request.then(|| {
+        Rect::new(
+            area.right().saturating_sub(CHECKOUT_WIDTH),
+            area.y,
+            CHECKOUT_WIDTH,
+            1,
+        )
+    });
 
     frame.render_widget(
         Paragraph::new(format!("#{number}"))
@@ -1216,7 +1252,7 @@ fn draw_issue_picker_row(
         number_area,
     );
     frame.render_widget(
-        Paragraph::new(format!(" {:^5} ", kind)).style(
+        Paragraph::new(format!("{:^6}", kind)).style(
             Style::default()
                 .fg(kind_color)
                 .bg(palette().canvas)
@@ -1277,6 +1313,24 @@ fn draw_issue_picker_row(
             author_area,
         );
     }
+    if let Some(checkout_area) = checkout_area {
+        draw_pull_request_checkout(frame, checkout_area, checkout_hovered);
+    }
+    checkout_area
+}
+
+fn draw_pull_request_checkout(frame: &mut Frame<'_>, area: Rect, hovered: bool) {
+    let (foreground, background) = if hovered {
+        (palette().canvas, palette().cyan)
+    } else {
+        (palette().cyan, palette().canvas)
+    };
+    frame.render_widget(
+        Paragraph::new(" checkout ")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(foreground).bg(background)),
+        area,
+    );
 }
 
 fn header_picker_visible_items(screen_height: u16, available_height: u16, chrome: usize) -> usize {

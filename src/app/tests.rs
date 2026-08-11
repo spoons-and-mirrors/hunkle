@@ -2452,3 +2452,58 @@ fn run_git(root: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn pull_request_selection_opens_detail_and_back_returns_to_master() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "PR Preview Test"]);
+    run_git(root, &["config", "user.email", "preview@example.com"]);
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "base"]);
+    let oid = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let mut app = App::new(root.to_path_buf());
+    app.issues.seed_pull_request_for_test(
+        root.to_path_buf(),
+        17,
+        "https://github.com/owner/repository".to_owned(),
+        oid,
+    );
+    app.header_picker.items = vec![HeaderPickerItem::Issue {
+        number: 17,
+        title: "Preview this pull request".to_owned(),
+        pull_request: true,
+        status: "OPEN".to_owned(),
+        author: Some("octocat".to_owned()),
+        labels: Vec::new(),
+        changed_files: Some(1),
+        additions: Some(1),
+        deletions: Some(0),
+    }];
+
+    app.activate_header_picker(0);
+
+    assert!(app.navigation.changes_detail_open());
+    assert!(app.changes.preview.issue().unwrap().pull_request.is_some());
+    assert_eq!(
+        app.navigation.back(),
+        WorkspaceBack::Detail {
+            changes: true,
+            agent: false,
+        }
+    );
+    assert!(!app.navigation.changes_detail_open());
+}

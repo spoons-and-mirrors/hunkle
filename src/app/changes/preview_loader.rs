@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs,
     io::{Cursor, Read},
     path::{Path, PathBuf},
@@ -36,6 +37,7 @@ const MAX_SQLITE_OBJECTS: usize = 1_000;
 const MAX_SQLITE_COLUMNS: usize = 128;
 const MAX_SQLITE_VALUE_CHARS: usize = 80;
 const SQLITE_QUERY_TIMEOUT: Duration = Duration::from_millis(750);
+const PULL_REQUEST_CACHE_SIZE: usize = 8;
 
 pub(super) enum LoadedPreview {
     Text(String),
@@ -70,6 +72,7 @@ impl PreviewLoader {
         let (wake, request_rx) = mpsc::sync_channel::<()>(1);
         let (result_tx, receiver) = mpsc::channel();
         let worker = thread::spawn(move || {
+            let mut pull_request_cache = VecDeque::<PullRequestCacheEntry>::new();
             while request_rx.recv().is_ok() {
                 let Some(request) = worker_pending.lock().ok().and_then(|mut slot| slot.take())
                 else {
@@ -94,6 +97,56 @@ impl PreviewLoader {
                         git::branch_diff(&request.root, target, current)
                             .map(LoadedPreview::Text)
                             .unwrap_or_else(|error| LoadedPreview::Error(error.to_string()))
+                    }
+                    Task::PullRequestDiff {
+                        repository,
+                        repository_url,
+                        base,
+                        head,
+                    } => {
+                        let cancelled = || {
+                            worker_cancellation_generation.load(Ordering::Relaxed)
+                                != request.generation
+                        };
+                        if let Some(diff) = cached_pull_request_diff(
+                            &mut pull_request_cache,
+                            &request.root,
+                            base,
+                            head,
+                        ) {
+                            LoadedPreview::Text(diff)
+                        } else {
+                            let loaded =
+                                match git::pull_request_diff(&request.root, base, head, &cancelled)
+                                {
+                                    Ok(Some(diff)) => LoadedPreview::Text(diff),
+                                    Ok(None) => crate::app::issues::pull_request_diff(
+                                        &request.root,
+                                        repository,
+                                        repository_url,
+                                        base,
+                                        head,
+                                        &cancelled,
+                                    )
+                                    .map(LoadedPreview::Text)
+                                    .unwrap_or_else(LoadedPreview::Error),
+                                    Err(error) => LoadedPreview::Error(error.to_string()),
+                                };
+                            if let LoadedPreview::Text(diff) = &loaded
+                                && !cancelled()
+                            {
+                                pull_request_cache.push_back(PullRequestCacheEntry {
+                                    root: request.root.clone(),
+                                    base: base.clone(),
+                                    head: head.clone(),
+                                    diff: diff.clone(),
+                                });
+                                if pull_request_cache.len() > PULL_REQUEST_CACHE_SIZE {
+                                    pull_request_cache.pop_front();
+                                }
+                            }
+                            loaded
+                        }
                     }
                     Task::SqlitePage { path, key } => LoadedPreview::DatabasePage {
                         path: path.clone(),
@@ -152,6 +205,25 @@ impl PreviewLoader {
 
     pub(super) fn request_branch_diff(&mut self, root: &Path, target: String, current: String) {
         self.request(root, Task::BranchDiff { target, current });
+    }
+
+    pub(super) fn request_pull_request_diff(
+        &mut self,
+        root: &Path,
+        repository: String,
+        repository_url: String,
+        base: String,
+        head: String,
+    ) {
+        self.request(
+            root,
+            Task::PullRequestDiff {
+                repository,
+                repository_url,
+                base,
+                head,
+            },
+        );
     }
 
     pub(super) fn request_sqlite_page(&mut self, root: &Path, path: RepoPath, key: SqlitePageKey) {
@@ -213,9 +285,46 @@ enum Task {
     File(RepoPath),
     Commit(String),
     Diff(Change),
-    SectionDiff { changes: Vec<Change>, staged: bool },
-    BranchDiff { target: String, current: String },
-    SqlitePage { path: RepoPath, key: SqlitePageKey },
+    SectionDiff {
+        changes: Vec<Change>,
+        staged: bool,
+    },
+    BranchDiff {
+        target: String,
+        current: String,
+    },
+    PullRequestDiff {
+        repository: String,
+        repository_url: String,
+        base: String,
+        head: String,
+    },
+    SqlitePage {
+        path: RepoPath,
+        key: SqlitePageKey,
+    },
+}
+
+struct PullRequestCacheEntry {
+    root: PathBuf,
+    base: String,
+    head: String,
+    diff: String,
+}
+
+fn cached_pull_request_diff(
+    cache: &mut VecDeque<PullRequestCacheEntry>,
+    root: &Path,
+    base: &str,
+    head: &str,
+) -> Option<String> {
+    let index = cache
+        .iter()
+        .position(|entry| entry.root == root && entry.base == base && entry.head == head)?;
+    let entry = cache.remove(index)?;
+    let diff = entry.diff.clone();
+    cache.push_back(entry);
+    Some(diff)
 }
 
 struct Completion {

@@ -919,6 +919,7 @@ fn run_headless(
             stdout_bytes: OPENCODE_OUTPUT_BYTES,
             stderr_bytes: OPENCODE_ERROR_BYTES,
             timeout: OPENCODE_RUN_TIMEOUT,
+            stop_at_stdout_limit: false,
         },
         &|| cancelled.load(Ordering::Acquire),
     );

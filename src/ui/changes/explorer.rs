@@ -107,6 +107,9 @@ pub(super) fn draw_explorer_master(
 
 pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let issue_preview = app.changes.preview.issue().cloned();
+    let pull_request = issue_preview
+        .as_ref()
+        .and_then(|issue| issue.pull_request.clone());
     let selected_path = issue_preview.as_ref().map_or_else(
         || {
             app.selected_explorer_file_path()
@@ -308,6 +311,18 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
         crate::ui::sqlite::draw(frame, app, preview_body);
     } else {
         app.changes.preview_presentation.hide_media();
+        if let (Some(issue), Some(pull_request)) = (issue_preview.as_ref(), pull_request.as_ref()) {
+            draw_pull_request_preview(
+                frame,
+                app,
+                area,
+                preview_body,
+                issue.number,
+                &issue.body,
+                pull_request,
+            );
+            return;
+        }
         let editable_path = match app.changes.preview.origin() {
             PreviewOrigin::ExplorerFile { path } if app.changes.preview.editable() => {
                 Some(path.clone())
@@ -342,6 +357,47 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
         }
         render_scrollable_content(frame, app, &mut layout);
     }
+}
+
+fn draw_pull_request_preview(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    preview_body: Rect,
+    number: u64,
+    body: &str,
+    pull_request: &crate::app::PullRequestPreview,
+) {
+    let content_width = usize::from(preview_body.width.saturating_sub(2).max(1));
+    let generation = app.changes.preview.generation();
+    let body_lines = app.changes.preview_presentation.leading_markdown(
+        generation,
+        body,
+        content_width,
+        app.changes.diff_wrap,
+    );
+    let body_height = body_lines.len().saturating_add(6);
+    let card_height = body_height.min(usize::from(u16::MAX)) as u16;
+    let mut layout = prepare_preview_layout(
+        app,
+        area,
+        preview_body,
+        &format!("pull-{number}.diff"),
+        false,
+        card_height.saturating_add(1),
+    );
+    draw_scrolled_pull_request_card(
+        frame,
+        &layout,
+        card_height,
+        &pull_request.base_ref_name,
+        &pull_request.head_ref_name,
+        pull_request.changed_files,
+        pull_request.additions,
+        pull_request.deletions,
+        &body_lines,
+    );
+    render_scrollable_content(frame, app, &mut layout);
 }
 
 pub(super) fn worktree_item<'a>(

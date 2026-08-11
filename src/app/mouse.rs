@@ -240,6 +240,7 @@ impl App {
                         Some(
                             HitTarget::HeaderPickerOverlay
                                 | HitTarget::HeaderPickerItem(_)
+                                | HitTarget::HeaderPickerCheckoutPullRequest(_)
                                 | HitTarget::HeaderPickerDeleteBranch(_)
                                 | HitTarget::HeaderPickerDeleteWorktree(_),
                         )
@@ -254,6 +255,7 @@ impl App {
                         Some(
                             HitTarget::HeaderPickerOverlay
                                 | HitTarget::HeaderPickerItem(_)
+                                | HitTarget::HeaderPickerCheckoutPullRequest(_)
                                 | HitTarget::HeaderPickerDeleteBranch(_)
                                 | HitTarget::HeaderPickerDeleteWorktree(_),
                         )
@@ -266,6 +268,9 @@ impl App {
                     match self.regions.hit_target_at(point) {
                         Some(HitTarget::HeaderPickerItem(index)) => {
                             self.activate_header_picker(index)
+                        }
+                        Some(HitTarget::HeaderPickerCheckoutPullRequest(index)) => {
+                            self.checkout_header_pull_request(index)
                         }
                         Some(HitTarget::HeaderPickerIssueScope) => self.toggle_header_issue_scope(),
                         Some(HitTarget::HeaderPickerNewBranch) => {

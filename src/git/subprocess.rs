@@ -11,6 +11,16 @@ pub(crate) fn run_limited(root: &Path, args: &[&str], limits: Limits) -> Result<
         .with_context(|| format!("could not run git {}", args.join(" ")))
 }
 
+pub(crate) fn run_limited_cancellable(
+    root: &Path,
+    args: &[&str],
+    limits: Limits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Output> {
+    process::run_cancellable(base_command(root).args(args), limits, cancelled)
+        .with_context(|| format!("could not run git {}", args.join(" ")))
+}
+
 pub(crate) fn run_path_command(root: &Path, args: &[&str], paths: &[&RepoPath]) -> Result<Output> {
     let output = run_path_command_limited(root, args, paths, git_limits())?;
     ensure_complete(&output, &format!("git {}", args.join(" ")))?;

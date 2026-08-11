@@ -182,6 +182,7 @@ pub(crate) struct PreparedEditorPreview {
 
 pub(crate) struct PreviewPresentation {
     cache: Option<PreviewCache>,
+    leading_markdown: Option<LeadingMarkdownCache>,
     editor_cache: Option<EditorPreviewCache>,
     editor_markers: Option<EditorMarkerCache>,
     media_state: Option<ThreadProtocol>,
@@ -198,6 +199,13 @@ pub(crate) struct PreviewPresentation {
     active_inline_image: Option<ActiveInlineImage>,
     pending_terminal_cleanup: Vec<u8>,
     pending_terminal_output: MediaTerminalOutput,
+}
+
+struct LeadingMarkdownCache {
+    generation: u64,
+    width: usize,
+    wrapped: bool,
+    lines: Arc<[Line<'static>]>,
 }
 
 struct PreviewCache {
@@ -304,6 +312,7 @@ impl Default for PreviewPresentation {
         });
         Self {
             cache: None,
+            leading_markdown: None,
             editor_cache: None,
             editor_markers: None,
             media_state: Some(ThreadProtocol::new(request_sender, None)),
@@ -327,9 +336,43 @@ impl Default for PreviewPresentation {
 impl PreviewPresentation {
     pub(crate) fn clear(&mut self) {
         self.cache = None;
+        self.leading_markdown = None;
         self.editor_cache = None;
         self.editor_markers = None;
         self.hide_media();
+    }
+
+    pub(crate) fn leading_markdown(
+        &mut self,
+        generation: u64,
+        markdown: &str,
+        width: usize,
+        wrapped: bool,
+    ) -> Arc<[Line<'static>]> {
+        let matches = self.leading_markdown.as_ref().is_some_and(|cache| {
+            cache.generation == generation && cache.width == width && cache.wrapped == wrapped
+        });
+        if !matches {
+            let lines = styled_markdown(markdown, width, wrapped);
+            let lines = if wrapped {
+                hard_wrap_preview_lines(lines, width, 0, usize::MAX, false, true)
+            } else {
+                lines
+            };
+            self.leading_markdown = Some(LeadingMarkdownCache {
+                generation,
+                width,
+                wrapped,
+                lines: Arc::from(lines),
+            });
+        }
+        Arc::clone(
+            &self
+                .leading_markdown
+                .as_ref()
+                .expect("leading Markdown was prepared")
+                .lines,
+        )
     }
 
     pub(crate) fn editor_line_markers(

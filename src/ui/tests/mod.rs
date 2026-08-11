@@ -90,6 +90,50 @@ fn columns_render_one_empty_workspace_without_a_repository() {
 }
 
 #[test]
+fn pull_request_preview_composes_description_and_diff() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    let mut app = App::new(root.to_path_buf());
+    app.changes.set_pull_request_for_test(
+        "## Context\nReview this change.",
+        concat!(
+            "diff --git a/file.txt b/file.txt\n",
+            "--- a/file.txt\n",
+            "+++ b/file.txt\n",
+            "@@ -1 +1 @@\n",
+            "-before\n",
+            "+after\n",
+        )
+        .to_owned(),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            changes::draw(
+                frame,
+                &mut app,
+                changes::ChangesPlan::Columns {
+                    areas: [Rect::new(0, 0, 38, 30), Rect::new(39, 0, 61, 30)],
+                    sidebar_pane: LeftPane::Files,
+                    preview_pane: Some(LeftPane::Files),
+                    agents: changes::ColumnAgents::Hidden,
+                },
+            );
+        })
+        .unwrap();
+
+    let rendered = screen_text(&terminal);
+    assert!(rendered.contains("PULL #17"), "{rendered}");
+    assert!(rendered.contains("CHANGES topic -> main"));
+    assert!(rendered.contains("DESCRIPTION"));
+    assert!(rendered.contains("Review this change."));
+    assert!(rendered.contains("file.txt"));
+    assert!(rendered.contains("+after"));
+}
+
+#[test]
 fn footer_abbreviates_paths_under_home() {
     let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
         return;

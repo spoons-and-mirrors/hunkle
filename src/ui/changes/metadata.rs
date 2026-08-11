@@ -39,6 +39,111 @@ pub(super) fn draw_scrolled_summary_card(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_scrolled_pull_request_card(
+    frame: &mut Frame<'_>,
+    layout: &PreviewLayout,
+    height: u16,
+    base_ref: &str,
+    head_ref: &str,
+    changed_files: Option<u64>,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+    body: &[Line<'static>],
+) {
+    let viewport = layout.viewport;
+    let scroll = layout.outer_scroll.min(usize::from(u16::MAX)) as u16;
+    if scroll >= height {
+        return;
+    }
+    let visible_height = height.saturating_sub(scroll).min(viewport.height);
+    let card = Rect::new(viewport.x, viewport.y, viewport.width, visible_height);
+    fill(frame, card, palette().surface_alt);
+    let content_x = card.x.saturating_add(1);
+    let content_width = card.width.saturating_sub(2);
+    draw_scrolled_text(
+        frame,
+        card,
+        Rect::new(content_x, 1, content_width, 1),
+        scroll,
+        Text::from(pull_request_metadata_line(
+            base_ref,
+            head_ref,
+            changed_files,
+            additions,
+            deletions,
+        )),
+        false,
+    );
+    draw_scrolled_text(
+        frame,
+        card,
+        Rect::new(content_x, 3, content_width, 1),
+        scroll,
+        Text::from(Line::styled(
+            "DESCRIPTION",
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        )),
+        false,
+    );
+    let body_y = card.y.saturating_add(5_u16.saturating_sub(scroll));
+    let visible_height = card.bottom().saturating_sub(body_y);
+    if visible_height > 0 {
+        let first = usize::from(scroll.saturating_sub(5));
+        let visible = body
+            .iter()
+            .skip(first)
+            .take(usize::from(visible_height))
+            .cloned()
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(Text::from(visible)),
+            Rect::new(content_x, body_y, content_width, visible_height),
+        );
+    }
+}
+
+fn pull_request_metadata_line(
+    base_ref: &str,
+    head_ref: &str,
+    changed_files: Option<u64>,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(
+            "CHANGES ",
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(head_ref.to_owned(), Style::default().fg(palette().accent)),
+        Span::styled(" -> ", Style::default().fg(palette().faint)),
+        Span::styled(base_ref.to_owned(), Style::default().fg(palette().ink)),
+    ];
+    if let Some(files) = changed_files {
+        spans.push(Span::styled(
+            format!("  {files} files"),
+            Style::default().fg(palette().muted),
+        ));
+    }
+    if let Some(additions) = additions {
+        spans.push(Span::styled(
+            format!(" +{additions}"),
+            Style::default().fg(palette().green),
+        ));
+    }
+    if let Some(deletions) = deletions {
+        spans.push(Span::styled(
+            format!(" -{deletions}"),
+            Style::default().fg(palette().red),
+        ));
+    }
+    Line::from(spans)
+}
+
 pub(super) struct CommitMetadata<'a> {
     pub(super) height: u16,
     pub(super) commit: &'a Commit,

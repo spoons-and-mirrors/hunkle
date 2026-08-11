@@ -159,6 +159,19 @@ pub(crate) struct IssuePreview {
     pub(crate) number: u64,
     pub(crate) kind: String,
     pub(crate) title: String,
+    pub(crate) body: Arc<str>,
+    pub(crate) pull_request: Option<PullRequestPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullRequestPreview {
+    pub(crate) base_ref_name: String,
+    pub(crate) base_ref_oid: String,
+    pub(crate) head_ref_name: String,
+    pub(crate) head_ref_oid: String,
+    pub(crate) changed_files: Option<u64>,
+    pub(crate) additions: Option<u64>,
+    pub(crate) deletions: Option<u64>,
 }
 
 struct PendingHunkSelection {
@@ -263,13 +276,22 @@ impl PreviewState {
                 | PreviewOrigin::WorktreeSection(_)
                 | PreviewOrigin::WorktreeDirectory { .. }
                 | PreviewOrigin::BranchComparison(_)
+                | PreviewOrigin::Issue(IssuePreview {
+                    pull_request: Some(_),
+                    ..
+                })
         )
     }
 
     pub(crate) fn markdown_available(&self) -> bool {
-        matches!(self.origin, PreviewOrigin::Issue(_))
-            || matches!(&self.origin, PreviewOrigin::ExplorerFile { path } if crate::app::is_markdown_path(path))
-                && matches!(self.payload, PreviewPayload::Source(_))
+        matches!(
+            self.origin,
+            PreviewOrigin::Issue(IssuePreview {
+                pull_request: None,
+                ..
+            })
+        ) || matches!(&self.origin, PreviewOrigin::ExplorerFile { path } if crate::app::is_markdown_path(path))
+            && matches!(self.payload, PreviewPayload::Source(_))
     }
 
     pub(crate) fn wrappable(&self) -> bool {
@@ -1657,9 +1679,11 @@ impl ChangesState {
                     PreviewOrigin::WorktreeChange { .. }
                     | PreviewOrigin::WorktreeSection(_)
                     | PreviewOrigin::Commit { .. }
-                    | PreviewOrigin::BranchComparison(_) => {
-                        PreviewPayload::Diff(DiffDocument::parse(content))
-                    }
+                    | PreviewOrigin::BranchComparison(_)
+                    | PreviewOrigin::Issue(IssuePreview {
+                        pull_request: Some(_),
+                        ..
+                    }) => PreviewPayload::Diff(DiffDocument::parse(content)),
                     _ => PreviewPayload::Message(content),
                 };
                 self.set_preview_payload(payload);
@@ -1907,12 +1931,35 @@ impl ChangesState {
         self.set_preview_payload(PreviewPayload::Diff(DiffDocument::parse(content)));
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_pull_request_for_test(&mut self, body: &str, content: String) {
+        self.preview.origin = PreviewOrigin::Issue(IssuePreview {
+            number: 17,
+            kind: "PULL".to_owned(),
+            title: "Improve previews".to_owned(),
+            body: Arc::from(body),
+            pull_request: Some(PullRequestPreview {
+                base_ref_name: "main".to_owned(),
+                base_ref_oid: "base".to_owned(),
+                head_ref_name: "topic".to_owned(),
+                head_ref_oid: "head".to_owned(),
+                changed_files: Some(1),
+                additions: Some(1),
+                deletions: Some(1),
+            }),
+        });
+        self.markdown_rendered = false;
+        self.set_diff_for_test(content);
+    }
+
     pub(crate) fn show_issue(&mut self, number: u64, kind: &str, title: &str, body: &str) {
         self.preview_loader.invalidate();
         self.preview.origin = PreviewOrigin::Issue(IssuePreview {
             number,
             kind: kind.to_owned(),
             title: title.to_owned(),
+            body: Arc::from(body),
+            pull_request: None,
         });
         self.diff_scroll = 0;
         self.markdown_rendered = true;
@@ -1926,6 +1973,59 @@ impl ChangesState {
         } else {
             body.to_owned()
         }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn show_pull_request(
+        &mut self,
+        root: &Path,
+        repository: &str,
+        repository_url: &str,
+        number: u64,
+        title: &str,
+        body: &str,
+        base_ref_name: &str,
+        base_ref_oid: &str,
+        head_ref_name: &str,
+        head_ref_oid: &str,
+        changed_files: Option<u64>,
+        additions: Option<u64>,
+        deletions: Option<u64>,
+    ) {
+        self.preview.origin = PreviewOrigin::Issue(IssuePreview {
+            number,
+            kind: "PULL".to_owned(),
+            title: title.to_owned(),
+            body: Arc::from(if body.trim().is_empty() {
+                "_No description provided._"
+            } else {
+                body
+            }),
+            pull_request: Some(PullRequestPreview {
+                base_ref_name: base_ref_name.to_owned(),
+                base_ref_oid: base_ref_oid.to_owned(),
+                head_ref_name: head_ref_name.to_owned(),
+                head_ref_oid: head_ref_oid.to_owned(),
+                changed_files,
+                additions,
+                deletions,
+            }),
+        });
+        self.diff_scroll = 0;
+        self.markdown_rendered = false;
+        self.markdown_alternate_scroll = None;
+        self.hunk_selection = None;
+        self.hunk_pin_pending = false;
+        self.pending_hunk_selection = None;
+        self.pending_preview_line = None;
+        self.set_preview_payload(PreviewPayload::Loading);
+        self.preview_loader.request_pull_request_diff(
+            root,
+            repository.to_owned(),
+            repository_url.to_owned(),
+            base_ref_oid.to_owned(),
+            head_ref_oid.to_owned(),
+        );
     }
 
     fn clear_issue_preview(&mut self) {

@@ -450,6 +450,122 @@ fn branch_diffs_show_changes_unique_to_the_current_branch() {
     assert_eq!(branch_name(root).unwrap(), "feature");
 }
 
+#[test]
+fn pull_request_diffs_compare_immutable_commits_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.name", "PR Diff Test"]);
+    git(root, &["config", "user.email", "pr-diff@example.com"]);
+    fs::write(root.join("shared.txt"), "base\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "base"]);
+    git(root, &["switch", "-c", "topic"]);
+    fs::write(root.join("topic.txt"), "committed\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "topic"]);
+    git(root, &["switch", "main"]);
+    fs::write(root.join("main.txt"), "target only\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "target"]);
+    git(root, &["switch", "topic"]);
+    fs::write(root.join("topic.txt"), "committed\nunstaged\n").unwrap();
+    fs::write(root.join("staged.txt"), "staged\n").unwrap();
+    fs::write(root.join("untracked.txt"), "untracked\n").unwrap();
+    git(root, &["add", "staged.txt"]);
+
+    let preview = pull_request_diff(root, "main", "topic", &|| false)
+        .unwrap()
+        .unwrap();
+
+    assert!(preview.contains("diff --git a/topic.txt b/topic.txt"));
+    assert!(preview.contains("+committed"));
+    assert!(!preview.contains("unstaged"));
+    assert!(!preview.contains("staged.txt"));
+    assert!(!preview.contains("untracked.txt"));
+    assert!(!preview.contains("main.txt"));
+    assert!(
+        pull_request_diff(root, "missing", "topic", &|| false)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn pull_request_checkout_verifies_the_fetched_revision_before_switching() {
+    let source_directory = tempfile::tempdir().unwrap();
+    let source = source_directory.path();
+    git(source, &["init", "-b", "main"]);
+    git(source, &["config", "user.name", "PR Checkout Test"]);
+    git(source, &["config", "user.email", "pr-checkout@example.com"]);
+    fs::write(source.join("base.txt"), "base\n").unwrap();
+    git(source, &["add", "."]);
+    git(source, &["commit", "-m", "base"]);
+    git(source, &["switch", "-c", "topic"]);
+    fs::write(source.join("topic.txt"), "first\n").unwrap();
+    git(source, &["add", "."]);
+    git(source, &["commit", "-m", "topic"]);
+    let expected = String::from_utf8(run(source, &["rev-parse", "HEAD"]).unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let remote_directory = tempfile::tempdir().unwrap();
+    let remote = remote_directory.path();
+    git(remote, &["init", "--bare"]);
+    git(
+        source,
+        &["push", remote.to_str().unwrap(), "topic:refs/pull/42/head"],
+    );
+    let workspace_directory = tempfile::tempdir().unwrap();
+    let workspace = workspace_directory.path();
+    git(workspace, &["init", "-b", "main"]);
+
+    let output =
+        checkout_pull_request_from_remote(workspace, remote.to_str().unwrap(), 42, &expected)
+            .unwrap();
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(
+        String::from_utf8(run(workspace, &["rev-parse", "HEAD"]).unwrap().stdout)
+            .unwrap()
+            .trim(),
+        expected
+    );
+    assert_eq!(
+        String::from_utf8(
+            run(workspace, &["branch", "--show-current"])
+                .unwrap()
+                .stdout
+        )
+        .unwrap()
+        .trim(),
+        format!("hunkle/pr-42-{}", &expected[..12])
+    );
+
+    fs::write(source.join("topic.txt"), "second\n").unwrap();
+    git(source, &["add", "."]);
+    git(source, &["commit", "-m", "force pushed"]);
+    git(
+        source,
+        &[
+            "push",
+            "--force",
+            remote.to_str().unwrap(),
+            "topic:refs/pull/42/head",
+        ],
+    );
+    let error =
+        checkout_pull_request_from_remote(workspace, remote.to_str().unwrap(), 42, &expected)
+            .unwrap_err();
+    assert!(error.to_string().contains("pull request changed"));
+    assert_eq!(
+        String::from_utf8(run(workspace, &["rev-parse", "HEAD"]).unwrap().stdout)
+            .unwrap()
+            .trim(),
+        expected
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn untracked_symlink_preview_does_not_read_its_target() {

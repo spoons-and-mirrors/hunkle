@@ -379,6 +379,7 @@ pub(crate) enum HitTarget {
     HeaderPickerConfirmDeleteWorktree,
     HeaderPickerCancelDeleteWorktree,
     HeaderPickerItem(usize),
+    HeaderPickerCheckoutPullRequest(usize),
     HeaderPickerIssueScope,
     Changes(ChangesHitTarget),
     CommitMessageGenerate,
@@ -910,6 +911,7 @@ impl Regions {
         match target {
             HitTarget::HeaderPickerOverlay
             | HitTarget::HeaderPickerItem(_)
+            | HitTarget::HeaderPickerCheckoutPullRequest(_)
             | HitTarget::HeaderPickerDeleteBranch(_)
             | HitTarget::HeaderPickerDeleteWorktree(_) => Some(ScrollTarget::HeaderPicker),
             HitTarget::AgentPreviewMessageTimeline(agent)

@@ -35,6 +35,7 @@ pub(crate) enum WorkerOutcome {
     DiscardUnstaged(DiscardUnstagedCompletion),
     Format(FormatCompletion),
     BranchCheckout(BranchCheckoutCompletion),
+    PullRequestCheckout(PullRequestCheckoutCompletion),
     BranchCreate(BranchCreateCompletion),
     BranchDelete(BranchDeleteCompletion),
 }
@@ -67,7 +68,9 @@ impl WorkerCompletion {
             // A formatter may rewrite a file before returning a failure.
             WorkerOutcome::Format(_) => Some(RefreshScope::WORKTREE),
             // A failed switch can still update the index or working tree.
-            WorkerOutcome::BranchCheckout(_) => Some(RefreshScope::ALL),
+            WorkerOutcome::BranchCheckout(_) | WorkerOutcome::PullRequestCheckout(_) => {
+                Some(RefreshScope::ALL)
+            }
             WorkerOutcome::BranchCreate(_) => Some(RefreshScope::ALL),
             WorkerOutcome::BranchDelete(done)
                 if done.result.as_ref().is_ok_and(|output| output.success) =>
@@ -100,6 +103,11 @@ impl WorkerCompletion {
 
 pub(crate) struct BranchCheckoutCompletion {
     pub(crate) branch: String,
+    pub(crate) result: Result<CommandOutput, String>,
+}
+
+pub(crate) struct PullRequestCheckoutCompletion {
+    pub(crate) number: u64,
     pub(crate) result: Result<CommandOutput, String>,
 }
 
@@ -234,6 +242,9 @@ enum WorkerKind {
     },
     BranchCheckout {
         branch: String,
+    },
+    PullRequestCheckout {
+        number: u64,
     },
     BranchCreate {
         branch: String,
@@ -659,6 +670,33 @@ impl RepositorySession {
         true
     }
 
+    pub(crate) fn start_pull_request_checkout(
+        &mut self,
+        repository_url: String,
+        number: u64,
+        expected_head: String,
+    ) -> bool {
+        if !self.operations.can_start(Operation::Mutation) {
+            return false;
+        }
+        let Some(root) = self.git_root() else {
+            return false;
+        };
+
+        self.operations.start(Operation::Mutation);
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = git::checkout_pull_request(&root, &repository_url, number, &expected_head)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(WorkerResult {
+                kind: WorkerKind::PullRequestCheckout { number },
+                root,
+                result,
+            });
+        });
+        true
+    }
+
     pub(crate) fn start_branch_create(&mut self, branch: String, base: String) -> bool {
         if !self.operations.can_start(Operation::Mutation) {
             return false;
@@ -889,6 +927,20 @@ impl RepositorySession {
                             WorkerCompletion::new(WorkerOutcome::BranchCheckout(
                                 BranchCheckoutCompletion {
                                     branch,
+                                    result: done.result,
+                                },
+                            )),
+                            fetch_interval,
+                        ));
+                    }
+                }
+                WorkerKind::PullRequestCheckout { number } => {
+                    self.operations.finish(Operation::Mutation);
+                    if active {
+                        return Some(self.schedule_completion_refresh(
+                            WorkerCompletion::new(WorkerOutcome::PullRequestCheckout(
+                                PullRequestCheckoutCompletion {
+                                    number,
                                     result: done.result,
                                 },
                             )),

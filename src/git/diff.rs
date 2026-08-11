@@ -212,12 +212,13 @@ pub fn branch_diff(root: &Path, target: &str, current: &str) -> Result<String> {
     let output = run_limited(
         root,
         &["diff", "--no-ext-diff", "--unified=3", &merge_base, "--"],
-        Limits::new(DIFF_PREVIEW_LIMIT, GIT_STDERR_LIMIT, SECTION_DIFF_TIMEOUT),
+        Limits::new(DIFF_PREVIEW_LIMIT, GIT_STDERR_LIMIT, SECTION_DIFF_TIMEOUT)
+            .stopping_at_stdout_limit(),
     )?;
     if output.timed_out {
         bail!("Git branch diff timed out");
     }
-    if !output.status.success() {
+    if !output.status.success() && !output.stdout_limit_reached {
         bail!("{}", clean_stderr(&output));
     }
     let mut bytes = output.stdout;
@@ -243,6 +244,52 @@ pub fn branch_diff(root: &Path, target: &str, current: &str) -> Result<String> {
         return Ok("No branch differences".to_owned());
     }
     Ok(preview_text(bytes, truncated))
+}
+
+pub(crate) fn pull_request_diff(
+    root: &Path,
+    base: &str,
+    head: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<String>> {
+    let merge_base = run_limited_cancellable(
+        root,
+        &["merge-base", base, head],
+        Limits::new(128, GIT_STDERR_LIMIT, SECTION_DIFF_TIMEOUT),
+        cancelled,
+    )?;
+    if merge_base.timed_out {
+        bail!("Checking pull request commits timed out");
+    }
+    if !merge_base.status.success() {
+        return Ok(None);
+    }
+
+    let range = format!("{base}...{head}");
+    let output = run_limited_cancellable(
+        root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--unified=3",
+            &range,
+            "--",
+        ],
+        Limits::new(DIFF_PREVIEW_LIMIT, GIT_STDERR_LIMIT, SECTION_DIFF_TIMEOUT)
+            .stopping_at_stdout_limit(),
+        cancelled,
+    )?;
+    if output.timed_out {
+        bail!("Git pull request diff timed out");
+    }
+    if !output.status.success() && !output.stdout_limit_reached {
+        bail!("{}", clean_stderr(&output));
+    }
+    if output.stdout.is_empty() {
+        return Ok(Some("No pull request differences".to_owned()));
+    }
+    Ok(Some(preview_text(output.stdout, output.stdout_truncated)))
 }
 
 pub fn commit_summaries(root: &Path, oids: &[String]) -> Result<HashMap<String, DiffSummary>> {

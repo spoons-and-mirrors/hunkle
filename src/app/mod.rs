@@ -27,7 +27,9 @@ pub(crate) use actions::{
 };
 pub(crate) use agent_preview::{AgentPreview, AgentPreviewEffect, LiveAgentPreviewContext};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
-pub(crate) use changes::{ChangesHitTarget, PreviewOrigin, SqliteFocus, SqlitePage};
+pub(crate) use changes::{
+    ChangesHitTarget, PreviewOrigin, PullRequestPreview, SqliteFocus, SqlitePage,
+};
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use commit_message::{CommitMessageCompletion, CommitMessageGenerator};
 pub(crate) use commit_summary::CommitSummaryCache;
@@ -1412,6 +1414,15 @@ impl App {
                     }
                     Err(error) => self.notice = Some(error),
                 },
+                WorkerOutcome::PullRequestCheckout(done) => match done.result {
+                    Ok(output) if output.success => {
+                        self.notice = Some(format!("Checked out PR #{}", done.number));
+                    }
+                    Ok(output) => {
+                        self.notice = Some(first_error(&output.stderr, "PR checkout failed"));
+                    }
+                    Err(error) => self.notice = Some(error),
+                },
                 WorkerOutcome::BranchCreate(done) => match done.result {
                     Ok(output) if output.success => {
                         self.notice = Some(format!("Created and checked out {}", done.branch));
@@ -2473,16 +2484,78 @@ impl App {
                 let Some(issue) = self.issues.issue(number) else {
                     return;
                 };
-                self.changes.show_issue(
-                    issue.number,
-                    issue.kind_label(),
-                    &issue.title,
-                    &issue.body,
-                );
+                let pull_request = issue
+                    .pull_request
+                    .then(|| {
+                        Some((
+                            issue.base_ref_name.as_deref()?,
+                            issue.base_ref_oid.as_deref()?,
+                            issue.head_ref_name.as_deref()?,
+                            issue.head_ref_oid.as_deref()?,
+                        ))
+                    })
+                    .flatten();
+                if let (Some(root), Some((base_name, base_oid, head_name, head_oid))) = (
+                    self.repository().map(|repo| repo.root.clone()),
+                    pull_request,
+                ) {
+                    self.changes.show_pull_request(
+                        &root,
+                        &issue.repository,
+                        &issue.repository_url,
+                        issue.number,
+                        &issue.title,
+                        &issue.body,
+                        base_name,
+                        base_oid,
+                        head_name,
+                        head_oid,
+                        issue.changed_files,
+                        issue.additions,
+                        issue.deletions,
+                    );
+                } else {
+                    self.changes.show_issue(
+                        issue.number,
+                        issue.kind_label(),
+                        &issue.title,
+                        &issue.body,
+                    );
+                }
                 self.initial_pane_pending = false;
                 self.dismiss_agent_preview();
-                self.show_main_pane();
+                self.show_detail_panel();
             }
+        }
+    }
+
+    pub(crate) fn checkout_header_pull_request(&mut self, index: usize) {
+        let Some(HeaderPickerItem::Issue {
+            number,
+            pull_request: true,
+            ..
+        }) = self.header_picker.items.get(index)
+        else {
+            return;
+        };
+        let number = *number;
+        let Some(issue) = self.issues.issue(number) else {
+            return;
+        };
+        let Some(head_oid) = issue.head_ref_oid.as_ref() else {
+            self.notice = Some("Pull request revision is unavailable".to_owned());
+            return;
+        };
+        if self.session.start_pull_request_checkout(
+            issue.repository_url.clone(),
+            number,
+            head_oid.clone(),
+        ) {
+            self.header_picker.close();
+            self.changes.clear_branch_comparison();
+            self.notice = Some(format!("Checking out PR #{number}…"));
+        } else {
+            self.notice = Some("Another repository operation is running".to_owned());
         }
     }
 

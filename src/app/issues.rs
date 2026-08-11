@@ -17,6 +17,8 @@ use crate::process::{self, Limits};
 const ISSUE_LIMIT: usize = 1000;
 const CATALOG_FRESHNESS: Duration = Duration::from_secs(60);
 const COMMAND_LIMITS: Limits = Limits::new(4 * 1024 * 1024, 32 * 1024, Duration::from_secs(30));
+const PULL_REQUEST_DIFF_LIMITS: Limits =
+    Limits::new(2 * 1024 * 1024, 32 * 1024, Duration::from_secs(30)).stopping_at_stdout_limit();
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum IssueScope {
@@ -43,6 +45,8 @@ impl IssueScope {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Issue {
+    pub(crate) repository: String,
+    pub(crate) repository_url: String,
     pub(crate) number: u64,
     pub(crate) title: String,
     pub(crate) body: String,
@@ -54,6 +58,10 @@ pub(crate) struct Issue {
     pub(crate) changed_files: Option<u64>,
     pub(crate) additions: Option<u64>,
     pub(crate) deletions: Option<u64>,
+    pub(crate) base_ref_name: Option<String>,
+    pub(crate) base_ref_oid: Option<String>,
+    pub(crate) head_ref_name: Option<String>,
+    pub(crate) head_ref_oid: Option<String>,
     merged_at: Option<String>,
     updated_at: String,
 }
@@ -293,6 +301,41 @@ impl IssueCatalog {
         self.issues()?.iter().find(|issue| issue.number == number)
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_pull_request_for_test(
+        &mut self,
+        root: PathBuf,
+        number: u64,
+        repository_url: String,
+        oid: String,
+    ) {
+        self.root = Some(root);
+        self.issues.insert(
+            self.scope,
+            vec![Issue {
+                repository: "owner/repository".to_owned(),
+                repository_url,
+                number,
+                title: "Preview this pull request".to_owned(),
+                body: "Pull request description".to_owned(),
+                author: Some("octocat".to_owned()),
+                labels: Vec::new(),
+                pull_request: true,
+                state: "OPEN".to_owned(),
+                is_draft: false,
+                changed_files: Some(1),
+                additions: Some(1),
+                deletions: Some(0),
+                base_ref_name: Some("main".to_owned()),
+                base_ref_oid: Some(oid.clone()),
+                head_ref_name: Some("topic".to_owned()),
+                head_ref_oid: Some(oid),
+                merged_at: None,
+                updated_at: "2026-01-01T00:00:00Z".to_owned(),
+            }],
+        );
+    }
+
     pub(crate) fn loading(&self) -> bool {
         self.pending.contains(&self.scope)
     }
@@ -380,6 +423,10 @@ struct RawGraphIssue {
     changed_files: Option<u64>,
     additions: Option<u64>,
     deletions: Option<u64>,
+    base_ref_name: Option<String>,
+    base_ref_oid: Option<String>,
+    head_ref_name: Option<String>,
+    head_ref_oid: Option<String>,
     merged_at: Option<String>,
 }
 
@@ -438,17 +485,19 @@ struct RawGraphResponse {
 #[serde(rename_all = "camelCase")]
 struct RawRepositoryIdentity {
     name_with_owner: String,
+    url: String,
 }
 
 fn load_issues(
     request: &IssueRequest,
     sender: &Sender<IssueCompletion>,
 ) -> Result<(), mpsc::SendError<IssueCompletion>> {
-    let result = repository_identity(&request.root).and_then(|(owner, name)| {
+    let result = repository_identity(&request.root).and_then(|(owner, name, repository_url)| {
         let (issues, pull_requests) = thread::scope(|threads| {
-            let issues = threads.spawn(|| load_issue_pages(request, sender, &owner, &name, false));
-            let pull_requests =
-                threads.spawn(|| load_issue_pages(request, sender, &owner, &name, true));
+            let issues = threads
+                .spawn(|| load_issue_pages(request, sender, &owner, &name, &repository_url, false));
+            let pull_requests = threads
+                .spawn(|| load_issue_pages(request, sender, &owner, &name, &repository_url, true));
             (
                 issues
                     .join()
@@ -470,19 +519,19 @@ fn load_issues(
     })
 }
 
-fn repository_identity(root: &Path) -> Result<(String, String), String> {
+fn repository_identity(root: &Path) -> Result<(String, String, String), String> {
     let mut command = Command::new("gh");
     command
         .current_dir(root)
         .env("GH_PROMPT_DISABLED", "1")
-        .args(["repo", "view", "--json", "nameWithOwner"]);
+        .args(["repo", "view", "--json", "nameWithOwner,url"]);
     let output = run_gh(&mut command, "repository")?;
     let identity = serde_json::from_slice::<RawRepositoryIdentity>(&output)
         .map_err(|error| format!("Could not identify GitHub repository: {error}"))?;
     identity
         .name_with_owner
         .split_once('/')
-        .map(|(owner, name)| (owner.to_owned(), name.to_owned()))
+        .map(|(owner, name)| (owner.to_owned(), name.to_owned(), identity.url))
         .ok_or_else(|| "GitHub CLI returned an invalid repository name".to_owned())
 }
 
@@ -491,6 +540,7 @@ fn load_issue_pages(
     sender: &Sender<IssueCompletion>,
     owner: &str,
     name: &str,
+    repository_url: &str,
     pull_request: bool,
 ) -> Result<(), String> {
     let noun = if pull_request {
@@ -509,7 +559,7 @@ fn load_issue_pages(
         _ => "OPEN",
     };
     let pull_request_fields = if pull_request {
-        "isDraft changedFiles additions deletions mergedAt"
+        "isDraft changedFiles additions deletions baseRefName baseRefOid headRefName headRefOid mergedAt"
     } else {
         ""
     };
@@ -531,7 +581,9 @@ fn load_issue_pages(
             command.args(["-F", &format!("after={cursor}")]);
         }
         let output = run_gh(&mut command, noun)?;
-        let (batch, page_info) = parse_graph_page(&output, pull_request, noun)?;
+        let repository = format!("{owner}/{name}");
+        let (batch, page_info) =
+            parse_graph_page(&output, pull_request, noun, &repository, repository_url)?;
         loaded += batch.len();
         if !batch.is_empty() {
             sender
@@ -557,6 +609,8 @@ fn parse_graph_page(
     output: &[u8],
     pull_request: bool,
     noun: &str,
+    repository: &str,
+    repository_url: &str,
 ) -> Result<(Vec<Issue>, RawPageInfo), String> {
     let response = serde_json::from_slice::<RawGraphResponse>(output)
         .map_err(|error| format!("Could not read GitHub {noun}: {error}"))?;
@@ -572,6 +626,8 @@ fn parse_graph_page(
         .nodes
         .into_iter()
         .map(|issue| Issue {
+            repository: repository.to_owned(),
+            repository_url: repository_url.to_owned(),
             number: issue.number,
             title: issue.title,
             body: issue.body,
@@ -588,11 +644,67 @@ fn parse_graph_page(
             changed_files: issue.changed_files,
             additions: issue.additions,
             deletions: issue.deletions,
+            base_ref_name: issue.base_ref_name,
+            base_ref_oid: issue.base_ref_oid,
+            head_ref_name: issue.head_ref_name,
+            head_ref_oid: issue.head_ref_oid,
             merged_at: issue.merged_at,
             updated_at: issue.updated_at,
         })
         .collect();
     Ok((issues, connection.page_info))
+}
+
+pub(crate) fn pull_request_diff(
+    root: &Path,
+    repository: &str,
+    repository_url: &str,
+    base: &str,
+    head: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    let mut command = Command::new("gh");
+    command
+        .current_dir(root)
+        .env("GH_PROMPT_DISABLED", "1")
+        .arg("api")
+        .arg(format!("repos/{repository}/compare/{base}...{head}"))
+        .args(["--header", "Accept: application/vnd.github.v3.diff"]);
+    if let Some(host) = repository_url
+        .strip_prefix("https://")
+        .and_then(|url| url.split('/').next())
+    {
+        command.args(["--hostname", host]);
+    }
+    let output = process::run_cancellable(&mut command, PULL_REQUEST_DIFF_LIMITS, cancelled)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "GitHub CLI (`gh`) is required when pull request commits are not available locally"
+                    .to_owned()
+            } else {
+                format!("Could not load pull request diff: {error}")
+            }
+        })?;
+    if output.timed_out {
+        return Err("Loading pull request diff timed out".to_owned());
+    }
+    if !output.status.success() && !output.stdout_limit_reached {
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("GitHub CLI returned an error")
+            .trim()
+            .to_owned();
+        return Err(detail);
+    }
+    let mut diff = String::from_utf8_lossy(&output.stdout).into_owned();
+    if output.stdout_truncated {
+        diff.push_str("\n\n[Pull request diff truncated at 2 MiB]\n");
+    }
+    if diff.is_empty() {
+        diff = "No pull request differences".to_owned();
+    }
+    Ok(diff)
 }
 
 fn run_gh(command: &mut Command, noun: &str) -> Result<Vec<u8>, String> {
@@ -719,12 +831,44 @@ mod tests {
     #[test]
     fn parses_nullable_authors_and_labels() {
         let raw = br#"{"data":{"repository":{"items":{"nodes":[{"number":7,"title":"Document it","body":"Body","author":null,"labels":{"nodes":[{"name":"docs"}]},"state":"CLOSED","updatedAt":"2026-01-01T00:00:00Z"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
-        let (parsed, page_info) = parse_graph_page(raw, false, "issues").unwrap();
+        let (parsed, page_info) = parse_graph_page(
+            raw,
+            false,
+            "issues",
+            "owner/repo",
+            "https://github.com/owner/repo",
+        )
+        .unwrap();
 
         assert_eq!(parsed[0].number, 7);
         assert!(parsed[0].author.is_none());
         assert_eq!(parsed[0].labels[0], "docs");
         assert!(!page_info.has_next_page);
+    }
+
+    #[test]
+    fn parses_pull_request_comparison_revisions() {
+        let raw = br#"{"data":{"repository":{"items":{"nodes":[{"number":9,"title":"Compare it","body":"Details","author":{"login":"octocat"},"labels":{"nodes":[]},"state":"OPEN","isDraft":false,"changedFiles":3,"additions":12,"deletions":4,"baseRefName":"main","baseRefOid":"1111111111111111111111111111111111111111","headRefName":"topic","headRefOid":"2222222222222222222222222222222222222222","mergedAt":null,"updatedAt":"2026-01-01T00:00:00Z"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
+
+        let (parsed, _) = parse_graph_page(
+            raw,
+            true,
+            "pullRequests",
+            "owner/repo",
+            "https://github.com/owner/repo",
+        )
+        .unwrap();
+
+        assert_eq!(parsed[0].base_ref_name.as_deref(), Some("main"));
+        assert_eq!(
+            parsed[0].base_ref_oid.as_deref(),
+            Some("1111111111111111111111111111111111111111")
+        );
+        assert_eq!(parsed[0].head_ref_name.as_deref(), Some("topic"));
+        assert_eq!(
+            parsed[0].head_ref_oid.as_deref(),
+            Some("2222222222222222222222222222222222222222")
+        );
     }
 
     #[test]
@@ -736,6 +880,8 @@ mod tests {
     #[test]
     fn pull_request_status_distinguishes_lifecycle_states() {
         let issue = |state: &str, is_draft, merged_at: Option<&str>| Issue {
+            repository: "owner/repo".to_owned(),
+            repository_url: "https://github.com/owner/repo".to_owned(),
             number: 1,
             title: String::new(),
             body: String::new(),
@@ -747,6 +893,10 @@ mod tests {
             changed_files: None,
             additions: None,
             deletions: None,
+            base_ref_name: None,
+            base_ref_oid: None,
+            head_ref_name: None,
+            head_ref_oid: None,
             merged_at: merged_at.map(str::to_owned),
             updated_at: String::new(),
         };

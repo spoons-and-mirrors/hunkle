@@ -48,6 +48,16 @@ fn completions_declare_repository_invalidation_policy() {
         .invalidation(),
         Some(RefreshScope::ALL)
     );
+    assert_eq!(
+        WorkerCompletion::new(WorkerOutcome::PullRequestCheckout(
+            PullRequestCheckoutCompletion {
+                number: 42,
+                result: Err("failed".to_owned()),
+            },
+        ))
+        .invalidation(),
+        Some(RefreshScope::ALL)
+    );
 }
 
 #[test]
