@@ -1103,7 +1103,11 @@ fn double_clicking_worktree_files_opens_them_in_files() {
         click(&mut app, worktree.x + 4, y);
         assert_eq!(app.sidebar_pane(), LeftPane::Worktree);
         click(&mut app, worktree.x + 4, y);
-        wait_for_preview(&mut app);
+        wait_for(&mut app, |app| {
+            app.selected_explorer_file_path()
+                .is_some_and(|selected| selected == path)
+                && app.changes.preview.text() == Some(content)
+        });
 
         assert_eq!(app.sidebar_pane(), LeftPane::Files);
         assert_eq!(app.view(), View::Changes);

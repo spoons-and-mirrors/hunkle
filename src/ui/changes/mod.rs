@@ -529,7 +529,7 @@ fn draw_detail(
             diff_header.y.saturating_add(2),
             diff_header.width,
             area.bottom()
-                .saturating_sub(diff_header.y.saturating_add(3)),
+                .saturating_sub(diff_header.y.saturating_add(2)),
         )
     };
     let wrap_label = if !app.changes.preview.wrappable() {

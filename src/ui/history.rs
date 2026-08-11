@@ -76,7 +76,7 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         area.x.saturating_add(1),
         area.y.saturating_add(1),
         area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
+        area.height.saturating_sub(1),
     );
     let search_area = Rect::new(area.x, table_area.y, area.width, 1);
     let commit_table_area = Rect::new(

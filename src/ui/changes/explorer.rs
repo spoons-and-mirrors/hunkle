@@ -128,7 +128,7 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
         preview_header.y.saturating_add(2),
         preview_header.width,
         area.bottom()
-            .saturating_sub(preview_header.y.saturating_add(3)),
+            .saturating_sub(preview_header.y.saturating_add(2)),
     );
     let media_loaded = app.changes.preview.image().is_some();
     let database_loaded = app.changes.preview.database().is_some();

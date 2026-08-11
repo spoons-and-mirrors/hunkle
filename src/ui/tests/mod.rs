@@ -452,6 +452,7 @@ fn renders_every_primary_surface() {
     let transition_y = footer_y - 1;
     assert_eq!(left.bottom(), transition_y);
     assert_eq!(right.bottom(), transition_y);
+    assert_eq!(app.regions.preview_body.unwrap().bottom(), transition_y);
     for point in [(left.x, left.y), (right.right().saturating_sub(1), right.y)] {
         let cell = &terminal.backend().buffer()[point];
         assert_eq!(cell.symbol(), " ");
@@ -547,6 +548,7 @@ fn renders_every_primary_surface() {
     click(&mut app, graph_toggle.x, graph_toggle.y);
     assert_eq!(app.view(), View::Graph);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.graph_table.unwrap().bottom(), transition_y);
     let commit = app.regions.commit.unwrap();
     assert_eq!(
         terminal.backend().buffer()[(commit.x, commit.y)].symbol(),
