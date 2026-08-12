@@ -894,6 +894,7 @@ fn draw_agent_history_content(
         replies,
         active_reply,
         view_area,
+        true,
         None,
         2,
         1,

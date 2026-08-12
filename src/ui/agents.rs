@@ -22,7 +22,7 @@ use crate::app::{
 use crate::theme::Palette;
 
 use super::{
-    draw_header_card, fill, palette, preview::hard_wrap_preview_lines,
+    draw_header_card, fill, header_badge_style, palette, preview::hard_wrap_preview_lines,
     text::styled_markdown_preserving_breaks, text_input_lines, truncate_width,
 };
 
@@ -793,6 +793,7 @@ pub(super) fn draw_history(
     replies: &[AgentPreviewReplyDraft],
     active_reply: Option<&AgentPreviewReplyTarget>,
     view_area: Rect,
+    view_top_padding: bool,
     repository_area: Option<Rect>,
     prompt_bottom_padding: u16,
     card_left_inset: u16,
@@ -934,6 +935,7 @@ pub(super) fn draw_history(
         view_area,
         view,
         hovered.as_ref(),
+        view_top_padding,
         &mut navigation_targets,
     );
     if repository_area.width >= 3 {
@@ -1393,13 +1395,14 @@ pub(super) fn draw_scheduled_history(
     active_reply: Option<&AgentPreviewReplyTarget>,
     hovered: Option<HitTarget>,
     view_area: Rect,
+    view_top_padding: bool,
     prompt_bottom_padding: u16,
     prompt_delivery_inside: bool,
     mut area: Rect,
 ) -> (Vec<(HitTarget, Rect)>, usize, usize) {
     fill(frame, area, palette().panel);
     let mut targets = Vec::new();
-    draw_preview_view_toggle(frame, view_area, view, None, &mut targets);
+    draw_preview_view_toggle(frame, view_area, view, None, view_top_padding, &mut targets);
     if prompt_available {
         let prompt_text_width = usize::from(area.width.saturating_sub(4)).max(1);
         let (prompt_cursor_row, prompt_visual_height) = prompt.visual_metrics(prompt_text_width);
@@ -2646,16 +2649,25 @@ fn draw_preview_view_toggle(
     area: Rect,
     view: AgentPreviewView,
     hovered: Option<&HitTarget>,
+    top_padding: bool,
     targets: &mut Vec<(HitTarget, Rect)>,
 ) {
-    let width = 6.min(area.width);
-    if width < 4 || area.height == 0 {
+    const LABEL: &str = " MINIMAL ";
+    let width = 9.min(area.width);
+    if width < 7 || area.height == 0 {
         return;
     }
     let button = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
     let active =
         view == AgentPreviewView::Output || hovered == Some(&HitTarget::AgentPreviewViewToggle);
-    draw_header_card(frame, button, " VIEW ", palette().cyan, active, false);
+    if top_padding {
+        draw_header_card(frame, button, LABEL, palette().cyan, active, false);
+    } else {
+        frame.render_widget(
+            Paragraph::new(LABEL).style(header_badge_style(palette().cyan, active)),
+            button,
+        );
+    }
     targets.push((HitTarget::AgentPreviewViewToggle, button));
 }
 
