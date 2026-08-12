@@ -351,6 +351,10 @@ fn preview_output_blocks_accept_ordered_inline_replies_without_a_final_note() {
     click(&mut app, first_reply_rect.x, first_reply_rect.y);
     app.handle_paste("Reply first");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let composer = screen_text(&terminal);
+    assert!(composer.contains("[Reply 1]"));
+    assert!(composer.contains("[Reply 2]"));
     app.agent_preview.prompt_delivery = AgentPromptDelivery::OnIdle;
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 

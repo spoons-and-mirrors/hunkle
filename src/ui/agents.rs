@@ -45,6 +45,7 @@ fn expanded_user_response_rows(user_height: usize, available: u16, fallback: u16
 struct TranscriptBlock {
     user: bool,
     headerless_response: bool,
+    thin_header: bool,
     lines: Arc<[Line<'static>]>,
     animated_rows: Arc<[usize]>,
     start: usize,
@@ -807,9 +808,14 @@ pub(super) fn draw_history(
     fill(frame, area, palette().panel);
     let prompt_text_width = usize::from(area.width.saturating_sub(4)).max(1);
     let (prompt_cursor_row, prompt_visual_height) = prompt.visual_metrics(prompt_text_width);
+    let reply_count = replies
+        .iter()
+        .filter(|reply| !reply.input.text().trim().is_empty())
+        .count();
     let desired_prompt_height = u16::try_from(prompt_visual_height)
         .unwrap_or(u16::MAX)
         .saturating_add(2)
+        .saturating_add(u16::from(reply_count > 0))
         .max(3);
     let maximum_prompt_height = area.height.saturating_sub(11).max(3).min(area.height);
     let prompt_height = desired_prompt_height.min(maximum_prompt_height);
@@ -834,6 +840,7 @@ pub(super) fn draw_history(
         prompt_error,
         prompt_cursor_row,
         prompt_visual_height,
+        reply_count,
         prompt_area,
     );
     let prompt_pending = herdr.agent_prompt_pending(index);
@@ -1098,6 +1105,7 @@ pub(super) fn draw_history(
     let user_block = TranscriptBlock {
         user: true,
         headerless_response: false,
+        thin_header: view == AgentPreviewView::Output,
         lines: cached.user_lines.clone(),
         animated_rows: Arc::default(),
         start: 0,
@@ -1267,6 +1275,7 @@ fn draw_agent_prompt(
     local_error: Option<&str>,
     cursor_row: usize,
     visual_height: usize,
+    reply_count: usize,
     area: Rect,
 ) {
     let sending = herdr.agent_prompt_sending(index);
@@ -1279,6 +1288,7 @@ fn draw_agent_prompt(
         sending,
         cursor_row,
         visual_height,
+        reply_count,
         area,
     );
 }
@@ -1292,6 +1302,7 @@ fn draw_preview_prompt(
     sending: bool,
     cursor_row: usize,
     visual_height: usize,
+    reply_count: usize,
     area: Rect,
 ) {
     let active = focused && !sending;
@@ -1304,11 +1315,33 @@ fn draw_preview_prompt(
     if area.is_empty() {
         return;
     }
+    let reply_rows = u16::from(reply_count > 0);
+    if reply_count > 0 {
+        let mut spans = Vec::new();
+        for reply in 1..=reply_count {
+            spans.push(Span::styled(
+                format!(" [Reply {reply}] "),
+                Style::default()
+                    .fg(palette().accent)
+                    .bg(palette().raised)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(
+                area.x.saturating_add(3),
+                area.y.saturating_add(1),
+                area.width.saturating_sub(4),
+                1,
+            ),
+        );
+    }
     let input_area = Rect::new(
         area.x.saturating_add(3),
-        area.y.saturating_add(1),
+        area.y.saturating_add(1).saturating_add(reply_rows),
         area.width.saturating_sub(4),
-        area.height.saturating_sub(2),
+        area.height.saturating_sub(2).saturating_sub(reply_rows),
     );
     frame.render_widget(
         Paragraph::new("›").style(Style::default().fg(palette().cyan).bg(background)),
@@ -1370,9 +1403,14 @@ pub(super) fn draw_scheduled_history(
     if prompt_available {
         let prompt_text_width = usize::from(area.width.saturating_sub(4)).max(1);
         let (prompt_cursor_row, prompt_visual_height) = prompt.visual_metrics(prompt_text_width);
+        let reply_count = replies
+            .iter()
+            .filter(|reply| !reply.input.text().trim().is_empty())
+            .count();
         let desired_prompt_height = u16::try_from(prompt_visual_height)
             .unwrap_or(u16::MAX)
             .saturating_add(2)
+            .saturating_add(u16::from(reply_count > 0))
             .max(3);
         let prompt_height =
             desired_prompt_height.min(area.height.saturating_sub(11).max(3).min(area.height));
@@ -1395,6 +1433,7 @@ pub(super) fn draw_scheduled_history(
             prompt_sending,
             prompt_cursor_row,
             prompt_visual_height,
+            reply_count,
             prompt_area,
         );
         let delivery_label = if prompt_sending { "sending" } else { "now" };
@@ -1559,6 +1598,7 @@ pub(super) fn draw_scheduled_history(
     let user_block = TranscriptBlock {
         user: true,
         headerless_response: false,
+        thin_header: view == AgentPreviewView::Output,
         lines: cached.user_lines.clone(),
         animated_rows: Arc::default(),
         start: 0,
@@ -1931,6 +1971,7 @@ fn build_request_transcript_counted(
         blocks.push(TranscriptBlock {
             user: false,
             headerless_response,
+            thin_header: false,
             lines: lines.into(),
             animated_rows: animated_rows.into(),
             start: document_height,
@@ -1949,6 +1990,7 @@ fn build_request_transcript_counted(
         blocks.push(TranscriptBlock {
             user: false,
             headerless_response: false,
+            thin_header: false,
             lines: lines.into(),
             animated_rows: animated_rows.into(),
             start: 0,
@@ -2040,6 +2082,7 @@ fn build_output_transcript_counted(
         blocks.push(TranscriptBlock {
             user: false,
             headerless_response: false,
+            thin_header: true,
             lines: lines.into(),
             animated_rows: animated_rows.into(),
             start: document_height,
@@ -2073,6 +2116,7 @@ fn build_output_transcript_counted(
         blocks.push(TranscriptBlock {
             user: false,
             headerless_response: false,
+            thin_header: true,
             lines: Arc::default(),
             animated_rows: Arc::default(),
             start: document_height,
@@ -2090,6 +2134,7 @@ fn build_output_transcript_counted(
         blocks.push(TranscriptBlock {
             user: false,
             headerless_response: true,
+            thin_header: true,
             lines: vec![working_line()].into(),
             animated_rows: vec![0].into(),
             start: 0,
@@ -2294,9 +2339,13 @@ fn draw_transcript_card(
     }
     if local_start == 0 && !block.headerless_response {
         {
+            let (glyph, style) = if block.thin_header {
+                ('─', Style::default().fg(background).bg(palette().panel))
+            } else {
+                ('▄', Style::default().fg(background).bg(palette().panel))
+            };
             frame.render_widget(
-                Paragraph::new("▄".repeat(usize::from(cards.width)))
-                    .style(Style::default().fg(background).bg(palette().panel)),
+                Paragraph::new(glyph.to_string().repeat(usize::from(cards.width))).style(style),
                 Rect::new(cards.x, y, cards.width, 1),
             );
         }
@@ -2352,12 +2401,7 @@ fn draw_transcript_card(
                             .bg(background)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Rect::new(
-                        cards.right().saturating_sub(width).saturating_sub(1),
-                        y,
-                        width,
-                        1,
-                    ),
+                    Rect::new(cards.right().saturating_sub(width), y, width, 1),
                 );
             }
         }
@@ -2551,12 +2595,19 @@ fn draw_reply_affordance(frame: &mut Frame<'_>, card: Rect, hovered: bool) -> Re
     );
     if hovered {
         frame.render_widget(
-            Paragraph::new(label).style(
-                Style::default()
-                    .fg(palette().cyan)
-                    .bg(palette().surface_alt)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "↳ ",
+                    Style::default().fg(palette().faint).bg(palette().panel),
+                ),
+                Span::styled(
+                    "Reply",
+                    Style::default()
+                        .fg(palette().accent)
+                        .bg(palette().panel)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
             area,
         );
     }
@@ -2574,6 +2625,7 @@ fn draw_inline_reply(frame: &mut Frame<'_>, input: &TextInput, focused: bool, ar
         false,
         cursor_row,
         visual_height,
+        0,
         area,
     );
 }
@@ -3974,6 +4026,7 @@ mod tests {
         let block = TranscriptBlock {
             user: false,
             headerless_response: false,
+            thin_header: false,
             lines: (0..20)
                 .map(|row| {
                     if row == animated_row {
