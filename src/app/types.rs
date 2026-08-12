@@ -393,6 +393,7 @@ pub(crate) enum HitTarget {
     AgentPreviewModalBackdrop,
     AgentPreviewModalOverlay,
     AgentPreviewModalClose,
+    AgentPreviewViewToggle,
     AgentPaneId(String),
     AgentListModeToggle,
     AgentScheduledRun(i64),
@@ -420,6 +421,42 @@ pub(crate) enum HitTarget {
     AgentPreviewScheduledRequest {
         run_id: i64,
         request: usize,
+    },
+    AgentPreviewOutput {
+        agent: AgentKey,
+        message: usize,
+        request: usize,
+        part: usize,
+    },
+    AgentPreviewOutputReply {
+        agent: AgentKey,
+        message: usize,
+        request: usize,
+        part: usize,
+    },
+    AgentPreviewOutputReplyInput {
+        agent: AgentKey,
+        message: usize,
+        request: usize,
+        part: usize,
+    },
+    AgentPreviewScheduledOutput {
+        run_id: i64,
+        message: usize,
+        request: usize,
+        part: usize,
+    },
+    AgentPreviewScheduledOutputReply {
+        run_id: i64,
+        message: usize,
+        request: usize,
+        part: usize,
+    },
+    AgentPreviewScheduledOutputReplyInput {
+        run_id: i64,
+        message: usize,
+        request: usize,
+        part: usize,
     },
     AgentTooltip {
         agent: AgentKey,
@@ -932,12 +969,18 @@ impl Regions {
             ) => Some(ScrollTarget::WorkspaceExplorerSurroundings),
             HitTarget::AgentTooltip { agent, .. }
             | HitTarget::AgentPreviewRequest { agent, .. }
+            | HitTarget::AgentPreviewOutput { agent, .. }
+            | HitTarget::AgentPreviewOutputReply { agent, .. }
+            | HitTarget::AgentPreviewOutputReplyInput { agent, .. }
             | HitTarget::AgentExpandedMessage { agent, .. } => {
                 Some(ScrollTarget::AgentTranscript(agent.clone()))
             }
             HitTarget::AgentScheduledMessage { run_id, .. }
             | HitTarget::AgentPreviewScheduledMessageStep { run_id, .. }
-            | HitTarget::AgentPreviewScheduledRequest { run_id, .. } => {
+            | HitTarget::AgentPreviewScheduledRequest { run_id, .. }
+            | HitTarget::AgentPreviewScheduledOutput { run_id, .. }
+            | HitTarget::AgentPreviewScheduledOutputReply { run_id, .. }
+            | HitTarget::AgentPreviewScheduledOutputReplyInput { run_id, .. } => {
                 Some(ScrollTarget::AgentScheduledTranscript(*run_id))
             }
             _ => None,

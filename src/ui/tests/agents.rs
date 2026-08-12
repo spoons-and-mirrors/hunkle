@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::{
-    AgentCardClickAction, AgentKey, AgentPromptDelivery, AgentRequestPartPreview,
+    AgentCardClickAction, AgentKey, AgentPreviewView, AgentPromptDelivery, AgentRequestPartPreview,
     AgentRequestPreview, AgentUserMessage, ScheduledRun, ScheduledRunStatus, ScheduledTask,
 };
 use std::path::PathBuf;
@@ -204,6 +204,166 @@ fn control_click_opens_the_live_agent_preview_modal() {
 }
 
 #[test]
+fn preview_view_card_keeps_user_and_model_text_with_timing_and_working_spinner() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_agent_user_messages_for_test(
+        0,
+        &[(
+            "Do not show this prompt",
+            Some("Keep this model output"),
+            1,
+            0,
+        )],
+    );
+    app.herdr.set_agent_request_for_test(
+        0,
+        0,
+        0,
+        AgentRequestPreview {
+            parts: vec![
+                AgentRequestPartPreview::Text("Keep this model output".to_owned()),
+                AgentRequestPartPreview::Activity(AgentActivityPreview::Tool {
+                    name: "read".to_owned(),
+                    title: Some("Hidden tool activity".to_owned()),
+                    running: true,
+                }),
+                AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning),
+            ],
+            reasoning_active: true,
+            duration_ms: Some(12_300),
+            reasoning_duration_ms: None,
+            tool_call_count: 1,
+        },
+    );
+    app.open_agent_preview_modal(0);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let initial = screen_text(&terminal);
+    assert!(!initial.contains("LIVE"));
+    assert!(initial.contains("Hidden tool activity"));
+    let view = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewViewToggle)
+        .unwrap();
+    click(&mut app, view.x + 1, view.y);
+    assert_eq!(app.agent_preview.view, AgentPreviewView::Output);
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let output = screen_text(&terminal);
+    assert!(output.contains("Keep this model output"));
+    assert!(output.contains("Do not show this prompt"));
+    assert!(output.contains("12.3s"));
+    assert!(output.contains("1 request · total 12.3s"));
+    assert!(output.contains("1 request · 1 tool · 12.3s"));
+    assert!(output.contains("working :"));
+    assert!(!output.contains("Hidden tool activity"));
+    assert!(!output.contains("reasoning"));
+    assert_eq!(output.matches("working :").count(), 1);
+}
+
+#[test]
+fn preview_output_blocks_accept_ordered_inline_replies_without_a_final_note() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr
+        .set_agent_user_messages_for_test(0, &[("Review these", Some("Second answer"), 2, 0)]);
+    app.herdr.set_agent_request_for_test(
+        0,
+        0,
+        0,
+        AgentRequestPreview {
+            parts: vec![AgentRequestPartPreview::Text("First answer".to_owned())],
+            reasoning_active: false,
+            duration_ms: Some(1_500),
+            reasoning_duration_ms: Some(500),
+            tool_call_count: 0,
+        },
+    );
+    app.herdr.set_agent_request_for_test(
+        0,
+        0,
+        1,
+        AgentRequestPreview {
+            parts: vec![
+                AgentRequestPartPreview::Activity(AgentActivityPreview::Reasoning),
+                AgentRequestPartPreview::Text("Second answer".to_owned()),
+            ],
+            reasoning_active: true,
+            duration_ms: Some(2_500),
+            reasoning_duration_ms: Some(500),
+            tool_call_count: 0,
+        },
+    );
+    app.open_agent_preview_modal(0);
+    let key = agent_key(&app, 0);
+    let mut terminal = Terminal::new(TestBackend::new(100, 42)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let view = app
+        .regions
+        .hit_target_rect(HitTarget::AgentPreviewViewToggle)
+        .unwrap();
+    click(&mut app, view.x + 1, view.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let first = HitTarget::AgentPreviewOutput {
+        agent: key.clone(),
+        message: 0,
+        request: 0,
+        part: 0,
+    };
+    let first_rect = app.regions.hit_target_rect(first.clone()).unwrap();
+    assert_eq!(
+        app.regions.hit_target_at(first_rect.as_position()),
+        Some(first.clone())
+    );
+    app.handle_mouse(mouse(MouseEventKind::Moved, first_rect.x + 2, first_rect.y));
+    assert_eq!(app.hovered_hit_target, Some(first.clone()));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.hovered_hit_target, Some(first));
+    assert!(screen_text(&terminal).contains("↳ Reply"));
+
+    let second_reply = HitTarget::AgentPreviewOutputReply {
+        agent: key.clone(),
+        message: 0,
+        request: 1,
+        part: 1,
+    };
+    let second_reply_rect = app.regions.hit_target_rect(second_reply).unwrap();
+    click(&mut app, second_reply_rect.x, second_reply_rect.y);
+    app.handle_paste("Reply second");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.agent_preview.prompt_focused);
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let first_reply = HitTarget::AgentPreviewOutputReply {
+        agent: key,
+        message: 0,
+        request: 0,
+        part: 0,
+    };
+    let first_reply_rect = app.regions.hit_target_rect(first_reply).unwrap();
+    click(&mut app, first_reply_rect.x, first_reply_rect.y);
+    app.handle_paste("Reply first");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.agent_preview.prompt_delivery = AgentPromptDelivery::OnIdle;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app.herdr.queued_agent_prompt_for_test(0),
+        Some(
+            "Replying to:\n> First answer\n\nReply first\n\n---\n\nReplying to:\n> Second answer\n\nReply second"
+        )
+    );
+    assert!(app.agent_preview.replies.is_empty());
+}
+
+#[test]
 fn standalone_agent_click_opens_the_agents_workspace() {
     let current = tempfile::tempdir().unwrap();
     let destination = tempfile::tempdir().unwrap();
@@ -247,6 +407,7 @@ fn wide_workspace_docks_agent_preview_and_control_click_keeps_it_docked() {
     let directory = tempfile::tempdir().unwrap();
     run_git(directory.path(), &["init", "-b", "main"]);
     let mut app = App::new(directory.path().to_path_buf());
+    app.settings.agent_preview_split_width = 120;
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
     app.herdr.set_agent_user_messages_for_test(

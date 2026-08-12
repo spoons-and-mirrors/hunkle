@@ -2102,6 +2102,12 @@ impl HerdrSession {
             .expect("test agent has no messages")
             .revision = self.transcript_revision;
     }
+
+    #[cfg(test)]
+    pub(crate) fn queued_agent_prompt_for_test(&self, index: usize) -> Option<&str> {
+        let key = &self.agents.get(index)?.runtime.timing_key;
+        self.agent_prompts_on_idle.get(key).map(String::as_str)
+    }
 }
 
 fn agent_layouts_path(config_dir: &Path, host_pane_id: &str) -> PathBuf {

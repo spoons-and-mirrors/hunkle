@@ -28,6 +28,7 @@ pub(in crate::ui) fn draw_agent_preview_modal(
     fill(frame, outer, palette().panel);
 
     let selected_index = app.agent_preview_index();
+    let hovered = app.hovered_hit_target.clone();
     let header = Rect::new(outer.x, outer.y, outer.width, 3.min(outer.height));
     let header_line = Rect::new(
         header.x.saturating_add(2),
@@ -165,6 +166,18 @@ pub(in crate::ui) fn draw_agent_preview_modal(
                 prompt_sending,
                 prompt_available,
                 conversation_message,
+                preview.view,
+                preview.replies,
+                preview.active_reply,
+                hovered,
+                Rect::new(
+                    close.right().saturating_add(1),
+                    header_line.y,
+                    header_line
+                        .right()
+                        .saturating_sub(close.right().saturating_add(1)),
+                    1,
+                ),
                 if profile.is_single() { 1 } else { 2 },
                 profile.is_single(),
                 body,
@@ -217,8 +230,10 @@ pub(in crate::ui) fn draw_agent_preview_modal(
             animation_presented: false,
         };
     };
-    let status_area = if profile.is_single() {
-        Rect::default()
+    let view_area = if profile.is_single() {
+        let left = close.right().saturating_add(1);
+        let right = repository_area.map_or(header_line.right(), |area| area.x.saturating_sub(1));
+        Rect::new(left, header_line.y, right.saturating_sub(left), 1)
     } else {
         Rect::new(
             header.x,
@@ -232,7 +247,8 @@ pub(in crate::ui) fn draw_agent_preview_modal(
     let expanded_requests = app.agent_preview_expanded_requests(index).to_vec();
     let user_message_expanded = app.agent_preview_user_message_expanded(index);
     let picker_open = app.agent_preview_picker_open();
-    let hovered = app.hovered_hit_target.clone();
+    let replies = &app.agent_preview.replies;
+    let active_reply = app.agent_preview.active_reply.as_ref();
     let (history_targets, scroll_max, scroll, animation_presented) = agents::draw_history(
         frame,
         &app.herdr,
@@ -248,7 +264,10 @@ pub(in crate::ui) fn draw_agent_preview_modal(
         app.agent_preview.prompt_focused,
         app.agent_preview.prompt_error.as_deref(),
         app.agent_preview.prompt_delivery,
-        status_area,
+        app.agent_preview.view,
+        replies,
+        active_reply,
+        view_area,
         repository_area,
         if profile.is_single() { 1 } else { 2 },
         u16::from(!profile.is_single()),

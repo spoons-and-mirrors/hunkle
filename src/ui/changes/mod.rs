@@ -864,7 +864,7 @@ fn draw_agent_history_content(
     frame: &mut Frame<'_>,
     app: &mut App,
     index: usize,
-    status_area: Rect,
+    view_area: Rect,
     history: Rect,
 ) {
     let selected_message = app.agent_preview_message(index);
@@ -873,6 +873,8 @@ fn draw_agent_history_content(
     let user_message_expanded = app.agent_preview_user_message_expanded(index);
     let picker_open = app.agent_preview_picker_open();
     let hovered = app.hovered_hit_target.clone();
+    let replies = &app.agent_preview.replies;
+    let active_reply = app.agent_preview.active_reply.as_ref();
     let (targets, scroll_max, scroll, animation_presented) = agents::draw_history(
         frame,
         &app.herdr,
@@ -888,7 +890,10 @@ fn draw_agent_history_content(
         app.agent_preview.prompt_focused,
         app.agent_preview.prompt_error.as_deref(),
         app.agent_preview.prompt_delivery,
-        status_area,
+        app.agent_preview.view,
+        replies,
+        active_reply,
+        view_area,
         None,
         2,
         1,

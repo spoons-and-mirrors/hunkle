@@ -22,6 +22,21 @@ impl App {
             }
             let point = Position::new(mouse.column, mouse.row);
             match mouse.kind {
+                MouseEventKind::Moved => {
+                    self.hovered_hit_target = self.regions.hit_target_at(point);
+                    if let Some(target) = self.hovered_hit_target.as_ref() {
+                        let agent = match target {
+                            HitTarget::AgentPreviewOutput { agent, .. }
+                            | HitTarget::AgentPreviewOutputReply { agent, .. }
+                            | HitTarget::AgentPreviewOutputReplyInput { agent, .. }
+                            | HitTarget::AgentTooltip { agent, .. } => Some(agent),
+                            _ => None,
+                        };
+                        if let Some(index) = agent.and_then(|key| self.herdr.agent_index(key)) {
+                            self.herdr.request_agent_latest_user_message(index);
+                        }
+                    }
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     self.handle_agent_preview_modal_click(point)
                 }
@@ -122,6 +137,9 @@ impl App {
                     | HitTarget::AgentPreviewPrompt(agent)
                     | HitTarget::AgentPreviewPromptDelivery(agent)
                     | HitTarget::AgentPreviewRequest { agent, .. }
+                    | HitTarget::AgentPreviewOutput { agent, .. }
+                    | HitTarget::AgentPreviewOutputReply { agent, .. }
+                    | HitTarget::AgentPreviewOutputReplyInput { agent, .. }
                     | HitTarget::AgentTooltip { agent, .. }
                     | HitTarget::AgentMessage { agent, .. } => Some(agent),
                     _ => None,

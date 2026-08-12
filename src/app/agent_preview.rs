@@ -133,6 +133,37 @@ pub(crate) enum AgentPreviewEffect {
     MoveMessage { agent: AgentKey, forward: bool },
     MoveScheduledMessage { run_id: i64, forward: bool },
     TogglePicker(AgentKey),
+    FocusReply(AgentPreviewReplyTarget),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AgentPreviewView {
+    #[default]
+    Activity,
+    Output,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AgentPreviewReplyTarget {
+    Live {
+        agent: AgentKey,
+        message: usize,
+        request: usize,
+        part: usize,
+    },
+    Scheduled {
+        run_id: i64,
+        message: usize,
+        request: usize,
+        part: usize,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct AgentPreviewReplyDraft {
+    pub(crate) target: AgentPreviewReplyTarget,
+    pub(crate) source: String,
+    pub(crate) input: TextInput,
 }
 
 pub(crate) struct ScheduledPreviewRenderState<'a> {
@@ -146,6 +177,9 @@ pub(crate) struct ScheduledPreviewRenderState<'a> {
     pub(crate) prompt_error: Option<&'a str>,
     pub(crate) conversation_error: Option<&'a str>,
     pub(crate) user_message_expanded: bool,
+    pub(crate) view: AgentPreviewView,
+    pub(crate) replies: &'a [AgentPreviewReplyDraft],
+    pub(crate) active_reply: Option<&'a AgentPreviewReplyTarget>,
 }
 
 pub(crate) struct AgentPreview {
@@ -160,6 +194,9 @@ pub(crate) struct AgentPreview {
     pub(crate) prompt_focused: bool,
     pub(crate) prompt_error: Option<String>,
     pub(crate) prompt_delivery: AgentPromptDelivery,
+    pub(crate) view: AgentPreviewView,
+    pub(crate) replies: Vec<AgentPreviewReplyDraft>,
+    pub(crate) active_reply: Option<AgentPreviewReplyTarget>,
     pub(crate) scheduled_run: Option<i64>,
     scheduled: ScheduledConversationState,
     return_mode: Mode,
@@ -191,6 +228,9 @@ impl Default for AgentPreview {
             prompt_focused: false,
             prompt_error: None,
             prompt_delivery: AgentPromptDelivery::default(),
+            view: AgentPreviewView::default(),
+            replies: Vec::new(),
+            active_reply: None,
             scheduled_run: None,
             scheduled: ScheduledConversationState::default(),
             return_mode: Mode::Normal,
@@ -265,9 +305,79 @@ impl AgentPreview {
         }
     }
 
+    pub(crate) fn handle_reply_key(
+        &mut self,
+        key: KeyEvent,
+        input_width: usize,
+    ) -> AgentPreviewEffect {
+        let Some(active) = self.active_reply.clone() else {
+            return AgentPreviewEffect::Handled;
+        };
+        let Some(input) = self.reply_input_mut(&active) else {
+            self.active_reply = None;
+            return AgentPreviewEffect::Handled;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.active_reply = None;
+                AgentPreviewEffect::Handled
+            }
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+            {
+                input.insert_char('\n');
+                AgentPreviewEffect::PromptEdited
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                input.insert_char('\n');
+                AgentPreviewEffect::PromptEdited
+            }
+            KeyCode::Enter => {
+                self.active_reply = None;
+                AgentPreviewEffect::FocusPrompt(None)
+            }
+            KeyCode::Up => {
+                input.move_up(input_width);
+                AgentPreviewEffect::Handled
+            }
+            KeyCode::Down => {
+                input.move_down(input_width);
+                AgentPreviewEffect::Handled
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                input.clear();
+                AgentPreviewEffect::PromptEdited
+            }
+            KeyCode::Backspace
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                input.delete_word();
+                AgentPreviewEffect::PromptEdited
+            }
+            _ if input.handle_edit_key(key) == EditOutcome::Edited => {
+                AgentPreviewEffect::PromptEdited
+            }
+            _ => AgentPreviewEffect::Handled,
+        }
+    }
+
     pub(crate) fn paste_prompt(&mut self, text: &str) -> AgentPreviewEffect {
         self.prompt.insert(text);
         self.clear_prompt_error();
+        AgentPreviewEffect::PromptEdited
+    }
+
+    pub(crate) fn paste_reply(&mut self, text: &str) -> AgentPreviewEffect {
+        let Some(active) = self.active_reply.clone() else {
+            return AgentPreviewEffect::Handled;
+        };
+        if let Some(input) = self.reply_input_mut(&active) {
+            input.insert(text);
+        }
         AgentPreviewEffect::PromptEdited
     }
 
@@ -303,6 +413,46 @@ impl AgentPreview {
         match target {
             HitTarget::AgentPreviewModalBackdrop | HitTarget::AgentPreviewModalClose => {
                 AgentPreviewEffect::Close(self.close())
+            }
+            HitTarget::AgentPreviewViewToggle => {
+                self.toggle_view();
+                AgentPreviewEffect::Handled
+            }
+            HitTarget::AgentPreviewOutputReply {
+                agent,
+                message,
+                request,
+                part,
+            }
+            | HitTarget::AgentPreviewOutputReplyInput {
+                agent,
+                message,
+                request,
+                part,
+            } => AgentPreviewEffect::FocusReply(AgentPreviewReplyTarget::Live {
+                agent: agent.clone(),
+                message: *message,
+                request: *request,
+                part: *part,
+            }),
+            HitTarget::AgentPreviewScheduledOutputReply {
+                run_id,
+                message,
+                request,
+                part,
+            }
+            | HitTarget::AgentPreviewScheduledOutputReplyInput {
+                run_id,
+                message,
+                request,
+                part,
+            } if self.scheduled_run == Some(*run_id) => {
+                AgentPreviewEffect::FocusReply(AgentPreviewReplyTarget::Scheduled {
+                    run_id: *run_id,
+                    message: *message,
+                    request: *request,
+                    part: *part,
+                })
             }
             HitTarget::AgentPreviewPrompt(key) => {
                 AgentPreviewEffect::FocusPrompt(Some(key.clone()))
@@ -366,11 +516,18 @@ impl AgentPreview {
             HitTarget::AgentPreviewModalBackdrop
                 | HitTarget::AgentPreviewModalOverlay
                 | HitTarget::AgentPreviewModalClose
+                | HitTarget::AgentPreviewViewToggle
                 | HitTarget::AgentPreviewPrompt(_)
                 | HitTarget::AgentPreviewScheduledPrompt(_)
                 | HitTarget::AgentPreviewPromptDelivery(_)
                 | HitTarget::AgentPreviewRequest { .. }
                 | HitTarget::AgentPreviewScheduledRequest { .. }
+                | HitTarget::AgentPreviewOutput { .. }
+                | HitTarget::AgentPreviewOutputReply { .. }
+                | HitTarget::AgentPreviewOutputReplyInput { .. }
+                | HitTarget::AgentPreviewScheduledOutput { .. }
+                | HitTarget::AgentPreviewScheduledOutputReply { .. }
+                | HitTarget::AgentPreviewScheduledOutputReplyInput { .. }
                 | HitTarget::AgentMessage { .. }
                 | HitTarget::AgentExpandedMessage { .. }
                 | HitTarget::AgentScheduledMessage { .. }
@@ -510,6 +667,8 @@ impl AgentPreview {
         self.expanded_user_message = None;
         self.picker_open = false;
         self.scheduled.reset();
+        self.replies.clear();
+        self.active_reply = None;
         self.reset_prompt();
     }
 
@@ -528,6 +687,7 @@ impl AgentPreview {
     }
 
     pub(crate) fn focus_prompt(&mut self) {
+        self.active_reply = None;
         self.prompt_focused = true;
         self.prompt.focus();
         self.prompt_error = None;
@@ -541,6 +701,8 @@ impl AgentPreview {
         match result {
             Ok(()) => {
                 self.prompt.clear();
+                self.replies.clear();
+                self.active_reply = None;
                 self.prompt_error = None;
                 self.prompt_focused = false;
             }
@@ -556,8 +718,129 @@ impl AgentPreview {
         self.prompt_delivery = self.prompt_delivery.toggle();
     }
 
+    fn toggle_view(&mut self) {
+        self.view = match self.view {
+            AgentPreviewView::Activity => AgentPreviewView::Output,
+            AgentPreviewView::Output => AgentPreviewView::Activity,
+        };
+        self.transcript_scroll = None;
+        self.scheduled.scroll = None;
+    }
+
     pub(crate) fn clear_prompt_error(&mut self) {
         self.prompt_error = None;
+    }
+
+    pub(crate) fn focus_reply(&mut self, target: AgentPreviewReplyTarget, source: String) {
+        if !self.replies.iter().any(|reply| reply.target == target) {
+            self.replies.push(AgentPreviewReplyDraft {
+                target: target.clone(),
+                source,
+                input: TextInput::default(),
+            });
+        }
+        self.prompt_focused = false;
+        self.active_reply = Some(target.clone());
+        if let Some(input) = self.reply_input_mut(&target) {
+            input.focus();
+        }
+        self.clear_prompt_error();
+    }
+
+    pub(crate) fn reply_focused(&self) -> bool {
+        self.active_reply.is_some()
+    }
+
+    pub(crate) fn reply_input_mut(
+        &mut self,
+        target: &AgentPreviewReplyTarget,
+    ) -> Option<&mut TextInput> {
+        self.replies
+            .iter_mut()
+            .find(|reply| &reply.target == target)
+            .map(|reply| &mut reply.input)
+    }
+
+    pub(crate) fn poll_reply_blink(&mut self) -> bool {
+        let active = self.active_reply.clone();
+        self.replies.iter_mut().fold(false, |changed, reply| {
+            changed
+                | reply
+                    .input
+                    .poll_blink(active.as_ref() == Some(&reply.target))
+        })
+    }
+
+    pub(crate) fn scheduled_reply_source(
+        &self,
+        run_id: i64,
+        message: usize,
+        request: usize,
+        part: usize,
+    ) -> Option<String> {
+        (self.scheduled_run == Some(run_id))
+            .then_some(())
+            .and_then(|()| self.scheduled_transcript.as_ref())
+            .and_then(|transcript| transcript.messages.get(message))
+            .and_then(|message| message.requests.get(request))
+            .and_then(|request| {
+                matches!(
+                    request.parts.get(part),
+                    Some(super::AgentRequestPartPreview::Text(text)) if !text.is_empty()
+                )
+                .then(|| {
+                    request
+                        .parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            super::AgentRequestPartPreview::Text(text) if !text.is_empty() => {
+                                Some(text.as_str())
+                            }
+                            super::AgentRequestPartPreview::Text(_)
+                            | super::AgentRequestPartPreview::Activity(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                })
+            })
+    }
+
+    pub(crate) fn composed_prompt(&self) -> String {
+        let mut replies = self
+            .replies
+            .iter()
+            .filter(|reply| !reply.input.text().trim().is_empty())
+            .collect::<Vec<_>>();
+        replies.sort_by_key(|reply| match &reply.target {
+            AgentPreviewReplyTarget::Live {
+                message,
+                request,
+                part,
+                ..
+            }
+            | AgentPreviewReplyTarget::Scheduled {
+                message,
+                request,
+                part,
+                ..
+            } => (*message, *request, *part),
+        });
+        let mut sections = replies
+            .into_iter()
+            .map(|reply| {
+                let quoted = reply
+                    .source
+                    .lines()
+                    .map(|line| format!("> {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("Replying to:\n{quoted}\n\n{}", reply.input.text().trim())
+            })
+            .collect::<Vec<_>>();
+        if !self.prompt.text().trim().is_empty() {
+            sections.push(self.prompt.text().trim().to_owned());
+        }
+        sections.join("\n\n---\n\n")
     }
 
     pub(crate) fn toggle_picker(&mut self, key: AgentKey) {
@@ -841,6 +1124,9 @@ impl AgentPreview {
             prompt_error: self.prompt_error.as_deref(),
             conversation_error,
             user_message_expanded: self.scheduled.user_expanded,
+            view: self.view,
+            replies: &self.replies,
+            active_reply: self.active_reply.as_ref(),
         }
     }
 

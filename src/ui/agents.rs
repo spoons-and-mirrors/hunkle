@@ -14,15 +14,16 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey, AgentListMode,
-    AgentPromptDelivery, AgentPromptOutcome, AgentRequestPartPreview, AgentRequestPreview,
-    AgentStatus, AgentTranscript, AgentUserMessage, HerdrSession, HitTarget, LinkedWorktreeCatalog,
-    ScheduledRun, ScheduledRunStatus, ScheduledTask, Settings, TextInput,
+    AgentPreviewReplyDraft, AgentPreviewReplyTarget, AgentPreviewView, AgentPromptDelivery,
+    AgentPromptOutcome, AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript,
+    AgentUserMessage, HerdrSession, HitTarget, LinkedWorktreeCatalog, ScheduledRun,
+    ScheduledRunStatus, ScheduledTask, Settings, TextInput,
 };
 use crate::theme::Palette;
 
 use super::{
-    fill, palette, preview::hard_wrap_preview_lines, text::styled_markdown_preserving_breaks,
-    text_input_lines, truncate_width,
+    draw_header_card, fill, palette, preview::hard_wrap_preview_lines,
+    text::styled_markdown_preserving_breaks, text_input_lines, truncate_width,
 };
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -40,6 +41,7 @@ fn expanded_user_response_rows(user_height: usize, available: u16, fallback: u16
     }
 }
 
+#[derive(Clone)]
 struct TranscriptBlock {
     user: bool,
     headerless_response: bool,
@@ -49,7 +51,9 @@ struct TranscriptBlock {
     height: usize,
     elapsed: Option<String>,
     request_count: usize,
+    tool_count: u64,
     request: Option<usize>,
+    part: Option<usize>,
     expandable: bool,
 }
 
@@ -74,6 +78,7 @@ struct AgentTranscriptCacheKey {
     expanded_requests: Vec<usize>,
     live: bool,
     mode: AgentTranscriptMode,
+    view: AgentPreviewView,
     palette: Palette,
 }
 
@@ -93,6 +98,7 @@ struct AgentTranscriptPresentationInput<'a> {
     expanded_requests: &'a [usize],
     live: bool,
     mode: AgentTranscriptMode,
+    view: AgentPreviewView,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -141,6 +147,7 @@ impl AgentTranscriptPresentation {
             input.width,
             input.live,
             input.expanded_requests,
+            input.view,
             &mut self.build_stats,
         );
         let mut expanded_requests = input.expanded_requests.to_vec();
@@ -158,6 +165,7 @@ impl AgentTranscriptPresentation {
                 expanded_requests,
                 live: input.live,
                 mode: input.mode,
+                view: input.view,
                 palette: *palette(),
             },
             user_lines,
@@ -210,6 +218,7 @@ impl AgentTranscriptCacheKey {
             && self.width == input.width
             && self.live == input.live
             && self.mode == input.mode
+            && self.view == input.view
             && self.palette == palette
             && self.expanded_requests.len() == input.expanded_requests.len()
             && input
@@ -779,7 +788,10 @@ pub(super) fn draw_history(
     prompt_focused: bool,
     prompt_error: Option<&str>,
     prompt_delivery: AgentPromptDelivery,
-    status_area: Rect,
+    view: AgentPreviewView,
+    replies: &[AgentPreviewReplyDraft],
+    active_reply: Option<&AgentPreviewReplyTarget>,
+    view_area: Rect,
     repository_area: Option<Rect>,
     prompt_bottom_padding: u16,
     card_left_inset: u16,
@@ -899,13 +911,6 @@ pub(super) fn draw_history(
         .agents
         .get(index)
         .map_or(AgentStatus::Unknown, |agent| agent.runtime.status);
-    let phase = match status {
-        AgentStatus::Working => Some(("LIVE", palette().orange)),
-        AgentStatus::Blocked => Some(("PAUSED", palette().red)),
-        AgentStatus::Done => Some(("COMPLETE", palette().green)),
-        AgentStatus::Idle => None,
-        AgentStatus::Unknown => Some(("UNKNOWN", palette().faint)),
-    };
     let repository = herdr.agent_repository_name(index).unwrap_or("UNKNOWN");
     let repository_width = badge_width(repository).min(area.width);
     let repository_area = repository_area.unwrap_or_else(|| {
@@ -917,26 +922,13 @@ pub(super) fn draw_history(
             1,
         )
     });
-    if let Some((phase, phase_color)) = phase {
-        let phase_width = u16::try_from(UnicodeWidthStr::width(phase)).unwrap_or(u16::MAX);
-        let phase_area = Rect::new(status_area.x, status_area.y, status_area.width, 1);
-        if phase_area.width >= phase_width.saturating_add(2) {
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("● ", Style::default().fg(phase_color)),
-                    Span::styled(
-                        phase,
-                        Style::default()
-                            .fg(phase_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]))
-                .alignment(Alignment::Right)
-                .style(Style::default().bg(palette().panel)),
-                phase_area,
-            );
-        }
-    }
+    draw_preview_view_toggle(
+        frame,
+        view_area,
+        view,
+        hovered.as_ref(),
+        &mut navigation_targets,
+    );
     if repository_area.width >= 3 {
         navigation_targets.push((
             HitTarget::AgentPreviewPicker(agent_key.clone()),
@@ -991,6 +983,7 @@ pub(super) fn draw_history(
         expanded_requests,
         live,
         mode: AgentTranscriptMode::Agent,
+        view,
     });
     let user_top_padding = u16::from(cached.user_elapsed.is_some());
     let full_user_card_height = cached.user_lines.len().saturating_add(2).max(3);
@@ -1035,11 +1028,37 @@ pub(super) fn draw_history(
         main.width.saturating_sub(card_left_inset),
         viewport.height,
     );
+    let reply_height = if view == AgentPreviewView::Output {
+        cached
+            .blocks
+            .iter()
+            .filter(|block| {
+                block
+                    .request
+                    .zip(block.part)
+                    .is_some_and(|(request, part)| {
+                        replies.iter().any(|reply| {
+                            reply.target
+                                == AgentPreviewReplyTarget::Live {
+                                    agent: agent_key.clone(),
+                                    message: selected_message,
+                                    request,
+                                    part,
+                                }
+                        })
+                    })
+            })
+            .count()
+            .saturating_mul(3)
+    } else {
+        0
+    };
     let scroll_max = if user_message_expanded {
         full_user_card_height.saturating_sub(usize::from(user_cards.height))
     } else {
         cached
             .request_height
+            .saturating_add(reply_height)
             .saturating_sub(usize::from(viewport.height))
     };
     let scroll = if user_message_expanded {
@@ -1089,7 +1108,9 @@ pub(super) fn draw_history(
         },
         elapsed: cached.user_elapsed.clone(),
         request_count: cached.request_count,
+        tool_count: 0,
         request: None,
+        part: None,
         expandable: false,
     };
     if let Some((rect, _)) = draw_transcript_card(
@@ -1099,6 +1120,7 @@ pub(super) fn draw_history(
         user_cards,
         if user_message_expanded { scroll } else { 0 },
         herdr.spinner_frame(),
+        false,
     ) {
         targets.push((
             if user_message_expanded {
@@ -1116,16 +1138,74 @@ pub(super) fn draw_history(
         ));
     }
     let request_scroll = if user_message_expanded { 0 } else { scroll };
+    let mut reply_offset = 0usize;
     for block in &cached.blocks {
+        let mut rendered_block = block.clone();
+        rendered_block.start = rendered_block.start.saturating_add(reply_offset);
+        let reply = block.request.zip(block.part).and_then(|(request, part)| {
+            let target = AgentPreviewReplyTarget::Live {
+                agent: agent_key.clone(),
+                message: selected_message,
+                request,
+                part,
+            };
+            replies
+                .iter()
+                .find(|reply| reply.target == target)
+                .map(|reply| (target, reply))
+        });
+        let output_target =
+            block
+                .request
+                .zip(block.part)
+                .map(|(request, part)| HitTarget::AgentPreviewOutput {
+                    agent: agent_key.clone(),
+                    message: selected_message,
+                    request,
+                    part,
+                });
+        let hovered_output = output_target.as_ref().is_some_and(|target| {
+            hovered.as_ref() == Some(target)
+                || matches!(
+                    hovered.as_ref(),
+                    Some(
+                        HitTarget::AgentPreviewOutputReply { agent, message, request, part }
+                            | HitTarget::AgentPreviewOutputReplyInput { agent, message, request, part }
+                    ) if agent == &agent_key
+                        && *message == selected_message
+                        && Some(*request) == block.request
+                        && Some(*part) == block.part
+                )
+        });
         if let Some((rect, block_animation_presented)) = draw_transcript_card(
             frame,
-            block,
+            &rendered_block,
             cards,
             viewport,
             request_scroll,
             herdr.spinner_frame(),
+            hovered_output,
         ) {
             animation_presented |= block_animation_presented;
+            if view == AgentPreviewView::Output
+                && let Some((request, part)) = block.request.zip(block.part)
+            {
+                let output = HitTarget::AgentPreviewOutput {
+                    agent: agent_key.clone(),
+                    message: selected_message,
+                    request,
+                    part,
+                };
+                targets.push((output, rect));
+                let reply_target = HitTarget::AgentPreviewOutputReply {
+                    agent: agent_key.clone(),
+                    message: selected_message,
+                    request,
+                    part,
+                };
+                let button = draw_reply_affordance(frame, rect, hovered_output);
+                targets.push((reply_target, button));
+            }
             if block.expandable
                 && let Some(request) = block.request
             {
@@ -1138,6 +1218,31 @@ pub(super) fn draw_history(
                     rect,
                 ));
             }
+        }
+        if let Some((target, reply)) = reply {
+            let start = rendered_block.start.saturating_add(rendered_block.height);
+            if let Some(rect) = visible_document_rect(cards, viewport, request_scroll, start, 3) {
+                let focused = active_reply == Some(&target);
+                draw_inline_reply(frame, &reply.input, focused, rect);
+                if let AgentPreviewReplyTarget::Live {
+                    agent,
+                    message,
+                    request,
+                    part,
+                } = target
+                {
+                    targets.push((
+                        HitTarget::AgentPreviewOutputReplyInput {
+                            agent,
+                            message,
+                            request,
+                            part,
+                        },
+                        rect,
+                    ));
+                }
+            }
+            reply_offset = reply_offset.saturating_add(3);
         }
     }
     draw_agent_preview_picker(
@@ -1250,12 +1355,18 @@ pub(super) fn draw_scheduled_history(
     prompt_sending: bool,
     prompt_available: bool,
     conversation_message: Option<&str>,
+    view: AgentPreviewView,
+    replies: &[AgentPreviewReplyDraft],
+    active_reply: Option<&AgentPreviewReplyTarget>,
+    hovered: Option<HitTarget>,
+    view_area: Rect,
     prompt_bottom_padding: u16,
     prompt_delivery_inside: bool,
     mut area: Rect,
 ) -> (Vec<(HitTarget, Rect)>, usize, usize) {
     fill(frame, area, palette().panel);
     let mut targets = Vec::new();
+    draw_preview_view_toggle(frame, view_area, view, None, &mut targets);
     if prompt_available {
         let prompt_text_width = usize::from(area.width.saturating_sub(4)).max(1);
         let (prompt_cursor_row, prompt_visual_height) = prompt.visual_metrics(prompt_text_width);
@@ -1350,6 +1461,7 @@ pub(super) fn draw_scheduled_history(
         expanded_requests,
         live: false,
         mode: AgentTranscriptMode::Scheduled,
+        view,
     });
     let user_top_padding = u16::from(cached.user_elapsed.is_some());
     let full_user_card_height = cached.user_lines.len().saturating_add(2).max(3);
@@ -1393,11 +1505,37 @@ pub(super) fn draw_scheduled_history(
         user_viewport.height.saturating_sub(user_top_padding),
     );
     let cards = Rect::new(area.x, viewport.y, area.width, viewport.height);
+    let reply_height = if view == AgentPreviewView::Output {
+        cached
+            .blocks
+            .iter()
+            .filter(|block| {
+                block
+                    .request
+                    .zip(block.part)
+                    .is_some_and(|(request, part)| {
+                        replies.iter().any(|reply| {
+                            reply.target
+                                == AgentPreviewReplyTarget::Scheduled {
+                                    run_id,
+                                    message: selected_message,
+                                    request,
+                                    part,
+                                }
+                        })
+                    })
+            })
+            .count()
+            .saturating_mul(3)
+    } else {
+        0
+    };
     let scroll_max = if user_message_expanded {
         full_user_card_height.saturating_sub(usize::from(user_cards.height))
     } else {
         cached
             .request_height
+            .saturating_add(reply_height)
             .saturating_sub(usize::from(viewport.height))
     };
     let scroll = if user_message_expanded {
@@ -1431,7 +1569,9 @@ pub(super) fn draw_scheduled_history(
         },
         elapsed: cached.user_elapsed.clone(),
         request_count: cached.request_count,
+        tool_count: 0,
         request: None,
+        part: None,
         expandable: false,
     };
     if let Some((rect, _)) = draw_transcript_card(
@@ -1441,6 +1581,7 @@ pub(super) fn draw_scheduled_history(
         user_cards,
         if user_message_expanded { scroll } else { 0 },
         0,
+        false,
     ) {
         targets.push((
             HitTarget::AgentScheduledMessage {
@@ -1451,16 +1592,116 @@ pub(super) fn draw_scheduled_history(
         ));
     }
     let request_scroll = if user_message_expanded { 0 } else { scroll };
+    let mut reply_offset = 0usize;
     for block in &cached.blocks {
-        if let Some((rect, _)) =
-            draw_transcript_card(frame, block, cards, viewport, request_scroll, 0)
-            && block.expandable
-            && let Some(request) = block.request
-        {
-            targets.push((
-                HitTarget::AgentPreviewScheduledRequest { run_id, request },
-                rect,
-            ));
+        let mut rendered_block = block.clone();
+        rendered_block.start = rendered_block.start.saturating_add(reply_offset);
+        let reply = block.request.zip(block.part).and_then(|(request, part)| {
+            let target = AgentPreviewReplyTarget::Scheduled {
+                run_id,
+                message: selected_message,
+                request,
+                part,
+            };
+            replies
+                .iter()
+                .find(|reply| reply.target == target)
+                .map(|reply| (target, reply))
+        });
+        let output_target = block.request.zip(block.part).map(|(request, part)| {
+            HitTarget::AgentPreviewScheduledOutput {
+                run_id,
+                message: selected_message,
+                request,
+                part,
+            }
+        });
+        let hovered_output = output_target.as_ref().is_some_and(|target| {
+            hovered.as_ref() == Some(target)
+                || matches!(
+                    hovered.as_ref(),
+                    Some(
+                        HitTarget::AgentPreviewScheduledOutputReply {
+                            run_id: hovered_run,
+                            message,
+                            request,
+                            part,
+                        } | HitTarget::AgentPreviewScheduledOutputReplyInput {
+                            run_id: hovered_run,
+                            message,
+                            request,
+                            part,
+                        }
+                    ) if *hovered_run == run_id
+                        && *message == selected_message
+                        && Some(*request) == block.request
+                        && Some(*part) == block.part
+                )
+        });
+        if let Some((rect, _)) = draw_transcript_card(
+            frame,
+            &rendered_block,
+            cards,
+            viewport,
+            request_scroll,
+            0,
+            hovered_output,
+        ) {
+            if view == AgentPreviewView::Output
+                && let Some((request, part)) = block.request.zip(block.part)
+            {
+                targets.push((
+                    HitTarget::AgentPreviewScheduledOutput {
+                        run_id,
+                        message: selected_message,
+                        request,
+                        part,
+                    },
+                    rect,
+                ));
+                let button = draw_reply_affordance(frame, rect, hovered_output);
+                targets.push((
+                    HitTarget::AgentPreviewScheduledOutputReply {
+                        run_id,
+                        message: selected_message,
+                        request,
+                        part,
+                    },
+                    button,
+                ));
+            } else if block.expandable
+                && let Some(request) = block.request
+            {
+                targets.push((
+                    HitTarget::AgentPreviewScheduledRequest { run_id, request },
+                    rect,
+                ));
+            }
+        }
+        if let Some((target, reply)) = reply {
+            let start = rendered_block.start.saturating_add(rendered_block.height);
+            if let Some(rect) = visible_document_rect(cards, viewport, request_scroll, start, 3) {
+                let focused = active_reply == Some(&target);
+                draw_inline_reply(frame, &reply.input, focused, rect);
+                if let AgentPreviewReplyTarget::Scheduled {
+                    run_id,
+                    message,
+                    request,
+                    part,
+                } = target
+                {
+                    targets.push((
+                        HitTarget::AgentPreviewScheduledOutputReplyInput {
+                            run_id,
+                            message,
+                            request,
+                            part,
+                        },
+                        rect,
+                    ));
+                }
+            }
+            reply_offset = reply_offset.saturating_add(3);
         }
     }
     (targets, scroll_max, scroll)
@@ -1599,8 +1840,12 @@ fn build_request_transcript_counted(
     width: usize,
     live: bool,
     expanded_requests: &[usize],
+    view: AgentPreviewView,
     stats: &mut AgentTranscriptBuildStats,
 ) -> (Vec<TranscriptBlock>, usize) {
+    if view == AgentPreviewView::Output {
+        return build_output_transcript_counted(message, width, live, stats);
+    }
     let mut blocks = Vec::new();
     let mut document_height = 0usize;
     let request_count = message.requests.len();
@@ -1692,7 +1937,9 @@ fn build_request_transcript_counted(
             height,
             elapsed,
             request_count: 0,
+            tool_count: 0,
             request: Some(request_index),
+            part: None,
             expandable,
         });
         document_height = document_height.saturating_add(height);
@@ -1708,7 +1955,9 @@ fn build_request_transcript_counted(
             height: height.saturating_add(REQUEST_CARD_EXTRA_ROWS),
             elapsed: None,
             request_count: 0,
+            tool_count: 0,
             request: None,
+            part: None,
             expandable: false,
         });
         document_height = height.saturating_add(REQUEST_CARD_EXTRA_ROWS);
@@ -1729,8 +1978,144 @@ fn build_request_transcript(
         width,
         live,
         expanded_requests,
+        AgentPreviewView::Activity,
         &mut AgentTranscriptBuildStats::default(),
     )
+}
+
+fn build_output_transcript_counted(
+    message: &AgentUserMessage,
+    width: usize,
+    live: bool,
+    stats: &mut AgentTranscriptBuildStats,
+) -> (Vec<TranscriptBlock>, usize) {
+    let mut blocks = Vec::new();
+    let mut document_height = 0usize;
+    let request_count = message.requests.len();
+    let mut grouped_requests = 0usize;
+    let mut grouped_tools = 0u64;
+    let mut grouped_duration_ms = 0u64;
+    let mut grouped_has_duration = false;
+    let mut last_block_duration_ms = 0u64;
+    let mut last_block_has_duration = false;
+    for (request_index, request) in message.requests.iter().enumerate() {
+        let request_live = live && request_index + 1 == request_count;
+        grouped_requests = grouped_requests.saturating_add(1);
+        grouped_tools = grouped_tools.saturating_add(request.tool_call_count);
+        if let Some(duration_ms) = request.duration_ms {
+            grouped_duration_ms = grouped_duration_ms.saturating_add(duration_ms);
+            grouped_has_duration = true;
+        }
+        let text_parts = request
+            .parts
+            .iter()
+            .enumerate()
+            .filter_map(|(part, value)| match value {
+                AgentRequestPartPreview::Text(text) if !text.is_empty() => Some((part, text)),
+                AgentRequestPartPreview::Text(_) | AgentRequestPartPreview::Activity(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if text_parts.is_empty() && !request_live {
+            continue;
+        }
+        let mut lines = Vec::new();
+        if !text_parts.is_empty() {
+            lines.push(agent_output_background_line());
+        }
+        for (text_index, (_, text)) in text_parts.iter().enumerate() {
+            if text_index > 0 {
+                lines.push(agent_output_background_line());
+            }
+            lines.extend(styled_agent_output_text_counted(text, width, stats));
+        }
+        if !text_parts.is_empty() {
+            lines.push(agent_output_background_line());
+        }
+        let mut animated_rows = Vec::new();
+        if request_live {
+            animated_rows.push(lines.len());
+            lines.push(working_line());
+        }
+        let height = lines.len().saturating_add(2);
+        blocks.push(TranscriptBlock {
+            user: false,
+            headerless_response: false,
+            lines: lines.into(),
+            animated_rows: animated_rows.into(),
+            start: document_height,
+            height,
+            elapsed: grouped_has_duration.then(|| format_preview_duration(grouped_duration_ms)),
+            request_count: grouped_requests,
+            tool_count: grouped_tools,
+            request: Some(request_index),
+            part: text_parts.first().map(|(part, _)| *part),
+            expandable: false,
+        });
+        document_height = document_height.saturating_add(height);
+        last_block_duration_ms = grouped_duration_ms;
+        last_block_has_duration = grouped_has_duration;
+        grouped_requests = 0;
+        grouped_tools = 0;
+        grouped_duration_ms = 0;
+        grouped_has_duration = false;
+    }
+    if grouped_requests > 0 {
+        if !live && let Some(block) = blocks.last_mut() {
+            block.request_count = block.request_count.saturating_add(grouped_requests);
+            block.tool_count = block.tool_count.saturating_add(grouped_tools);
+            last_block_duration_ms = last_block_duration_ms.saturating_add(grouped_duration_ms);
+            last_block_has_duration |= grouped_has_duration;
+            block.elapsed =
+                last_block_has_duration.then(|| format_preview_duration(last_block_duration_ms));
+            return (blocks, document_height);
+        }
+        let height = 2;
+        blocks.push(TranscriptBlock {
+            user: false,
+            headerless_response: false,
+            lines: Arc::default(),
+            animated_rows: Arc::default(),
+            start: document_height,
+            height,
+            elapsed: grouped_has_duration.then(|| format_preview_duration(grouped_duration_ms)),
+            request_count: grouped_requests,
+            tool_count: grouped_tools,
+            request: None,
+            part: None,
+            expandable: false,
+        });
+        document_height = document_height.saturating_add(height);
+    }
+    if blocks.is_empty() && live {
+        blocks.push(TranscriptBlock {
+            user: false,
+            headerless_response: true,
+            lines: vec![working_line()].into(),
+            animated_rows: vec![0].into(),
+            start: 0,
+            height: 2,
+            elapsed: None,
+            request_count: 0,
+            tool_count: 0,
+            request: None,
+            part: None,
+            expandable: false,
+        });
+        document_height = 2;
+    }
+    (blocks, document_height)
+}
+
+fn working_line() -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "working : ",
+            Style::default()
+                .fg(palette().orange)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(SPINNER_FRAMES[0], Style::default().fg(palette().orange)),
+    ])
 }
 
 fn styled_agent_text(text: &str, width: usize) -> Vec<Line<'static>> {
@@ -1858,6 +2243,7 @@ fn draw_transcript_card(
     viewport: Rect,
     scroll: usize,
     spinner_frame: usize,
+    _hovered: bool,
 ) -> Option<(Rect, bool)> {
     let visible_start = block.start.max(scroll);
     let visible_end = block
@@ -1879,6 +2265,7 @@ fn draw_transcript_card(
         u16::try_from(visible_end - visible_start).unwrap_or(u16::MAX),
     );
     let background = palette().canvas;
+    let output_background = palette().panel;
     let accent = if block.user {
         palette().yellow
     } else {
@@ -1913,7 +2300,7 @@ fn draw_transcript_card(
                 Rect::new(cards.x, y, cards.width, 1),
             );
         }
-        let label = if block.user {
+        let label = if block.user && (block.request_count > 0 || block.elapsed.is_some()) {
             let request_word = if block.request_count == 1 {
                 "request"
             } else {
@@ -1927,7 +2314,27 @@ fn draw_transcript_card(
             } else {
                 Some(format!(" {} {request_word} ", block.request_count))
             }
-        } else if block.headerless_response {
+        } else if block.request_count > 0 {
+            let request_word = if block.request_count == 1 {
+                "request"
+            } else {
+                "requests"
+            };
+            let tool_word = if block.tool_count == 1 {
+                "tool"
+            } else {
+                "tools"
+            };
+            let mut label = format!(
+                " {} {request_word} · {} {tool_word}",
+                block.request_count, block.tool_count
+            );
+            if let Some(elapsed) = block.elapsed.as_deref() {
+                label.push_str(&format!(" · {elapsed}"));
+            }
+            label.push(' ');
+            Some(label)
+        } else if block.user || block.headerless_response {
             None
         } else {
             block
@@ -1997,7 +2404,7 @@ fn draw_transcript_card(
                     if code_row {
                         palette().raised
                     } else {
-                        palette().panel
+                        output_background
                     },
                 );
             }
@@ -2009,6 +2416,7 @@ fn draw_transcript_card(
             .take(usize::from(content.height))
             .enumerate()
         {
+            let line = line.clone();
             let line_area = Rect::new(
                 content.x,
                 content
@@ -2032,7 +2440,15 @@ fn draw_transcript_card(
             let y = content
                 .y
                 .saturating_add(u16::try_from(row.saturating_sub(line_start)).unwrap_or(u16::MAX));
-            if let Some(cell) = frame.buffer_mut().cell_mut((content.x, y)) {
+            let column = block
+                .lines
+                .get(row)
+                .and_then(animated_spinner_column)
+                .unwrap_or(0);
+            if let Some(cell) = frame
+                .buffer_mut()
+                .cell_mut((content.x.saturating_add(column), y))
+            {
                 cell.set_symbol(spinner);
             }
         }
@@ -2070,7 +2486,7 @@ fn draw_transcript_card(
                 Paragraph::new(elapsed).style(
                     Style::default()
                         .fg(accent)
-                        .bg(palette().panel)
+                        .bg(output_background)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Rect::new(
@@ -2089,7 +2505,7 @@ fn draw_transcript_card(
         let bottom = Rect::new(cards.x, bottom_y, cards.width, 1);
         if !block.user && block.lines.last().is_some_and(is_agent_output_row) {
             frame.render_widget(Clear, bottom);
-            fill(frame, bottom, palette().panel);
+            fill(frame, bottom, output_background);
         } else {
             frame.render_widget(
                 Paragraph::new("▀".repeat(usize::from(cards.width)))
@@ -2099,6 +2515,96 @@ fn draw_transcript_card(
         }
     }
     Some((visible, animation_presented))
+}
+
+fn visible_document_rect(
+    cards: Rect,
+    viewport: Rect,
+    scroll: usize,
+    start: usize,
+    height: usize,
+) -> Option<Rect> {
+    let visible_start = start.max(scroll);
+    let visible_end = start
+        .saturating_add(height)
+        .min(scroll.saturating_add(usize::from(viewport.height)));
+    (visible_start < visible_end).then(|| {
+        Rect::new(
+            cards.x.saturating_add(2),
+            viewport.y.saturating_add(
+                u16::try_from(visible_start.saturating_sub(scroll)).unwrap_or(u16::MAX),
+            ),
+            cards.width.saturating_sub(3),
+            u16::try_from(visible_end.saturating_sub(visible_start)).unwrap_or(u16::MAX),
+        )
+    })
+}
+
+fn draw_reply_affordance(frame: &mut Frame<'_>, card: Rect, hovered: bool) -> Rect {
+    let label = "↳ Reply";
+    let width = u16::try_from(UnicodeWidthStr::width(label)).unwrap_or(u16::MAX);
+    let area = Rect::new(
+        card.right().saturating_sub(width).saturating_sub(2),
+        card.bottom().saturating_sub(2),
+        width,
+        1,
+    );
+    if hovered {
+        frame.render_widget(
+            Paragraph::new(label).style(
+                Style::default()
+                    .fg(palette().cyan)
+                    .bg(palette().surface_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            area,
+        );
+    }
+    area
+}
+
+fn draw_inline_reply(frame: &mut Frame<'_>, input: &TextInput, focused: bool, area: Rect) {
+    let (cursor_row, visual_height) =
+        input.visual_metrics(usize::from(area.width.saturating_sub(4)));
+    draw_preview_prompt(
+        frame,
+        input,
+        focused,
+        None,
+        false,
+        cursor_row,
+        visual_height,
+        area,
+    );
+}
+
+fn animated_spinner_column(line: &Line<'_>) -> Option<u16> {
+    let mut column = 0usize;
+    for span in &line.spans {
+        if span.content == SPINNER_FRAMES[0] {
+            return Some(u16::try_from(column).unwrap_or(u16::MAX));
+        }
+        column = column.saturating_add(UnicodeWidthStr::width(span.content.as_ref()));
+    }
+    None
+}
+
+fn draw_preview_view_toggle(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: AgentPreviewView,
+    hovered: Option<&HitTarget>,
+    targets: &mut Vec<(HitTarget, Rect)>,
+) {
+    let width = 6.min(area.width);
+    if width < 4 || area.height == 0 {
+        return;
+    }
+    let button = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
+    let active =
+        view == AgentPreviewView::Output || hovered == Some(&HitTarget::AgentPreviewViewToggle);
+    draw_header_card(frame, button, " VIEW ", palette().cyan, active, false);
+    targets.push((HitTarget::AgentPreviewViewToggle, button));
 }
 
 fn request_content(
@@ -2979,6 +3485,7 @@ mod tests {
             expanded_requests,
             live,
             mode: AgentTranscriptMode::Agent,
+            view: AgentPreviewView::Activity,
         }
     }
 
@@ -3179,7 +3686,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                animation_presented = draw_transcript_card(frame, block, area, area, 0, 7)
+                animation_presented = draw_transcript_card(frame, block, area, area, 0, 7, false)
                     .unwrap()
                     .1;
             })
@@ -3195,6 +3702,54 @@ mod tests {
                 .any(|cell| cell.symbol() == SPINNER_FRAMES[7])
         );
         assert_eq!(presentation.build_stats().presentations, 1);
+    }
+
+    #[test]
+    fn output_view_keeps_request_metadata_and_live_spinner_without_text() {
+        let request = |text: Option<&str>, duration_ms, tool_call_count| AgentRequestPreview {
+            parts: text
+                .map(|text| vec![AgentRequestPartPreview::Text(text.to_owned())])
+                .unwrap_or_default(),
+            reasoning_active: false,
+            duration_ms,
+            reasoning_duration_ms: None,
+            tool_call_count,
+        };
+        let messages = vec![AgentUserMessage {
+            text: "prompt".to_owned(),
+            requests: vec![
+                request(Some("first"), Some(10_000), 2),
+                request(None, Some(20_000), 3),
+                request(Some("second"), Some(30_000), 1),
+                request(None, Some(40_000), 4),
+            ],
+        }];
+        let mut presentation = AgentTranscriptPresentation::default();
+        let mut input = presentation_input("conversation", 1, &messages, 0, 40, &[], true);
+        input.view = AgentPreviewView::Output;
+
+        let cached = presentation.prepare(input);
+
+        assert_eq!(cached.request_count, 4);
+        assert_eq!(cached.user_elapsed.as_deref(), Some("1m"));
+        assert_eq!(cached.blocks.len(), 3);
+        assert_eq!(cached.blocks[0].elapsed.as_deref(), Some("10s"));
+        assert_eq!(cached.blocks[0].request_count, 1);
+        assert_eq!(cached.blocks[0].tool_count, 2);
+        assert_eq!(cached.blocks[1].elapsed.as_deref(), Some("50s"));
+        assert_eq!(cached.blocks[1].request_count, 2);
+        assert_eq!(cached.blocks[1].tool_count, 4);
+        assert!(cached.blocks[1].animated_rows.is_empty());
+        assert_eq!(cached.blocks[2].elapsed.as_deref(), Some("40s"));
+        assert_eq!(cached.blocks[2].request_count, 1);
+        assert_eq!(cached.blocks[2].tool_count, 4);
+        assert_eq!(cached.blocks[2].animated_rows.as_ref(), &[0]);
+        assert!(
+            cached.blocks[2].lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("working :"))
+        );
     }
 
     #[test]
@@ -3336,7 +3891,14 @@ mod tests {
         )])];
         let mut stats = AgentTranscriptBuildStats::default();
 
-        build_request_transcript_counted(&messages[0], 40, false, &[], &mut stats);
+        build_request_transcript_counted(
+            &messages[0],
+            40,
+            false,
+            &[],
+            AgentPreviewView::Activity,
+            &mut stats,
+        );
 
         assert_eq!(stats.markdown_parses, 1);
         assert_eq!(stats.markdown_input_bytes, output.len());
@@ -3359,7 +3921,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_transcript_card(frame, block, area, area, 0, 0);
+                draw_transcript_card(frame, block, area, area, 0, 0, false);
             })
             .unwrap();
 
@@ -3394,7 +3956,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_transcript_card(frame, block, area, area, 0, 0);
+                draw_transcript_card(frame, block, area, area, 0, 0, false);
             })
             .unwrap();
 
@@ -3427,7 +3989,9 @@ mod tests {
             height: 22,
             elapsed: None,
             request_count: 0,
+            tool_count: 0,
             request: Some(0),
+            part: None,
             expandable: false,
         };
         let area = Rect::new(0, 0, 40, 8);
@@ -3436,7 +4000,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                animation_presented = draw_transcript_card(frame, &block, area, area, 0, 0)
+                animation_presented = draw_transcript_card(frame, &block, area, area, 0, 0, false)
                     .unwrap()
                     .1;
             })
@@ -3445,7 +4009,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                animation_presented = draw_transcript_card(frame, &block, area, area, 10, 0)
+                animation_presented = draw_transcript_card(frame, &block, area, area, 10, 0, false)
                     .unwrap()
                     .1;
             })

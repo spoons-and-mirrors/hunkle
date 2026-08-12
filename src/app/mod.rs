@@ -25,7 +25,10 @@ mod text_input;
 pub(crate) use actions::{
     ACTION_ITEMS, ActionsState, CommandLayout, CommandLineSource, CommandStatus,
 };
-pub(crate) use agent_preview::{AgentPreview, AgentPreviewEffect, LiveAgentPreviewContext};
+pub(crate) use agent_preview::{
+    AgentPreview, AgentPreviewEffect, AgentPreviewReplyDraft, AgentPreviewReplyTarget,
+    AgentPreviewView, LiveAgentPreviewContext,
+};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub(crate) use changes::{
     ChangesHitTarget, PreviewOrigin, PullRequestPreview, SqliteFocus, SqlitePage,
@@ -747,6 +750,12 @@ impl App {
             self.request_quit();
             return;
         }
+        if self.agent_preview.reply_focused() {
+            let input_width = self.agent_preview_reply_width();
+            let effect = self.agent_preview.handle_reply_key(key, input_width);
+            self.apply_agent_preview_effect(effect);
+            return;
+        }
         if self.agent_preview.prompt_focused {
             let input_width = self.agent_preview_prompt_width();
             let effect = self.agent_preview.handle_prompt_key(key, input_width);
@@ -847,6 +856,11 @@ impl App {
             self.header_picker.query.insert_single_line(text);
             self.header_picker.message = None;
             self.header_picker.apply_filter();
+            return;
+        }
+        if self.agent_preview.reply_focused() {
+            let effect = self.agent_preview.paste_reply(text);
+            self.apply_agent_preview_effect(effect);
             return;
         }
         if self.agent_preview.prompt_focused {
@@ -1150,6 +1164,7 @@ impl App {
             .agent_preview
             .prompt
             .poll_blink(self.agent_preview.prompt_focused);
+        changed |= self.agent_preview.poll_reply_blink();
         if let Some(editor) = &mut self.settings_state.discord_webhook_editor {
             changed |= editor.active_input_mut().poll_blink(
                 self.mode == Mode::Settings && self.settings_state.page == SettingsPage::Discord,
@@ -2785,6 +2800,7 @@ impl App {
                     | HitTarget::StashedAgent(_)
                     | HitTarget::AgentPreviewPicker(_)
                     | HitTarget::AgentPreviewPickerItem(_)
+                    | HitTarget::AgentPreviewViewToggle
                     | HitTarget::AgentPreviewMessageTimeline(_)
                     | HitTarget::AgentPreviewMessageStep { .. }
                     | HitTarget::AgentPreviewScheduledMessageStep { .. }
@@ -2792,6 +2808,12 @@ impl App {
                     | HitTarget::AgentPreviewPromptDelivery(_)
                     | HitTarget::AgentPreviewScheduledPrompt(_)
                     | HitTarget::AgentPreviewRequest { .. }
+                    | HitTarget::AgentPreviewOutput { .. }
+                    | HitTarget::AgentPreviewOutputReply { .. }
+                    | HitTarget::AgentPreviewOutputReplyInput { .. }
+                    | HitTarget::AgentPreviewScheduledOutput { .. }
+                    | HitTarget::AgentPreviewScheduledOutputReply { .. }
+                    | HitTarget::AgentPreviewScheduledOutputReplyInput { .. }
                     | HitTarget::AgentTooltip { .. }
                     | HitTarget::AgentMessage { .. }
                     | HitTarget::AgentExpandedMessage { .. }
@@ -2911,6 +2933,42 @@ impl App {
             .map_or(1, |area| usize::from(area.width.saturating_sub(4)).max(1))
     }
 
+    fn agent_preview_reply_width(&self) -> usize {
+        self.agent_preview
+            .active_reply
+            .as_ref()
+            .and_then(|target| match target {
+                AgentPreviewReplyTarget::Live {
+                    agent,
+                    message,
+                    request,
+                    part,
+                } => self
+                    .regions
+                    .hit_target_rect(HitTarget::AgentPreviewOutputReplyInput {
+                        agent: agent.clone(),
+                        message: *message,
+                        request: *request,
+                        part: *part,
+                    }),
+                AgentPreviewReplyTarget::Scheduled {
+                    run_id,
+                    message,
+                    request,
+                    part,
+                } => {
+                    self.regions
+                        .hit_target_rect(HitTarget::AgentPreviewScheduledOutputReplyInput {
+                            run_id: *run_id,
+                            message: *message,
+                            request: *request,
+                            part: *part,
+                        })
+                }
+            })
+            .map_or(1, |area| usize::from(area.width.saturating_sub(4)).max(1))
+    }
+
     pub(super) fn agent_preview_live_context_for_key(
         &self,
         key: &AgentKey,
@@ -3021,6 +3079,34 @@ impl App {
                     self.agent_preview.toggle_picker(key);
                 }
             }
+            AgentPreviewEffect::FocusReply(target) => {
+                let source = match &target {
+                    AgentPreviewReplyTarget::Live {
+                        agent,
+                        message,
+                        request,
+                        part,
+                    } => self
+                        .herdr
+                        .agent_index(agent)
+                        .and_then(|index| self.herdr.agent_user_messages(index))
+                        .and_then(|messages| messages.get(*message))
+                        .and_then(|message| message.requests.get(*request))
+                        .and_then(|request| agent_request_reply_source(request, *part)),
+                    AgentPreviewReplyTarget::Scheduled {
+                        run_id,
+                        message,
+                        request,
+                        part,
+                    } => self
+                        .agent_preview
+                        .scheduled_reply_source(*run_id, *message, *request, *part),
+                }
+                .unwrap_or_default();
+                if !source.is_empty() {
+                    self.agent_preview.focus_reply(target, source);
+                }
+            }
         }
     }
 
@@ -3039,6 +3125,9 @@ impl App {
                 | HitTarget::AgentPreviewPrompt(key)
                 | HitTarget::AgentPreviewPromptDelivery(key)
                 | HitTarget::AgentPreviewRequest { agent: key, .. }
+                | HitTarget::AgentPreviewOutput { agent: key, .. }
+                | HitTarget::AgentPreviewOutputReply { agent: key, .. }
+                | HitTarget::AgentPreviewOutputReplyInput { agent: key, .. }
                 | HitTarget::AgentTooltip { agent: key, .. }
                 | HitTarget::AgentMessage { agent: key, .. }
                 | HitTarget::AgentExpandedMessage { agent: key, .. } => Some(key.clone()),
@@ -3056,6 +3145,7 @@ impl App {
 
     fn text_field_focused(&self) -> bool {
         self.agent_preview.prompt_focused
+            || self.agent_preview.reply_focused()
             || (self.mode == Mode::Normal
                 && (self.view() == View::RepositorySearch
                     || (self.visible_view() == View::Graph && self.graph_search_focused)))
@@ -3083,7 +3173,7 @@ impl App {
         if let Some(run_id) = self.agent_preview.scheduled_run
             && self.agent_preview_index().is_none()
         {
-            let prompt = self.agent_preview.prompt.text().trim().to_owned();
+            let prompt = self.agent_preview.composed_prompt();
             let result = self.scheduled_tasks.prompt_run(run_id, prompt);
             self.agent_preview.finish_prompt(result);
             return;
@@ -3093,7 +3183,7 @@ impl App {
                 .set_prompt_error("Agent is no longer available");
             return;
         };
-        let prompt = self.agent_preview.prompt.text().trim().to_owned();
+        let prompt = self.agent_preview.composed_prompt();
         match self
             .herdr
             .prompt_agent(index, prompt, self.agent_preview.prompt_delivery)
@@ -3236,6 +3326,24 @@ impl App {
             self.show_graph();
         }
     }
+}
+
+fn agent_request_reply_source(request: &AgentRequestPreview, part: usize) -> Option<String> {
+    matches!(
+        request.parts.get(part),
+        Some(AgentRequestPartPreview::Text(text)) if !text.is_empty()
+    )
+    .then(|| {
+        request
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                AgentRequestPartPreview::Text(text) if !text.is_empty() => Some(text.as_str()),
+                AgentRequestPartPreview::Text(_) | AgentRequestPartPreview::Activity(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    })
 }
 
 fn is_workspace_local_build(path: &Path) -> bool {
