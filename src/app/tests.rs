@@ -146,6 +146,29 @@ fn opening_a_file_from_the_explorer_selects_it_in_the_new_workspace() {
 }
 
 #[test]
+fn startup_file_opens_its_parent_workspace_and_selects_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let nested = directory.path().join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    let file = nested.join("auth.json");
+    fs::write(&file, "{}\n").unwrap();
+
+    let mut app = App::opening(file);
+    wait_for_state(&mut app, |app| !app.session.open_running());
+
+    let repo = app.repository().unwrap().clone();
+    assert_eq!(repo.root, fs::canonicalize(&nested).unwrap());
+    assert!(repo.is_local());
+    assert_eq!(app.view(), View::Changes);
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(
+        app.changes.selected_explorer_file_path(&repo),
+        Some(&RepoPath::from("auth.json"))
+    );
+    assert!(app.pending_file_selection.is_none());
+}
+
+#[test]
 fn repeated_open_keeps_the_first_workspace_request_active() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

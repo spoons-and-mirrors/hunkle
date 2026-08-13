@@ -209,6 +209,14 @@ impl App {
     }
 
     pub fn opening(path: PathBuf) -> Self {
+        if path.is_file()
+            && let Ok(path) = fs::canonicalize(&path)
+            && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        {
+            let mut app = Self::build(parent.to_path_buf(), true);
+            app.pending_file_selection = Some(RepoPath::from(PathBuf::from(name)));
+            return app;
+        }
         Self::build(path, true)
     }
 

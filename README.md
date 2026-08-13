@@ -32,6 +32,7 @@ history, staging, and repository actions.
 ```sh
 cargo run -p hunkle
 cargo run -p hunkle -- /path/to/repository
+cargo run -p hunkle -- /path/to/file.json
 ```
 
 For agent-driven development across linked worktrees, install each checkout into
