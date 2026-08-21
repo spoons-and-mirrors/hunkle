@@ -1106,8 +1106,8 @@ impl App {
                 self.generate_commit_message();
                 return;
             }
-            Some(HitTarget::MarkdownPreviewToggle) => {
-                self.toggle_markdown_preview();
+            Some(HitTarget::RenderedPreviewToggle) => {
+                self.toggle_rendered_preview();
                 return;
             }
             Some(HitTarget::Graph(GraphHitTarget::AuthorHeader)) => {

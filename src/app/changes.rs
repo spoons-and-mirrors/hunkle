@@ -78,8 +78,8 @@ pub struct ChangesState {
     explorer_scroll_to_selection: bool,
     pub(crate) diff_scroll: usize,
     pub(crate) diff_wrap: bool,
-    pub(crate) markdown_rendered: bool,
-    markdown_alternate_scroll: Option<usize>,
+    pub(crate) rendered_preview: bool,
+    rendered_preview_alternate_scroll: Option<usize>,
     pub(crate) hunk_selection: Option<usize>,
     hunk_pin_pending: bool,
     pending_hunk_selection: Option<PendingHunkSelection>,
@@ -142,6 +142,10 @@ pub(crate) enum PreviewPayload {
     Source(String),
     Diff(DiffDocument),
     Image(Arc<DynamicImage>),
+    Svg {
+        source: String,
+        preview: Result<Arc<DynamicImage>, String>,
+    },
     Database(SqliteBrowser),
     Error(String),
 }
@@ -203,7 +207,7 @@ impl PreviewState {
             PreviewPayload::Empty => Some(""),
             PreviewPayload::Loading => Some("Loading preview…"),
             PreviewPayload::Message(message) | PreviewPayload::Error(message) => Some(message),
-            PreviewPayload::Source(source) => Some(source),
+            PreviewPayload::Source(source) | PreviewPayload::Svg { source, .. } => Some(source),
             PreviewPayload::Diff(document) => Some(document.as_str()),
             PreviewPayload::Image(_) | PreviewPayload::Database(_) => None,
         }
@@ -223,6 +227,9 @@ impl PreviewState {
             | PreviewPayload::Error(message) => {
                 Some(crate::ui::preview::PreviewContent::Source(message))
             }
+            PreviewPayload::Svg { source, .. } => {
+                Some(crate::ui::preview::PreviewContent::Source(source))
+            }
             PreviewPayload::Image(_) | PreviewPayload::Database(_) => None,
         }
     }
@@ -234,11 +241,24 @@ impl PreviewState {
         Some(document)
     }
 
-    pub(crate) fn image(&self) -> Option<&Arc<DynamicImage>> {
-        let PreviewPayload::Image(image) = &self.payload else {
-            return None;
-        };
-        Some(image)
+    pub(crate) fn image(&self, rendered_preview: bool) -> Option<&Arc<DynamicImage>> {
+        match &self.payload {
+            PreviewPayload::Image(image) => Some(image),
+            PreviewPayload::Svg {
+                preview: Ok(image), ..
+            } if rendered_preview => Some(image),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn rendered_preview_error(&self) -> Option<&str> {
+        match &self.payload {
+            PreviewPayload::Svg {
+                preview: Err(error),
+                ..
+            } => Some(error),
+            _ => None,
+        }
     }
 
     pub(crate) fn database(&self) -> Option<&SqliteBrowser> {
@@ -294,6 +314,17 @@ impl PreviewState {
             && matches!(self.payload, PreviewPayload::Source(_))
     }
 
+    pub(crate) fn rendered_preview_available(&self) -> bool {
+        self.markdown_available()
+            || matches!(
+                (&self.origin, &self.payload),
+                (
+                    PreviewOrigin::ExplorerFile { .. },
+                    PreviewPayload::Svg { .. }
+                )
+            )
+    }
+
     pub(crate) fn wrappable(&self) -> bool {
         !matches!(
             self.payload,
@@ -306,7 +337,7 @@ impl PreviewState {
             (&self.origin, &self.payload),
             (
                 PreviewOrigin::ExplorerFile { .. },
-                PreviewPayload::Source(_)
+                PreviewPayload::Source(_) | PreviewPayload::Svg { .. }
             ) | (
                 PreviewOrigin::WorktreeChange { .. },
                 PreviewPayload::Diff(_)
@@ -371,8 +402,8 @@ impl ChangesState {
             explorer_scroll_to_selection: false,
             diff_scroll: 0,
             diff_wrap: true,
-            markdown_rendered: false,
-            markdown_alternate_scroll: None,
+            rendered_preview: false,
+            rendered_preview_alternate_scroll: None,
             hunk_selection: None,
             hunk_pin_pending: false,
             pending_hunk_selection: None,
@@ -1232,13 +1263,13 @@ impl ChangesState {
         self.diff_wrap
     }
 
-    pub(super) fn toggle_markdown_rendered(&mut self) {
+    pub(super) fn toggle_rendered_preview(&mut self) {
         let outgoing_scroll = self.diff_scroll;
         self.diff_scroll = self
-            .markdown_alternate_scroll
+            .rendered_preview_alternate_scroll
             .replace(outgoing_scroll)
             .unwrap_or(outgoing_scroll);
-        self.markdown_rendered = !self.markdown_rendered;
+        self.rendered_preview = !self.rendered_preview;
         self.hunk_selection = None;
         self.preview_presentation.clear();
     }
@@ -1249,7 +1280,7 @@ impl ChangesState {
             oid: commit.oid.clone(),
         };
         self.diff_scroll = 0;
-        self.markdown_alternate_scroll = None;
+        self.rendered_preview_alternate_scroll = None;
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
@@ -1282,7 +1313,7 @@ impl ChangesState {
     ) {
         self.clear_issue_preview();
         self.diff_scroll = 0;
-        self.markdown_alternate_scroll = None;
+        self.rendered_preview_alternate_scroll = None;
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
@@ -1541,7 +1572,7 @@ impl ChangesState {
         if matches!(self.preview.origin, PreviewOrigin::Issue(_)) {
             return;
         }
-        self.markdown_alternate_scroll = None;
+        self.rendered_preview_alternate_scroll = None;
         self.selection_summary = None;
         let preserve_hunk = self.pending_hunk_selection.as_ref().is_some_and(|pending| {
             repo.and_then(|repo| {
@@ -1578,6 +1609,12 @@ impl ChangesState {
             let directory = row.directory_path.clone();
             let descendant_count = row.descendant_count;
             if let Some(path) = file_path {
+                if !matches!(
+                    &self.preview.origin,
+                    PreviewOrigin::ExplorerFile { path: current } if current == &path
+                ) {
+                    self.rendered_preview = false;
+                }
                 self.preview.origin = PreviewOrigin::ExplorerFile { path: path.clone() };
                 self.set_preview_payload(PreviewPayload::Loading);
                 self.preview_loader.request_file(&repo.root, path);
@@ -1700,6 +1737,9 @@ impl ChangesState {
                 }
             }
             LoadedPreview::Image(image) => self.set_image(image),
+            LoadedPreview::Svg { source, preview } => {
+                self.set_preview_payload(PreviewPayload::Svg { source, preview });
+            }
         }
         if let Some(pending) = self.pending_hunk_selection.take() {
             let count = self.preview.document().map_or(0, DiffDocument::hunk_count);
@@ -1948,7 +1988,7 @@ impl ChangesState {
                 deletions: Some(1),
             }),
         });
-        self.markdown_rendered = false;
+        self.rendered_preview = false;
         self.set_diff_for_test(content);
     }
 
@@ -1962,8 +2002,8 @@ impl ChangesState {
             pull_request: None,
         });
         self.diff_scroll = 0;
-        self.markdown_rendered = true;
-        self.markdown_alternate_scroll = None;
+        self.rendered_preview = true;
+        self.rendered_preview_alternate_scroll = None;
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
@@ -2012,8 +2052,8 @@ impl ChangesState {
             }),
         });
         self.diff_scroll = 0;
-        self.markdown_rendered = false;
-        self.markdown_alternate_scroll = None;
+        self.rendered_preview = false;
+        self.rendered_preview_alternate_scroll = None;
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
@@ -2036,7 +2076,7 @@ impl ChangesState {
 
     pub(crate) fn pin_preview_line(&mut self, path: RepoPath, line: usize) {
         self.pending_preview_line = Some((path, line.max(1)));
-        self.markdown_rendered = false;
+        self.rendered_preview = false;
     }
 
     pub(crate) fn take_preview_line(&mut self, path: &RepoPath) -> Option<usize> {
@@ -2056,7 +2096,7 @@ impl ChangesState {
 
     fn set_database(&mut self, path: RepoPath, database: SqliteDatabase) {
         self.diff_scroll = 0;
-        self.markdown_rendered = false;
+        self.rendered_preview = false;
         let generation = self.preview.generation.wrapping_add(1);
         self.set_preview_payload(PreviewPayload::Database(SqliteBrowser::new(
             path, database, generation,
@@ -2065,7 +2105,7 @@ impl ChangesState {
 
     fn set_image(&mut self, image: Arc<DynamicImage>) {
         self.diff_scroll = 0;
-        self.markdown_rendered = false;
+        self.rendered_preview = false;
         self.set_preview_payload(PreviewPayload::Image(image));
     }
 

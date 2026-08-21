@@ -77,7 +77,7 @@ pub(crate) fn draw_help(
         ),
         shortcut_help(
             shortcuts,
-            ShortcutAction::ToggleMarkdown,
+            ShortcutAction::ToggleRenderedPreview,
             "Markdown preview / source",
         ),
         shortcut_help(

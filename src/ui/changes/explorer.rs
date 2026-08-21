@@ -130,7 +130,17 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
         area.bottom()
             .saturating_sub(preview_header.y.saturating_add(2)),
     );
-    let media_loaded = app.changes.preview.image().is_some();
+    let rendered_preview_available = app.rendered_preview_available();
+    let rendered_preview_visible = app.rendered_preview_visible();
+    let media_loaded = app
+        .changes
+        .preview
+        .image(rendered_preview_visible)
+        .is_some();
+    let rendered_preview_error = rendered_preview_visible
+        .then(|| app.changes.preview.rendered_preview_error())
+        .flatten()
+        .map(str::to_owned);
     let database_loaded = app.changes.preview.database().is_some();
     let wrap_label = if !app.changes.preview.wrappable() {
         String::new()
@@ -145,18 +155,17 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
             app.settings.shortcuts.label(ShortcutAction::ToggleWrap)
         )
     };
-    let markdown_available = app.markdown_preview_available();
-    let markdown_rendered = app.markdown_preview_rendered();
-    let access_label = if app.changes.preview.editable() && !markdown_rendered {
+    let markdown_rendered = rendered_preview_visible && app.changes.preview.markdown_available();
+    let access_label = if app.changes.preview.editable() && !rendered_preview_visible {
         "click to edit"
     } else {
         "read-only"
     };
-    let markdown_button_width = if markdown_available { 11 } else { 0 };
+    let preview_button_width = if rendered_preview_available { 11 } else { 0 };
     let header_content_width = preview_header
         .width
-        .saturating_sub(markdown_button_width)
-        .saturating_sub(u16::from(markdown_available));
+        .saturating_sub(preview_button_width)
+        .saturating_sub(u16::from(rendered_preview_available));
     let preview_kind = issue_preview.as_ref().map_or_else(
         || {
             if database_loaded {
@@ -210,19 +219,19 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
             preview_header.height,
         ),
     );
-    if markdown_available {
+    if rendered_preview_available {
         let button = Rect::new(
-            preview_header.right().saturating_sub(markdown_button_width),
+            preview_header.right().saturating_sub(preview_button_width),
             preview_header.y,
-            markdown_button_width,
+            preview_button_width,
             1,
         );
         app.regions
-            .register_hit_target(HitTarget::MarkdownPreviewToggle, button);
-        let highlighted =
-            markdown_rendered || app.hovered_hit_target == Some(HitTarget::MarkdownPreviewToggle);
+            .register_hit_target(HitTarget::RenderedPreviewToggle, button);
+        let highlighted = rendered_preview_visible
+            || app.hovered_hit_target == Some(HitTarget::RenderedPreviewToggle);
         frame.render_widget(
-            Paragraph::new(if markdown_rendered {
+            Paragraph::new(if rendered_preview_visible {
                 " m Source  "
             } else {
                 " m Preview "
@@ -253,7 +262,7 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
         let image = app
             .changes
             .preview
-            .image()
+            .image(rendered_preview_visible)
             .expect("media preview was checked")
             .clone();
         let generation = app.changes.preview.generation();
@@ -306,6 +315,15 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
         }
     } else if media_loaded {
         app.changes.preview_presentation.hide_media();
+    } else if let Some(error) = rendered_preview_error {
+        app.changes.preview_presentation.hide_media();
+        app.regions.diff_scroll_max = 0;
+        frame.render_widget(
+            Paragraph::new(error)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(palette().red).bg(palette().panel)),
+            preview_body,
+        );
     } else if database_loaded {
         app.changes.preview_presentation.hide_media();
         crate::ui::sqlite::draw(frame, app, preview_body);

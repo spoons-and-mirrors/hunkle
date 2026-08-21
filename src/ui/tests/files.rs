@@ -1163,7 +1163,7 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     assert!(source.contains("# Markdown Title"));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
-    assert!(app.markdown_preview_rendered());
+    assert!(app.rendered_preview_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let rendered: String = terminal
         .backend()
@@ -1182,17 +1182,17 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.changes.diff_scroll, 7);
     click(&mut app, preview_button.0, preview_button.1);
-    assert!(!app.markdown_preview_rendered());
+    assert!(!app.rendered_preview_visible());
     assert_eq!(app.changes.diff_scroll, 0);
     app.changes.diff_scroll = 40;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.changes.diff_scroll, 40);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
-    assert!(app.markdown_preview_rendered());
+    assert!(app.rendered_preview_visible());
     assert_eq!(app.changes.diff_scroll, 7);
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
-    assert!(!app.markdown_preview_rendered());
+    assert!(!app.rendered_preview_visible());
     assert_eq!(app.changes.diff_scroll, 40);
 
     terminal.backend_mut().resize(50, 10);

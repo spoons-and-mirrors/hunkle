@@ -383,7 +383,7 @@ pub(crate) enum HitTarget {
     HeaderPickerIssueScope,
     Changes(ChangesHitTarget),
     CommitMessageGenerate,
-    MarkdownPreviewToggle,
+    RenderedPreviewToggle,
     Graph(GraphHitTarget),
     Explorer(ExplorerHitTarget),
     FileSearch(FileSearchHitTarget),

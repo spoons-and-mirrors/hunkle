@@ -54,7 +54,7 @@ fn control_c_quits_from_the_non_editable_add_file_choice() {
 fn clearing_targets_removes_overlaps_but_keeps_adjacent_targets() {
     let mut regions = Regions::default();
     regions.register_hit_target(HitTarget::CommitMessageGenerate, Rect::new(0, 0, 4, 1));
-    regions.register_hit_target(HitTarget::MarkdownPreviewToggle, Rect::new(3, 0, 4, 1));
+    regions.register_hit_target(HitTarget::RenderedPreviewToggle, Rect::new(3, 0, 4, 1));
     regions.register_hit_target(
         HitTarget::Graph(GraphHitTarget::AuthorHeader),
         Rect::new(7, 0, 2, 1),
@@ -71,7 +71,7 @@ fn clearing_targets_removes_overlaps_but_keeps_adjacent_targets() {
     );
     assert!(
         regions
-            .hit_target_rect(HitTarget::MarkdownPreviewToggle)
+            .hit_target_rect(HitTarget::RenderedPreviewToggle)
             .is_none()
     );
     assert!(

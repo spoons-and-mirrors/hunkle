@@ -20,7 +20,7 @@ pub(crate) enum ShortcutAction {
     StartAgent,
     OpenHelp,
     ToggleWrap,
-    ToggleMarkdown,
+    ToggleRenderedPreview,
     RenameFile,
     DeleteFile,
     EditFile,
@@ -344,9 +344,9 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         KeyCode::Char('z')
     ),
     shortcut!(
-        ToggleMarkdown,
+        ToggleRenderedPreview,
         "toggle-markdown",
-        "Markdown preview",
+        "Rendered preview",
         "Changes / files",
         MAIN,
         KeyCode::Char('m')

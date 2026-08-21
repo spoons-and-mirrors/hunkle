@@ -314,20 +314,20 @@ fn remembers_independent_markdown_source_and_preview_scrolls() {
     let mut state = ChangesState::new(None);
     state.diff_scroll = 80;
 
-    state.toggle_markdown_rendered();
-    assert!(state.markdown_rendered);
+    state.toggle_rendered_preview();
+    assert!(state.rendered_preview);
     assert_eq!(state.diff_scroll, 80);
 
     state.diff_scroll = 12;
-    state.toggle_markdown_rendered();
-    assert!(!state.markdown_rendered);
+    state.toggle_rendered_preview();
+    assert!(!state.rendered_preview);
     assert_eq!(state.diff_scroll, 80);
-    state.toggle_markdown_rendered();
+    state.toggle_rendered_preview();
     assert_eq!(state.diff_scroll, 12);
 
     state.refresh_diff(None);
     state.diff_scroll = 5;
-    state.toggle_markdown_rendered();
+    state.toggle_rendered_preview();
     assert_eq!(state.diff_scroll, 5);
 }
 
@@ -338,7 +338,7 @@ fn issue_preview_survives_refresh_and_clears_on_navigation() {
 
     state.show_issue(17, "ISSUE", "Render issue bodies", "# Body");
     assert_eq!(state.preview.text(), Some("# Body"));
-    assert!(state.markdown_rendered);
+    assert!(state.rendered_preview);
     assert_eq!(state.preview.pane(), LeftPane::Files);
     assert_eq!(state.preview.issue().map(|issue| issue.number), Some(17));
 

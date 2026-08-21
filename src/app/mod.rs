@@ -2068,7 +2068,7 @@ impl App {
                     format!("{subject} wrap disabled")
                 });
             }
-            ShortcutAction::ToggleMarkdown => self.toggle_markdown_preview(),
+            ShortcutAction::ToggleRenderedPreview => self.toggle_rendered_preview(),
             ShortcutAction::RenameFile if self.changes.pane == LeftPane::Files => {
                 self.open_rename_dialog();
             }
@@ -2632,23 +2632,23 @@ impl App {
             .selected_explorer_file_path(self.session.data()?)
     }
 
-    pub(crate) fn markdown_preview_available(&self) -> bool {
-        self.view() == View::Changes && self.changes.preview.markdown_available()
+    pub(crate) fn rendered_preview_available(&self) -> bool {
+        self.view() == View::Changes && self.changes.preview.rendered_preview_available()
     }
 
-    pub(crate) fn markdown_preview_rendered(&self) -> bool {
-        self.markdown_preview_available() && self.changes.markdown_rendered
+    pub(crate) fn rendered_preview_visible(&self) -> bool {
+        self.rendered_preview_available() && self.changes.rendered_preview
     }
 
     pub(crate) fn fullscreen_agent_activation_pending(&self) -> bool {
         self.herdr.fullscreen() && self.last_agent_click.is_some()
     }
 
-    fn toggle_markdown_preview(&mut self) {
-        if !self.markdown_preview_available() {
+    fn toggle_rendered_preview(&mut self) {
+        if !self.rendered_preview_available() {
             return;
         }
-        self.changes.toggle_markdown_rendered();
+        self.changes.toggle_rendered_preview();
     }
 
     fn toggle_fullscreen(&mut self) {

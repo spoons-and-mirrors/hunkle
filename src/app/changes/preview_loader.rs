@@ -51,6 +51,10 @@ pub(super) enum LoadedPreview {
         result: Result<SqlitePage, String>,
     },
     Image(Arc<DynamicImage>),
+    Svg {
+        source: String,
+        preview: Result<Arc<DynamicImage>, String>,
+    },
     Error(String),
 }
 
@@ -368,6 +372,15 @@ fn load_file_preview_cancellable(
             .map(|image| LoadedPreview::Image(Arc::new(image)))
             .unwrap_or_else(LoadedPreview::Error);
     }
+    if is_svg(path.as_path()) {
+        return match git::file_content(root, path) {
+            Ok(source) => {
+                let preview = render_svg(source.as_bytes()).map(Arc::new);
+                LoadedPreview::Svg { source, preview }
+            }
+            Err(error) => LoadedPreview::Error(error.to_string()),
+        };
+    }
     if is_image(path.as_path()) {
         return load_image(&full_path)
             .map(|image| LoadedPreview::Image(Arc::new(image)))
@@ -384,6 +397,12 @@ fn has_sqlite_header(path: &Path) -> bool {
     };
     let mut header = [0_u8; SQLITE_HEADER.len()];
     file.read_exact(&mut header).is_ok() && &header == SQLITE_HEADER
+}
+
+fn is_svg(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
 }
 
 fn load_sqlite_database(path: &Path) -> Result<SqliteDatabase, String> {
@@ -773,6 +792,35 @@ fn load_image(path: &Path) -> Result<DynamicImage, String> {
         .decode()
         .map_err(|error| format!("Could not decode image: {error}"))?;
     Ok(bound_preview_dimensions(image))
+}
+
+fn render_svg(source: &[u8]) -> Result<DynamicImage, String> {
+    let mut options = resvg::usvg::Options::default();
+    options.fontdb_mut().load_system_fonts();
+    let tree = resvg::usvg::Tree::from_data(source, &options)
+        .map_err(|error| format!("Could not parse SVG: {error}"))?;
+    let size = tree.size();
+    let scale = (MAX_PREVIEW_WIDTH as f32 / size.width())
+        .min(MAX_PREVIEW_HEIGHT as f32 / size.height())
+        .min(1.0);
+    let width = (size.width() * scale)
+        .ceil()
+        .clamp(1.0, MAX_PREVIEW_WIDTH as f32) as u32;
+    let height = (size.height() * scale)
+        .ceil()
+        .clamp(1.0, MAX_PREVIEW_HEIGHT as f32) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| "SVG dimensions are too large to preview".to_owned())?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let png = pixmap
+        .encode_png()
+        .map_err(|error| format!("Could not encode SVG preview: {error}"))?;
+    image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+        .map_err(|error| format!("Could not decode SVG preview: {error}"))
 }
 
 fn load_video_frame(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<DynamicImage, String> {

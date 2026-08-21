@@ -2164,7 +2164,7 @@ fn wait_for_preview(app: &mut App) {
     for _ in 0..100 {
         let _ = app.poll_worker();
         if app.changes.preview.text() != Some("Loading preview…")
-            || app.changes.preview.image().is_some()
+            || app.changes.preview.image(false).is_some()
         {
             return;
         }
