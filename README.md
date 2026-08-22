@@ -16,6 +16,8 @@
   any vertical header separator to resize the adjacent columns.
 - Herdr-aware agent launching from any known repository or linked worktree into
   a selected pane in the active tab.
+- Passive, read-only Norm presence cards when a same-user Norm daemon is already
+  running.
 - Repository-local scheduled tasks that can be created as Markdown files or
   edited through Hunkle's scheduler.
 - Source-aware diffs with changed-file and line-count summaries, line numbers,
@@ -136,7 +138,7 @@ emergency quit command elsewhere.
 | `m`                               | Toggle rendered Markdown and source for Markdown files in Files                                                                                                                      |
 | `F1`                              | Send a command or prompt to the Herdr pane directly below Hunkle, creating it when needed                                                                                            |
 | `F2`                              | Rename the selected file or folder in Files                                                                                                                                          |
-| `F3`                              | Select the Agents pane                                                                                                                                                               |
+| `F3`                              | Select the Agents pane when Herdr or Norm presence is available                                                                                                                      |
 | `F4`                              | Open or close the scheduled-task manager                                                                                                                                             |
 | `/`                               | Open repository search; use Tab/Shift+Tab for scope and Alt+C/W/R/I for search options                                                                                              |
 | `Ctrl+Delete`                     | Permanently delete the selected file or folder from Files after confirmation                                                                                                         |
@@ -151,7 +153,7 @@ emergency quit command elsewhere.
 | `Space`                           | Stage or unstage the selected entry, or stage the selected hunk                                                                                                                      |
 | `Delete` in Changes               | Discard the selected file's unstaged changes after confirmation; staged changes are preserved                                                                                        |
 | `Right`, `l` in hunk mode         | Stage the selected hunk                                                                                                                                                              |
-| `a`                               | Show or hide the Agents section                                                                                                                                                      |
+| `a`                               | Show, hide, or cycle the Herdr Agents section                                                                                                                                        |
 | `u`                               | Unstage all changes                                                                                                                                                                  |
 | `c`                               | Focus the commit message editor                                                                                                                                                      |
 | `Enter`, `Ctrl+Enter`             | New commit-message line, create commit                                                                                                                                               |
@@ -203,6 +205,17 @@ shown in the header. Choose which non-Hunkle pane in the active Herdr tab to
 replace. If the displaced pane contains only an idle shell, Hunkle closes it after
 the agent starts. A pane with a foreground process is parked in its own tab,
 named after its starting directory, so the process and its output are preserved.
+
+Hunkle also passively reads Norm presence from
+`$XDG_RUNTIME_DIR/norm/daemon.sock`, falling back to
+`/tmp/norm-<euid>/norm/daemon.sock` when `XDG_RUNTIME_DIR` is unset. Hunkle only
+connects to an already-running same-user daemon: it never starts Norm, invokes
+Norm, or attaches to its agents. Norm conversations appear as a separate
+read-only **NORM** section with workspace, branch, title/session, activity, and
+open-view information. Herdr launch, layout, prompt, stash, and transcript
+controls do not apply to Norm cards. Missing or refused sockets clear the
+section immediately; brief transport or protocol failures retain the last
+snapshot for at most six seconds.
 
 The Agents section acts as a live per-agent layout switcher. Clicking an agent
 restores its complete pane layout around the fixed Hunkle pane, keeps keyboard

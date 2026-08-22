@@ -16,11 +16,14 @@ pub(super) fn layout_agents_pane(
     }
 
     let mode = app.herdr.agent_list_mode();
-    let agent_count = match mode {
+    let herdr_count = match mode {
         AgentListMode::Agents => app.herdr.agent_card_count(),
         AgentListMode::Scheduled => app.scheduled_tasks.runs().len(),
         AgentListMode::Stash => app.herdr.stashed_agents().len(),
     };
+    let agent_count = herdr_count
+        + app.norm_presence.agents().len()
+        + usize::from(app.herdr_available() && app.norm_presence.is_available());
     let automatic_count = agent_count.min(10);
     if app.agents_height_fit_for != Some((mode, automatic_count)) {
         app.agents_height_fit_for = Some((mode, automatic_count));
@@ -74,6 +77,7 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
         matches!(
             target,
             HitTarget::Agent(_)
+                | HitTarget::NormAgent(_)
                 | HitTarget::AgentPaneId(_)
                 | HitTarget::AgentListModeToggle
                 | HitTarget::AgentScheduledRun(_)
@@ -87,9 +91,10 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
                 | HitTarget::AgentMessage { .. }
         )
     });
-    let (targets, animation_presented) = agents::draw(
+    let (targets, animation_presented, norm_scroll) = agents::draw(
         frame,
         &mut app.herdr,
+        &app.norm_presence,
         app.scheduled_tasks.tasks(),
         app.scheduled_tasks.runs(),
         &app.linked_worktrees,
@@ -100,6 +105,10 @@ pub(super) fn draw_agents_section(frame: &mut Frame<'_>, app: &mut App) {
         hovered,
     );
     app.regions.agent_animation_presented |= animation_presented;
+    if let Some(norm_scroll) = norm_scroll {
+        app.regions
+            .register_scroll_target(ScrollTarget::NormAgents, norm_scroll);
+    }
     for (target, rect) in targets {
         app.regions.register_hit_target(target, rect);
     }

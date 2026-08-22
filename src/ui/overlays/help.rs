@@ -5,6 +5,7 @@ pub(crate) fn draw_help(
     shortcuts: &Shortcuts,
     herdr_available: bool,
     herdr_embedded: bool,
+    agents_available: bool,
 ) {
     let area = centered_min(frame.area(), 72, 0, 58, 24);
     frame.render_widget(Clear, area);
@@ -106,11 +107,13 @@ pub(crate) fn draw_help(
             "Send to Herdr pane below",
         ));
     }
-    if herdr_available {
+    if agents_available {
         navigation.insert(
             4,
             shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Show Agents"),
         );
+    }
+    if herdr_available {
         navigation.push(shortcut_help(
             shortcuts,
             ShortcutAction::StartAgent,

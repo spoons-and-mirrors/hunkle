@@ -16,11 +16,13 @@ impl App {
                 self.settings_state.shortcut_error = None;
                 return;
             }
-            let Some(action) =
-                Shortcuts::definitions(self.herdr_available(), self.herdr_embedded())
-                    .nth(self.settings_state.shortcut_selection)
-                    .map(|definition| definition.action)
-            else {
+            let Some(action) = Shortcuts::definitions(
+                self.herdr_available(),
+                self.herdr_embedded(),
+                self.agents_available(),
+            )
+            .nth(self.settings_state.shortcut_selection)
+            .map(|definition| definition.action) else {
                 self.settings_state.shortcut_capture = false;
                 return;
             };
@@ -413,10 +415,12 @@ impl App {
 
     pub(crate) fn activate_settings_target(&mut self, target: SettingsHitTarget) {
         let shortcut_index = match target {
-            SettingsHitTarget::Shortcut(action) => {
-                Shortcuts::definitions(self.herdr_available(), self.herdr_embedded())
-                    .position(|definition| definition.action == action)
-            }
+            SettingsHitTarget::Shortcut(action) => Shortcuts::definitions(
+                self.herdr_available(),
+                self.herdr_embedded(),
+                self.agents_available(),
+            )
+            .position(|definition| definition.action == action),
             _ => None,
         };
         let effect = self.settings_state.activate_target(target, shortcut_index);
@@ -450,7 +454,12 @@ impl App {
     }
 
     pub(crate) fn handle_shortcut_settings(&mut self, key: KeyEvent) {
-        let count = Shortcuts::definitions(self.herdr_available(), self.herdr_embedded()).count();
+        let count = Shortcuts::definitions(
+            self.herdr_available(),
+            self.herdr_embedded(),
+            self.agents_available(),
+        )
+        .count();
         match key.code {
             KeyCode::Esc => self.close_settings(),
             KeyCode::Down | KeyCode::Char('j') => {
@@ -473,9 +482,13 @@ impl App {
                 self.settings_state.begin_shortcut_capture();
             }
             KeyCode::Delete => {
-                let action = Shortcuts::definitions(self.herdr_available(), self.herdr_embedded())
-                    .nth(self.settings_state.shortcut_selection)
-                    .map(|definition| definition.action);
+                let action = Shortcuts::definitions(
+                    self.herdr_available(),
+                    self.herdr_embedded(),
+                    self.agents_available(),
+                )
+                .nth(self.settings_state.shortcut_selection)
+                .map(|definition| definition.action);
                 if action.is_some_and(|action| self.settings.shortcuts.reset(action)) {
                     self.settings_changed();
                 }
@@ -486,7 +499,12 @@ impl App {
     }
 
     pub(crate) fn keep_shortcut_selection_visible(&mut self) {
-        let count = Shortcuts::definitions(self.herdr_available(), self.herdr_embedded()).count();
+        let count = Shortcuts::definitions(
+            self.herdr_available(),
+            self.herdr_embedded(),
+            self.agents_available(),
+        )
+        .count();
         let viewport = self
             .regions
             .scroll_state(&ScrollTarget::SettingsShortcuts)

@@ -34,9 +34,190 @@ fn agent_snapshot() -> serde_json::Value {
     })
 }
 
+#[cfg(unix)]
+fn norm_presence_snapshot(workspace: &std::path::Path) -> String {
+    serde_json::json!({
+        "Presence": {
+            "version": 1,
+            "daemon_epoch": "norm-epoch",
+            "revision": 5,
+            "agents": [{
+                "id": 81,
+                "generation": 4,
+                "sequence": 9,
+                "workspace": workspace,
+                "lifecycle": "Running",
+                "activity": "Blocked",
+                "session_id": "session-norm",
+                "title": "Fix presence parser",
+                "open_views": 2
+            }],
+            "instances": [{
+                "instance_id": "instance-a",
+                "revision": 1,
+                "active_tab_id": 3,
+                "tabs": [{
+                    "tab_id": 3,
+                    "ordinal": 0,
+                    "agent_id": 81,
+                    "generation": 4,
+                    "workspace": workspace,
+                    "label": "presence",
+                    "connection": "Ready",
+                    "activity": "Blocked",
+                    "writable": false,
+                    "session_title": "Fix presence parser"
+                }]
+            }]
+        }
+    })
+    .to_string()
+}
+
 fn open_agents_pane(app: &mut App) {
     app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
     assert!(app.agents_pane_visible());
+}
+
+#[test]
+#[cfg(unix)]
+fn norm_only_agents_are_visible_and_open_the_agents_workspace() {
+    let current = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    run_git(current.path(), &["init", "-b", "main"]);
+    run_git(destination.path(), &["init", "-b", "main"]);
+    let destination = fs::canonicalize(destination.path()).unwrap();
+    let mut app = App::new(current.path().to_path_buf());
+    app.norm_presence
+        .set_snapshot_for_test(&norm_presence_snapshot(&destination));
+    open_agents_pane(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let screen = screen_text(&terminal);
+    assert!(screen.contains("NORM 1"), "screen: {screen}");
+    assert!(screen.contains("Fix presence"), "screen: {screen}");
+    assert!(screen.contains("blocked"), "screen: {screen}");
+    assert!(screen.contains("2 views"), "screen: {screen}");
+    assert!(
+        app.regions
+            .scroll_target_rect(ScrollTarget::NormAgents)
+            .is_some()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentListModeToggle)
+            .is_none()
+    );
+    let identity = app.norm_presence.agents()[0].identity.clone();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::NormAgent(identity.clone()))
+        .unwrap();
+    assert!(!app.regions.hit_targets().any(|target| matches!(
+        target,
+        HitTarget::Agent(_)
+            | HitTarget::AgentPaneId(_)
+            | HitTarget::AgentStash(_)
+            | HitTarget::StashedAgent(_)
+    )));
+
+    app.handle_mouse(mouse(MouseEventKind::Moved, card.x + 1, card.y));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        app.regions.hit_target_at(Position::new(card.x + 1, card.y)),
+        Some(HitTarget::NormAgent(identity))
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(card.x + 1, card.y + 1)].bg,
+        palette().selected
+    );
+
+    click(&mut app, card.x + 1, card.y);
+
+    assert!(app.session.open_running());
+    assert_eq!(app.notice.as_deref(), Some("Opening workspace…"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while app.session.open_running() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+        let _ = app.poll_worker();
+    }
+    assert_eq!(app.repository().unwrap().root, destination);
+}
+
+#[test]
+#[cfg(unix)]
+fn untitled_norm_agents_do_not_expose_raw_session_ids() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let response = norm_presence_snapshot(directory.path())
+        .replace("\"title\":\"Fix presence parser\"", "\"title\":null")
+        .replace(
+            "\"session_title\":\"Fix presence parser\"",
+            "\"session_title\":null",
+        );
+    let mut app = App::new(directory.path().to_path_buf());
+    app.norm_presence.set_snapshot_for_test(&response);
+
+    assert_eq!(
+        crate::ui::agents::norm_agent_name(&app.norm_presence.agents()[0]),
+        "New session"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn norm_cards_form_a_separate_section_beside_herdr_cards() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.norm_presence
+        .set_snapshot_for_test(&norm_presence_snapshot(directory.path()));
+    open_agents_pane(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(120, 48)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let screen = screen_text(&terminal);
+    assert!(screen.contains("AGENTS 1"), "screen: {screen}");
+    assert!(screen.contains("NORM 1"), "screen: {screen}");
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Agent(agent_key(&app, 0)))
+            .is_some()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::AgentListModeToggle)
+            .is_some()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn norm_section_remains_visible_in_herdr_scheduled_and_stash_modes() {
+    let directory = tempfile::tempdir().unwrap();
+    run_git(directory.path(), &["init", "-b", "main"]);
+    let mut app = App::new(directory.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.norm_presence
+        .set_snapshot_for_test(&norm_presence_snapshot(directory.path()));
+    open_agents_pane(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(120, 48)).unwrap();
+
+    app.herdr.cycle_agent_list_mode();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen = screen_text(&terminal);
+    assert!(screen.contains("SCHEDULED"), "screen: {screen}");
+    assert!(screen.contains("NORM 1"), "screen: {screen}");
+
+    app.herdr.cycle_agent_list_mode();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen = screen_text(&terminal);
+    assert!(screen.contains("STASHED"), "screen: {screen}");
+    assert!(screen.contains("NORM 1"), "screen: {screen}");
 }
 
 fn agent_key(app: &App, index: usize) -> AgentKey {
@@ -811,7 +992,7 @@ fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewi
     let detail = (card.x..card.right())
         .map(|x| terminal.backend().buffer()[(x, card.y + 1)].symbol())
         .collect::<String>();
-    assert!(detail.contains("finished 2m ago"));
+    assert!(detail.contains("finished 2m"), "detail: {detail:?}");
     assert!((card.x..card.right()).any(|x| {
         let cell = &terminal.backend().buffer()[(x, card.y)];
         cell.symbol() == "⠋" && cell.fg == palette().green

@@ -217,6 +217,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     discord_webhook_error: app.settings_state.discord_webhook_error.as_deref(),
                     herdr_available: app.herdr_available(),
                     herdr_embedded: app.herdr_embedded(),
+                    agents_available: app.agents_available(),
                 },
                 app.fetch_running(),
             );
@@ -228,6 +229,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     let maximum = crate::app::Shortcuts::definitions(
                         app.herdr_available(),
                         app.herdr_embedded(),
+                        app.agents_available(),
                     )
                     .count()
                     .saturating_sub(viewport);
@@ -327,6 +329,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 &app.settings.shortcuts,
                 app.herdr_available(),
                 app.herdr_embedded(),
+                app.agents_available(),
             );
         }
         Mode::Scheduler => {
@@ -511,7 +514,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
         (ShortcutAction::ShowChanges, "Changes")
     } else if app.sidebar_pane() == LeftPane::Worktree {
         (ShortcutAction::ShowFiles, "Files")
-    } else if app.herdr_available() {
+    } else if app.agents_available() {
         (ShortcutAction::ShowAgents, "Agents")
     } else {
         (ShortcutAction::ShowChanges, "Changes")

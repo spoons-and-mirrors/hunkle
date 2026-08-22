@@ -325,11 +325,11 @@ fn herdr_disconnect_reconciles_settings_selections() {
     let mut app = App::new(directory.path().to_path_buf());
     app.settings_state.selection = 5;
     app.settings_state.shortcut_capture = true;
-    app.settings_state.shortcut_selection = Shortcuts::definitions(true, true)
+    app.settings_state.shortcut_selection = Shortcuts::definitions(true, true, true)
         .position(|definition| definition.action == ShortcutAction::OpenHerdr)
         .unwrap();
 
-    app.reconcile_settings_after_herdr_capability_change(Some(ShortcutAction::OpenHerdr));
+    app.reconcile_settings_after_capability_change(Some(ShortcutAction::OpenHerdr));
 
     assert!(!app.settings_state.shortcut_capture);
     assert_ne!(app.settings_state.selection, 5);
@@ -338,7 +338,7 @@ fn herdr_disconnect_reconciles_settings_selections() {
         app.settings_state.shortcut_selection
     );
     assert!(
-        Shortcuts::definitions(false, false)
+        Shortcuts::definitions(false, false, false)
             .nth(app.settings_state.shortcut_selection)
             .is_some()
     );
@@ -350,7 +350,7 @@ fn herdr_reconnect_preserves_the_selected_shortcut_identity() {
     let mut app = App::new(directory.path().to_path_buf());
     let selected = ShortcutAction::Quit;
     app.settings_state.shortcut_capture = true;
-    app.settings_state.shortcut_selection = Shortcuts::definitions(false, false)
+    app.settings_state.shortcut_selection = Shortcuts::definitions(false, false, false)
         .position(|definition| definition.action == selected)
         .unwrap();
     app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
@@ -361,11 +361,11 @@ fn herdr_reconnect_preserves_the_selected_shortcut_identity() {
     }));
     app.herdr.set_background_attached_for_test("w1");
 
-    app.reconcile_settings_after_herdr_capability_change(Some(selected));
+    app.reconcile_settings_after_capability_change(Some(selected));
 
     assert!(app.settings_state.shortcut_capture);
     assert_eq!(
-        Shortcuts::definitions(true, false)
+        Shortcuts::definitions(true, false, true)
             .nth(app.settings_state.shortcut_selection)
             .map(|definition| definition.action),
         Some(selected)
@@ -1191,6 +1191,44 @@ fn function_keys_select_changes_files_and_agents() {
 }
 
 #[test]
+#[cfg(unix)]
+fn norm_presence_exposes_agents_navigation_without_herdr_actions() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    let response = serde_json::json!({
+        "Presence": {
+            "version": 1,
+            "daemon_epoch": "epoch-a",
+            "revision": 1,
+            "agents": [{
+                "id": 7,
+                "generation": 2,
+                "sequence": 3,
+                "workspace": directory.path(),
+                "lifecycle": "Running",
+                "activity": "Idle",
+                "session_id": "session-a",
+                "title": "Read-only agent",
+                "open_views": 1
+            }],
+            "instances": []
+        }
+    });
+    app.norm_presence
+        .set_snapshot_for_test(&response.to_string());
+
+    assert!(!app.herdr_available());
+    assert!(app.agents_available());
+    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    assert!(app.agents_pane_visible());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(app.agents_pane_visible());
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Agents);
+}
+
+#[test]
 fn scheduler_f4_works_without_herdr_and_toggles_the_modal() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());
@@ -1569,10 +1607,13 @@ fn shortcut_settings_rebind_reset_and_persist_commands() {
     app.settings_store = SettingsStore::at(path);
     app.mode = Mode::Settings;
     app.settings_state.page = SettingsPage::Shortcuts;
-    app.settings_state.shortcut_selection =
-        Shortcuts::definitions(app.herdr_available(), app.herdr_embedded())
-            .position(|definition| definition.action == ShortcutAction::OpenExplorer)
-            .unwrap();
+    app.settings_state.shortcut_selection = Shortcuts::definitions(
+        app.herdr_available(),
+        app.herdr_embedded(),
+        app.agents_available(),
+    )
+    .position(|definition| definition.action == ShortcutAction::OpenExplorer)
+    .unwrap();
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));

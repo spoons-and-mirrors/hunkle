@@ -728,7 +728,7 @@ pub(super) fn draw_sidebar_tabs(
             !agents_active && pane == LeftPane::Files,
         ),
     ];
-    if app.herdr_available() {
+    if app.agents_available() {
         tabs.push(("AGENTS", ChangesHitTarget::AgentsTab, agents_active));
     }
     let mut spans = Vec::new();

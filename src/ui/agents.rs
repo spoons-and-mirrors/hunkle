@@ -16,7 +16,7 @@ use crate::app::{
     AgentActivityPreview, AgentDestinationMetadata, AgentEntryState, AgentKey, AgentListMode,
     AgentPreviewReplyDraft, AgentPreviewReplyTarget, AgentPreviewView, AgentPromptDelivery,
     AgentPromptOutcome, AgentRequestPartPreview, AgentRequestPreview, AgentStatus, AgentTranscript,
-    AgentUserMessage, HerdrSession, HitTarget, LinkedWorktreeCatalog, ScheduledRun,
+    AgentUserMessage, HerdrSession, HitTarget, LinkedWorktreeCatalog, NormPresence, ScheduledRun,
     ScheduledRunStatus, ScheduledTask, Settings, TextInput,
 };
 use crate::theme::Palette;
@@ -231,6 +231,105 @@ impl AgentTranscriptCacheKey {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw(
+    frame: &mut Frame<'_>,
+    herdr: &mut HerdrSession,
+    norm: &NormPresence,
+    scheduled_tasks: &[ScheduledTask],
+    scheduled_runs: &[ScheduledRun],
+    linked_worktrees: &LinkedWorktreeCatalog,
+    settings: &Settings,
+    header: Rect,
+    list: Rect,
+    dragging: bool,
+    hovered: Option<HitTarget>,
+) -> (Vec<(HitTarget, Rect)>, bool, Option<Rect>) {
+    if norm.is_available() {
+        if !herdr.is_enabled() {
+            let (targets, animation_presented) = draw_norm_agents(
+                frame,
+                norm,
+                linked_worktrees,
+                header,
+                list,
+                herdr.spinner_frame(),
+                dragging,
+                hovered,
+            );
+            return (targets, animation_presented, Some(list));
+        }
+        let desired_norm_height = u16::try_from(norm.agents().len())
+            .unwrap_or(u16::MAX)
+            .saturating_mul(3)
+            .saturating_add(2);
+        let herdr_cards_present = match herdr.agent_list_mode() {
+            AgentListMode::Agents => herdr.agent_card_count() > 0,
+            AgentListMode::Scheduled => !scheduled_runs.is_empty(),
+            AgentListMode::Stash => !herdr.stashed_agents().is_empty(),
+        };
+        let maximum_norm_height = if !herdr_cards_present {
+            list.height.saturating_sub(1)
+        } else {
+            list.height / 2
+        };
+        let norm_height = desired_norm_height.min(maximum_norm_height);
+        if norm_height >= 2 {
+            let herdr_list = Rect::new(
+                list.x,
+                list.y,
+                list.width,
+                list.height.saturating_sub(norm_height),
+            );
+            let norm_header = Rect::new(list.x, herdr_list.bottom(), list.width, 1);
+            let norm_list = Rect::new(
+                list.x,
+                norm_header.bottom(),
+                list.width,
+                norm_height.saturating_sub(1),
+            );
+            let (mut targets, herdr_animation) = draw_herdr(
+                frame,
+                herdr,
+                scheduled_tasks,
+                scheduled_runs,
+                linked_worktrees,
+                settings,
+                header,
+                herdr_list,
+                dragging,
+                hovered.clone(),
+            );
+            let (norm_targets, norm_animation) = draw_norm_agents(
+                frame,
+                norm,
+                linked_worktrees,
+                norm_header,
+                norm_list,
+                herdr.spinner_frame(),
+                dragging,
+                hovered,
+            );
+            targets.extend(norm_targets);
+            return (targets, herdr_animation || norm_animation, Some(norm_list));
+        }
+    }
+
+    let (targets, animation_presented) = draw_herdr(
+        frame,
+        herdr,
+        scheduled_tasks,
+        scheduled_runs,
+        linked_worktrees,
+        settings,
+        header,
+        list,
+        dragging,
+        hovered,
+    );
+    (targets, animation_presented, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_herdr(
     frame: &mut Frame<'_>,
     herdr: &mut HerdrSession,
     scheduled_tasks: &[ScheduledTask],
@@ -496,6 +595,208 @@ pub(super) fn draw(
         draw_trailing_agent_gap(frame, gap, list, background);
     }
     (targets, animation_presented)
+}
+
+fn draw_norm_agents(
+    frame: &mut Frame<'_>,
+    norm: &NormPresence,
+    linked_worktrees: &LinkedWorktreeCatalog,
+    header: Rect,
+    list: Rect,
+    spinner_frame: usize,
+    dragging: bool,
+    hovered: Option<HitTarget>,
+) -> (Vec<(HitTarget, Rect)>, bool) {
+    let mut targets = Vec::new();
+    draw_read_only_agent_header(frame, header, "NORM", norm.agents().len(), dragging);
+    if list.width == 0 || list.height == 0 {
+        return (targets, false);
+    }
+    if norm.agents().is_empty() {
+        frame.render_widget(
+            Paragraph::new("  No Norm agents").style(
+                Style::default()
+                    .fg(palette().faint)
+                    .bg(palette().surface_alt),
+            ),
+            list,
+        );
+        return (targets, false);
+    }
+
+    let card_height: u16 = if list.height >= 2 { 2 } else { 1 };
+    let item_step = card_height.saturating_add(1);
+    let top_padding = u16::from(list.height > card_height);
+    let card_list = Rect::new(
+        list.x,
+        list.y.saturating_add(top_padding),
+        list.width.saturating_sub(1),
+        list.height.saturating_sub(top_padding),
+    );
+    let viewport = complete_card_viewport(card_list.height, item_step);
+    let scroll = norm
+        .scroll()
+        .min(norm.agents().len().saturating_sub(viewport));
+    let mut last_card = None;
+    let mut animation_presented = false;
+    for (screen_row, agent) in norm.agents().iter().skip(scroll).take(viewport).enumerate() {
+        let offset = u16::try_from(screen_row).unwrap_or(0) * item_step;
+        let row_area = Rect::new(
+            card_list.x,
+            card_list.y.saturating_add(offset),
+            card_list.width,
+            card_height.min(card_list.height.saturating_sub(offset)),
+        );
+        let full_row_area = Rect::new(list.x, row_area.y, list.width, row_area.height);
+        let target = HitTarget::NormAgent(agent.identity.clone());
+        let is_hovered = hovered == Some(target.clone());
+        let background = row_background(&AgentEntryState::default(), is_hovered);
+        if row_area.y > list.y {
+            draw_agent_gap(
+                frame,
+                Rect::new(list.x, row_area.y - 1, list.width, 1),
+                last_card.map_or(palette().panel, |(_, color)| color),
+                background,
+            );
+        }
+        fill(frame, full_row_area, background);
+        let fallback_repository = agent
+            .workspace
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace");
+        let destination = agent_card_destination(
+            linked_worktrees.agent_destination(&agent.workspace),
+            fallback_repository,
+            None,
+        );
+        let detail = norm_agent_name(agent);
+        draw_row(
+            frame,
+            row_area,
+            destination,
+            None,
+            &detail,
+            1,
+            None,
+            None,
+            agent.status(),
+            spinner_frame,
+            AgentEntryState::default(),
+            false,
+            is_hovered,
+            false,
+        );
+        if row_area.height > 1 {
+            draw_norm_agent_detail(
+                frame,
+                Rect::new(row_area.x, row_area.y.saturating_add(1), row_area.width, 1),
+                agent,
+                background,
+            );
+        }
+        last_card = Some((full_row_area, background));
+        targets.push((target, full_row_area));
+        animation_presented |= agent.status() == AgentStatus::Working;
+    }
+    if let Some((card, background)) = last_card {
+        draw_trailing_agent_gap(
+            frame,
+            Rect::new(card.x, card.bottom(), card.width, 1),
+            list,
+            background,
+        );
+    }
+    (targets, animation_presented)
+}
+
+fn draw_read_only_agent_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    source: &str,
+    count: usize,
+    dragging: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let title = truncate_width(&format!("{source} {count}"), usize::from(area.width));
+    let separator_width = usize::from(area.width)
+        .saturating_sub(UnicodeWidthStr::width(title.as_str()).saturating_add(1));
+    let mut spans = vec![Span::styled(
+        title,
+        Style::default()
+            .fg(palette().cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if separator_width > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            "─".repeat(separator_width),
+            Style::default().fg(if dragging {
+                palette().cyan
+            } else {
+                palette().faint
+            }),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+pub(super) fn norm_agent_name(agent: &crate::app::NormAgent) -> String {
+    if let Some(title) = agent
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        return title.to_owned();
+    }
+    if agent.session_id.is_some() {
+        return "New session".to_owned();
+    }
+    format!("Agent {}", agent.identity.id)
+}
+
+fn draw_norm_agent_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    agent: &crate::app::NormAgent,
+    background: Color,
+) {
+    if area.width < 2 || area.height == 0 {
+        return;
+    }
+    let views = format!(
+        "{} {}",
+        agent.open_views,
+        if agent.open_views == 1 {
+            "view"
+        } else {
+            "views"
+        }
+    );
+    let metadata = format!("{} · {views}", agent.status_label());
+    let metadata_width = u16::try_from(UnicodeWidthStr::width(metadata.as_str()))
+        .unwrap_or(u16::MAX)
+        .min(area.width.saturating_sub(2));
+    let metadata_x = area.right().saturating_sub(metadata_width);
+    let name_x = area.x.saturating_add(1);
+    let name_width = metadata_x.saturating_sub(name_x).saturating_sub(1);
+    frame.render_widget(
+        Paragraph::new(truncate_width(
+            &norm_agent_name(agent),
+            usize::from(name_width),
+        ))
+        .style(Style::default().fg(palette().muted).bg(background)),
+        Rect::new(name_x, area.y, name_width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(truncate_width(&metadata, usize::from(metadata_width)))
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().cyan).bg(background)),
+        Rect::new(metadata_x, area.y, metadata_width, 1),
+    );
 }
 
 fn draw_scheduled_runs(

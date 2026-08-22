@@ -18,6 +18,7 @@ pub(crate) struct SettingsView<'a> {
     pub(crate) discord_webhook_error: Option<&'a str>,
     pub(crate) herdr_available: bool,
     pub(crate) herdr_embedded: bool,
+    pub(crate) agents_available: bool,
 }
 
 pub(crate) struct SettingsRegions {
@@ -48,6 +49,7 @@ pub(crate) fn draw_settings(
         discord_webhook_error,
         herdr_available,
         herdr_embedded,
+        agents_available,
     } = view;
     let area = centered_min(frame.area(), 58, 0, 48, 32);
     frame.render_widget(Clear, area);
@@ -138,7 +140,7 @@ pub(crate) fn draw_settings(
             area.width.saturating_sub(4),
             area.height.saturating_sub(6),
         );
-        let definitions = Shortcuts::definitions(herdr_available, herdr_embedded);
+        let definitions = Shortcuts::definitions(herdr_available, herdr_embedded, agents_available);
         for (row, (index, definition)) in definitions
             .enumerate()
             .skip(shortcut_scroll)

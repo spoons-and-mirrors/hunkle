@@ -16,6 +16,11 @@ mod herdr_session;
 mod issues;
 mod linked_worktrees;
 mod mouse;
+#[cfg(unix)]
+mod norm_presence;
+#[cfg(not(unix))]
+#[path = "norm_presence_non_unix.rs"]
+mod norm_presence;
 mod opencode_session;
 mod scheduler;
 mod settings;
@@ -59,6 +64,7 @@ pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
     LinkedWorktreeObservation, RepositoryPickerItem,
 };
+pub(crate) use norm_presence::{NormAgent, NormAgentIdentity, NormPresence};
 #[cfg(test)]
 pub(crate) use scheduler::SchedulerDestination;
 pub(crate) use scheduler::{
@@ -159,6 +165,7 @@ pub struct App {
     pub(crate) header_picker: HeaderPicker,
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) herdr: HerdrSession,
+    pub(crate) norm_presence: NormPresence,
     pub(crate) scheduled_tasks: ScheduledTasks,
     pub(crate) scheduler: SchedulerState,
     pub(crate) agents_visible: bool,
@@ -286,6 +293,10 @@ impl App {
         }
         let mut herdr = HerdrSession::detect(workspace_config_dir);
         #[cfg(not(test))]
+        let norm_presence = NormPresence::new();
+        #[cfg(test)]
+        let norm_presence = NormPresence::new().disabled_for_test();
+        #[cfg(not(test))]
         let scheduled_tasks = ScheduledTasks::open(workspace_config_dir, discord_webhooks.clone());
         #[cfg(test)]
         let scheduled_tasks = ScheduledTasks::memory();
@@ -335,6 +346,7 @@ impl App {
             header_picker: HeaderPicker::default(),
             linked_worktrees,
             herdr,
+            norm_presence,
             scheduled_tasks,
             scheduler: SchedulerState::default(),
             agents_visible: true,
@@ -474,7 +486,11 @@ impl App {
     }
 
     pub(crate) fn agents_pane_visible(&self) -> bool {
-        self.herdr_available() && self.navigation.agents_selected()
+        self.agents_available() && self.navigation.agents_selected()
+    }
+
+    pub(crate) fn agents_available(&self) -> bool {
+        self.herdr_available() || self.norm_presence.is_available()
     }
 
     pub(crate) fn herdr_available(&self) -> bool {
@@ -1009,14 +1025,29 @@ impl App {
         for (run_id, session_id) in preview_poll.resolved_sessions {
             self.scheduled_tasks.bind_session(run_id, session_id);
         }
+        let agents_were_available = self.agents_available();
+        let selected_shortcut = Shortcuts::definitions(
+            self.herdr_available(),
+            self.herdr_embedded(),
+            agents_were_available,
+        )
+        .nth(self.settings_state.shortcut_selection)
+        .map(|definition| definition.action);
+        changed |= self.norm_presence.poll();
+        if agents_were_available != self.agents_available() {
+            self.reconcile_settings_after_capability_change(selected_shortcut);
+        }
         let mut herdr_changed = false;
         if self.herdr.should_poll() {
             let herdr_was_available = self.herdr_available();
             let herdr_was_embedded = self.herdr_embedded();
-            let selected_shortcut =
-                Shortcuts::definitions(herdr_was_available, self.herdr_embedded())
-                    .nth(self.settings_state.shortcut_selection)
-                    .map(|definition| definition.action);
+            let selected_shortcut = Shortcuts::definitions(
+                herdr_was_available,
+                self.herdr_embedded(),
+                self.agents_available(),
+            )
+            .nth(self.settings_state.shortcut_selection)
+            .map(|definition| definition.action);
             if self.herdr_available() {
                 for index in self.visible_agent_message_indices() {
                     self.herdr.request_agent_latest_user_message(index);
@@ -1037,7 +1068,7 @@ impl App {
             if (herdr_was_available, herdr_was_embedded)
                 != (self.herdr_available(), self.herdr_embedded())
             {
-                self.reconcile_settings_after_herdr_capability_change(selected_shortcut);
+                self.reconcile_settings_after_capability_change(selected_shortcut);
                 if !herdr_was_available
                     && self.herdr_available()
                     && self.notice.as_deref().is_some_and(|notice| {
@@ -1713,19 +1744,27 @@ impl App {
         changed
     }
 
-    fn reconcile_settings_after_herdr_capability_change(
+    fn reconcile_settings_after_capability_change(
         &mut self,
         selected_shortcut: Option<ShortcutAction>,
     ) {
         let selected_shortcut_index = selected_shortcut.and_then(|action| {
-            Shortcuts::definitions(self.herdr_available(), self.herdr_embedded())
-                .position(|definition| definition.action == action)
+            Shortcuts::definitions(
+                self.herdr_available(),
+                self.herdr_embedded(),
+                self.agents_available(),
+            )
+            .position(|definition| definition.action == action)
         });
         if let Some(index) = selected_shortcut_index {
             self.settings_state.shortcut_selection = index;
         } else {
-            let count =
-                Shortcuts::definitions(self.herdr_available(), self.herdr_embedded()).count();
+            let count = Shortcuts::definitions(
+                self.herdr_available(),
+                self.herdr_embedded(),
+                self.agents_available(),
+            )
+            .count();
             self.settings_state.shortcut_selection = self
                 .settings_state
                 .shortcut_selection
@@ -2020,11 +2059,12 @@ impl App {
     }
 
     fn handle_normal_shortcut(&mut self, key: KeyEvent) -> bool {
-        let Some(action) =
-            self.settings
-                .shortcuts
-                .main_action(key, self.herdr_available(), self.herdr_embedded())
-        else {
+        let Some(action) = self.settings.shortcuts.main_action(
+            key,
+            self.herdr_available(),
+            self.herdr_embedded(),
+            self.agents_available(),
+        ) else {
             return false;
         };
         match action {
@@ -2665,6 +2705,7 @@ impl App {
             key,
             self.herdr_available(),
             self.herdr_embedded(),
+            self.agents_available(),
         ) {
             Some(ShortcutAction::ShowChanges) => self.show_sidebar_pane(LeftPane::Worktree),
             Some(ShortcutAction::ShowFiles) => self.show_sidebar_pane(LeftPane::Files),
@@ -2737,6 +2778,10 @@ impl App {
     }
 
     fn move_agent_panel_selection(&mut self, delta: isize) {
+        if !self.herdr_available() && self.norm_presence.is_available() {
+            self.norm_presence.scroll_agents(delta);
+            return;
+        }
         if self.herdr.agent_list_mode() != AgentListMode::Agents || self.herdr.agents.is_empty() {
             self.herdr.scroll_agents(delta);
             return;
@@ -3294,7 +3339,7 @@ impl App {
     }
 
     pub(super) fn show_agents_pane(&mut self) {
-        if !self.herdr_available() {
+        if !self.agents_available() {
             return;
         }
         let selection = self
@@ -3319,7 +3364,7 @@ impl App {
         }
         match self.changes.pane {
             LeftPane::Worktree => self.show_sidebar_pane(LeftPane::Files),
-            LeftPane::Files if self.herdr_available() => self.show_agents_pane(),
+            LeftPane::Files if self.agents_available() => self.show_agents_pane(),
             LeftPane::Files => self.show_sidebar_pane(LeftPane::Worktree),
         }
     }

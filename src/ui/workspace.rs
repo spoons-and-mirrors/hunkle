@@ -118,7 +118,7 @@ fn plan(app: &App, area: Rect, profile: LayoutProfile) -> WorkspacePlan {
         (app.herdr_available() && app.agent_preview_index().is_some())
             .then_some(app.settings.agent_preview_split_width),
     );
-    let agents = if !app.herdr_available() || !app.agents_visible {
+    let agents = if !app.agents_available() || !app.agents_visible {
         changes::ColumnAgents::Hidden
     } else if app.agents_pane_visible() {
         if columns.companion.is_some() {

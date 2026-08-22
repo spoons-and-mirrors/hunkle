@@ -425,6 +425,11 @@ impl App {
                     );
                     return;
                 }
+                Some(HitTarget::NormAgent(identity)) => {
+                    self.selection.clear();
+                    self.activate_norm_agent(&identity);
+                    return;
+                }
                 Some(HitTarget::AgentListModeToggle) => {
                     self.herdr.cycle_agent_list_mode();
                     return;
@@ -801,6 +806,7 @@ impl App {
             ScrollTarget::Worktree => self.scroll_worktree(wheel_amount(delta)),
             ScrollTarget::Explorer => self.scroll_explorer(wheel_amount(delta)),
             ScrollTarget::Agents => self.herdr.scroll_agents(delta),
+            ScrollTarget::NormAgents => self.norm_presence.scroll_agents(delta),
             ScrollTarget::Preview => self.scroll_diff_by(wheel_amount(delta)),
             ScrollTarget::SqliteObjects => {
                 let viewport = self
@@ -1119,6 +1125,10 @@ impl App {
                     return;
                 };
                 self.handle_agent_card_action(key, index, false);
+                return;
+            }
+            Some(HitTarget::NormAgent(identity)) => {
+                self.activate_norm_agent(&identity);
                 return;
             }
             Some(HitTarget::AgentListModeToggle) => {
@@ -1502,6 +1512,18 @@ impl App {
             self.open_agent_preview_modal(index);
         } else {
             self.show_agent(index);
+        }
+    }
+
+    fn activate_norm_agent(&mut self, identity: &super::NormAgentIdentity) {
+        let workspace = self
+            .norm_presence
+            .agents()
+            .iter()
+            .find(|agent| &agent.identity == identity)
+            .map(|agent| agent.workspace.clone());
+        if let Some(workspace) = workspace {
+            self.queue_workspace_restore(workspace);
         }
     }
 
