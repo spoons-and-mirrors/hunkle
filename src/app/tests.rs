@@ -1318,6 +1318,7 @@ fn norm_tab_switch_follows_only_the_displayed_pane_workspace() {
     app.norm_presence
         .set_snapshot_for_test(&presence(1, "w9:p4", current.path(), next.path()));
     assert!(!app.follow_norm_workspace_changes());
+    let started = Instant::now();
     app.norm_presence
         .set_snapshot_for_test(&presence(2, "w9:p4", current.path(), next.path()));
     assert!(app.follow_norm_workspace_changes());
@@ -1326,6 +1327,10 @@ fn norm_tab_switch_follows_only_the_displayed_pane_workspace() {
     assert_eq!(
         app.repository().unwrap().root,
         fs::canonicalize(next.path()).unwrap()
+    );
+    eprintln!(
+        "Norm workspace follow through repository bootstrap: {:?}",
+        started.elapsed()
     );
 
     app.norm_presence.set_snapshot_for_test(&presence(

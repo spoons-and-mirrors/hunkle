@@ -51,6 +51,9 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui_image::picker::Picker;
 
+const UI_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const FAST_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 fn main() -> Result<()> {
     let startup = workspace_state::WorkspaceState::resolve(
         std::env::args_os().nth(1).map(PathBuf::from),
@@ -144,7 +147,23 @@ fn main() -> Result<()> {
         }
         let ready = {
             let _activity = diagnostics::activity("terminal-poll", app.diagnostic_context());
-            event::poll(Duration::from_millis(50))?
+            let mut ready = false;
+            let poll_interval = if app.workspace_open_running() {
+                FAST_POLL_INTERVAL
+            } else {
+                UI_POLL_INTERVAL
+            };
+            for _ in 0..poll_interval.as_millis() / FAST_POLL_INTERVAL.as_millis() {
+                if event::poll(FAST_POLL_INTERVAL)? {
+                    ready = true;
+                    break;
+                }
+                if app.poll_norm_presence() {
+                    dirty = true;
+                    break;
+                }
+            }
+            ready
         };
         if !ready {
             continue;

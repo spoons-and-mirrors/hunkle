@@ -35,6 +35,8 @@ impl NormPresence {
     pub(crate) fn take_workspace_changes(&mut self) -> Vec<NormWorkspaceChange> {
         Vec::new()
     }
+
+    pub(crate) fn shutdown(&mut self) {}
 }
 
 pub(crate) struct NormWorkspaceChange {

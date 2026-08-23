@@ -49,6 +49,18 @@ repeated snapshots. Route a matched workspace through the existing queued
 repository-open path; switching tabs inside an already displayed Norm pane
 does not require another layout exchange.
 
+Consume presence through one passive, reconnecting watch connection. Norm sends
+an initial authoritative snapshot and coalesced replacements only when the
+presence projection changes. Keep only the latest unread snapshot so rapid tab
+switches do not bootstrap intermediate repositories. Older one-shot daemons
+remain compatible and are queried at the previous bounded polling cadence.
+During the normal 50 ms terminal wait, check only the latest-value mailbox at
+10 ms intervals; do not run every App worker more frequently. Apply pending
+Herdr completions before deciding whether a workspace transition is paired.
+While the resulting workspace open is in flight, temporarily process worker
+completions every 10 ms so the loaded workspace is not held until the next
+normal terminal interval.
+
 ## Consequences
 
 - Clicking an active hosted Norm card restores the existing terminal, process,

@@ -717,6 +717,7 @@ impl App {
     }
 
     pub(crate) fn shutdown(&mut self) {
+        self.norm_presence.shutdown();
         self.scheduled_tasks.shutdown();
         self.herdr.shutdown();
         self.file_search.shutdown();
@@ -972,9 +973,29 @@ impl App {
         self.copy_request.take()
     }
 
+    pub fn poll_norm_presence(&mut self) -> bool {
+        self.norm_presence.poll()
+    }
+
+    pub fn workspace_open_running(&self) -> bool {
+        self.session.open_running()
+    }
+
     pub fn poll_worker(&mut self) -> bool {
         let now = Instant::now();
         let mut changed = false;
+        let agents_were_available = self.agents_available();
+        let selected_shortcut = Shortcuts::definitions(
+            self.herdr_available(),
+            self.herdr_embedded(),
+            agents_were_available,
+        )
+        .nth(self.settings_state.shortcut_selection)
+        .map(|definition| definition.action);
+        changed |= self.poll_norm_presence();
+        if agents_were_available != self.agents_available() {
+            self.reconcile_settings_after_capability_change(selected_shortcut);
+        }
         if let Some(marquee) = &mut self.footer_marquee
             && now >= marquee.next_frame
         {
@@ -1030,19 +1051,6 @@ impl App {
         changed |= preview_poll.changed;
         for (run_id, session_id) in preview_poll.resolved_sessions {
             self.scheduled_tasks.bind_session(run_id, session_id);
-        }
-        let agents_were_available = self.agents_available();
-        let selected_shortcut = Shortcuts::definitions(
-            self.herdr_available(),
-            self.herdr_embedded(),
-            agents_were_available,
-        )
-        .nth(self.settings_state.shortcut_selection)
-        .map(|definition| definition.action);
-        changed |= self.norm_presence.poll();
-        changed |= self.follow_norm_workspace_changes();
-        if agents_were_available != self.agents_available() {
-            self.reconcile_settings_after_capability_change(selected_shortcut);
         }
         let mut herdr_changed = false;
         if self.herdr.should_poll() {
@@ -1131,6 +1139,7 @@ impl App {
                 self.notice = Some("Herdr disconnected before the agent preview opened".to_owned());
             }
         }
+        changed |= self.follow_norm_workspace_changes();
         if scheduled_tasks_changed || herdr_changed {
             self.sync_scheduler_selection();
         }

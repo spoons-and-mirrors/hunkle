@@ -2,8 +2,11 @@ use std::{
     env,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
-    thread,
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Sender},
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -19,23 +22,26 @@ use serde::{Deserialize, Serialize};
 use super::AgentStatus;
 
 const PRESENCE_VERSION: u32 = 1;
-const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const STALE_GRACE: Duration = Duration::from_secs(6);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
-const IO_TIMEOUT: Duration = Duration::from_millis(500);
+const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+const READ_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const RECONNECT_MIN: Duration = Duration::from_millis(20);
+const RECONNECT_MAX: Duration = Duration::from_secs(1);
+const LEGACY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const PARTIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct NormPresence {
     socket_path: PathBuf,
     snapshot: Option<PresenceSnapshot>,
-    last_success: Option<Instant>,
-    next_refresh: Instant,
+    connection_failed_at: Option<Instant>,
     request_generation: u64,
-    loading: bool,
     scroll: usize,
     workspace_changes: Vec<NormWorkspaceChange>,
-    completions_tx: Sender<PresenceCompletion>,
-    completions_rx: Receiver<PresenceCompletion>,
+    completion: Arc<Mutex<Option<PresenceCompletion>>>,
+    shutdown_tx: Option<Sender<()>>,
+    worker: Option<JoinHandle<()>>,
     #[cfg(test)]
     disabled: bool,
 }
@@ -45,19 +51,17 @@ impl NormPresence {
         Self::with_socket_path(daemon_socket_path(), Instant::now())
     }
 
-    fn with_socket_path(socket_path: PathBuf, now: Instant) -> Self {
-        let (completions_tx, completions_rx) = mpsc::channel();
+    fn with_socket_path(socket_path: PathBuf, _now: Instant) -> Self {
         Self {
             socket_path,
             snapshot: None,
-            last_success: None,
-            next_refresh: now,
+            connection_failed_at: None,
             request_generation: 0,
-            loading: false,
             scroll: 0,
             workspace_changes: Vec::new(),
-            completions_tx,
-            completions_rx,
+            completion: Arc::new(Mutex::new(None)),
+            shutdown_tx: None,
+            worker: None,
             #[cfg(test)]
             disabled: false,
         }
@@ -79,35 +83,37 @@ impl NormPresence {
             return false;
         }
 
-        let mut changed = false;
-        while let Ok(completion) = self.completions_rx.try_recv() {
-            changed |= self.accept_completion(completion, now);
-        }
+        self.start_worker();
+        let completion = self
+            .completion
+            .lock()
+            .expect("Norm presence completion lock poisoned")
+            .take();
+        let mut changed =
+            completion.is_some_and(|completion| self.accept_completion(completion, now));
         changed |= self.expire_stale_snapshot(now);
-
-        if !self.loading && now >= self.next_refresh {
-            self.request_generation = self.request_generation.wrapping_add(1);
-            self.loading = true;
-            self.next_refresh = now + REFRESH_INTERVAL;
-            let generation = self.request_generation;
-            let socket_path = self.socket_path.clone();
-            let completions = self.completions_tx.clone();
-            thread::spawn(move || {
-                let outcome = fetch_presence(&socket_path);
-                let _ = completions.send(PresenceCompletion {
-                    generation,
-                    outcome,
-                });
-            });
-        }
         changed
+    }
+
+    fn start_worker(&mut self) {
+        if self.worker.is_some() {
+            return;
+        }
+        self.request_generation = self.request_generation.wrapping_add(1);
+        let generation = self.request_generation;
+        let socket_path = self.socket_path.clone();
+        let completion = self.completion.clone();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        self.shutdown_tx = Some(shutdown_tx);
+        self.worker = Some(thread::spawn(move || {
+            stream_presence(socket_path, generation, completion, shutdown_rx);
+        }));
     }
 
     fn accept_completion(&mut self, completion: PresenceCompletion, now: Instant) -> bool {
         if completion.generation != self.request_generation {
             return false;
         }
-        self.loading = false;
         match completion.outcome {
             FetchOutcome::Snapshot(snapshot) => {
                 let changed = self.snapshot.as_ref() != Some(&snapshot);
@@ -115,26 +121,30 @@ impl NormPresence {
                     .extend(active_workspace_changes(self.snapshot.as_ref(), &snapshot));
                 self.scroll = self.scroll.min(snapshot.agents.len().saturating_sub(1));
                 self.snapshot = Some(snapshot);
-                self.last_success = Some(now);
+                self.connection_failed_at = None;
                 changed
             }
             FetchOutcome::Absent => {
-                self.last_success = None;
+                self.connection_failed_at = None;
                 self.scroll = 0;
                 self.snapshot.take().is_some()
             }
-            FetchOutcome::Transient => self.expire_stale_snapshot(now),
+            FetchOutcome::Transient => {
+                self.connection_failed_at
+                    .get_or_insert(completion.observed_at);
+                self.expire_stale_snapshot(now)
+            }
         }
     }
 
     fn expire_stale_snapshot(&mut self, now: Instant) -> bool {
         let expired = self
-            .last_success
-            .is_some_and(|success| now.saturating_duration_since(success) >= STALE_GRACE);
+            .connection_failed_at
+            .is_some_and(|failure| now.saturating_duration_since(failure) >= STALE_GRACE);
         if !expired {
             return false;
         }
-        self.last_success = None;
+        self.connection_failed_at = None;
         self.scroll = 0;
         self.snapshot.take().is_some()
     }
@@ -161,17 +171,34 @@ impl NormPresence {
         std::mem::take(&mut self.workspace_changes)
     }
 
+    pub(crate) fn shutdown(&mut self) {
+        if let Some(shutdown) = self.shutdown_tx.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn set_snapshot_for_test(&mut self, response: &str) {
+        let now = Instant::now();
         self.accept_completion(
             PresenceCompletion {
                 generation: self.request_generation,
+                observed_at: now,
                 outcome: FetchOutcome::Snapshot(
                     parse_response(response.as_bytes()).expect("valid Norm test presence"),
                 ),
             },
-            Instant::now(),
+            now,
         );
+    }
+}
+
+impl Drop for NormPresence {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -179,6 +206,7 @@ impl NormPresence {
 struct PresenceSnapshot {
     daemon_epoch: String,
     _revision: u64,
+    _watch: bool,
     agents: Vec<NormAgent>,
     instances: Vec<NormInstance>,
 }
@@ -290,6 +318,7 @@ enum NormConnection {
 
 struct PresenceCompletion {
     generation: u64,
+    observed_at: Instant,
     outcome: FetchOutcome,
 }
 
@@ -301,7 +330,7 @@ enum FetchOutcome {
 
 #[derive(Serialize)]
 enum PresenceRequest {
-    ListPresence { version: u32 },
+    ListPresence { version: u32, watch: bool },
 }
 
 #[derive(Deserialize)]
@@ -312,6 +341,8 @@ enum PresenceResponse {
 #[derive(Deserialize)]
 struct PresenceDto {
     version: u32,
+    #[serde(default)]
+    watch: bool,
     daemon_epoch: String,
     revision: u64,
     agents: Vec<AgentDto>,
@@ -354,15 +385,72 @@ struct TabDto {
     session_title: Option<String>,
 }
 
-fn fetch_presence(path: &Path) -> FetchOutcome {
-    match try_fetch_presence(path) {
-        Ok(snapshot) => FetchOutcome::Snapshot(snapshot),
-        Err(FetchError::Absent) => FetchOutcome::Absent,
-        Err(FetchError::Transient) => FetchOutcome::Transient,
+fn stream_presence(
+    path: PathBuf,
+    generation: u64,
+    completion: Arc<Mutex<Option<PresenceCompletion>>>,
+    shutdown: mpsc::Receiver<()>,
+) {
+    let mut reconnect_delay = RECONNECT_MIN;
+    let mut failure_started = None;
+    loop {
+        if shutdown.try_recv().is_ok() {
+            return;
+        }
+        let mut received_snapshot = false;
+        let mut stream_confirmed = false;
+        let connection_started = Instant::now();
+        let outcome = watch_presence_connection(
+            &path,
+            generation,
+            &completion,
+            &shutdown,
+            &mut received_snapshot,
+            &mut stream_confirmed,
+        );
+        let failure = match outcome {
+            Ok(()) => return,
+            Err(failure) => failure,
+        };
+        if received_snapshot {
+            failure_started = None;
+        }
+        let failure_at = *failure_started.get_or_insert_with(Instant::now);
+        if !received_snapshot || stream_confirmed {
+            publish_completion(
+                &completion,
+                PresenceCompletion {
+                    generation,
+                    observed_at: failure_at,
+                    outcome: match failure {
+                        FetchError::Absent => FetchOutcome::Absent,
+                        FetchError::Transient => FetchOutcome::Transient,
+                    },
+                },
+            );
+        }
+        reconnect_delay = if received_snapshot && !stream_confirmed {
+            LEGACY_POLL_INTERVAL
+        } else if received_snapshot && connection_started.elapsed() >= LEGACY_POLL_INTERVAL {
+            RECONNECT_MIN
+        } else {
+            reconnect_delay.saturating_mul(2).min(RECONNECT_MAX)
+        };
+        match shutdown.recv_timeout(reconnect_delay) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
     }
 }
 
-fn try_fetch_presence(path: &Path) -> Result<PresenceSnapshot, FetchError> {
+fn watch_presence_connection(
+    path: &Path,
+    generation: u64,
+    completion: &Arc<Mutex<Option<PresenceCompletion>>>,
+    shutdown: &mpsc::Receiver<()>,
+    received_snapshot: &mut bool,
+    stream_confirmed: &mut bool,
+) -> Result<(), FetchError> {
     let name = path
         .to_fs_name::<GenericFilePath>()
         .map_err(|_| FetchError::Transient)?;
@@ -379,16 +467,17 @@ fn try_fetch_presence(path: &Path) -> Result<PresenceSnapshot, FetchError> {
         return Err(FetchError::Transient);
     }
     stream
-        .set_send_timeout(Some(IO_TIMEOUT))
+        .set_send_timeout(Some(WRITE_TIMEOUT))
         .map_err(|_| FetchError::Transient)?;
     stream
-        .set_recv_timeout(Some(IO_TIMEOUT))
+        .set_recv_timeout(Some(READ_POLL_INTERVAL))
         .map_err(|_| FetchError::Transient)?;
 
     serde_json::to_writer(
         &mut stream,
         &PresenceRequest::ListPresence {
             version: PRESENCE_VERSION,
+            watch: true,
         },
     )
     .map_err(|_| FetchError::Transient)?;
@@ -397,27 +486,104 @@ fn try_fetch_presence(path: &Path) -> Result<PresenceSnapshot, FetchError> {
         .and_then(|()| stream.flush())
         .map_err(|_| FetchError::Transient)?;
 
-    let mut response = Vec::new();
+    let mut pending = Vec::new();
+    let mut scanned = 0;
+    let mut partial_started = None;
     let mut buffer = [0; 8192];
     loop {
-        let read = stream
-            .read(&mut buffer)
-            .map_err(|_| FetchError::Transient)?;
+        if shutdown.try_recv().is_ok() {
+            return Ok(());
+        }
+        let read = match stream.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                if partial_started
+                    .is_some_and(|started: Instant| started.elapsed() >= PARTIAL_FRAME_TIMEOUT)
+                {
+                    return Err(FetchError::Transient);
+                }
+                continue;
+            }
+            Err(_) => return Err(FetchError::Transient),
+        };
         if read == 0 {
             return Err(FetchError::Transient);
         }
-        let chunk = &buffer[..read];
-        let line_end = chunk.iter().position(|byte| *byte == b'\n');
-        let body = line_end.map_or(chunk, |index| &chunk[..index]);
-        if response.len().saturating_add(body.len()) > MAX_RESPONSE_BYTES {
+        pending.extend_from_slice(&buffer[..read]);
+        partial_started.get_or_insert_with(Instant::now);
+        if partial_started.is_some_and(|started| started.elapsed() >= PARTIAL_FRAME_TIMEOUT) {
             return Err(FetchError::Transient);
         }
-        response.extend_from_slice(body);
-        if line_end.is_some() {
-            break;
+        while let Some(relative_end) = pending[scanned..].iter().position(|byte| *byte == b'\n') {
+            let line_end = scanned + relative_end;
+            if line_end > MAX_RESPONSE_BYTES {
+                return Err(FetchError::Transient);
+            }
+            let remainder = pending.split_off(line_end + 1);
+            pending.truncate(line_end);
+            let snapshot = parse_response(&pending).map_err(|_| FetchError::Transient)?;
+            *stream_confirmed |= snapshot._watch;
+            publish_completion(
+                completion,
+                PresenceCompletion {
+                    generation,
+                    observed_at: Instant::now(),
+                    outcome: FetchOutcome::Snapshot(snapshot),
+                },
+            );
+            *received_snapshot = true;
+            pending = remainder;
+            scanned = 0;
+            partial_started = (!pending.is_empty()).then(Instant::now);
+        }
+        scanned = pending.len();
+        if pending.len() > MAX_RESPONSE_BYTES {
+            return Err(FetchError::Transient);
         }
     }
-    parse_response(&response).map_err(|_| FetchError::Transient)
+}
+
+fn publish_completion(
+    completion: &Arc<Mutex<Option<PresenceCompletion>>>,
+    next: PresenceCompletion,
+) {
+    let mut slot = completion
+        .lock()
+        .expect("Norm presence completion lock poisoned");
+    *slot = Some(next);
+}
+
+#[cfg(test)]
+fn fetch_presence(path: &Path) -> FetchOutcome {
+    let completion = Arc::new(Mutex::new(None));
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let worker_completion = completion.clone();
+    let path = path.to_owned();
+    let worker = thread::spawn(move || stream_presence(path, 1, worker_completion, shutdown_rx));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let outcome = loop {
+        if let Some(completion) = completion
+            .lock()
+            .expect("Norm presence completion lock poisoned")
+            .take()
+        {
+            break completion.outcome;
+        }
+        if Instant::now() >= deadline {
+            break FetchOutcome::Transient;
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    let _ = shutdown_tx.send(());
+    let _ = worker.join();
+    outcome
 }
 
 fn parse_response(response: &[u8]) -> Result<PresenceSnapshot, String> {
@@ -459,6 +625,7 @@ fn parse_response(response: &[u8]) -> Result<PresenceSnapshot, String> {
     Ok(PresenceSnapshot {
         daemon_epoch: daemon_epoch.clone(),
         _revision: presence.revision,
+        _watch: presence.watch,
         agents: presence
             .agents
             .into_iter()
@@ -608,6 +775,7 @@ mod tests {
         serde_json::json!({
             "Presence": {
                 "version": 1,
+                "watch": true,
                 "daemon_epoch": epoch,
                 "revision": 8,
                 "agents": [],
@@ -670,6 +838,7 @@ mod tests {
     #[test]
     fn parses_identity_status_and_retains_topology() {
         let snapshot = parse_response(PRESENCE.as_bytes()).unwrap();
+        assert!(!snapshot._watch);
         assert_eq!(snapshot._revision, 7);
         assert_eq!(snapshot.agents.len(), 1);
         let agent = &snapshot.agents[0];
@@ -722,15 +891,18 @@ mod tests {
         assert!(presence.accept_completion(
             PresenceCompletion {
                 generation: 0,
+                observed_at: now,
                 outcome: FetchOutcome::Snapshot(snapshot.clone()),
             },
             now,
         ));
         assert!(presence.is_available());
+        assert!(!presence.expire_stale_snapshot(now + STALE_GRACE * 2));
 
         assert!(!presence.accept_completion(
             PresenceCompletion {
                 generation: 0,
+                observed_at: now,
                 outcome: FetchOutcome::Transient,
             },
             now + STALE_GRACE - Duration::from_millis(1),
@@ -742,6 +914,7 @@ mod tests {
         presence.accept_completion(
             PresenceCompletion {
                 generation: 0,
+                observed_at: now,
                 outcome: FetchOutcome::Snapshot(snapshot),
             },
             now,
@@ -749,11 +922,39 @@ mod tests {
         assert!(presence.accept_completion(
             PresenceCompletion {
                 generation: 0,
+                observed_at: now,
                 outcome: FetchOutcome::Absent,
             },
             now,
         ));
         assert!(!presence.is_available());
+    }
+
+    #[test]
+    fn newer_transport_failure_replaces_an_unread_snapshot() {
+        let now = Instant::now();
+        let completion = Arc::new(Mutex::new(None));
+        publish_completion(
+            &completion,
+            PresenceCompletion {
+                generation: 1,
+                observed_at: now,
+                outcome: FetchOutcome::Snapshot(parse_response(PRESENCE.as_bytes()).unwrap()),
+            },
+        );
+        publish_completion(
+            &completion,
+            PresenceCompletion {
+                generation: 1,
+                observed_at: now + Duration::from_millis(1),
+                outcome: FetchOutcome::Transient,
+            },
+        );
+
+        assert!(matches!(
+            completion.lock().unwrap().as_ref().unwrap().outcome,
+            FetchOutcome::Transient
+        ));
     }
 
     #[test]
@@ -765,6 +966,7 @@ mod tests {
         assert!(!presence.accept_completion(
             PresenceCompletion {
                 generation: 1,
+                observed_at: now,
                 outcome: FetchOutcome::Snapshot(snapshot),
             },
             now,
@@ -779,6 +981,7 @@ mod tests {
         presence.accept_completion(
             PresenceCompletion {
                 generation: 0,
+                observed_at: now,
                 outcome: FetchOutcome::Snapshot(parse_response(PRESENCE.as_bytes()).unwrap()),
             },
             now,
@@ -793,6 +996,7 @@ mod tests {
         presence.accept_completion(
             PresenceCompletion {
                 generation: 0,
+                observed_at: now + Duration::from_secs(1),
                 outcome: FetchOutcome::Snapshot(parse_response(empty.as_bytes()).unwrap()),
             },
             now + Duration::from_secs(1),
@@ -850,13 +1054,12 @@ mod tests {
         let now = Instant::now();
         let mut presence = NormPresence::with_socket_path(socket, now);
         assert!(!presence.poll_at(now));
-        assert!(presence.loading);
         let generation = presence.request_generation;
-        assert!(!presence.poll_at(now + REFRESH_INTERVAL));
+        assert!(!presence.poll_at(now + Duration::from_millis(500)));
         assert_eq!(presence.request_generation, generation);
         assert_eq!(
             request_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            "{\"ListPresence\":{\"version\":1}}\n"
+            "{\"ListPresence\":{\"version\":1,\"watch\":true}}\n"
         );
         reply_tx.send(()).unwrap();
 
@@ -868,6 +1071,83 @@ mod tests {
         server.join().unwrap();
         assert!(presence.is_available());
         assert_eq!(presence.agents()[0].identity.id, 42);
+        presence.shutdown();
+    }
+
+    #[test]
+    fn persistent_stream_delivers_tab_switches_with_low_latency() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("norm-stream.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (request_tx, request_rx) = mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<String>();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            request_tx.send(request).unwrap();
+            while let Ok(snapshot) = snapshot_rx.recv() {
+                stream.write_all(snapshot.as_bytes()).unwrap();
+                stream.write_all(b"\n").unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut presence = NormPresence::with_socket_path(socket, Instant::now());
+        presence.poll();
+        assert_eq!(
+            request_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "{\"ListPresence\":{\"version\":1,\"watch\":true}}\n"
+        );
+        snapshot_tx
+            .send(two_tab_presence("epoch-stream", 8))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !presence.is_available() && Instant::now() < deadline {
+            thread::yield_now();
+            presence.poll();
+        }
+        assert!(presence.is_available());
+        assert!(presence.take_workspace_changes().is_empty());
+
+        let mut latencies = Vec::new();
+        for index in 0..40 {
+            let active_tab_id = if index % 2 == 0 { 9 } else { 8 };
+            let expected = if active_tab_id == 9 {
+                PathBuf::from("/work/two")
+            } else {
+                PathBuf::from("/work/one")
+            };
+            let started = Instant::now();
+            snapshot_tx
+                .send(two_tab_presence("epoch-stream", active_tab_id))
+                .unwrap();
+            let deadline = started + Duration::from_millis(500);
+            loop {
+                presence.poll();
+                if let Some(change) = presence.take_workspace_changes().pop() {
+                    assert_eq!(change.workspace, expected);
+                    latencies.push(started.elapsed());
+                    break;
+                }
+                assert!(Instant::now() < deadline, "streamed tab switch timed out");
+                thread::yield_now();
+            }
+        }
+        latencies.sort_unstable();
+        let p50 = latencies[latencies.len() / 2];
+        let p95 = latencies[latencies.len() * 95 / 100];
+        eprintln!(
+            "Norm presence stream: p50={p50:?}, p95={p95:?}, max={:?}",
+            latencies.last().unwrap()
+        );
+        assert!(p95 < Duration::from_millis(20));
+
+        presence.shutdown();
+        drop(snapshot_tx);
+        server.join().unwrap();
     }
 
     #[test]

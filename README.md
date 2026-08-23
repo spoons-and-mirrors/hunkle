@@ -220,10 +220,10 @@ layout switcher. The process, scrollback, and Norm state remain in the original
 terminal. Hunkle matches the exact Norm agent ID and generation and resolves the
 pane's current location through Herdr; it never guesses from a title, process,
 or working directory. When a Norm pane is displayed beside Hunkle, clicking
-another Norm tab makes Hunkle follow the new tab's workspace within half a
-second. Hunkle verifies the pane through Herdr, so initial presence, unrelated
-Norm windows, and daemon replacements do not move it. An inactive Norm tab
-cannot yet be selected remotely, so
+another Norm tab pushes its workspace directly to Hunkle over one persistent
+presence stream. Hunkle verifies the pane through Herdr, so initial presence,
+unrelated Norm windows, and daemon replacements do not move it. An inactive
+Norm tab cannot yet be selected remotely, so
 its card opens the agent workspace instead of showing the wrong tab. A Norm
 daemon started before pane-presence support also falls back and asks to be
 restarted. Herdr prompt, stash, and transcript controls do not apply to Norm
