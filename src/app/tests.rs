@@ -1265,6 +1265,80 @@ fn norm_presence_exposes_agents_navigation_without_herdr_actions() {
 }
 
 #[test]
+#[cfg(unix)]
+fn norm_tab_switch_follows_only_the_displayed_pane_workspace() {
+    fn presence(active_tab_id: u64, pane_id: &str, first: &Path, second: &Path) -> String {
+        serde_json::json!({
+            "Presence": {
+                "version": 1,
+                "daemon_epoch": "epoch-a",
+                "revision": active_tab_id,
+                "agents": [],
+                "instances": [{
+                    "instance_id": "terminal-a",
+                    "revision": active_tab_id,
+                    "active_tab_id": active_tab_id,
+                    "herdr_pane_id": pane_id,
+                    "tabs": [{
+                        "tab_id": 1,
+                        "ordinal": 0,
+                        "agent_id": 1,
+                        "generation": 1,
+                        "workspace": first,
+                        "label": "first",
+                        "connection": "Ready",
+                        "activity": "Idle",
+                        "writable": true,
+                        "session_title": null
+                    }, {
+                        "tab_id": 2,
+                        "ordinal": 1,
+                        "agent_id": 2,
+                        "generation": 1,
+                        "workspace": second,
+                        "label": "second",
+                        "connection": "Ready",
+                        "activity": "Idle",
+                        "writable": true,
+                        "session_title": null
+                    }]
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    let current = tempfile::tempdir().unwrap();
+    let next = tempfile::tempdir().unwrap();
+    initialize_repository(current.path());
+    initialize_repository(next.path());
+    let mut app = App::new(current.path().to_path_buf());
+    app.herdr.set_displayed_external_pane_for_test("w9:p4");
+
+    app.norm_presence
+        .set_snapshot_for_test(&presence(1, "w9:p4", current.path(), next.path()));
+    assert!(!app.follow_norm_workspace_changes());
+    app.norm_presence
+        .set_snapshot_for_test(&presence(2, "w9:p4", current.path(), next.path()));
+    assert!(app.follow_norm_workspace_changes());
+    assert!(app.session.open_running());
+    wait_for_state(&mut app, |app| !app.session.open_running());
+    assert_eq!(
+        app.repository().unwrap().root,
+        fs::canonicalize(next.path()).unwrap()
+    );
+
+    app.norm_presence.set_snapshot_for_test(&presence(
+        1,
+        "unrelated-pane",
+        current.path(),
+        next.path(),
+    ));
+    assert!(!app.follow_norm_workspace_changes());
+    assert!(!app.session.open_running());
+}
+
+#[test]
 fn scheduler_f4_works_without_herdr_and_toggles_the_modal() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());

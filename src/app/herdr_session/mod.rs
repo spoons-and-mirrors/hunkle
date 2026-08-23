@@ -364,6 +364,10 @@ enum Completion {
     Fullscreen {
         result: Result<bool, String>,
     },
+    ExternalPaneWorkspace {
+        pane_alias: String,
+        in_host_tab: bool,
+    },
     LatestUserMessage {
         identity: OpenCodeConversationIdentity,
         result: Result<latest_message::TranscriptFetch, String>,
@@ -464,6 +468,7 @@ pub(crate) struct HerdrSession {
     agent_display_running: bool,
     fullscreen_running: bool,
     fullscreen: bool,
+    external_pane_workspace_requests: HashMap<String, PathBuf>,
     latest_user_messages: HashMap<OpenCodeConversationIdentity, AgentTranscriptEntry>,
     transcript_revision: u64,
     latest_user_message_requests: HashSet<OpenCodeConversationIdentity>,
@@ -560,6 +565,7 @@ impl HerdrSession {
             agent_display_running: false,
             fullscreen_running: false,
             fullscreen: false,
+            external_pane_workspace_requests: HashMap::new(),
             latest_user_messages: HashMap::new(),
             transcript_revision: 0,
             latest_user_message_requests: HashSet::new(),
@@ -886,6 +892,15 @@ impl HerdrSession {
                         Err(error) => format!("Could not toggle fullscreen: {error}"),
                     });
                     poll.fullscreen_result = Some(result);
+                }
+                Completion::ExternalPaneWorkspace {
+                    pane_alias,
+                    in_host_tab,
+                } => {
+                    let path = self.external_pane_workspace_requests.remove(&pane_alias);
+                    if in_host_tab {
+                        poll.reopen_path = path;
+                    }
                 }
                 Completion::LatestUserMessage { identity, result } => {
                     completion_changed = false;
@@ -1701,6 +1716,45 @@ impl HerdrSession {
             && self.host_pane_id.is_some()
     }
 
+    pub(crate) fn displays_external_pane(&self, pane_alias: &str) -> bool {
+        matches!(
+            self.displayed_agent_key.as_ref(),
+            Some(AgentTimingKey::ExternalPane(displayed)) if displayed == pane_alias
+        )
+    }
+
+    pub(crate) fn request_external_pane_workspace_follow(
+        &mut self,
+        pane_alias: String,
+        workspace: PathBuf,
+    ) -> bool {
+        let Some(host_tab_id) = self.host_tab_id.clone() else {
+            return false;
+        };
+        let pending = self
+            .external_pane_workspace_requests
+            .insert(pane_alias.clone(), workspace)
+            .is_some();
+        if pending {
+            return true;
+        }
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let in_host_tab =
+                client::current_pane(&pane_alias).is_ok_and(|pane| pane.tab_id == host_tab_id);
+            let _ = sender.send(Completion::ExternalPaneWorkspace {
+                pane_alias,
+                in_host_tab,
+            });
+        });
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_displayed_external_pane_for_test(&mut self, pane_alias: &str) {
+        self.displayed_agent_key = Some(AgentTimingKey::ExternalPane(pane_alias.to_owned()));
+    }
+
     pub(crate) fn show_external_pane(
         &mut self,
         pane_alias: String,
@@ -2358,6 +2412,46 @@ mod presentation_interest_tests {
         let mut session = HerdrSession::new(true, None, None);
         session.next_refresh = Instant::now() + Duration::from_secs(60);
         session
+    }
+
+    #[test]
+    fn verified_external_norm_pane_reopens_the_latest_requested_workspace() {
+        let mut session = session_without_snapshot();
+        session
+            .external_pane_workspace_requests
+            .insert("w9:p4".to_owned(), PathBuf::from("/work/latest"));
+        session
+            .sender
+            .send(Completion::ExternalPaneWorkspace {
+                pane_alias: "w9:p4".to_owned(),
+                in_host_tab: true,
+            })
+            .unwrap();
+
+        let poll = session.poll(false);
+
+        assert_eq!(poll.reopen_path, Some(PathBuf::from("/work/latest")));
+        assert!(session.external_pane_workspace_requests.is_empty());
+    }
+
+    #[test]
+    fn unrelated_external_norm_pane_discards_the_workspace_request() {
+        let mut session = session_without_snapshot();
+        session
+            .external_pane_workspace_requests
+            .insert("w8:p3".to_owned(), PathBuf::from("/work/unrelated"));
+        session
+            .sender
+            .send(Completion::ExternalPaneWorkspace {
+                pane_alias: "w8:p3".to_owned(),
+                in_host_tab: false,
+            })
+            .unwrap();
+
+        let poll = session.poll(false);
+
+        assert_eq!(poll.reopen_path, None);
+        assert!(session.external_pane_workspace_requests.is_empty());
     }
 
     fn test_workspace(id: &str) -> HerdrWorkspace {

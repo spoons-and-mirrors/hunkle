@@ -31,6 +31,16 @@ impl NormPresence {
     }
 
     pub(crate) fn scroll_agents(&mut self, _delta: isize) {}
+
+    pub(crate) fn take_workspace_changes(&mut self) -> Vec<NormWorkspaceChange> {
+        Vec::new()
+    }
+}
+
+pub(crate) struct NormWorkspaceChange {
+    pub(crate) instance_id: String,
+    pub(crate) pane_id: String,
+    pub(crate) workspace: PathBuf,
 }
 
 #[derive(Clone)]

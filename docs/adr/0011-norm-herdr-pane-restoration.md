@@ -40,6 +40,15 @@ Standalone and background-attached Hunkle keep the workspace-only behavior.
 Hunkle remains a passive Norm-presence consumer. It does not start Norm, attach
 to the daemon as a controller, or shell out to Herdr outside `HerdrSession`.
 
+Treat a later active-tab transition from the exact Norm pane displayed beside
+Hunkle as a workspace-follow request. Resolve an otherwise unknown pane alias
+through Herdr's authoritative `pane.current` API and require it to share
+Hunkle's host tab. The first observed snapshot is only a baseline. Ignore
+unrelated Norm instances, daemon replacements, missing active tabs, and
+repeated snapshots. Route a matched workspace through the existing queued
+repository-open path; switching tabs inside an already displayed Norm pane
+does not require another layout exchange.
+
 ## Consequences
 
 - Clicking an active hosted Norm card restores the existing terminal, process,
@@ -48,6 +57,8 @@ to the daemon as a controller, or shell out to Herdr outside `HerdrSession`.
   including focus preservation, recovery, persistence, and pruning.
 - Inactive tabs have an explicit workspace fallback until Norm offers a bounded,
   identity-checked tab-activation command.
+- Clicking another tab in the displayed Norm pane makes Hunkle follow that
+  tab's workspace without moving either pane.
 - Norm must be restarted once after upgrading from a daemon that does not relay
   pane metadata.
 

@@ -1040,6 +1040,7 @@ impl App {
         .nth(self.settings_state.shortcut_selection)
         .map(|definition| definition.action);
         changed |= self.norm_presence.poll();
+        changed |= self.follow_norm_workspace_changes();
         if agents_were_available != self.agents_available() {
             self.reconcile_settings_after_capability_change(selected_shortcut);
         }
@@ -1755,6 +1756,29 @@ impl App {
         }
         changed |= self.changes.preview_presentation.poll_media();
         changed
+    }
+
+    fn follow_norm_workspace_changes(&mut self) -> bool {
+        let changes = self.norm_presence.take_workspace_changes();
+        let mut followed = false;
+        for change in changes {
+            if self.herdr.displays_external_pane(&change.pane_id) {
+                diagnostics::event(format!(
+                    "following Norm workspace instance={} pane={} path={}",
+                    change.instance_id,
+                    change.pane_id,
+                    change.workspace.display()
+                ));
+                self.queue_workspace_restore(change.workspace);
+                followed = true;
+            } else if self
+                .herdr
+                .request_external_pane_workspace_follow(change.pane_id, change.workspace)
+            {
+                followed = true;
+            }
+        }
+        followed
     }
 
     fn reconcile_settings_after_capability_change(

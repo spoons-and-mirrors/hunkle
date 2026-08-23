@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use super::AgentStatus;
 
 const PRESENCE_VERSION: u32 = 1;
-const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const STALE_GRACE: Duration = Duration::from_secs(6);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const IO_TIMEOUT: Duration = Duration::from_millis(500);
@@ -33,6 +33,7 @@ pub(crate) struct NormPresence {
     request_generation: u64,
     loading: bool,
     scroll: usize,
+    workspace_changes: Vec<NormWorkspaceChange>,
     completions_tx: Sender<PresenceCompletion>,
     completions_rx: Receiver<PresenceCompletion>,
     #[cfg(test)]
@@ -54,6 +55,7 @@ impl NormPresence {
             request_generation: 0,
             loading: false,
             scroll: 0,
+            workspace_changes: Vec::new(),
             completions_tx,
             completions_rx,
             #[cfg(test)]
@@ -109,6 +111,8 @@ impl NormPresence {
         match completion.outcome {
             FetchOutcome::Snapshot(snapshot) => {
                 let changed = self.snapshot.as_ref() != Some(&snapshot);
+                self.workspace_changes
+                    .extend(active_workspace_changes(self.snapshot.as_ref(), &snapshot));
                 self.scroll = self.scroll.min(snapshot.agents.len().saturating_sub(1));
                 self.snapshot = Some(snapshot);
                 self.last_success = Some(now);
@@ -153,19 +157,37 @@ impl NormPresence {
         self.scroll = self.scroll.saturating_add_signed(delta);
     }
 
+    pub(crate) fn take_workspace_changes(&mut self) -> Vec<NormWorkspaceChange> {
+        std::mem::take(&mut self.workspace_changes)
+    }
+
     #[cfg(test)]
     pub(crate) fn set_snapshot_for_test(&mut self, response: &str) {
-        self.snapshot =
-            Some(parse_response(response.as_bytes()).expect("valid Norm test presence"));
-        self.last_success = Some(Instant::now());
+        self.accept_completion(
+            PresenceCompletion {
+                generation: self.request_generation,
+                outcome: FetchOutcome::Snapshot(
+                    parse_response(response.as_bytes()).expect("valid Norm test presence"),
+                ),
+            },
+            Instant::now(),
+        );
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PresenceSnapshot {
+    daemon_epoch: String,
     _revision: u64,
     agents: Vec<NormAgent>,
-    _instances: Vec<NormInstance>,
+    instances: Vec<NormInstance>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NormWorkspaceChange {
+    pub(crate) instance_id: String,
+    pub(crate) pane_id: String,
+    pub(crate) workspace: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,7 +272,7 @@ struct NormTab {
     _ordinal: u16,
     agent_id: Option<u64>,
     generation: u64,
-    _workspace: PathBuf,
+    workspace: PathBuf,
     _label: String,
     _connection: NormConnection,
     _activity: NormActivity,
@@ -424,7 +446,7 @@ fn parse_response(response: &[u8]) -> Result<PresenceSnapshot, String> {
                     _ordinal: tab.ordinal,
                     agent_id: tab.agent_id,
                     generation: tab.generation,
-                    _workspace: tab.workspace,
+                    workspace: tab.workspace,
                     _label: tab.label,
                     _connection: tab.connection,
                     _activity: tab.activity,
@@ -435,6 +457,7 @@ fn parse_response(response: &[u8]) -> Result<PresenceSnapshot, String> {
         })
         .collect::<Vec<_>>();
     Ok(PresenceSnapshot {
+        daemon_epoch: daemon_epoch.clone(),
         _revision: presence.revision,
         agents: presence
             .agents
@@ -462,8 +485,45 @@ fn parse_response(response: &[u8]) -> Result<PresenceSnapshot, String> {
                 _sequence: agent.sequence,
             })
             .collect(),
-        _instances: instances,
+        instances,
     })
+}
+
+fn active_workspace_changes(
+    previous: Option<&PresenceSnapshot>,
+    next: &PresenceSnapshot,
+) -> Vec<NormWorkspaceChange> {
+    let Some(previous) = previous.filter(|previous| previous.daemon_epoch == next.daemon_epoch)
+    else {
+        return Vec::new();
+    };
+    next.instances
+        .iter()
+        .filter_map(|instance| {
+            let previous = previous
+                .instances
+                .iter()
+                .find(|previous| previous.instance_id == instance.instance_id)?;
+            let (Some(previous_tab), Some(active_tab)) =
+                (previous.active_tab_id, instance.active_tab_id)
+            else {
+                return None;
+            };
+            if previous_tab == active_tab {
+                return None;
+            }
+            let pane_id = instance
+                .herdr_pane_id
+                .as_ref()
+                .filter(|pane| !pane.is_empty())?;
+            let tab = instance.tabs.iter().find(|tab| tab.tab_id == active_tab)?;
+            Some(NormWorkspaceChange {
+                instance_id: instance.instance_id.clone(),
+                pane_id: pane_id.clone(),
+                workspace: tab.workspace.clone(),
+            })
+        })
+        .collect()
 }
 
 fn agent_view(instances: &[NormInstance], agent_id: u64, generation: u64) -> NormAgentView {
@@ -544,6 +604,69 @@ mod tests {
 
     const PRESENCE: &str = r#"{"Presence":{"version":1,"daemon_epoch":"epoch-a","revision":7,"agents":[{"id":42,"generation":3,"sequence":9,"workspace":"/work/repo","lifecycle":"Running","activity":"Blocked","session_id":"session-a","title":"Fix parser","open_views":2,"future_agent_field":true}],"instances":[{"instance_id":"terminal-a","revision":4,"active_tab_id":8,"herdr_pane_id":"w9:p4","tabs":[{"tab_id":8,"ordinal":0,"agent_id":42,"generation":3,"workspace":"/work/repo","label":"parser","connection":"Ready","activity":"Working","writable":false,"session_title":"Fix parser","future_tab_field":17}],"future_instance_field":{}}],"future_presence_field":"ignored"}}"#;
 
+    fn two_tab_presence(epoch: &str, active_tab_id: u64) -> String {
+        serde_json::json!({
+            "Presence": {
+                "version": 1,
+                "daemon_epoch": epoch,
+                "revision": 8,
+                "agents": [],
+                "instances": [{
+                    "instance_id": "terminal-a",
+                    "revision": 5,
+                    "active_tab_id": active_tab_id,
+                    "herdr_pane_id": "w9:p4",
+                    "tabs": [{
+                        "tab_id": 8,
+                        "ordinal": 0,
+                        "agent_id": 42,
+                        "generation": 3,
+                        "workspace": "/work/one",
+                        "label": "one",
+                        "connection": "Ready",
+                        "activity": "Idle",
+                        "writable": true,
+                        "session_title": null
+                    }, {
+                        "tab_id": 9,
+                        "ordinal": 1,
+                        "agent_id": 43,
+                        "generation": 1,
+                        "workspace": "/work/two",
+                        "label": "two",
+                        "connection": "Ready",
+                        "activity": "Idle",
+                        "writable": true,
+                        "session_title": null
+                    }]
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn active_tab_changes_emit_once_without_synthesizing_daemon_restarts() {
+        let mut presence = NormPresence::with_socket_path(PathBuf::new(), Instant::now());
+        presence.set_snapshot_for_test(&two_tab_presence("epoch-a", 8));
+        assert!(presence.take_workspace_changes().is_empty());
+
+        presence.set_snapshot_for_test(&two_tab_presence("epoch-a", 9));
+        assert_eq!(
+            presence.take_workspace_changes(),
+            [NormWorkspaceChange {
+                instance_id: "terminal-a".to_owned(),
+                pane_id: "w9:p4".to_owned(),
+                workspace: PathBuf::from("/work/two"),
+            }]
+        );
+
+        presence.set_snapshot_for_test(&two_tab_presence("epoch-a", 9));
+        assert!(presence.take_workspace_changes().is_empty());
+        presence.set_snapshot_for_test(&two_tab_presence("epoch-b", 8));
+        assert!(presence.take_workspace_changes().is_empty());
+    }
+
     #[test]
     fn parses_identity_status_and_retains_topology() {
         let snapshot = parse_response(PRESENCE.as_bytes()).unwrap();
@@ -559,10 +682,10 @@ mod tests {
             agent.view,
             NormAgentView::ActiveHerdrPane("w9:p4".to_owned())
         );
-        assert_eq!(snapshot._instances.len(), 1);
-        assert_eq!(snapshot._instances[0].tabs.len(), 1);
+        assert_eq!(snapshot.instances.len(), 1);
+        assert_eq!(snapshot.instances[0].tabs.len(), 1);
         assert_eq!(
-            snapshot._instances[0].tabs[0]._connection,
+            snapshot.instances[0].tabs[0]._connection,
             NormConnection::Ready
         );
     }
