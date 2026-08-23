@@ -42,11 +42,18 @@ The `o` interaction for finding and opening another workspace. Confirming a file
 
 ## Agent destination
 
-The active Git Repository or Linked worktree where Hunkle launches an OpenCode agent. The Repository, Worktree, and Branch header cards define this filesystem destination; clicking Agent uses it directly. Herdr remains the adapter for choosing pane placement and starting the agent.
+The active Git Repository or Linked worktree where Hunkle asks Norm to open an
+agent tab. The Repository, Worktree, and Branch header cards define this
+filesystem destination; clicking Agent or pressing `Ctrl+Space` uses it
+directly.
 
 ## Agent pane
 
-A Herdr pane with attached agent runtime metadata. The pane owns location, working directories, and focus; Herdr's agent record contributes runtime status, session, and timing identity. Hunkle does not maintain a second flattened agent entity.
+A legacy Herdr pane with attached agent runtime metadata. The pane owns
+location, working directories, and focus; Herdr's agent record contributes
+runtime status, session, and timing identity. Hunkle does not maintain a
+second flattened agent entity. New agent creation uses Norm tabs instead; the
+Herdr placement flow remains available in code for later reuse.
 
 ## Interaction
 

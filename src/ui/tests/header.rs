@@ -891,16 +891,16 @@ fn header_cards_open_pickers_and_checkout_branches() {
 
     click(&mut app, agent.x, agent.y);
     assert_eq!(app.header_picker.kind, None);
-    assert_eq!(app.herdr_prompt.agent_destination(), Some(root));
+    assert_eq!(app.herdr_prompt.agent_destination(), None);
     assert_eq!(
         app.notice.as_deref(),
-        Some("Loading active Herdr tab layout")
+        Some("No running Norm TUI is available")
     );
-    assert!(app.herdr_prompt.cancel_pending_agent());
+    assert!(!app.herdr_prompt.cancel_pending_agent());
 
     app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
-    assert_eq!(app.herdr_prompt.agent_destination(), Some(root));
-    assert!(app.herdr_prompt.cancel_pending_agent());
+    assert_eq!(app.herdr_prompt.agent_destination(), None);
+    assert!(!app.herdr_prompt.cancel_pending_agent());
 
     click(&mut app, diff.x, diff.y);
     assert_eq!(app.mode, Mode::Normal);

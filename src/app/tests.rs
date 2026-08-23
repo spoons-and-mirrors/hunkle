@@ -596,7 +596,7 @@ fn local_workspaces_reload_files_and_reject_git_actions() {
         assert_eq!(app.notice.as_deref(), Some("Not a Git repository"), "{key}");
     }
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    assert!(app.agents_visible);
+    assert!(!app.agents_visible);
     assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Agents);
     assert!(!app.agents_pane_visible());
     assert_eq!(app.notice.as_deref(), Some("Not a Git repository"));
@@ -1030,7 +1030,10 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     app.settings = Settings::default();
     app.settings_store = SettingsStore::at(path.clone());
 
+    assert!(!app.agents_visible);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(app.agents_visible);
+    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Agents);
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(app.agents_visible);
     assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Scheduled);
@@ -1110,7 +1113,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
             graph_commit_width: 7,
             explorer_left_pane_width: None,
             editor_command: None,
-            opencode_model: "opencode/deepseek-v4-flash-free".to_owned(),
+            opencode_model: "opencode/big-pickle".to_owned(),
             opencode_reasoning: OpenCodeReasoning::Max,
             media_preview_protocol: MediaPreviewProtocol::Auto,
             shortcuts: Shortcuts::default(),

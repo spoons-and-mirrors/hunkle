@@ -486,11 +486,7 @@ mod tests {
 
     #[test]
     fn builds_configured_model_and_reasoning_command() {
-        let args = opencode_args(
-            DiffSource::Staged,
-            "opencode/deepseek-v4-flash-free",
-            Some("max"),
-        );
+        let args = opencode_args(DiffSource::Staged, "opencode/big-pickle", Some("max"));
         let args = args
             .iter()
             .map(|arg| arg.to_string_lossy())
@@ -501,7 +497,7 @@ mod tests {
                 "run",
                 "--pure",
                 "--model",
-                "opencode/deepseek-v4-flash-free",
+                "opencode/big-pickle",
                 "--variant",
                 "max",
                 "--format",

@@ -113,13 +113,11 @@ pub(crate) fn draw_help(
             shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Show Agents"),
         );
     }
-    if herdr_available {
-        navigation.push(shortcut_help(
-            shortcuts,
-            ShortcutAction::StartAgent,
-            "Start agent",
-        ));
-    }
+    navigation.push(shortcut_help(
+        shortcuts,
+        ShortcutAction::StartAgent,
+        "Start agent in Norm",
+    ));
     let mut worktree = vec![
         Line::styled(
             "CHANGES / FILES",

@@ -441,7 +441,7 @@ impl Default for Settings {
             graph_commit_width: 7,
             explorer_left_pane_width: None,
             editor_command: None,
-            opencode_model: "opencode/deepseek-v4-flash-free".to_owned(),
+            opencode_model: "opencode/big-pickle".to_owned(),
             opencode_reasoning: OpenCodeReasoning::Max,
             media_preview_protocol: MediaPreviewProtocol::Auto,
             shortcuts: Shortcuts::default(),

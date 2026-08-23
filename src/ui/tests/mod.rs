@@ -48,6 +48,7 @@ fn enable_herdr(app: &mut App) {
             "panes": []
         } }
     }));
+    app.agents_visible = true;
 }
 
 fn screen_text(terminal: &Terminal<TestBackend>) -> String {
@@ -341,11 +342,11 @@ fn standalone_hides_herdr_surfaces() {
         "Toggle fullscreen",
         "Show Agents",
         "Send to Herdr",
-        "Start agent",
         "Cycle agents",
     ] {
         assert!(!screen.contains(label));
     }
+    assert!(screen.contains("Start agent in Norm"));
 
     app.mode = Mode::Settings;
     app.settings_state.page = SettingsPage::General;
@@ -2046,7 +2047,7 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(opencode_screen.contains("OpenCode"));
-    assert!(opencode_screen.contains("deepseek-v4-flash-free"));
+    assert!(opencode_screen.contains("opencode/big-pickle"));
     assert!(opencode_screen.contains("Reasoning"));
     assert!(opencode_screen.contains("Max"));
     let model_row = app

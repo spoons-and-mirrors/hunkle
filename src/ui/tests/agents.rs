@@ -380,6 +380,7 @@ fn control_click_opens_the_live_agent_preview_modal() {
     let mut app = App::new(directory.path().to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.agents_visible = true;
     app.herdr.set_agent_user_messages_for_test(
         0,
         &[("Inspect the scheduler", Some("Conversation loaded"), 1, 0)],
@@ -693,6 +694,7 @@ fn standalone_agent_click_opens_the_agents_workspace() {
     let mut app = App::new(current.path().to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.agents_visible = true;
     app.herdr.set_background_attached_for_test("w1");
     app.herdr.agents[0].destination_cwd = Some(destination.clone());
     let key = agent_key(&app, 0);
@@ -730,6 +732,7 @@ fn wide_workspace_docks_agent_preview_and_control_click_keeps_it_docked() {
     app.settings.agent_preview_split_width = 120;
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.agents_visible = true;
     app.herdr.set_agent_user_messages_for_test(
         0,
         &[("Inspect the wide layout", Some("Preview is docked"), 1, 0)],
@@ -778,6 +781,7 @@ fn agent_card_click_setting_swaps_plain_and_control_actions() {
     run_git(directory.path(), &["init", "-b", "main"]);
     let mut app = App::new(directory.path().to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.agents_visible = true;
     app.settings.agent_card_click_action = AgentCardClickAction::OpenPreview;
     let key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
@@ -854,6 +858,7 @@ fn agent_preview_modal_routes_message_and_agent_scroll_gestures() {
     let mut app = App::new(directory.path().to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&snapshot);
+    app.agents_visible = true;
     app.herdr.set_agent_user_messages_for_test(
         0,
         &[
@@ -935,6 +940,7 @@ fn fullscreen_agent_first_click_replaces_footer_path_with_activation_hint() {
     let mut app = App::new(root.to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.agents_visible = true;
     app.herdr.agents[0].destination_cwd = Some(root.to_path_buf());
     app.herdr.set_fullscreen_for_test(true);
     let key = agent_key(&app, 0);
@@ -969,6 +975,7 @@ fn panel_mode_toggle_reaches_stashed_agent_cards() {
     app.settings.agents_height = 9;
     app.settings.worktree_width = 48;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.agents_visible = true;
     let stash = StashedAgent {
         harness: "opencode".to_owned(),
         agent_name: "opencode".to_owned(),
@@ -1072,6 +1079,7 @@ fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewi
     let mut app = App::new(root.to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.agents_visible = true;
     app.scheduled_tasks.set_tasks_for_test(vec![ScheduledTask {
         id: 7,
         title: "Review".to_owned(),
@@ -1277,6 +1285,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     app.settings.agents_height = 9;
     app.settings.worktree_width = 48;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.agents_visible = true;
     app.herdr.workspaces[0].branch = Some("feature/agents".to_owned());
     let stats_path = PathBuf::from("/agent/stats");
     app.herdr.agents[0].destination_cwd = Some(stats_path.clone());
@@ -2337,6 +2346,7 @@ fn agent_preview_picker_switches_without_activating_agent_layouts() {
     ]);
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&snapshot);
+    app.agents_visible = true;
     app.herdr.set_host_for_test("w1", "w1:t1", "w1:p0");
     app.herdr
         .set_agent_user_messages_for_test(0, &[("First request", Some("First reply"), 1, 0)]);
@@ -2656,6 +2666,7 @@ fn conversation_preview_scopes_requests_to_the_selected_user_message() {
     let mut app = App::new(root.to_path_buf());
     app.settings.agents_height = 5;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.agents_visible = true;
     let messages = (1..=50)
         .map(|turn| {
             (
@@ -2813,6 +2824,7 @@ fn collapses_agents_sharing_a_tab_into_one_card() {
     });
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&snapshot);
+    app.agents_visible = true;
     let first_key = agent_key(&app, 0);
     let second_key = agent_key(&app, 1);
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
@@ -2886,6 +2898,7 @@ fn offscreen_working_agent_does_not_register_spinner_animation() {
     });
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&snapshot);
+    app.agents_visible = true;
     app.herdr
         .set_agent_user_messages_for_test(0, &[("Working", None, 1, 0)]);
     app.herdr
@@ -2948,6 +2961,7 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
         })
     };
     let mut app = App::new(root.to_path_buf());
+    app.agents_visible = true;
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
 
     app.herdr = HerdrSession::ready_for_test(&snapshot(1));

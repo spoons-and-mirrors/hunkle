@@ -14,8 +14,7 @@
 - An all-refs commit graph showing branches, remotes, tags, authors, dates,
   hashes, lazy-loaded line-change totals, and interactive author filtering. Drag
   any vertical header separator to resize the adjacent columns.
-- Herdr-aware agent launching from any known repository or linked worktree into
-  a selected pane in the active tab.
+- Norm agent-tab launching from the active repository or linked worktree.
 - Norm presence cards that restore an active Norm TUI beside Hunkle when both
   are hosted by Herdr.
 - Repository-local scheduled tasks that can be created as Markdown files or
@@ -153,7 +152,7 @@ emergency quit command elsewhere.
 | `Space`                           | Stage or unstage the selected entry, or stage the selected hunk                                                                                                                      |
 | `Delete` in Changes               | Discard the selected file's unstaged changes after confirmation; staged changes are preserved                                                                                        |
 | `Right`, `l` in hunk mode         | Stage the selected hunk                                                                                                                                                              |
-| `a`                               | Show, hide, or cycle the Herdr Agents section                                                                                                                                        |
+| `a`                               | Legacy: show, hide, or cycle the Herdr Agents section                                                                                                                                |
 | `u`                               | Unstage all changes                                                                                                                                                                  |
 | `c`                               | Focus the commit message editor                                                                                                                                                      |
 | `Enter`, `Ctrl+Enter`             | New commit-message line, create commit                                                                                                                                               |
@@ -199,20 +198,18 @@ Hunkle opens the result after creation. Hunkle-created worktrees are stored in
 `$XDG_DATA_HOME/hunkle/worktrees`, or `~/.local/share/hunkle/worktrees` when
 `XDG_DATA_HOME` is unset.
 
-When Hunkle runs inside Herdr, click the green **AGENT** header card or press
-`Ctrl+Space` to start an OpenCode agent at the repository, worktree, and branch
-shown in the header. Choose which non-Hunkle pane in the active Herdr tab to
-replace. If the displaced pane contains only an idle shell, Hunkle closes it after
-the agent starts. A pane with a foreground process is parked in its own tab,
-named after its starting directory, so the process and its output are preserved.
+Click the green **AGENT** header card or press `Ctrl+Space` to ask the running
+Norm client to open an OpenCode agent tab at the repository, worktree, and
+branch shown in the header. The selected filesystem path is passed directly to
+Norm; no Herdr pane-placement prompt is shown.
 
-Hunkle also passively reads Norm presence from
+Hunkle reads Norm presence from
 `$XDG_RUNTIME_DIR/norm/daemon.sock`, falling back to
 `/tmp/norm-<euid>/norm/daemon.sock` when `XDG_RUNTIME_DIR` is unset. Hunkle only
-connects to an already-running same-user daemon: it never starts Norm, invokes
-Norm, or attaches to its agents. Norm conversations appear as a separate
-**NORM** section with workspace, branch, title/session, activity, and open-view
-information.
+connects to an already-running same-user daemon for presence and uses Norm's
+external `open` command for agent creation. It does not start a Norm TUI or
+attach to an agent. Norm conversations appear as a separate **NORM** section
+with workspace, branch, title/session, activity, and open-view information.
 
 When Hunkle and an existing Norm TUI run inside Herdr, clicking the card for the
 TUI's active agent restores that live Norm pane beside Hunkle through Herdr's
@@ -230,7 +227,9 @@ restarted. Herdr prompt, stash, and transcript controls do not apply to Norm
 cards. Missing or refused sockets clear the section immediately; brief transport
 or protocol failures retain the last snapshot for at most six seconds.
 
-The Agents section acts as a live per-agent layout switcher. Clicking an agent
+The legacy Agents section is hidden by default. Press `a` to reveal it while
+this compatibility UI remains available; it acts as a live per-agent layout
+switcher. Clicking an agent
 restores its complete pane layout around the fixed Hunkle pane, keeps keyboard
 focus in Hunkle, and opens the selected agent's working directory. When switching
 agents, the currently visible layout is parked in the selected layout's former

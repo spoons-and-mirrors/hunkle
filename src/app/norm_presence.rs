@@ -2,6 +2,7 @@ use std::{
     env,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc, Mutex,
         mpsc::{self, Sender},
@@ -40,6 +41,8 @@ pub(crate) struct NormPresence {
     scroll: usize,
     workspace_changes: Vec<NormWorkspaceChange>,
     completion: Arc<Mutex<Option<PresenceCompletion>>>,
+    open_tab_completion: Arc<Mutex<Option<Result<(), String>>>>,
+    open_tab_running: bool,
     shutdown_tx: Option<Sender<()>>,
     worker: Option<JoinHandle<()>>,
     #[cfg(test)]
@@ -60,6 +63,8 @@ impl NormPresence {
             scroll: 0,
             workspace_changes: Vec::new(),
             completion: Arc::new(Mutex::new(None)),
+            open_tab_completion: Arc::new(Mutex::new(None)),
+            open_tab_running: false,
             shutdown_tx: None,
             worker: None,
             #[cfg(test)]
@@ -169,6 +174,68 @@ impl NormPresence {
 
     pub(crate) fn take_workspace_changes(&mut self) -> Vec<NormWorkspaceChange> {
         std::mem::take(&mut self.workspace_changes)
+    }
+
+    pub(crate) fn open_tab(&mut self, workspace: PathBuf) -> Result<(), String> {
+        if self
+            .snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.instances.is_empty())
+        {
+            return Err("No running Norm TUI is available".into());
+        }
+        if self.open_tab_running {
+            return Err("a Norm agent is already being created".into());
+        }
+        let instance_id = self.snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .instances
+                .iter()
+                .find(|instance| instance.tabs.iter().any(|tab| tab.workspace == workspace))
+                .or_else(|| snapshot.instances.first())
+                .map(|instance| instance.instance_id.clone())
+        });
+        let completion = self.open_tab_completion.clone();
+        self.open_tab_running = true;
+        thread::spawn(move || {
+            let mut command = Command::new("norm");
+            command.arg("open");
+            if let Some(instance_id) = instance_id {
+                command.arg("--instance").arg(instance_id);
+            }
+            let result = command
+                .arg(&workspace)
+                .output()
+                .map_err(|error| format!("could not run Norm: {error}"))
+                .and_then(|output| {
+                    if output.status.success() {
+                        Ok(())
+                    } else {
+                        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                        Err(if detail.is_empty() {
+                            format!("Norm could not create an agent for {}", workspace.display())
+                        } else {
+                            detail
+                        })
+                    }
+                });
+            *completion
+                .lock()
+                .expect("Norm tab completion lock poisoned") = Some(result);
+        });
+        Ok(())
+    }
+
+    pub(crate) fn take_open_tab_completion(&mut self) -> Option<Result<(), String>> {
+        let completion = self
+            .open_tab_completion
+            .lock()
+            .expect("Norm tab completion lock poisoned")
+            .take();
+        if completion.is_some() {
+            self.open_tab_running = false;
+        }
+        completion
     }
 
     pub(crate) fn shutdown(&mut self) {

@@ -355,7 +355,7 @@ impl App {
             norm_presence,
             scheduled_tasks,
             scheduler: SchedulerState::default(),
-            agents_visible: true,
+            agents_visible: false,
             agent_preview: AgentPreview::default(),
             hovered_hit_target: None,
             settings,
@@ -993,6 +993,13 @@ impl App {
         .nth(self.settings_state.shortcut_selection)
         .map(|definition| definition.action);
         changed |= self.poll_norm_presence();
+        if let Some(result) = self.norm_presence.take_open_tab_completion() {
+            self.notice = Some(match result {
+                Ok(()) => "Started agent in a new Norm tab".to_owned(),
+                Err(error) => format!("Norm agent creation failed: {error}"),
+            });
+            changed = true;
+        }
         if agents_were_available != self.agents_available() {
             self.reconcile_settings_after_capability_change(selected_shortcut);
         }

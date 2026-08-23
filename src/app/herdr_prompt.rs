@@ -137,6 +137,7 @@ impl HerdrPrompt {
         });
     }
 
+    #[allow(dead_code)]
     pub(crate) fn prepare_agent(
         &mut self,
         path: PathBuf,

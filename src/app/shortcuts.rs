@@ -41,7 +41,7 @@ impl ShortcutAction {
     pub(crate) fn requires_herdr(self) -> bool {
         matches!(
             self,
-            Self::ToggleFullscreen | Self::OpenHerdr | Self::StartAgent | Self::ToggleAgents
+            Self::ToggleFullscreen | Self::OpenHerdr | Self::ToggleAgents
         )
     }
 
@@ -757,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn herdr_shortcuts_are_unavailable_without_herdr() {
+    fn herdr_shortcuts_are_unavailable_without_herdr_but_norm_creation_remains_available() {
         let shortcuts = Shortcuts::default();
 
         assert!(
@@ -768,11 +768,19 @@ mod tests {
             KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
             KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::F(1), KeyModifiers::SHIFT),
-            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
         ] {
             assert_eq!(shortcuts.main_action(key, false, false, false), None);
         }
+        assert_eq!(
+            shortcuts.main_action(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+                false,
+                false,
+                false,
+            ),
+            Some(ShortcutAction::StartAgent)
+        );
     }
 
     #[test]
@@ -807,14 +815,14 @@ mod tests {
     }
 
     #[test]
-    fn norm_presence_exposes_only_the_read_only_agents_navigation() {
+    fn norm_presence_exposes_read_only_navigation_and_agent_creation() {
         let shortcuts = Shortcuts::default();
         let actions = Shortcuts::definitions(false, false, true)
             .map(|definition| definition.action)
             .collect::<Vec<_>>();
 
         assert!(actions.contains(&ShortcutAction::ShowAgents));
-        assert!(!actions.contains(&ShortcutAction::StartAgent));
+        assert!(actions.contains(&ShortcutAction::StartAgent));
         assert!(!actions.contains(&ShortcutAction::ToggleAgents));
         assert_eq!(
             shortcuts.main_action(

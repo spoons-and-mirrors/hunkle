@@ -36,6 +36,14 @@ impl NormPresence {
         Vec::new()
     }
 
+    pub(crate) fn open_tab(&mut self, _workspace: PathBuf) -> std::result::Result<(), String> {
+        Err("Norm agent creation is unavailable on this platform".into())
+    }
+
+    pub(crate) fn take_open_tab_completion(&mut self) -> Option<std::result::Result<(), String>> {
+        None
+    }
+
     pub(crate) fn shutdown(&mut self) {}
 }
 

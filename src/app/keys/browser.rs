@@ -298,28 +298,15 @@ impl App {
         if self.mode != Mode::Normal || self.session.open_running() {
             return;
         }
-        if !self.herdr_available() {
-            return;
-        }
-        if self.herdr.agent_stash_running() || self.pending_agent_preview_pane.is_some() {
-            self.notice = Some("Another agent operation is still in progress".to_owned());
-            return;
-        }
         self.header_picker.close();
         let Some(path) = self.agent_destination_for_start() else {
             self.notice = Some("Open a workspace first".to_owned());
             return;
         };
-        let background_workspace_id = self.herdr.background_workspace_id().map(str::to_owned);
-        if let Err(error) = self
-            .herdr_prompt
-            .prepare_agent(path, background_workspace_id)
-        {
+        if let Err(error) = self.norm_presence.open_tab(path) {
             self.notice = Some(error);
-        } else if self.herdr.is_background_attached() {
-            self.notice = Some("Starting agent in a new Herdr tab".to_owned());
         } else {
-            self.notice = Some("Loading active Herdr tab layout".to_owned());
+            self.notice = Some("Starting agent in a new Norm tab".to_owned());
         }
     }
 
