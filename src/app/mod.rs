@@ -64,7 +64,7 @@ pub(crate) use linked_worktrees::{
     AgentDestinationMetadata, LinkedWorktreeCandidate, LinkedWorktreeCatalog,
     LinkedWorktreeObservation, RepositoryPickerItem,
 };
-pub(crate) use norm_presence::{NormAgent, NormAgentIdentity, NormPresence};
+pub(crate) use norm_presence::{NormAgent, NormAgentIdentity, NormAgentView, NormPresence};
 #[cfg(test)]
 pub(crate) use scheduler::SchedulerDestination;
 pub(crate) use scheduler::{
@@ -95,6 +95,12 @@ const BACKGROUND_HERDR_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 6, 7, 8, 9, 10];
 const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 const AGENT_PREVIEW_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AgentActivationTarget {
+    Herdr(AgentKey),
+    Norm(NormAgentIdentity),
+}
 
 pub(super) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) use ratatui::{
@@ -192,8 +198,8 @@ pub struct App {
     editor_request: Option<EditorRequest>,
     pub(crate) file_dialog: Option<FileDialog>,
     file_drag: Option<FileDrag>,
-    last_agent_click: Option<(AgentKey, Instant)>,
-    pending_fullscreen_agent: Option<AgentKey>,
+    last_agent_click: Option<(AgentActivationTarget, Instant)>,
+    pending_fullscreen_agent: Option<AgentActivationTarget>,
     pending_agent_preview_pane: Option<(String, Instant, u64)>,
     last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
     last_explorer_file_click: Option<(RepoPath, Instant)>,
@@ -1081,11 +1087,18 @@ impl App {
             }
             if let Some(result) = herdr_poll.fullscreen_result {
                 let pending = self.pending_fullscreen_agent.take();
-                if result == Ok(false)
-                    && let Some(index) =
-                        pending.as_ref().and_then(|key| self.herdr.agent_index(key))
-                {
-                    self.show_agent(index);
+                if result == Ok(false) {
+                    match pending {
+                        Some(AgentActivationTarget::Herdr(key)) => {
+                            if let Some(index) = self.herdr.agent_index(&key) {
+                                self.show_agent(index);
+                            }
+                        }
+                        Some(AgentActivationTarget::Norm(identity)) => {
+                            self.activate_norm_agent(&identity);
+                        }
+                        None => {}
+                    }
                 }
             }
             if let Some(path) = herdr_poll.reopen_path {
@@ -2692,8 +2705,16 @@ impl App {
     }
 
     fn toggle_fullscreen(&mut self) {
+        let pending_activation = self.herdr.fullscreen().then(|| {
+            self.last_agent_click
+                .as_ref()
+                .map(|(target, _)| target.clone())
+        });
         match self.herdr.toggle_fullscreen() {
-            Ok(()) => self.last_agent_click = None,
+            Ok(()) => {
+                self.pending_fullscreen_agent = pending_activation.flatten();
+                self.last_agent_click = None;
+            }
             Err(error) => {
                 self.notice = Some(format!("Could not toggle fullscreen: {error}"));
             }

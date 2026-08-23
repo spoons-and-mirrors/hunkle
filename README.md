@@ -16,8 +16,8 @@
   any vertical header separator to resize the adjacent columns.
 - Herdr-aware agent launching from any known repository or linked worktree into
   a selected pane in the active tab.
-- Passive, read-only Norm presence cards when a same-user Norm daemon is already
-  running.
+- Norm presence cards that restore an active Norm TUI beside Hunkle when both
+  are hosted by Herdr.
 - Repository-local scheduled tasks that can be created as Markdown files or
   edited through Hunkle's scheduler.
 - Source-aware diffs with changed-file and line-count summaries, line numbers,
@@ -211,11 +211,20 @@ Hunkle also passively reads Norm presence from
 `/tmp/norm-<euid>/norm/daemon.sock` when `XDG_RUNTIME_DIR` is unset. Hunkle only
 connects to an already-running same-user daemon: it never starts Norm, invokes
 Norm, or attaches to its agents. Norm conversations appear as a separate
-read-only **NORM** section with workspace, branch, title/session, activity, and
-open-view information. Herdr launch, layout, prompt, stash, and transcript
-controls do not apply to Norm cards. Missing or refused sockets clear the
-section immediately; brief transport or protocol failures retain the last
-snapshot for at most six seconds.
+**NORM** section with workspace, branch, title/session, activity, and open-view
+information.
+
+When Hunkle and an existing Norm TUI run inside Herdr, clicking the card for the
+TUI's active agent restores that live Norm pane beside Hunkle through Herdr's
+layout switcher. The process, scrollback, and Norm state remain in the original
+terminal. Hunkle matches the exact Norm agent ID and generation and resolves the
+pane's current location through Herdr; it never guesses from a title, process,
+or working directory. An inactive Norm tab cannot yet be selected remotely, so
+its card opens the agent workspace instead of showing the wrong tab. A Norm
+daemon started before pane-presence support also falls back and asks to be
+restarted. Herdr prompt, stash, and transcript controls do not apply to Norm
+cards. Missing or refused sockets clear the section immediately; brief transport
+or protocol failures retain the last snapshot for at most six seconds.
 
 The Agents section acts as a live per-agent layout switcher. Clicking an agent
 restores its complete pane layout around the fixed Hunkle pane, keeps keyboard

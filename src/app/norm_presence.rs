@@ -172,12 +172,21 @@ struct PresenceSnapshot {
 pub(crate) struct NormAgent {
     pub(crate) identity: NormAgentIdentity,
     pub(crate) workspace: PathBuf,
+    pub(crate) view: NormAgentView,
     pub(crate) lifecycle: NormLifecycle,
     pub(crate) activity: NormActivity,
     pub(crate) session_id: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) open_views: u32,
     _sequence: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NormAgentView {
+    ActiveHerdrPane(String),
+    InactiveHerdrPane,
+    MissingHerdrPane,
+    NoView,
 }
 
 impl NormAgent {
@@ -228,18 +237,19 @@ pub(crate) enum NormActivity {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NormInstance {
-    _instance_id: String,
+    instance_id: String,
     _revision: u64,
-    _active_tab_id: Option<u64>,
-    _tabs: Vec<NormTab>,
+    active_tab_id: Option<u64>,
+    herdr_pane_id: Option<String>,
+    tabs: Vec<NormTab>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NormTab {
-    _tab_id: u64,
+    tab_id: u64,
     _ordinal: u16,
-    _agent_id: Option<u64>,
-    _generation: u64,
+    agent_id: Option<u64>,
+    generation: u64,
     _workspace: PathBuf,
     _label: String,
     _connection: NormConnection,
@@ -304,6 +314,7 @@ struct InstanceDto {
     instance_id: String,
     revision: u64,
     active_tab_id: Option<u64>,
+    herdr_pane_id: Option<String>,
     tabs: Vec<TabDto>,
 }
 
@@ -397,6 +408,32 @@ fn parse_response(response: &[u8]) -> Result<PresenceSnapshot, String> {
         ));
     }
     let daemon_epoch = presence.daemon_epoch;
+    let instances = presence
+        .instances
+        .into_iter()
+        .map(|instance| NormInstance {
+            instance_id: instance.instance_id,
+            _revision: instance.revision,
+            active_tab_id: instance.active_tab_id,
+            herdr_pane_id: instance.herdr_pane_id,
+            tabs: instance
+                .tabs
+                .into_iter()
+                .map(|tab| NormTab {
+                    tab_id: tab.tab_id,
+                    _ordinal: tab.ordinal,
+                    agent_id: tab.agent_id,
+                    generation: tab.generation,
+                    _workspace: tab.workspace,
+                    _label: tab.label,
+                    _connection: tab.connection,
+                    _activity: tab.activity,
+                    _writable: tab.writable,
+                    _session_title: tab.session_title,
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
     Ok(PresenceSnapshot {
         _revision: presence.revision,
         agents: presence
@@ -416,6 +453,7 @@ fn parse_response(response: &[u8]) -> Result<PresenceSnapshot, String> {
                     generation: agent.generation,
                 },
                 workspace: agent.workspace,
+                view: agent_view(&instances, agent.id, agent.generation),
                 lifecycle: agent.lifecycle,
                 activity: agent.activity,
                 session_id: agent.session_id,
@@ -424,32 +462,45 @@ fn parse_response(response: &[u8]) -> Result<PresenceSnapshot, String> {
                 _sequence: agent.sequence,
             })
             .collect(),
-        _instances: presence
-            .instances
-            .into_iter()
-            .map(|instance| NormInstance {
-                _instance_id: instance.instance_id,
-                _revision: instance.revision,
-                _active_tab_id: instance.active_tab_id,
-                _tabs: instance
-                    .tabs
-                    .into_iter()
-                    .map(|tab| NormTab {
-                        _tab_id: tab.tab_id,
-                        _ordinal: tab.ordinal,
-                        _agent_id: tab.agent_id,
-                        _generation: tab.generation,
-                        _workspace: tab.workspace,
-                        _label: tab.label,
-                        _connection: tab.connection,
-                        _activity: tab.activity,
-                        _writable: tab.writable,
-                        _session_title: tab.session_title,
-                    })
-                    .collect(),
-            })
-            .collect(),
+        _instances: instances,
     })
+}
+
+fn agent_view(instances: &[NormInstance], agent_id: u64, generation: u64) -> NormAgentView {
+    let mut active = Vec::new();
+    let mut active_without_pane = false;
+    let mut inactive_with_pane = false;
+    let mut matched = false;
+    for instance in instances {
+        for tab in &instance.tabs {
+            if tab.agent_id != Some(agent_id) || tab.generation != generation {
+                continue;
+            }
+            matched = true;
+            let pane = instance
+                .herdr_pane_id
+                .as_deref()
+                .filter(|pane| !pane.is_empty());
+            if instance.active_tab_id == Some(tab.tab_id) {
+                if let Some(pane) = pane {
+                    active.push((!tab._writable, instance.instance_id.as_str(), pane));
+                } else {
+                    active_without_pane = true;
+                }
+            } else if pane.is_some() {
+                inactive_with_pane = true;
+            }
+        }
+    }
+    if let Some((_, _, pane)) = active.into_iter().min() {
+        NormAgentView::ActiveHerdrPane(pane.to_owned())
+    } else if active_without_pane || matched && !inactive_with_pane {
+        NormAgentView::MissingHerdrPane
+    } else if inactive_with_pane {
+        NormAgentView::InactiveHerdrPane
+    } else {
+        NormAgentView::NoView
+    }
 }
 
 fn classify_connect_error(error: io::Error) -> FetchError {
@@ -491,7 +542,7 @@ mod tests {
 
     use super::*;
 
-    const PRESENCE: &str = r#"{"Presence":{"version":1,"daemon_epoch":"epoch-a","revision":7,"agents":[{"id":42,"generation":3,"sequence":9,"workspace":"/work/repo","lifecycle":"Running","activity":"Blocked","session_id":"session-a","title":"Fix parser","open_views":2,"future_agent_field":true}],"instances":[{"instance_id":"terminal-a","revision":4,"active_tab_id":8,"tabs":[{"tab_id":8,"ordinal":0,"agent_id":42,"generation":3,"workspace":"/work/repo","label":"parser","connection":"Ready","activity":"Working","writable":false,"session_title":"Fix parser","future_tab_field":17}],"future_instance_field":{}}],"future_presence_field":"ignored"}}"#;
+    const PRESENCE: &str = r#"{"Presence":{"version":1,"daemon_epoch":"epoch-a","revision":7,"agents":[{"id":42,"generation":3,"sequence":9,"workspace":"/work/repo","lifecycle":"Running","activity":"Blocked","session_id":"session-a","title":"Fix parser","open_views":2,"future_agent_field":true}],"instances":[{"instance_id":"terminal-a","revision":4,"active_tab_id":8,"herdr_pane_id":"w9:p4","tabs":[{"tab_id":8,"ordinal":0,"agent_id":42,"generation":3,"workspace":"/work/repo","label":"parser","connection":"Ready","activity":"Working","writable":false,"session_title":"Fix parser","future_tab_field":17}],"future_instance_field":{}}],"future_presence_field":"ignored"}}"#;
 
     #[test]
     fn parses_identity_status_and_retains_topology() {
@@ -504,11 +555,30 @@ mod tests {
         assert_eq!(agent.identity.generation, 3);
         assert_eq!(agent.status(), AgentStatus::Blocked);
         assert_eq!(agent.status_label(), "blocked");
-        assert_eq!(snapshot._instances.len(), 1);
-        assert_eq!(snapshot._instances[0]._tabs.len(), 1);
         assert_eq!(
-            snapshot._instances[0]._tabs[0]._connection,
+            agent.view,
+            NormAgentView::ActiveHerdrPane("w9:p4".to_owned())
+        );
+        assert_eq!(snapshot._instances.len(), 1);
+        assert_eq!(snapshot._instances[0].tabs.len(), 1);
+        assert_eq!(
+            snapshot._instances[0].tabs[0]._connection,
             NormConnection::Ready
+        );
+    }
+
+    #[test]
+    fn distinguishes_inactive_and_legacy_norm_views() {
+        let inactive = PRESENCE.replacen("\"active_tab_id\":8", "\"active_tab_id\":9", 1);
+        assert_eq!(
+            parse_response(inactive.as_bytes()).unwrap().agents[0].view,
+            NormAgentView::InactiveHerdrPane
+        );
+
+        let legacy = PRESENCE.replacen("\"herdr_pane_id\":\"w9:p4\",", "", 1);
+        assert_eq!(
+            parse_response(legacy.as_bytes()).unwrap().agents[0].view,
+            NormAgentView::MissingHerdrPane
         );
     }
 

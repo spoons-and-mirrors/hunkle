@@ -457,7 +457,43 @@ fn fullscreen_agent_double_click_queues_layout_restore_and_selection() {
     app.activate_agent_card(key.clone(), 0);
 
     assert!(app.herdr.fullscreen_running());
-    assert_eq!(app.pending_fullscreen_agent, Some(key));
+    assert_eq!(
+        app.pending_fullscreen_agent,
+        Some(AgentActivationTarget::Herdr(key.clone()))
+    );
+
+    app.activate_agent_card(key.clone(), 0);
+    app.activate_agent_card(key.clone(), 0);
+
+    assert_eq!(
+        app.pending_fullscreen_agent,
+        Some(AgentActivationTarget::Herdr(key))
+    );
+}
+
+#[test]
+fn fullscreen_shortcut_queues_the_clicked_norm_agent() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let mut app = fullscreen_agent_app(first.path(), second.path());
+    let identity = NormAgentIdentity {
+        daemon_epoch: "epoch".to_owned(),
+        id: 7,
+        generation: 3,
+    };
+    app.last_agent_click = Some((
+        AgentActivationTarget::Norm(identity.clone()),
+        Instant::now(),
+    ));
+
+    app.toggle_fullscreen();
+
+    assert!(app.herdr.fullscreen_running());
+    assert_eq!(
+        app.pending_fullscreen_agent,
+        Some(AgentActivationTarget::Norm(identity))
+    );
+    assert!(app.last_agent_click.is_none());
 }
 
 #[test]

@@ -216,6 +216,13 @@ pub(super) struct LivePaneLocation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CurrentPane {
+    pub(super) workspace_id: String,
+    pub(super) tab_id: String,
+    pub(super) pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrPaneLayout {
     pub(crate) workspace_id: String,
     pub(crate) x: u16,
@@ -655,6 +662,33 @@ fn scheduler_observe_with(
 
 pub(super) fn display_agent(request: DisplayAgentRequest) -> Result<DisplayAgentResult, String> {
     display_agent_with(request, run, api_request)
+}
+
+pub(super) fn current_pane(caller_pane_id: &str) -> Result<CurrentPane, String> {
+    current_pane_with(caller_pane_id, api_request)
+}
+
+fn current_pane_with<A>(caller_pane_id: &str, mut api: A) -> Result<CurrentPane, String>
+where
+    A: FnMut(&str, &Value) -> Result<Value, String>,
+{
+    let params = serde_json::json!({ "caller_pane_id": caller_pane_id });
+    let response = api("pane.current", &params)?;
+    let pane = response
+        .pointer("/result/pane")
+        .ok_or_else(|| "Herdr pane.current returned no pane".to_owned())?;
+    let required = |field: &str| {
+        pane.get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Herdr pane.current returned no {field}"))
+    };
+    Ok(CurrentPane {
+        workspace_id: required("workspace_id")?,
+        tab_id: required("tab_id")?,
+        pane_id: required("pane_id")?,
+    })
 }
 
 #[cfg(test)]
@@ -2391,6 +2425,54 @@ mod tests {
     use std::{cell::RefCell, path::Path};
 
     use super::*;
+
+    #[test]
+    fn resolves_a_pane_alias_through_the_official_current_pane_api() {
+        let mut call = None;
+        let pane = current_pane_with("w3:p7", |method, params| {
+            call = Some((method.to_owned(), params.clone()));
+            Ok(serde_json::json!({
+                "result": {
+                    "pane": {
+                        "pane_id": "w1:p4",
+                        "terminal_id": "terminal-4",
+                        "workspace_id": "w1",
+                        "tab_id": "w1:t2",
+                        "focused": false
+                    }
+                }
+            }))
+        })
+        .unwrap();
+
+        assert_eq!(
+            call,
+            Some((
+                "pane.current".to_owned(),
+                serde_json::json!({ "caller_pane_id": "w3:p7" })
+            ))
+        );
+        assert_eq!(
+            pane,
+            CurrentPane {
+                pane_id: "w1:p4".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t2".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_an_incomplete_current_pane_response() {
+        let error = current_pane_with("w3:p7", |_, _| {
+            Ok(serde_json::json!({
+                "result": { "pane": { "pane_id": "w1:p4", "workspace_id": "w1" } }
+            }))
+        })
+        .unwrap_err();
+
+        assert_eq!(error, "Herdr pane.current returned no tab_id");
+    }
 
     #[test]
     fn prompts_an_agent_by_pane_id() {

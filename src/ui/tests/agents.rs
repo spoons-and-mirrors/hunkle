@@ -56,6 +56,7 @@ fn norm_presence_snapshot(workspace: &std::path::Path) -> String {
                 "instance_id": "instance-a",
                 "revision": 1,
                 "active_tab_id": 3,
+                "herdr_pane_id": "w9:p4",
                 "tabs": [{
                     "tab_id": 3,
                     "ordinal": 0,
@@ -144,6 +145,140 @@ fn norm_only_agents_are_visible_and_open_the_agents_workspace() {
         let _ = app.poll_worker();
     }
     assert_eq!(app.repository().unwrap().root, destination);
+}
+
+#[test]
+#[cfg(unix)]
+fn norm_agent_card_restores_its_active_herdr_view() {
+    let current = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    run_git(current.path(), &["init", "-b", "main"]);
+    run_git(destination.path(), &["init", "-b", "main"]);
+    let destination = fs::canonicalize(destination.path()).unwrap();
+    let mut app = App::new(current.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_host_for_test("w1", "w1:t1", "w1:p1");
+    app.norm_presence
+        .set_snapshot_for_test(&norm_presence_snapshot(&destination));
+    open_agents_pane(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let identity = app.norm_presence.agents()[0].identity.clone();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::NormAgent(identity))
+        .unwrap();
+
+    click(&mut app, card.x + 1, card.y);
+
+    assert!(!app.session.open_running());
+    assert_eq!(
+        app.herdr.external_pane_request_for_test(),
+        Some(("w9:p4", destination.as_path()))
+    );
+    assert_eq!(app.notice.as_deref(), Some("Restoring Norm side panel…"));
+}
+
+#[test]
+#[cfg(unix)]
+fn fullscreen_norm_agent_card_opens_workspace_without_exchanging_layouts() {
+    let current = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    run_git(current.path(), &["init", "-b", "main"]);
+    run_git(destination.path(), &["init", "-b", "main"]);
+    let destination = fs::canonicalize(destination.path()).unwrap();
+    let mut app = App::new(current.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_host_for_test("w1", "w1:t1", "w1:p1");
+    app.herdr.set_fullscreen_for_test(true);
+    app.norm_presence
+        .set_snapshot_for_test(&norm_presence_snapshot(&destination));
+    open_agents_pane(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let identity = app.norm_presence.agents()[0].identity.clone();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::NormAgent(identity))
+        .unwrap();
+
+    click(&mut app, card.x + 1, card.y);
+
+    assert!(app.session.open_running());
+    assert_eq!(app.herdr.external_pane_request_for_test(), None);
+    assert!(app.fullscreen_agent_activation_pending());
+}
+
+#[test]
+#[cfg(unix)]
+fn fullscreen_norm_agent_double_click_queues_layout_restore() {
+    let current = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    run_git(current.path(), &["init", "-b", "main"]);
+    run_git(destination.path(), &["init", "-b", "main"]);
+    let destination = fs::canonicalize(destination.path()).unwrap();
+    let mut app = App::new(current.path().to_path_buf());
+    app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+    app.herdr.set_host_for_test("w1", "w1:t1", "w1:p1");
+    app.herdr.set_fullscreen_for_test(true);
+    app.norm_presence
+        .set_snapshot_for_test(&norm_presence_snapshot(&destination));
+    open_agents_pane(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let identity = app.norm_presence.agents()[0].identity.clone();
+    let card = app
+        .regions
+        .hit_target_rect(HitTarget::NormAgent(identity))
+        .unwrap();
+
+    click(&mut app, card.x + 1, card.y);
+    click(&mut app, card.x + 1, card.y);
+
+    assert!(app.herdr.fullscreen_running());
+}
+
+#[test]
+#[cfg(unix)]
+fn fullscreen_norm_fallbacks_keep_their_specific_notices() {
+    let current = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    run_git(current.path(), &["init", "-b", "main"]);
+    run_git(destination.path(), &["init", "-b", "main"]);
+    let destination = fs::canonicalize(destination.path()).unwrap();
+    let active = norm_presence_snapshot(&destination);
+    let cases = [
+        (
+            active.replace("\"active_tab_id\":3", "\"active_tab_id\":9"),
+            "Norm agent is not the active tab; opened its workspace",
+        ),
+        (
+            active.replace("\"herdr_pane_id\":\"w9:p4\",", ""),
+            "Restart Norm to enable side-panel restoration; opened its workspace",
+        ),
+    ];
+
+    for (snapshot, expected_notice) in cases {
+        let mut app = App::new(current.path().to_path_buf());
+        app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
+        app.herdr.set_host_for_test("w1", "w1:t1", "w1:p1");
+        app.herdr.set_fullscreen_for_test(true);
+        app.norm_presence.set_snapshot_for_test(&snapshot);
+        open_agents_pane(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let identity = app.norm_presence.agents()[0].identity.clone();
+        let card = app
+            .regions
+            .hit_target_rect(HitTarget::NormAgent(identity))
+            .unwrap();
+
+        click(&mut app, card.x + 1, card.y);
+
+        assert_eq!(app.notice.as_deref(), Some(expected_notice));
+        assert_eq!(app.herdr.external_pane_request_for_test(), None);
+        assert!(!app.fullscreen_agent_activation_pending());
+    }
 }
 
 #[test]

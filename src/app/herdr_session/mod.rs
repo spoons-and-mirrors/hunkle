@@ -164,6 +164,7 @@ enum AgentTimingKey {
     Session(AgentSessionIdentity),
     Terminal(String),
     Pane(String),
+    ExternalPane(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,6 +328,12 @@ pub(crate) struct HerdrSessionPoll {
     pub(crate) fullscreen_result: Option<Result<bool, String>>,
 }
 
+struct AgentDisplaySuccess {
+    display: client::DisplayAgentResult,
+    selected_workspace_id: String,
+    selected_tab_id: String,
+}
+
 #[allow(clippy::large_enum_variant)]
 enum Completion {
     Snapshot {
@@ -339,14 +346,12 @@ enum Completion {
         observed_at_ms: u64,
     },
     AgentDisplay {
-        result: Result<Box<client::DisplayAgentResult>, String>,
+        result: Result<Box<AgentDisplaySuccess>, String>,
         selected_key: AgentTimingKey,
         outgoing_key: Option<AgentTimingKey>,
         reopen_path: Option<PathBuf>,
         host_workspace_id: String,
         host_tab_id: String,
-        selected_workspace_id: String,
-        selected_tab_id: String,
     },
     AgentStash {
         session_id: String,
@@ -482,6 +487,8 @@ pub(crate) struct HerdrSession {
     agent_layouts: HashMap<AgentTimingKey, SavedAgentLayout>,
     agent_layouts_path: Option<PathBuf>,
     displayed_agent_key: Option<AgentTimingKey>,
+    #[cfg(test)]
+    external_pane_request: Option<(String, PathBuf)>,
     stash: stash::AgentStashStore,
     agent_list_mode: AgentListMode,
     pub(crate) stash_scroll: usize,
@@ -578,6 +585,8 @@ impl HerdrSession {
             agent_layouts: HashMap::new(),
             agent_layouts_path: None,
             displayed_agent_key: None,
+            #[cfg(test)]
+            external_pane_request: None,
             stash: stash::AgentStashStore::new(agent_stash_path),
             agent_list_mode: AgentListMode::Agents,
             stash_scroll: 0,
@@ -766,18 +775,21 @@ impl HerdrSession {
                     reopen_path,
                     host_workspace_id,
                     host_tab_id,
-                    selected_workspace_id,
-                    selected_tab_id,
                 } => {
                     self.agent_display_running = false;
                     self.next_refresh = Instant::now();
                     match result {
                         Ok(result) => {
+                            let AgentDisplaySuccess {
+                                display,
+                                selected_workspace_id,
+                                selected_tab_id,
+                            } = *result;
                             let client::DisplayAgentResult {
                                 displayed,
                                 parked,
                                 pane_locations,
-                            } = *result;
+                            } = display;
                             for saved in self.agent_layouts.values_mut() {
                                 saved.layout.remap_known(&pane_locations);
                             }
@@ -1058,11 +1070,12 @@ impl HerdrSession {
                 .remove_live(live_sessions.iter().map(String::as_str));
         }
         let displayed_is_present = self.displayed_agent_key.as_ref().is_some_and(|key| {
-            self.agents.iter().any(|agent| {
-                &agent.runtime.timing_key == key
-                    && self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
-                    && self.host_tab_id.as_deref() == Some(&agent.tab_id)
-            })
+            matches!(key, AgentTimingKey::ExternalPane(_))
+                || self.agents.iter().any(|agent| {
+                    &agent.runtime.timing_key == key
+                        && self.host_workspace_id.as_deref() == Some(&agent.workspace_id)
+                        && self.host_tab_id.as_deref() == Some(&agent.tab_id)
+                })
         });
         if !displayed_is_present {
             self.displayed_agent_key = self
@@ -1679,6 +1692,85 @@ impl HerdrSession {
         self.display_agent(index)
     }
 
+    pub(crate) fn can_display_external_pane(&self) -> bool {
+        self.enabled
+            && !self.background_attached
+            && !self.fullscreen
+            && self.host_workspace_id.is_some()
+            && self.host_tab_id.is_some()
+            && self.host_pane_id.is_some()
+    }
+
+    pub(crate) fn show_external_pane(
+        &mut self,
+        pane_alias: String,
+        reopen_path: PathBuf,
+    ) -> Result<(), String> {
+        if !self.can_display_external_pane() {
+            return Err("Hunkle is not attached to a Herdr pane".to_owned());
+        }
+        if self.agent_layout_running() {
+            return Err("Another agent layout change is still in progress".to_owned());
+        }
+        let host_workspace_id = self.host_workspace_id.clone().unwrap_or_default();
+        let host_tab_id = self.host_tab_id.clone().unwrap_or_default();
+        let host_pane_id = self.host_pane_id.clone().unwrap_or_default();
+        let selected_key = AgentTimingKey::ExternalPane(pane_alias.clone());
+        let saved_layout = self
+            .agent_layouts
+            .get(&selected_key)
+            .map(|saved| saved.layout.clone());
+        let outgoing_key = self.displayed_agent_key.clone().or_else(|| {
+            self.agents
+                .iter()
+                .find(|agent| self.agent_is_in_host_tab_by_agent(agent))
+                .map(|agent| agent.runtime.timing_key.clone())
+        });
+        self.agent_display_running = true;
+        if cfg!(test) {
+            #[cfg(test)]
+            {
+                self.external_pane_request = Some((pane_alias, reopen_path));
+            }
+            return Ok(());
+        }
+        let sender = self.sender.clone();
+        let allow_cross_workspace = self.cross_workspace_agents;
+        thread::spawn(move || {
+            let result = client::current_pane(&pane_alias).and_then(|pane| {
+                let selected_workspace_id = pane.workspace_id.clone();
+                let selected_tab_id = pane.tab_id.clone();
+                let request = client::DisplayAgentRequest {
+                    pane_id: pane.pane_id,
+                    workspace_id: pane.workspace_id,
+                    tab_id: pane.tab_id,
+                    host_pane_id,
+                    host_workspace_id: host_workspace_id.clone(),
+                    host_tab_id: host_tab_id.clone(),
+                    allow_cross_workspace,
+                    saved_layout,
+                };
+                client::display_agent(request).map(|display| {
+                    Box::new(AgentDisplaySuccess {
+                        display,
+                        selected_workspace_id,
+                        selected_tab_id,
+                    })
+                })
+            });
+            let reopen_path = result.as_ref().ok().map(|_| reopen_path);
+            let _ = sender.send(Completion::AgentDisplay {
+                result,
+                selected_key,
+                outgoing_key,
+                reopen_path,
+                host_workspace_id,
+                host_tab_id,
+            });
+        });
+        Ok(())
+    }
+
     fn display_agent(&mut self, index: usize) -> Result<(), String> {
         let agent = self
             .agents
@@ -1719,7 +1811,13 @@ impl HerdrSession {
         self.agent_display_running = true;
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = client::display_agent(request).map(Box::new);
+            let result = client::display_agent(request).map(|display| {
+                Box::new(AgentDisplaySuccess {
+                    display,
+                    selected_workspace_id,
+                    selected_tab_id,
+                })
+            });
             let reopen_path = result.as_ref().ok().and(reopen_path);
             let _ = sender.send(Completion::AgentDisplay {
                 result,
@@ -1728,8 +1826,6 @@ impl HerdrSession {
                 reopen_path,
                 host_workspace_id: completion_host_workspace_id,
                 host_tab_id: completion_host_tab_id,
-                selected_workspace_id,
-                selected_tab_id,
             });
         });
         Ok(())
@@ -1946,6 +2042,13 @@ impl HerdrSession {
         self.host_workspace_id = Some(workspace.to_owned());
         self.host_tab_id = Some(tab.to_owned());
         self.host_pane_id = Some(pane.to_owned());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn external_pane_request_for_test(&self) -> Option<(&str, &Path)> {
+        self.external_pane_request
+            .as_ref()
+            .map(|(pane, path)| (pane.as_str(), path.as_path()))
     }
 
     #[cfg(test)]
@@ -3120,6 +3223,56 @@ mod layout_tests {
         assert!(session.agent_layouts.contains_key(&displayed_key));
         assert!(!session.agent_layouts.contains_key(&layout_key(2)));
         assert!(!session.agent_layouts.contains_key(&layout_key(3)));
+    }
+
+    #[test]
+    fn external_pane_display_completion_persists_layout_ownership() {
+        let mut session = HerdrSession::new(true, None, None);
+        let key = AgentTimingKey::ExternalPane("w9:p4".to_owned());
+        let reopen_path = PathBuf::from("/code/norm-agent");
+        session.agent_display_running = true;
+        session
+            .sender
+            .send(Completion::AgentDisplay {
+                result: Ok(Box::new(AgentDisplaySuccess {
+                    display: client::DisplayAgentResult {
+                        displayed: saved_layout(7).layout,
+                        parked: None,
+                        pane_locations: HashMap::new(),
+                    },
+                    selected_workspace_id: "w9".to_owned(),
+                    selected_tab_id: "w9:t3".to_owned(),
+                })),
+                selected_key: key.clone(),
+                outgoing_key: None,
+                reopen_path: Some(reopen_path.clone()),
+                host_workspace_id: "w1".to_owned(),
+                host_tab_id: "w1:t1".to_owned(),
+            })
+            .unwrap();
+
+        let poll = session.poll(false);
+
+        assert_eq!(poll.reopen_path, Some(reopen_path));
+        assert_eq!(session.displayed_agent_key.as_ref(), Some(&key));
+        assert!(session.agent_layouts.contains_key(&key));
+        assert!(!session.agent_display_running);
+
+        session.apply_agent_snapshot_at(Vec::new(), unix_time_ms());
+        assert_eq!(session.displayed_agent_key.as_ref(), Some(&key));
+    }
+
+    #[test]
+    fn external_pane_layout_keys_round_trip_through_persistence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-layouts.json");
+        let key = AgentTimingKey::ExternalPane("w9:p4".to_owned());
+        let layouts = HashMap::from([(key.clone(), saved_layout(9))]);
+
+        save_agent_layouts(&path, &layouts).unwrap();
+        let loaded = load_agent_layouts(&path).unwrap();
+
+        assert!(loaded.contains_key(&key));
     }
 
     #[test]

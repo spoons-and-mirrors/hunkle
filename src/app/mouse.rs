@@ -5,10 +5,11 @@ use std::time::Instant;
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, AgentKey, AgentPreview, App, CloneField, DOUBLE_CLICK_INTERVAL,
-    ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag, GraphHitTarget, HeaderPickerKind,
-    HitTarget, LeftPane, MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin, ScrollTarget,
-    SettingsHitTarget, View, changes::ChangesEffect, file_editor::FileEditor, scroll_table,
+    ACTION_ITEMS, AgentActivationTarget, AgentKey, AgentPreview, App, CloneField,
+    DOUBLE_CLICK_INTERVAL, ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag, GraphHitTarget,
+    HeaderPickerKind, HitTarget, LeftPane, MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin,
+    ScrollTarget, SettingsHitTarget, View, changes::ChangesEffect, file_editor::FileEditor,
+    scroll_table,
 };
 
 const AGENT_PREVIEW_SWIPE_THRESHOLD: u16 = 4;
@@ -1480,18 +1481,18 @@ impl App {
             return;
         }
         if self.herdr.fullscreen() {
+            let target = AgentActivationTarget::Herdr(key.clone());
             let double_click = self
                 .last_agent_click
                 .as_ref()
                 .is_some_and(|(previous, at)| {
-                    previous == &key && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+                    previous == &target && at.elapsed() <= DOUBLE_CLICK_INTERVAL
                 });
-            self.last_agent_click = (!double_click).then(|| (key.clone(), Instant::now()));
+            self.last_agent_click = (!double_click).then(|| (target.clone(), Instant::now()));
             if double_click {
                 match self.herdr.toggle_fullscreen() {
-                    Ok(()) => self.pending_fullscreen_agent = Some(key),
+                    Ok(()) => self.pending_fullscreen_agent = Some(target),
                     Err(error) => {
-                        self.pending_fullscreen_agent = None;
                         self.notice = Some(format!("Could not toggle fullscreen: {error}"));
                     }
                 }
@@ -1515,16 +1516,74 @@ impl App {
         }
     }
 
-    fn activate_norm_agent(&mut self, identity: &super::NormAgentIdentity) {
-        let workspace = self
+    pub(super) fn activate_norm_agent(&mut self, identity: &super::NormAgentIdentity) {
+        let agent = self
             .norm_presence
             .agents()
             .iter()
             .find(|agent| &agent.identity == identity)
-            .map(|agent| agent.workspace.clone());
-        if let Some(workspace) = workspace {
-            self.queue_workspace_restore(workspace);
+            .cloned();
+        let Some(agent) = agent else {
+            return;
+        };
+        if self.herdr_embedded() {
+            match &agent.view {
+                super::NormAgentView::ActiveHerdrPane(_) if self.herdr.fullscreen() => {
+                    let target = AgentActivationTarget::Norm(identity.clone());
+                    let double_click =
+                        self.last_agent_click
+                            .as_ref()
+                            .is_some_and(|(previous, at)| {
+                                previous == &target && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+                            });
+                    self.last_agent_click =
+                        (!double_click).then(|| (target.clone(), Instant::now()));
+                    if double_click {
+                        match self.herdr.toggle_fullscreen() {
+                            Ok(()) => self.pending_fullscreen_agent = Some(target),
+                            Err(error) => {
+                                self.notice = Some(format!("Could not toggle fullscreen: {error}"));
+                            }
+                        }
+                    } else {
+                        self.queue_workspace_restore(agent.workspace);
+                    }
+                    return;
+                }
+                super::NormAgentView::ActiveHerdrPane(pane_id) => {
+                    self.last_agent_click = None;
+                    match self
+                        .herdr
+                        .show_external_pane(pane_id.clone(), agent.workspace.clone())
+                    {
+                        Ok(()) => {
+                            self.notice = Some("Restoring Norm side panel…".to_owned());
+                        }
+                        Err(error) => self.notice = Some(error),
+                    }
+                    return;
+                }
+                super::NormAgentView::InactiveHerdrPane => {
+                    self.last_agent_click = None;
+                    self.queue_workspace_restore(agent.workspace);
+                    self.notice =
+                        Some("Norm agent is not the active tab; opened its workspace".to_owned());
+                    return;
+                }
+                super::NormAgentView::MissingHerdrPane => {
+                    self.last_agent_click = None;
+                    self.queue_workspace_restore(agent.workspace);
+                    self.notice = Some(
+                        "Restart Norm to enable side-panel restoration; opened its workspace"
+                            .to_owned(),
+                    );
+                    return;
+                }
+                super::NormAgentView::NoView => {}
+            }
         }
+        self.last_agent_click = None;
+        self.queue_workspace_restore(agent.workspace);
     }
 
     fn handle_agent_card_action(&mut self, key: AgentKey, index: usize, control: bool) {

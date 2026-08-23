@@ -33,14 +33,24 @@ impl NormPresence {
     pub(crate) fn scroll_agents(&mut self, _delta: isize) {}
 }
 
+#[derive(Clone)]
 pub(crate) struct NormAgent {
     pub(crate) identity: NormAgentIdentity,
     pub(crate) workspace: PathBuf,
+    pub(crate) view: NormAgentView,
     pub(crate) lifecycle: NormLifecycle,
     pub(crate) activity: NormActivity,
     pub(crate) session_id: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) open_views: u32,
+}
+
+#[derive(Clone)]
+pub(crate) enum NormAgentView {
+    ActiveHerdrPane(String),
+    InactiveHerdrPane,
+    MissingHerdrPane,
+    NoView,
 }
 
 impl NormAgent {
