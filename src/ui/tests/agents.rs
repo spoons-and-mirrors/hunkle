@@ -38,7 +38,7 @@ fn agent_snapshot() -> serde_json::Value {
 fn norm_presence_snapshot(workspace: &std::path::Path) -> String {
     serde_json::json!({
         "Presence": {
-            "version": 1,
+            "version": 2,
             "daemon_epoch": "norm-epoch",
             "revision": 5,
             "agents": [{
@@ -46,6 +46,7 @@ fn norm_presence_snapshot(workspace: &std::path::Path) -> String {
                 "generation": 4,
                 "sequence": 9,
                 "workspace": workspace,
+                "harness": "opencode",
                 "lifecycle": "Running",
                 "activity": "Blocked",
                 "session_id": "session-norm",
@@ -63,6 +64,7 @@ fn norm_presence_snapshot(workspace: &std::path::Path) -> String {
                     "agent_id": 81,
                     "generation": 4,
                     "workspace": workspace,
+                    "harness": "opencode",
                     "label": "presence",
                     "connection": "Ready",
                     "activity": "Blocked",

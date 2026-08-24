@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use super::AgentStatus;
 
-const PRESENCE_VERSION: u32 = 1;
+const PRESENCE_VERSION: u32 = 2;
 const STALE_GRACE: Duration = Duration::from_secs(6);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -836,12 +836,12 @@ mod tests {
 
     use super::*;
 
-    const PRESENCE: &str = r#"{"Presence":{"version":1,"daemon_epoch":"epoch-a","revision":7,"agents":[{"id":42,"generation":3,"sequence":9,"workspace":"/work/repo","lifecycle":"Running","activity":"Blocked","session_id":"session-a","title":"Fix parser","open_views":2,"future_agent_field":true}],"instances":[{"instance_id":"terminal-a","revision":4,"active_tab_id":8,"herdr_pane_id":"w9:p4","tabs":[{"tab_id":8,"ordinal":0,"agent_id":42,"generation":3,"workspace":"/work/repo","label":"parser","connection":"Ready","activity":"Working","writable":false,"session_title":"Fix parser","future_tab_field":17}],"future_instance_field":{}}],"future_presence_field":"ignored"}}"#;
+    const PRESENCE: &str = r#"{"Presence":{"version":2,"daemon_epoch":"epoch-a","revision":7,"agents":[{"id":42,"generation":3,"sequence":9,"workspace":"/work/repo","harness":"opencode","lifecycle":"Running","activity":"Blocked","session_id":"session-a","title":"Fix parser","open_views":2,"future_agent_field":true}],"instances":[{"instance_id":"terminal-a","revision":4,"active_tab_id":8,"herdr_pane_id":"w9:p4","tabs":[{"tab_id":8,"ordinal":0,"agent_id":42,"generation":3,"workspace":"/work/repo","harness":"opencode","label":"parser","connection":"Ready","activity":"Working","writable":false,"session_title":"Fix parser","future_tab_field":17}],"future_instance_field":{}}],"future_presence_field":"ignored"}}"#;
 
     fn two_tab_presence(epoch: &str, active_tab_id: u64) -> String {
         serde_json::json!({
             "Presence": {
-                "version": 1,
+                "version": 2,
                 "watch": true,
                 "daemon_epoch": epoch,
                 "revision": 8,
@@ -857,6 +857,7 @@ mod tests {
                         "agent_id": 42,
                         "generation": 3,
                         "workspace": "/work/one",
+                        "harness": "opencode",
                         "label": "one",
                         "connection": "Ready",
                         "activity": "Idle",
@@ -868,6 +869,7 @@ mod tests {
                         "agent_id": 43,
                         "generation": 1,
                         "workspace": "/work/two",
+                        "harness": "opencode",
                         "label": "two",
                         "connection": "Ready",
                         "activity": "Idle",
@@ -943,10 +945,10 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_protocol_versions() {
-        let response = PRESENCE.replacen("\"version\":1", "\"version\":2", 1);
+        let response = PRESENCE.replacen("\"version\":2", "\"version\":1", 1);
         assert_eq!(
             parse_response(response.as_bytes()).unwrap_err(),
-            "unsupported Norm presence version 2"
+            "unsupported Norm presence version 1"
         );
     }
 
@@ -1056,7 +1058,7 @@ mod tests {
         assert_eq!(presence.agents().len(), 1);
 
         let empty = PRESENCE.replacen(
-            "\"agents\":[{\"id\":42,\"generation\":3,\"sequence\":9,\"workspace\":\"/work/repo\",\"lifecycle\":\"Running\",\"activity\":\"Blocked\",\"session_id\":\"session-a\",\"title\":\"Fix parser\",\"open_views\":2,\"future_agent_field\":true}]",
+            "\"agents\":[{\"id\":42,\"generation\":3,\"sequence\":9,\"workspace\":\"/work/repo\",\"harness\":\"opencode\",\"lifecycle\":\"Running\",\"activity\":\"Blocked\",\"session_id\":\"session-a\",\"title\":\"Fix parser\",\"open_views\":2,\"future_agent_field\":true}]",
             "\"agents\":[]",
             1,
         );
@@ -1126,7 +1128,7 @@ mod tests {
         assert_eq!(presence.request_generation, generation);
         assert_eq!(
             request_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            "{\"ListPresence\":{\"version\":1,\"watch\":true}}\n"
+            "{\"ListPresence\":{\"version\":2,\"watch\":true}}\n"
         );
         reply_tx.send(()).unwrap();
 
@@ -1166,7 +1168,7 @@ mod tests {
         presence.poll();
         assert_eq!(
             request_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            "{\"ListPresence\":{\"version\":1,\"watch\":true}}\n"
+            "{\"ListPresence\":{\"version\":2,\"watch\":true}}\n"
         );
         snapshot_tx
             .send(two_tab_presence("epoch-stream", 8))

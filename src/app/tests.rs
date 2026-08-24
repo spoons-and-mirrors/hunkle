@@ -1237,7 +1237,7 @@ fn norm_presence_exposes_agents_navigation_without_herdr_actions() {
     let mut app = App::new(directory.path().to_path_buf());
     let response = serde_json::json!({
         "Presence": {
-            "version": 1,
+            "version": 2,
             "daemon_epoch": "epoch-a",
             "revision": 1,
             "agents": [{
@@ -1245,6 +1245,7 @@ fn norm_presence_exposes_agents_navigation_without_herdr_actions() {
                 "generation": 2,
                 "sequence": 3,
                 "workspace": directory.path(),
+                "harness": "opencode",
                 "lifecycle": "Running",
                 "activity": "Idle",
                 "session_id": "session-a",
@@ -1273,7 +1274,7 @@ fn norm_tab_switch_follows_only_the_displayed_pane_workspace() {
     fn presence(active_tab_id: u64, pane_id: &str, first: &Path, second: &Path) -> String {
         serde_json::json!({
             "Presence": {
-                "version": 1,
+                "version": 2,
                 "daemon_epoch": "epoch-a",
                 "revision": active_tab_id,
                 "agents": [],
@@ -1288,6 +1289,7 @@ fn norm_tab_switch_follows_only_the_displayed_pane_workspace() {
                         "agent_id": 1,
                         "generation": 1,
                         "workspace": first,
+                        "harness": "opencode",
                         "label": "first",
                         "connection": "Ready",
                         "activity": "Idle",
@@ -1299,6 +1301,7 @@ fn norm_tab_switch_follows_only_the_displayed_pane_workspace() {
                         "agent_id": 2,
                         "generation": 1,
                         "workspace": second,
+                        "harness": "opencode",
                         "label": "second",
                         "connection": "Ready",
                         "activity": "Idle",
