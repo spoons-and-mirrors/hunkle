@@ -5,20 +5,24 @@ pub(super) use std::{
         mpsc::{self, Receiver},
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
-pub(super) use image::DynamicImage;
+pub(super) use image::{DynamicImage, GenericImageView, RgbaImage};
 pub(super) use ratatui::{
     buffer::{Buffer, CellDiffOption},
-    layout::{Rect, Size},
+    layout::{Position, Rect, Size},
     style::Style,
     text::{Line, Span},
 };
 pub(super) use ratatui_image::{
-    Resize,
+    Resize, ResizeEncodeRender,
     errors::Errors as ImageError,
     picker::{Picker, ProtocolType},
-    protocol::{StatefulProtocol, StatefulProtocolType, kitty::StatefulKitty},
+    protocol::{
+        Protocol, StatefulProtocol, StatefulProtocolType, halfblocks::Halfblocks,
+        kitty::StatefulKitty,
+    },
     thread::{ResizeRequest, ResizeResponse, ThreadProtocol},
 };
 pub(super) use unicode_segmentation::UnicodeSegmentation;
@@ -44,6 +48,32 @@ const MAX_CACHED_PREVIEW_BYTES: usize = 512 * 1024;
 const MARKDOWN_LINE_GUTTER_WIDTH: usize = 7;
 const MIN_NUMBERED_MARKDOWN_WIDTH: usize = 12;
 const SOURCE_LINE_CHECKPOINT_STRIDE: usize = 256;
+const MEDIA_ZOOM_STEP: f64 = 1.25;
+const MAX_MEDIA_ZOOM_LEVEL: u8 = 10;
+const MEDIA_INTERACTION_SETTLE: Duration = Duration::from_millis(120);
+
+fn interaction_preview(
+    image: &DynamicImage,
+    crop_x: u32,
+    crop_y: u32,
+    crop_width: u32,
+    crop_height: u32,
+    size: Size,
+) -> Result<Protocol, ImageError> {
+    let width = u32::from(size.width);
+    let height = u32::from(size.height) * 2;
+    let sampled = RgbaImage::from_fn(width, height, |x, y| {
+        let source_x = crop_x + sample_coordinate(crop_width, x, width);
+        let source_y = crop_y + sample_coordinate(crop_height, y, height);
+        image.get_pixel(source_x, source_y)
+    });
+    Halfblocks::new(DynamicImage::ImageRgba8(sampled), size).map(Protocol::Halfblocks)
+}
+
+fn sample_coordinate(extent: u32, index: u32, samples: u32) -> u32 {
+    let centered = (u64::from(index) * 2 + 1) * u64::from(extent);
+    ((centered / (u64::from(samples) * 2)) as u32).min(extent - 1)
+}
 
 const KITTY_DELETE_ALL: &str = "\u{1b}_Ga=d,d=A,q=2\u{1b}\\";
 const KITTY_DELETE_PLACEMENTS: &str = "\u{1b}_Ga=d,d=a,q=2\u{1b}\\";
@@ -60,18 +90,135 @@ pub(crate) struct MediaTerminalOutput {
     pub(crate) kitty: bool,
 }
 
+pub(crate) enum MediaRenderState<'a> {
+    Immediate(&'a Protocol),
+    Threaded(&'a mut ThreadProtocol),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ActiveKittyImage {
-    generation: u64,
+    revision: u64,
     image_id: u32,
     area: Rect,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ActiveInlineImage {
-    generation: u64,
+    revision: u64,
     protocol: MediaPreviewProtocol,
     area: Rect,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MediaViewMetrics {
+    scaled_width: f64,
+    scaled_height: f64,
+    viewport: Rect,
+    area: Rect,
+}
+
+impl MediaViewMetrics {
+    fn zoomed(mut self, zoom_ratio: f64) -> Self {
+        self.scaled_width *= zoom_ratio;
+        self.scaled_height *= zoom_ratio;
+        let width = self.scaled_width.ceil().min(f64::from(self.viewport.width)) as u16;
+        let height = self
+            .scaled_height
+            .ceil()
+            .min(f64::from(self.viewport.height)) as u16;
+        self.area = Rect::new(
+            self.viewport.x + (self.viewport.width - width) / 2,
+            self.viewport.y + (self.viewport.height - height) / 2,
+            width,
+            height,
+        );
+        self
+    }
+
+    fn anchored_center(
+        self,
+        center_x: f64,
+        center_y: f64,
+        pointer: Position,
+        zoom_ratio: f64,
+    ) -> (f64, f64) {
+        if !self.area.contains(pointer) {
+            return (center_x, center_y);
+        }
+        let axis = |center: f64,
+                    scaled: f64,
+                    viewport_start: u16,
+                    viewport_extent: u16,
+                    area_start: u16,
+                    area_extent: u16,
+                    pointer: u16| {
+            let pointer = f64::from(pointer) + 0.5;
+            let position =
+                ((pointer - f64::from(area_start)) / f64::from(area_extent)).clamp(0.0, 1.0);
+            let visible = (f64::from(viewport_extent) / scaled).min(1.0);
+            let source_at_pointer = center + (position - 0.5) * visible;
+
+            let next_scaled = scaled * zoom_ratio;
+            let next_area_extent = next_scaled.ceil().min(f64::from(viewport_extent)) as u16;
+            let next_area_start = viewport_start + (viewport_extent - next_area_extent) / 2;
+            let next_position = ((pointer - f64::from(next_area_start))
+                / f64::from(next_area_extent))
+            .clamp(0.0, 1.0);
+            let next_visible = (f64::from(viewport_extent) / next_scaled).min(1.0);
+            if next_visible == 1.0 {
+                0.5
+            } else {
+                let half_visible = next_visible / 2.0;
+                (source_at_pointer - (next_position - 0.5) * next_visible)
+                    .clamp(half_visible, 1.0 - half_visible)
+            }
+        };
+        (
+            axis(
+                center_x,
+                self.scaled_width,
+                self.viewport.x,
+                self.viewport.width,
+                self.area.x,
+                self.area.width,
+                pointer.x,
+            ),
+            axis(
+                center_y,
+                self.scaled_height,
+                self.viewport.y,
+                self.viewport.height,
+                self.area.y,
+                self.area.height,
+                pointer.y,
+            ),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MediaView {
+    zoom_level: u8,
+    center_x: f64,
+    center_y: f64,
+    revision: u64,
+    drag_position: Option<Position>,
+    preview_until: Option<Instant>,
+    metrics: Option<MediaViewMetrics>,
+}
+
+impl Default for MediaView {
+    fn default() -> Self {
+        Self {
+            zoom_level: 0,
+            center_x: 0.5,
+            center_y: 0.5,
+            revision: 0,
+            drag_position: None,
+            preview_until: None,
+            metrics: None,
+        }
+    }
 }
 
 pub(crate) fn take_kitty_transmission(
@@ -192,6 +339,12 @@ pub(crate) struct PreviewPresentation {
     allow_auto_kitty: bool,
     media_generation: Option<u64>,
     media_protocol: Option<MediaPreviewProtocol>,
+    media_available: Size,
+    media_applied_view_revision: u64,
+    media_applied_immediate: bool,
+    media_frame_revision: u64,
+    media_view: MediaView,
+    media_preview: Option<Protocol>,
     effective_media_protocol: MediaPreviewProtocol,
     media_size: Size,
     media_error: Option<String>,
@@ -304,7 +457,10 @@ impl Default for PreviewPresentation {
         let (request_sender, request_receiver) = mpsc::channel::<ResizeRequest>();
         let (result_sender, media_receiver) = mpsc::channel();
         let media_worker = thread::spawn(move || {
-            while let Ok(request) = request_receiver.recv() {
+            while let Ok(mut request) = request_receiver.recv() {
+                while let Ok(newer_request) = request_receiver.try_recv() {
+                    request = newer_request;
+                }
                 if result_sender.send(request.resize_encode()).is_err() {
                     break;
                 }
@@ -322,6 +478,12 @@ impl Default for PreviewPresentation {
             allow_auto_kitty: false,
             media_generation: None,
             media_protocol: None,
+            media_available: Size::default(),
+            media_applied_view_revision: 0,
+            media_applied_immediate: false,
+            media_frame_revision: 0,
+            media_view: MediaView::default(),
+            media_preview: None,
             effective_media_protocol: MediaPreviewProtocol::Halfblocks,
             media_size: Size::default(),
             media_error: None,
@@ -340,6 +502,7 @@ impl PreviewPresentation {
         self.editor_cache = None;
         self.editor_markers = None;
         self.hide_media();
+        self.media_view = MediaView::default();
     }
 
     pub(crate) fn leading_markdown(
@@ -751,13 +914,7 @@ impl PreviewPresentation {
     }
 
     pub(crate) fn hide_media(&mut self) {
-        if self.active_kitty_image.take().is_some() {
-            self.pending_terminal_cleanup
-                .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
-        }
-        if let Some(active) = self.active_inline_image.take() {
-            append_clear_area(&mut self.pending_terminal_cleanup, active.area);
-        }
+        self.clear_active_terminal_media();
         if self.media_generation.take().is_some() {
             self.media_state
                 .as_mut()
@@ -765,12 +922,136 @@ impl PreviewPresentation {
                 .empty_protocol();
         }
         self.media_protocol = None;
+        self.media_available = Size::default();
+        self.media_applied_immediate = false;
         self.media_size = Size::default();
+        self.media_preview = None;
         self.media_error = None;
+        self.media_view.drag_position = None;
+        self.media_view.preview_until = None;
+    }
+
+    fn clear_active_terminal_media(&mut self) {
+        if self.active_kitty_image.take().is_some() {
+            self.pending_terminal_cleanup
+                .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
+        }
+        if let Some(active) = self.active_inline_image.take() {
+            append_clear_area(&mut self.pending_terminal_cleanup, active.area);
+        }
+    }
+
+    pub(crate) fn media_zoom_percent(&self) -> u16 {
+        (MEDIA_ZOOM_STEP.powi(i32::from(self.media_view.zoom_level)) * 100.0).round() as u16
+    }
+
+    pub(crate) fn zoom_media(&mut self, zoom_in: bool, anchor: Option<Position>) -> bool {
+        let current = self.media_view.zoom_level;
+        let next = if zoom_in {
+            current.saturating_add(1).min(MAX_MEDIA_ZOOM_LEVEL)
+        } else {
+            current.saturating_sub(1)
+        };
+        if next == current {
+            return false;
+        }
+        if let Some(metrics) = self.media_view.metrics {
+            let zoom_ratio = MEDIA_ZOOM_STEP.powi(i32::from(next) - i32::from(current));
+            if let Some(anchor) = anchor {
+                (self.media_view.center_x, self.media_view.center_y) = metrics.anchored_center(
+                    self.media_view.center_x,
+                    self.media_view.center_y,
+                    anchor,
+                    zoom_ratio,
+                );
+            }
+            self.media_view.metrics = Some(metrics.zoomed(zoom_ratio));
+        }
+        self.media_view.zoom_level = next;
+        if next == 0 {
+            self.media_view.center_x = 0.5;
+            self.media_view.center_y = 0.5;
+        }
+        self.media_view.preview_until = Some(Instant::now() + MEDIA_INTERACTION_SETTLE);
+        self.media_view.revision = self.media_view.revision.wrapping_add(1);
+        true
+    }
+
+    pub(crate) fn begin_media_pan(&mut self, position: Position) {
+        self.media_view.drag_position = Some(position);
+        self.media_view.preview_until = None;
+    }
+
+    pub(crate) fn media_pan_active(&self) -> bool {
+        self.media_view.drag_position.is_some()
+    }
+
+    pub(crate) fn pan_media(&mut self, position: Position) -> bool {
+        let Some(previous) = self.media_view.drag_position.replace(position) else {
+            return false;
+        };
+        let Some(metrics) = self.media_view.metrics else {
+            return false;
+        };
+        let clamp_center = |center: f64, scaled: f64, viewport: f64| {
+            if scaled <= viewport {
+                0.5
+            } else {
+                let half_visible = viewport / scaled / 2.0;
+                center.clamp(half_visible, 1.0 - half_visible)
+            }
+        };
+        let next_x = clamp_center(
+            self.media_view.center_x
+                - (f64::from(position.x) - f64::from(previous.x)) / metrics.scaled_width,
+            metrics.scaled_width,
+            f64::from(metrics.viewport.width),
+        );
+        let next_y = clamp_center(
+            self.media_view.center_y
+                - (f64::from(position.y) - f64::from(previous.y)) / metrics.scaled_height,
+            metrics.scaled_height,
+            f64::from(metrics.viewport.height),
+        );
+        if next_x == self.media_view.center_x && next_y == self.media_view.center_y {
+            return false;
+        }
+        self.media_view.center_x = next_x;
+        self.media_view.center_y = next_y;
+        self.media_view.revision = self.media_view.revision.wrapping_add(1);
+        true
+    }
+
+    pub(crate) fn end_media_pan(&mut self) {
+        if self.media_view.drag_position.take().is_some() {
+            self.media_view.preview_until = None;
+            self.media_view.revision = self.media_view.revision.wrapping_add(1);
+        }
+    }
+
+    fn media_live_preview_active_at(&self, now: Instant) -> bool {
+        self.media_view.drag_position.is_some()
+            || self
+                .media_view
+                .preview_until
+                .is_some_and(|deadline| deadline > now)
     }
 
     pub(crate) fn poll_media(&mut self) -> bool {
+        self.poll_media_at(Instant::now())
+    }
+
+    fn poll_media_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
+        if self
+            .media_view
+            .preview_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.media_view.preview_until = None;
+            self.media_view.revision = self.media_view.revision.wrapping_add(1);
+            changed = true;
+        }
         while let Ok(result) = self.media_receiver.try_recv() {
             match result {
                 Ok(response) => {
@@ -781,6 +1062,7 @@ impl PreviewPresentation {
                         .update_resized_protocol(response);
                     if accepted {
                         self.media_error = None;
+                        self.media_preview = None;
                     }
                     changed |= accepted;
                 }
@@ -799,7 +1081,7 @@ impl PreviewPresentation {
 
     pub(crate) fn queue_kitty_frame(
         &mut self,
-        generation: u64,
+        revision: u64,
         area: Rect,
         transmission: Option<KittyTransmission>,
     ) {
@@ -816,18 +1098,20 @@ impl PreviewPresentation {
             );
             self.pending_terminal_output.kitty = true;
             self.active_kitty_image = Some(ActiveKittyImage {
-                generation,
+                revision,
                 image_id: transmission.image_id,
                 area,
             });
             return;
         }
 
-        let Some(active) = self.active_kitty_image.as_mut() else {
+        let Some(active) = self.active_kitty_image.as_ref() else {
             return;
         };
-        if active.generation != generation {
-            self.hide_media();
+        if active.revision != revision {
+            self.active_kitty_image = None;
+            self.pending_terminal_cleanup
+                .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
             return;
         }
         if active.area == area {
@@ -845,12 +1129,15 @@ impl PreviewPresentation {
             placement.as_bytes(),
         );
         self.pending_terminal_output.kitty = true;
-        active.area = area;
+        self.active_kitty_image
+            .as_mut()
+            .expect("active Kitty image was checked")
+            .area = area;
     }
 
     pub(crate) fn queue_inline_frame(
         &mut self,
-        generation: u64,
+        revision: u64,
         protocol: MediaPreviewProtocol,
         area: Rect,
         transmission: Option<Vec<u8>>,
@@ -859,7 +1146,7 @@ impl PreviewPresentation {
             return;
         };
         let next = ActiveInlineImage {
-            generation,
+            revision,
             protocol,
             area,
         };
@@ -897,8 +1184,13 @@ impl PreviewPresentation {
                 .empty_protocol();
         }
         self.media_protocol = None;
+        self.media_available = Size::default();
+        self.media_applied_immediate = false;
         self.media_size = Size::default();
+        self.media_preview = None;
         self.media_error = None;
+        self.media_view.drag_position = None;
+        self.media_view.preview_until = None;
     }
 
     pub(crate) fn configure_media_picker(&mut self, picker: Picker, allow_auto_kitty: bool) {
@@ -925,46 +1217,135 @@ impl PreviewPresentation {
         image: &Arc<DynamicImage>,
         protocol: MediaPreviewProtocol,
         available: Rect,
-    ) -> (Rect, MediaPreviewProtocol, &mut ThreadProtocol) {
-        let effective_protocol = self.effective_protocol(protocol);
-        if self.media_generation != Some(generation) || self.media_protocol != Some(protocol) {
-            let mut picker = self.media_picker.clone();
-            let state = if effective_protocol == MediaPreviewProtocol::Kitty {
-                let image_id = ((generation % 99_999) + 1) as u32;
-                StatefulProtocol::new(
-                    (**image).clone(),
-                    picker.font_size(),
-                    None,
-                    StatefulProtocolType::Kitty(StatefulKitty::new(image_id, false)),
-                )
-            } else {
-                picker.set_protocol_type(match effective_protocol {
-                    MediaPreviewProtocol::Auto | MediaPreviewProtocol::Halfblocks => {
-                        ProtocolType::Halfblocks
+    ) -> (Rect, MediaPreviewProtocol, u64, MediaRenderState<'_>) {
+        let final_protocol = self.effective_protocol(protocol);
+        let immediate = self.media_live_preview_active_at(Instant::now());
+        if available.is_empty() || image.width() == 0 || image.height() == 0 {
+            self.media_size = Size::default();
+            self.media_view.metrics = None;
+            return (
+                Rect::new(available.x, available.y, 0, 0),
+                final_protocol,
+                self.media_frame_revision,
+                MediaRenderState::Threaded(
+                    self.media_state.as_mut().expect("media worker is running"),
+                ),
+            );
+        }
+        let available_size = available.into();
+        if self.media_generation != Some(generation)
+            || self.media_protocol != Some(protocol)
+            || self.media_available != available_size
+            || self.media_applied_view_revision != self.media_view.revision
+            || self.media_applied_immediate != immediate
+        {
+            let font_size = self.media_picker.font_size();
+            let image_width = f64::from(image.width());
+            let image_height = f64::from(image.height());
+            let font_width = f64::from(font_size.width.max(1));
+            let font_height = f64::from(font_size.height.max(1));
+            let viewport_width = f64::from(available.width) * font_width;
+            let viewport_height = f64::from(available.height) * font_height;
+            let fit_scale = (viewport_width / image_width)
+                .min(viewport_height / image_height)
+                .min(1.0);
+            let scale = fit_scale * MEDIA_ZOOM_STEP.powi(i32::from(self.media_view.zoom_level));
+            let scaled_width = image_width * scale;
+            let scaled_height = image_height * scale;
+            let visible_width = scaled_width.min(viewport_width);
+            let visible_height = scaled_height.min(viewport_height);
+            let crop_width = ((visible_width / scale).ceil() as u32).clamp(1, image.width());
+            let crop_height = ((visible_height / scale).ceil() as u32).clamp(1, image.height());
+            let half_crop_x = f64::from(crop_width) / image_width / 2.0;
+            let half_crop_y = f64::from(crop_height) / image_height / 2.0;
+            self.media_view.center_x = self
+                .media_view
+                .center_x
+                .clamp(half_crop_x, 1.0 - half_crop_x);
+            self.media_view.center_y = self
+                .media_view
+                .center_y
+                .clamp(half_crop_y, 1.0 - half_crop_y);
+            let crop_x = (self.media_view.center_x * image_width - f64::from(crop_width) / 2.0)
+                .round()
+                .clamp(0.0, f64::from(image.width() - crop_width)) as u32;
+            let crop_y = (self.media_view.center_y * image_height - f64::from(crop_height) / 2.0)
+                .round()
+                .clamp(0.0, f64::from(image.height() - crop_height))
+                as u32;
+            self.media_size = Size::new(
+                ((visible_width / font_width).ceil() as u16).min(available.width),
+                ((visible_height / font_height).ceil() as u16).min(available.height),
+            );
+            self.media_view.metrics = Some(MediaViewMetrics {
+                scaled_width: scaled_width / font_width,
+                scaled_height: scaled_height / font_height,
+                viewport: available,
+                area: Rect::default(),
+            });
+            if immediate {
+                self.clear_active_terminal_media();
+                self.media_state
+                    .as_mut()
+                    .expect("media worker is running")
+                    .empty_protocol();
+                match interaction_preview(
+                    image,
+                    crop_x,
+                    crop_y,
+                    crop_width,
+                    crop_height,
+                    self.media_size,
+                ) {
+                    Ok(preview) => {
+                        self.media_preview = Some(preview);
+                        self.media_error = None;
                     }
-                    MediaPreviewProtocol::Kitty => ProtocolType::Kitty,
-                    MediaPreviewProtocol::Iterm2 => ProtocolType::Iterm2,
-                    MediaPreviewProtocol::Sixel => ProtocolType::Sixel,
-                });
-                picker.new_resize_protocol((**image).clone())
-            };
-            self.media_state
-                .as_mut()
-                .expect("media worker is running")
-                .replace_protocol(state);
+                    Err(error) => {
+                        self.media_preview = None;
+                        self.media_error = Some(format!(
+                            "Could not render interactive media preview: {error}"
+                        ));
+                    }
+                }
+                self.effective_media_protocol = MediaPreviewProtocol::Halfblocks;
+            } else {
+                let view = image.crop_imm(crop_x, crop_y, crop_width, crop_height);
+                let mut picker = self.media_picker.clone();
+                let protocol_state = if final_protocol == MediaPreviewProtocol::Kitty {
+                    let image_id = ((generation % 99_999) + 1) as u32;
+                    StatefulProtocol::new(
+                        view,
+                        picker.font_size(),
+                        None,
+                        StatefulProtocolType::Kitty(StatefulKitty::new(image_id, false)),
+                    )
+                } else {
+                    picker.set_protocol_type(match final_protocol {
+                        MediaPreviewProtocol::Auto | MediaPreviewProtocol::Halfblocks => {
+                            ProtocolType::Halfblocks
+                        }
+                        MediaPreviewProtocol::Kitty => ProtocolType::Kitty,
+                        MediaPreviewProtocol::Iterm2 => ProtocolType::Iterm2,
+                        MediaPreviewProtocol::Sixel => ProtocolType::Sixel,
+                    });
+                    picker.new_resize_protocol(view)
+                };
+                let show_preview_while_encoding = self.media_preview.is_some();
+                let threaded_state = self.media_state.as_mut().expect("media worker is running");
+                threaded_state.replace_protocol(protocol_state);
+                if show_preview_while_encoding {
+                    threaded_state.resize_encode(&Resize::Scale(None), self.media_size);
+                }
+                self.effective_media_protocol = final_protocol;
+                self.media_error = None;
+            }
             self.media_generation = Some(generation);
             self.media_protocol = Some(protocol);
-            self.effective_media_protocol = effective_protocol;
-            self.media_size = Size::default();
-            self.media_error = None;
-        }
-        if let Some(size) = self
-            .media_state
-            .as_ref()
-            .expect("media worker is running")
-            .size_for(Resize::Fit(None), available.into())
-        {
-            self.media_size = size;
+            self.media_available = available_size;
+            self.media_applied_view_revision = self.media_view.revision;
+            self.media_applied_immediate = immediate;
+            self.media_frame_revision = self.media_frame_revision.wrapping_add(1);
         }
         let width = self.media_size.width.min(available.width);
         let height = self.media_size.height.min(available.height);
@@ -978,11 +1359,29 @@ impl PreviewPresentation {
             width,
             height,
         );
+        if let Some(metrics) = self.media_view.metrics.as_mut() {
+            metrics.viewport = available;
+            metrics.area = area;
+        }
+        if let Some(preview) = self.media_preview.as_ref() {
+            return (
+                area,
+                MediaPreviewProtocol::Halfblocks,
+                self.media_frame_revision,
+                MediaRenderState::Immediate(preview),
+            );
+        }
         (
             area,
             self.effective_media_protocol,
-            self.media_state.as_mut().expect("media worker is running"),
+            self.media_frame_revision,
+            MediaRenderState::Threaded(self.media_state.as_mut().expect("media worker is running")),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn media_center_for_test(&self) -> (f64, f64) {
+        (self.media_view.center_x, self.media_view.center_y)
     }
 
     pub(crate) fn shutdown(&mut self) {

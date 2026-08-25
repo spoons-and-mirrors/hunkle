@@ -88,6 +88,54 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
 }
 
 #[test]
+fn mouse_wheel_zooms_and_middle_drag_pans_media() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = image::RgbaImage::from_pixel(800, 400, image::Rgba([40, 120, 220, 255]));
+    image.save(directory.path().join("wide.png")).unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.settings.media_preview_protocol = crate::media::MediaPreviewProtocol::Halfblocks;
+    wait_for(&mut app, |app| app.changes.preview.image(false).is_some());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    wait_for_halfblock_render(&mut terminal, &mut app);
+    let viewer = app
+        .regions
+        .hit_target_rect(HitTarget::MediaPreview)
+        .expect("media viewer hit target");
+    let center = Position::new(viewer.x + viewer.width / 2, viewer.y + viewer.height / 2);
+
+    assert_eq!(app.changes.preview_presentation.media_zoom_percent(), 100);
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, center.x, center.y));
+    assert_eq!(app.changes.preview_presentation.media_zoom_percent(), 125);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Middle),
+        center.x,
+        center.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Middle),
+        center.x.saturating_sub(5),
+        center.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Middle),
+        viewer.x,
+        viewer.y,
+    ));
+    let (center_x, center_y) = app.changes.preview_presentation.media_center_for_test();
+    assert!(center_x > 0.5);
+    assert_eq!(center_y, 0.5);
+
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, center.x, center.y));
+    assert_eq!(app.changes.preview_presentation.media_zoom_percent(), 100);
+    assert_eq!(
+        app.changes.preview_presentation.media_center_for_test(),
+        (0.5, 0.5)
+    );
+}
+
+#[test]
 fn corrupt_image_shows_an_error_as_text() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("broken.png"), b"not a png\0\xff").unwrap();
@@ -97,7 +145,7 @@ fn corrupt_image_shows_an_error_as_text() {
             .preview
             .text()
             .unwrap()
-            .starts_with("Could not read image dimensions:")
+            .starts_with("Could not decode image:")
     });
     assert!(app.changes.preview.image(false).is_none());
     assert!(
@@ -105,7 +153,7 @@ fn corrupt_image_shows_an_error_as_text() {
             .preview
             .text()
             .unwrap()
-            .starts_with("Could not read image dimensions:")
+            .starts_with("Could not decode image:")
     );
 }
 

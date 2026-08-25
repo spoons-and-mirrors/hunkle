@@ -156,7 +156,15 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
         )
     };
     let markdown_rendered = rendered_preview_visible && app.changes.preview.markdown_available();
-    let access_label = if app.changes.preview.editable() && !rendered_preview_visible {
+    let media_zoom_label = media_loaded.then(|| {
+        format!(
+            "{}%  MMB pan",
+            app.changes.preview_presentation.media_zoom_percent()
+        )
+    });
+    let access_label = if let Some(label) = media_zoom_label.as_deref() {
+        label
+    } else if app.changes.preview.editable() && !rendered_preview_visible {
         "click to edit"
     } else {
         "read-only"
@@ -256,6 +264,8 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
     }
     let media_visible = media_loaded && app.view() == View::Changes && app.mode == Mode::Normal;
     if media_visible {
+        app.regions
+            .register_hit_target(HitTarget::MediaPreview, preview_body);
         app.regions.diff_scroll_max = 0;
         app.regions.diff_scrollbar = None;
         app.regions.diff_scroll_thumb = None;
@@ -267,23 +277,28 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
             .clone();
         let generation = app.changes.preview.generation();
         let protocol = app.settings.media_preview_protocol;
-        let (area, effective_protocol, state) = app.changes.preview_presentation.media_state(
-            generation,
-            &image,
-            protocol,
-            preview_body,
-        );
+        let (area, effective_protocol, frame_revision, render_state) = app
+            .changes
+            .preview_presentation
+            .media_state(generation, &image, protocol, preview_body);
         if !area.is_empty() {
-            frame.render_stateful_widget(
-                StatefulImage::new().resize(Resize::Fit(None)),
-                area,
-                state,
-            );
+            match render_state {
+                MediaRenderState::Immediate(preview) => {
+                    frame.render_widget(TerminalImage::new(preview), area);
+                }
+                MediaRenderState::Threaded(state) => {
+                    frame.render_stateful_widget(
+                        StatefulImage::new().resize(Resize::Scale(None)),
+                        area,
+                        state,
+                    );
+                }
+            }
             match effective_protocol {
                 crate::media::MediaPreviewProtocol::Kitty => {
                     let transmission = take_kitty_transmission(frame.buffer_mut(), area);
                     app.changes.preview_presentation.queue_kitty_frame(
-                        generation,
+                        frame_revision,
                         area,
                         transmission,
                     );
@@ -293,7 +308,7 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
                     let transmission =
                         take_inline_transmission(frame.buffer_mut(), area, effective_protocol);
                     app.changes.preview_presentation.queue_inline_frame(
-                        generation,
+                        frame_revision,
                         effective_protocol,
                         area,
                         transmission,

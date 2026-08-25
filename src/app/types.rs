@@ -384,6 +384,7 @@ pub(crate) enum HitTarget {
     Changes(ChangesHitTarget),
     CommitMessageGenerate,
     RenderedPreviewToggle,
+    MediaPreview,
     Graph(GraphHitTarget),
     Explorer(ExplorerHitTarget),
     FileSearch(FileSearchHitTarget),

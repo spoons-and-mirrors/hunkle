@@ -1,5 +1,8 @@
 use image::{ImageBuffer, Rgba};
-use ratatui_image::ResizeEncodeRender;
+use ratatui::widgets::{StatefulWidget, Widget};
+use ratatui_image::{Image, Resize, ResizeEncodeRender, StatefulImage};
+
+use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -133,6 +136,138 @@ fn real_inline_encoders_produce_extractable_terminal_payloads() {
 }
 
 #[test]
+fn threaded_sixel_view_queues_positioned_terminal_output() {
+    let mut preview = PreviewPresentation::default();
+    let mut picker = Picker::halfblocks();
+    picker.set_protocol_type(ProtocolType::Sixel);
+    preview.configure_media_picker(picker, false);
+    let image = Arc::new(DynamicImage::ImageRgba8(ImageBuffer::from_fn(
+        800,
+        400,
+        |x, y| Rgba([x as u8, y as u8, x.wrapping_add(y) as u8, 255]),
+    )));
+    let available = Rect::new(5, 6, 40, 10);
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    loop {
+        preview.poll_media();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 20));
+        let (area, protocol, frame_revision, render_state) =
+            preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+        let MediaRenderState::Threaded(state) = render_state else {
+            panic!("initial SIXEL render unexpectedly used an interactive preview");
+        };
+        StatefulWidget::render(
+            StatefulImage::new().resize(Resize::Scale(None)),
+            area,
+            &mut buffer,
+            state,
+        );
+        let transmission = take_inline_transmission(&mut buffer, area, protocol);
+        preview.queue_inline_frame(frame_revision, protocol, area, transmission);
+        let output = preview.take_terminal_output();
+        if !output.bytes.is_empty() {
+            assert!(!output.kitty);
+            assert!(output.bytes.starts_with(b"\x1b[s\x1b[7;6H"));
+            assert!(output.bytes.windows(2).any(|bytes| bytes == b"\x1bP"));
+            assert!(output.bytes.ends_with(b"\x1b[u"));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "threaded SIXEL encoding did not produce terminal output"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn media_interactions_render_immediately_then_restore_sixel() {
+    let mut preview = PreviewPresentation::default();
+    let mut picker = Picker::halfblocks();
+    picker.set_protocol_type(ProtocolType::Sixel);
+    preview.configure_media_picker(picker, false);
+    let image = Arc::new(DynamicImage::ImageRgba8(ImageBuffer::from_fn(
+        800,
+        400,
+        |x, y| Rgba([x as u8, y as u8, x.wrapping_add(y) as u8, 255]),
+    )));
+    let available = Rect::new(5, 6, 40, 10);
+
+    assert!(preview.zoom_media(true, None));
+    let (area, protocol, _, render_state) =
+        preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+    assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
+    let MediaRenderState::Immediate(state) = render_state else {
+        panic!("zoom did not produce an immediate preview");
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 20));
+    Widget::render(Image::new(state), area, &mut buffer);
+    assert!(
+        area.positions()
+            .any(|position| buffer.cell(position).unwrap().symbol() == "▀")
+    );
+
+    let settled = preview.media_view.preview_until.unwrap() + Duration::from_millis(1);
+    assert!(preview.poll_media_at(settled));
+    assert!(!preview.media_live_preview_active_at(settled));
+    let (_, protocol, _, render_state) =
+        preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+    assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
+    assert!(matches!(render_state, MediaRenderState::Immediate(_)));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if preview.poll_media() {
+            let (_, protocol, _, render_state) =
+                preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+            if protocol == MediaPreviewProtocol::Sixel {
+                assert!(matches!(render_state, MediaRenderState::Threaded(_)));
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "final SIXEL frame did not replace the interactive preview"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn large_media_drag_previews_stay_interactive() {
+    let mut preview = PreviewPresentation::default();
+    let image = Arc::new(DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+        3840,
+        2160,
+        Rgba([40, 120, 220, 255]),
+    )));
+    let available = Rect::new(0, 0, 120, 40);
+
+    assert!(preview.zoom_media(true, None));
+    let (_, protocol, _, render_state) =
+        preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+    assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
+    assert!(matches!(render_state, MediaRenderState::Immediate(_)));
+    preview.begin_media_pan(Position::new(80, 20));
+
+    let started = Instant::now();
+    for step in 0..40 {
+        let column = if step % 2 == 0 { 79 } else { 80 };
+        assert!(preview.pan_media(Position::new(column, 20)));
+        let (_, protocol, _, render_state) =
+            preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+        assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
+        assert!(matches!(render_state, MediaRenderState::Immediate(_)));
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "40 large-image drag previews took {elapsed:?}"
+    );
+}
+
+#[test]
 fn queues_inline_output_only_when_placement_changes() {
     let mut preview = PreviewPresentation::default();
     let area = Rect::new(2, 3, 10, 4);
@@ -166,6 +301,9 @@ fn queues_inline_output_only_when_placement_changes() {
     assert!(cleanup.ends_with("\u{1b}[u"));
     assert!(!preview.take_terminal_output().bytes.is_empty());
 
+    preview.queue_inline_frame(8, MediaPreviewProtocol::Iterm2, area, None);
+    assert!(preview.take_terminal_cleanup().is_empty());
+
     preview.hide_media();
     let cleanup = String::from_utf8(preview.take_terminal_cleanup()).unwrap();
     assert!(cleanup.starts_with("\u{1b}[s\u{1b}[6;5H\u{1b}[10X"));
@@ -195,6 +333,99 @@ fn auto_uses_detected_protocols_but_requires_a_known_kitty_terminal() {
         preview.effective_protocol(MediaPreviewProtocol::Auto),
         MediaPreviewProtocol::Kitty
     );
+}
+
+#[test]
+fn media_view_zooms_pans_and_resets_to_fit() {
+    let mut preview = PreviewPresentation::default();
+    let image = Arc::new(DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+        800,
+        400,
+        Rgba([255, 0, 0, 255]),
+    )));
+    let available = Rect::new(5, 6, 40, 10);
+
+    let (fit_area, _, _, _) =
+        preview.media_state(1, &image, MediaPreviewProtocol::Halfblocks, available);
+    assert_eq!(fit_area, available);
+    assert_eq!(preview.media_zoom_percent(), 100);
+
+    assert!(preview.zoom_media(true, None));
+    assert_eq!(preview.media_zoom_percent(), 125);
+    let (zoomed_area, _, _, _) =
+        preview.media_state(1, &image, MediaPreviewProtocol::Halfblocks, available);
+    assert_eq!(zoomed_area, available);
+
+    preview.begin_media_pan(Position::new(25, 10));
+    assert!(preview.pan_media(Position::new(15, 10)));
+    preview.end_media_pan();
+    let (center_x, center_y) = preview.media_center_for_test();
+    assert!(center_x > 0.5);
+    assert_eq!(center_y, 0.5);
+
+    assert!(preview.zoom_media(false, None));
+    assert_eq!(preview.media_zoom_percent(), 100);
+    assert_eq!(preview.media_center_for_test(), (0.5, 0.5));
+}
+
+#[test]
+fn wheel_zoom_keeps_the_source_point_under_the_cursor() {
+    let mut preview = PreviewPresentation::default();
+    let image = Arc::new(DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+        800,
+        400,
+        Rgba([255, 0, 0, 255]),
+    )));
+    let available = Rect::new(5, 6, 40, 10);
+    let cursor = Position::new(39, 13);
+    let source_at_cursor = |metrics: MediaViewMetrics, center: (f64, f64), cursor: Position| {
+        let x =
+            (f64::from(cursor.x) + 0.5 - f64::from(metrics.area.x)) / f64::from(metrics.area.width);
+        let y = (f64::from(cursor.y) + 0.5 - f64::from(metrics.area.y))
+            / f64::from(metrics.area.height);
+        (
+            center.0
+                + (x - 0.5) * (f64::from(metrics.viewport.width) / metrics.scaled_width).min(1.0),
+            center.1
+                + (y - 0.5) * (f64::from(metrics.viewport.height) / metrics.scaled_height).min(1.0),
+        )
+    };
+
+    let _ = preview.media_state(1, &image, MediaPreviewProtocol::Halfblocks, available);
+    let before = source_at_cursor(
+        preview.media_view.metrics.unwrap(),
+        preview.media_center_for_test(),
+        cursor,
+    );
+    assert!(preview.zoom_media(true, Some(cursor)));
+    let after_first_wheel = source_at_cursor(
+        preview.media_view.metrics.unwrap(),
+        preview.media_center_for_test(),
+        cursor,
+    );
+    assert!((before.0 - after_first_wheel.0).abs() < 1e-9);
+    assert!((before.1 - after_first_wheel.1).abs() < 1e-9);
+    assert!(preview.zoom_media(true, Some(cursor)));
+    let after_queued_wheel = source_at_cursor(
+        preview.media_view.metrics.unwrap(),
+        preview.media_center_for_test(),
+        cursor,
+    );
+    assert!((before.0 - after_queued_wheel.0).abs() < 1e-9);
+    assert!((before.1 - after_queued_wheel.1).abs() < 1e-9);
+
+    let _ = preview.media_state(1, &image, MediaPreviewProtocol::Halfblocks, available);
+    let after = source_at_cursor(
+        preview.media_view.metrics.unwrap(),
+        preview.media_center_for_test(),
+        cursor,
+    );
+
+    assert!((before.0 - after.0).abs() < 1e-9);
+    assert!((before.1 - after.1).abs() < 1e-9);
+    let (center_x, center_y) = preview.media_center_for_test();
+    assert!(center_x > 0.5);
+    assert!(center_y > 0.5);
 }
 
 #[test]

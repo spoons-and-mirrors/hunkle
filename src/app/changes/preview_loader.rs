@@ -767,18 +767,6 @@ fn load_image(path: &Path) -> Result<DynamicImage, String> {
             MAX_IMAGE_SOURCE_BYTES / 1024 / 1024
         ));
     }
-    let reader = ImageReader::open(path)
-        .map_err(|error| format!("Could not open image: {error}"))?
-        .with_guessed_format()
-        .map_err(|error| format!("Could not identify image: {error}"))?;
-    let (width, height) = reader
-        .into_dimensions()
-        .map_err(|error| format!("Could not read image dimensions: {error}"))?;
-    if width > MAX_DECODED_WIDTH || height > MAX_DECODED_HEIGHT {
-        return Err(format!(
-            "Image dimensions are too large to preview ({width}x{height})"
-        ));
-    }
     let mut reader = ImageReader::open(path)
         .map_err(|error| format!("Could not open image: {error}"))?
         .with_guessed_format()
@@ -816,11 +804,9 @@ fn render_svg(source: &[u8]) -> Result<DynamicImage, String> {
         resvg::tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
-    let png = pixmap
-        .encode_png()
-        .map_err(|error| format!("Could not encode SVG preview: {error}"))?;
-    image::load_from_memory_with_format(&png, image::ImageFormat::Png)
-        .map_err(|error| format!("Could not decode SVG preview: {error}"))
+    let rgba = image::RgbaImage::from_raw(width, height, pixmap.take_demultiplied())
+        .ok_or_else(|| "Could not create SVG preview pixels".to_owned())?;
+    Ok(DynamicImage::ImageRgba8(rgba))
 }
 
 fn load_video_frame(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<DynamicImage, String> {
@@ -922,7 +908,20 @@ mod tests {
         let path = directory.path().join("bad.png");
         fs::write(&path, b"not actually a png\0\xff").unwrap();
         let error = load_image(&path).unwrap_err();
-        assert!(error.starts_with("Could not read image dimensions:"));
+        assert!(error.starts_with("Could not decode image:"));
+    }
+
+    #[test]
+    fn renders_svg_directly_into_rgba_pixels() {
+        let image = render_svg(
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2">
+                <rect width="4" height="2" fill="#804020"/>
+            </svg>"##,
+        )
+        .unwrap();
+
+        assert_eq!((image.width(), image.height()), (4, 2));
+        assert_eq!(image.to_rgba8().get_pixel(0, 0).0, [128, 64, 32, 255]);
     }
 
     #[test]

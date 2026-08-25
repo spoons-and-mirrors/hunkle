@@ -5,7 +5,7 @@ pub(super) use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, List, ListItem, Paragraph, Wrap},
 };
-pub(super) use ratatui_image::{Resize, StatefulImage};
+pub(super) use ratatui_image::{Image as TerminalImage, Resize, StatefulImage};
 pub(super) use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) use crate::{
@@ -20,7 +20,10 @@ pub(super) use crate::{
 
 pub(super) use super::{
     agents, fill, palette,
-    preview::{PreparedPreview, PreviewInput, take_inline_transmission, take_kitty_transmission},
+    preview::{
+        MediaRenderState, PreparedPreview, PreviewInput, take_inline_transmission,
+        take_kitty_transmission,
+    },
     text::word_wrapped_height,
     text_input_lines, truncate_width,
 };

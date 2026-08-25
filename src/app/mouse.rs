@@ -365,6 +365,13 @@ impl App {
             return;
         }
 
+        if self.mode == Mode::Normal
+            && self.view() == View::Changes
+            && self.handle_media_preview_mouse(mouse, point)
+        {
+            return;
+        }
+
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
@@ -923,6 +930,41 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn handle_media_preview_mouse(&mut self, mouse: MouseEvent, point: Position) -> bool {
+        let presentation = &mut self.changes.preview_presentation;
+        if presentation.media_pan_active() {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Middle) => {
+                    presentation.pan_media(point);
+                    return true;
+                }
+                MouseEventKind::Up(MouseButton::Middle) => {
+                    presentation.end_media_pan();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        if self.regions.hit_target_at(point) != Some(HitTarget::MediaPreview) {
+            return false;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                presentation.zoom_media(true, Some(point));
+                true
+            }
+            MouseEventKind::ScrollDown => {
+                presentation.zoom_media(false, Some(point));
+                true
+            }
+            MouseEventKind::Down(MouseButton::Middle) => {
+                presentation.begin_media_pan(point);
+                true
+            }
+            _ => false,
         }
     }
 
