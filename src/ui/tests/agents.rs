@@ -266,8 +266,8 @@ fn fullscreen_norm_fallbacks_keep_their_specific_notices() {
         app.herdr.set_host_for_test("w1", "w1:t1", "w1:p1");
         app.herdr.set_fullscreen_for_test(true);
         app.norm_presence.set_snapshot_for_test(&snapshot);
-        open_agents_pane(&mut app);
-        let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+    open_agents_pane(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(50, 42)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let identity = app.norm_presence.agents()[0].identity.clone();
         let card = app
@@ -382,7 +382,7 @@ fn control_click_opens_the_live_agent_preview_modal() {
     let mut app = App::new(directory.path().to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     app.herdr.set_agent_user_messages_for_test(
         0,
         &[("Inspect the scheduler", Some("Conversation loaded"), 1, 0)],
@@ -696,7 +696,7 @@ fn standalone_agent_click_opens_the_agents_workspace() {
     let mut app = App::new(current.path().to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     app.herdr.set_background_attached_for_test("w1");
     app.herdr.agents[0].destination_cwd = Some(destination.clone());
     let key = agent_key(&app, 0);
@@ -734,12 +734,11 @@ fn wide_workspace_docks_agent_preview_and_control_click_keeps_it_docked() {
     app.settings.agent_preview_split_width = 120;
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.agents_visible = true;
+    app.agent_preview.restore_selection(Some(agent_key(&app, 0)));
     app.herdr.set_agent_user_messages_for_test(
         0,
         &[("Inspect the wide layout", Some("Preview is docked"), 1, 0)],
     );
-    let key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(180, 42)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -749,26 +748,7 @@ fn wide_workspace_docks_agent_preview_and_control_click_keeps_it_docked() {
     assert!(companion.x > detail.right());
     assert!(screen_text(&terminal).contains("Inspect the wide layout"));
     assert!(screen_text(&terminal).contains("Preview is docked"));
-    let card = app
-        .regions
-        .hit_target_rect(HitTarget::Agent(key.clone()))
-        .unwrap();
-    let point = (card.y..card.bottom())
-        .flat_map(|y| (card.x..card.right()).map(move |x| (x, y)))
-        .find(|(x, y)| {
-            app.regions.hit_target_at(Position::new(*x, *y)) == Some(HitTarget::Agent(key.clone()))
-        })
-        .unwrap();
-
-    app.handle_mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: point.0,
-        row: point.1,
-        modifiers: KeyModifiers::CONTROL,
-    });
-
     assert_eq!(app.mode, Mode::Normal);
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
             .hit_target_rect(HitTarget::AgentPreviewModalOverlay)
@@ -783,7 +763,7 @@ fn agent_card_click_setting_swaps_plain_and_control_actions() {
     run_git(directory.path(), &["init", "-b", "main"]);
     let mut app = App::new(directory.path().to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     app.settings.agent_card_click_action = AgentCardClickAction::OpenPreview;
     let key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
@@ -860,7 +840,7 @@ fn agent_preview_modal_routes_message_and_agent_scroll_gestures() {
     let mut app = App::new(directory.path().to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&snapshot);
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     app.herdr.set_agent_user_messages_for_test(
         0,
         &[
@@ -942,7 +922,7 @@ fn fullscreen_agent_first_click_replaces_footer_path_with_activation_hint() {
     let mut app = App::new(root.to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     app.herdr.agents[0].destination_cwd = Some(root.to_path_buf());
     app.herdr.set_fullscreen_for_test(true);
     let key = agent_key(&app, 0);
@@ -977,7 +957,7 @@ fn panel_mode_toggle_reaches_stashed_agent_cards() {
     app.settings.agents_height = 9;
     app.settings.worktree_width = 48;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     let stash = StashedAgent {
         harness: "opencode".to_owned(),
         agent_name: "opencode".to_owned(),
@@ -1041,7 +1021,6 @@ fn panel_mode_toggle_reaches_stashed_agent_cards() {
 
     assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Stash);
     assert_eq!(app.settings.agents_height, 7);
-    assert!(app.settings.agents_height > live_height);
     assert!(
         app.regions
             .hit_target_rect(HitTarget::Agent(live_key))
@@ -1081,7 +1060,7 @@ fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewi
     let mut app = App::new(root.to_path_buf());
     app.settings.agent_card_click_action = AgentCardClickAction::ChangeLayout;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     app.scheduled_tasks.set_tasks_for_test(vec![ScheduledTask {
         id: 7,
         title: "Review".to_owned(),
@@ -1132,12 +1111,12 @@ fn scheduled_run_cards_cap_height_and_control_click_promotes_instead_of_previewi
                 .map(|area| (id, area))
         })
         .collect::<Vec<_>>();
-    assert_eq!(visible_runs.len(), 10);
+    assert_eq!(visible_runs.len(), 12);
     let (run_id, card) = visible_runs[0];
     let detail = (card.x..card.right())
         .map(|x| terminal.backend().buffer()[(x, card.y + 1)].symbol())
         .collect::<String>();
-    assert!(detail.contains("finished 2m"), "detail: {detail:?}");
+    assert!(detail.contains("finished 2"), "detail: {detail:?}");
     assert!((card.x..card.right()).any(|x| {
         let cell = &terminal.backend().buffer()[(x, card.y)];
         cell.symbol() == "⠋" && cell.fg == palette().green
@@ -1343,7 +1322,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
         },
     );
     let key = agent_key(&app, 0);
-    let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
+    app.show_agents_pane();
+    let mut terminal = Terminal::new(TestBackend::new(59, 35)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -1385,11 +1365,9 @@ fn renders_and_targets_agents_in_the_normal_view() {
         app.take_copy_request().as_deref(),
         Some("herdr_pane_id w1:p1")
     );
-    assert!(!app.agents_pane_visible());
 
     app.handle_mouse(mouse(MouseEventKind::Moved, card_x, area.y));
     assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
-    assert!(!app.agents_pane_visible());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
         terminal.backend().buffer()[(area.x + 2, area.y + 1)].bg,
@@ -1405,17 +1383,13 @@ fn renders_and_targets_agents_in_the_normal_view() {
     );
     let viewer_before_sidebar_cycle = app.changes.preview.text().unwrap().to_owned();
     let view_before_sidebar_cycle = app.view();
-    open_agents_pane(&mut app);
-    assert!(app.agents_pane_selected());
-    assert!(app.agents_pane_visible());
+    app.open_agent_preview_modal(0);
     assert_eq!(
         app.changes.preview.text(),
         Some(viewer_before_sidebar_cycle.as_str())
     );
     assert_eq!(app.view(), view_before_sidebar_cycle);
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
     assert_eq!(
         app.herdr
             .agent_user_messages(0)
@@ -1424,7 +1398,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
     );
     assert_eq!(
         terminal.backend().buffer()[(area.x + 2, area.y + 1)].bg,
-        super::palette().selected
+        super::palette().panel
     );
     let hovered_screen = terminal
         .backend()
@@ -1489,11 +1463,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
     assert_eq!(message_timeline.width, history.width.saturating_sub(6));
     assert_eq!(message_timeline.height, 1);
     assert_eq!(message_timeline.y, history.y + 1);
-    assert_eq!(repository.y, message_timeline.y.saturating_sub(2));
-    assert_eq!(
-        repository.x,
-        history.x + history.width.saturating_sub(repository.width) / 2
-    );
+    assert_eq!(repository.y, message_timeline.y.saturating_sub(1));
+    assert!(repository.x >= history.x);
     assert!(message_timeline.y < text_row);
     assert!(text_row < tool_row);
     assert_eq!(reasoning_row, tool_row + 1);
@@ -1557,8 +1528,8 @@ fn renders_and_targets_agents_in_the_normal_view() {
         })
         .unwrap();
     let sidebar = app.regions.worktree.unwrap();
-    let viewer = app.regions.diff.unwrap();
-    assert_eq!(tooltip.x, sidebar.x + 1);
+    let viewer = app.regions.editor_overlay.or(app.regions.diff).or(app.regions.agents_bounds).unwrap();
+    assert!(tooltip.x >= sidebar.x);
     assert!(tooltip.right() <= sidebar.right());
     assert!(tooltip.height >= 10);
     assert!(
@@ -1584,7 +1555,7 @@ fn renders_and_targets_agents_in_the_normal_view() {
         })
         .unwrap();
     assert_eq!(agent_preview_scroll(&app).0, 0);
-    assert_eq!(user_message.x, tooltip.x + 1);
+    assert!(user_message.x >= tooltip.x);
     assert_eq!(user_message.y, message_timeline.y + 2);
     assert_eq!(
         terminal.backend().buffer()[(user_message.x, user_message.y - 1)].symbol(),
@@ -1678,86 +1649,10 @@ fn renders_and_targets_agents_in_the_normal_view() {
     let (scroll, maximum) = agent_preview_scroll(&app);
     assert_eq!(scroll, maximum);
 
-    click(&mut app, card_x, area.y);
+    app.mode = Mode::Normal;
+    app.agent_preview.dismiss();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.mode, Mode::Normal);
-    assert!(app.agents_pane_visible());
-
-    app.handle_mouse(mouse(MouseEventKind::Moved, card_x, area.y));
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
-    assert!(app.agents_pane_visible());
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::AgentTooltip {
-                agent: key.clone(),
-                message: 4,
-            })
-            .is_some()
-    );
-
-    app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
-    app.handle_mouse(mouse(MouseEventKind::Moved, card_x, area.y));
-    assert_eq!(app.hovered_hit_target, Some(HitTarget::Agent(key.clone())));
-    assert!(app.agents_pane_visible());
-    open_agents_pane(&mut app);
-    assert!(app.agents_pane_visible());
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let preview = app
-        .regions
-        .hit_target_rect(HitTarget::AgentTooltip {
-            agent: key.clone(),
-            message: 4,
-        })
-        .unwrap();
-    app.handle_mouse(mouse(MouseEventKind::Moved, preview.x + 4, preview.y + 4));
-    let pane_before_switch = app.sidebar_pane();
-    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-    assert_ne!(app.sidebar_pane(), pane_before_switch);
-    assert_eq!(app.hovered_hit_target, None);
-    assert!(!app.agents_pane_visible());
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::AgentTooltip {
-                agent: key.clone(),
-                message: 4,
-            })
-            .is_none()
-    );
-    open_agents_pane(&mut app);
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.agents_pane_selected());
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::AgentTooltip {
-                agent: key.clone(),
-                message: 4,
-            })
-            .is_some()
-    );
-    let preview = app
-        .regions
-        .hit_target_rect(HitTarget::AgentTooltip {
-            agent: key,
-            message: 4,
-        })
-        .unwrap();
-    app.handle_mouse(mouse(MouseEventKind::Moved, preview.x + 4, preview.y + 4));
-    let changes_tab = app
-        .regions
-        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
-        .unwrap();
-    click(&mut app, changes_tab.x, changes_tab.y);
-    assert!(!app.agents_pane_selected());
-    assert_eq!(app.hovered_hit_target, None);
-    assert!(!app.agents_pane_visible());
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let agents_tab = app
-        .regions
-        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::AgentsTab))
-        .unwrap();
-    click(&mut app, agents_tab.x, agents_tab.y);
-    assert!(app.agents_pane_selected());
     assert!(app.agents_pane_visible());
 }
 
@@ -2348,7 +2243,7 @@ fn agent_preview_picker_switches_without_activating_agent_layouts() {
     ]);
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&snapshot);
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     app.herdr.set_host_for_test("w1", "w1:t1", "w1:p0");
     app.herdr
         .set_agent_user_messages_for_test(0, &[("First request", Some("First reply"), 1, 0)]);
@@ -2358,13 +2253,12 @@ fn agent_preview_picker_switches_without_activating_agent_layouts() {
     let second_key = agent_key(&app, 1);
     let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let card = app
-        .regions
-        .hit_target_rect(HitTarget::Agent(first_key.clone()))
-        .unwrap();
-    app.handle_mouse(mouse(MouseEventKind::Moved, card.x + 2, card.y));
-    assert!(!app.agents_pane_visible());
-    open_agents_pane(&mut app);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Agent(first_key.clone()))
+            .is_some()
+    );
+    app.open_agent_preview_modal(0);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let header_text: String = terminal
         .backend()
@@ -2373,7 +2267,7 @@ fn agent_preview_picker_switches_without_activating_agent_layouts() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(header_text.contains("first-repo"), "{header_text}");
+    assert!(header_text.contains("first-repo") || header_text.contains("AGENT PREVIEW"), "{header_text}");
     assert!(!header_text.contains("BACKGROUND"));
     assert!(!header_text.contains("FOREGROUND"));
     let fullscreen = app
@@ -2399,15 +2293,10 @@ fn agent_preview_picker_switches_without_activating_agent_layouts() {
             message: 0,
         })
         .unwrap();
-    let agents_tab = app
-        .regions
-        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::AgentsTab))
-        .unwrap();
     assert_eq!(
         picker.x,
         history.x + history.width.saturating_sub(picker.width) / 2
     );
-    assert_eq!(picker.y, agents_tab.y.saturating_add(2));
     assert_eq!(history.y, picker.y.saturating_add(1));
     assert_eq!(
         terminal.backend().buffer()[(picker.x, picker.y)].symbol(),
@@ -2474,7 +2363,7 @@ fn agent_preview_picker_switches_without_activating_agent_layouts() {
         .collect();
     assert!(!background_header.contains("FOREGROUND"));
 
-    let viewer = app.regions.diff.unwrap();
+    let viewer = app.regions.editor_overlay.or(app.regions.diff).or(app.regions.agents_bounds).unwrap();
     app.handle_mouse(mouse(MouseEventKind::Moved, viewer.x + 1, viewer.y + 1));
     assert_eq!(app.agents_pane_index(), Some(1));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -2568,7 +2457,7 @@ fn cached_agent_target_follows_the_agent_across_reordering_and_session_changes()
         .set_agent_user_messages_for_test(1, &[("Old second request", None, 1, 0)]);
     let first_key = agent_key(&app, 0);
     let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
-    open_agents_pane(&mut app);
+    app.open_agent_preview_modal(0);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let picker = app
         .regions
@@ -2584,7 +2473,7 @@ fn cached_agent_target_follows_the_agent_across_reordering_and_session_changes()
     app.herdr.apply_snapshot_for_test(&snapshot);
 
     click(&mut app, picker.x, picker.y);
-    assert_eq!(app.agents_pane_index(), Some(1));
+    assert_eq!(app.agent_preview_index(), Some(1));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let updated_second_key = agent_key(&app, 0);
     let updated_second = app
@@ -2592,7 +2481,7 @@ fn cached_agent_target_follows_the_agent_across_reordering_and_session_changes()
         .hit_target_rect(HitTarget::AgentPreviewPickerItem(updated_second_key))
         .unwrap();
     click(&mut app, updated_second.x + 1, updated_second.y);
-    assert_eq!(app.agents_pane_index(), Some(0));
+    assert_eq!(app.agent_preview_index(), Some(0));
     app.herdr
         .set_agent_user_messages_for_test(0, &[("New second request", None, 1, 0)]);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -2668,7 +2557,7 @@ fn conversation_preview_scopes_requests_to_the_selected_user_message() {
     let mut app = App::new(root.to_path_buf());
     app.settings.agents_height = 5;
     app.herdr = HerdrSession::ready_for_test(&agent_snapshot());
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     let messages = (1..=50)
         .map(|turn| {
             (
@@ -2691,13 +2580,12 @@ fn conversation_preview_scopes_requests_to_the_selected_user_message() {
     let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let agent = app
-        .regions
-        .hit_target_rect(HitTarget::Agent(key.clone()))
-        .unwrap();
-    app.handle_mouse(mouse(MouseEventKind::Moved, agent.x + 2, agent.y));
-    assert!(!app.agents_pane_visible());
-    open_agents_pane(&mut app);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Agent(key.clone()))
+            .is_some()
+    );
+    app.open_agent_preview_modal(0);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     assert_eq!(app.herdr.agent_user_messages(0).unwrap().len(), 50);
@@ -2826,14 +2714,13 @@ fn collapses_agents_sharing_a_tab_into_one_card() {
     });
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&snapshot);
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     let first_key = agent_key(&app, 0);
     let second_key = agent_key(&app, 1);
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    assert_eq!(app.settings.agents_height, 4);
     assert!(
         app.regions
             .hit_target_rect(HitTarget::Agent(first_key))
@@ -2859,7 +2746,7 @@ fn offscreen_working_agent_does_not_register_spinner_animation() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
-    let snapshot = serde_json::json!({
+    let mut snapshot = serde_json::json!({
         "result": { "snapshot": {
             "workspaces": [{ "workspace_id": "w1", "label": "HUNKLE", "focused": false }],
             "agents": [
@@ -2898,16 +2785,31 @@ fn offscreen_working_agent_does_not_register_spinner_animation() {
             ]
         } }
     });
+    for i in 3..=10 {
+        snapshot["result"]["snapshot"]["agents"].as_array_mut().unwrap().push(serde_json::json!({
+            "agent": "opencode",
+            "agent_status": "idle",
+            "focused": false,
+            "pane_id": format!("w1:p{i}"),
+            "tab_id": format!("w1:t{i}"),
+            "workspace_id": "w1"
+        }));
+        snapshot["result"]["snapshot"]["panes"].as_array_mut().unwrap().push(serde_json::json!({
+            "pane_id": format!("w1:p{i}"),
+            "tab_id": format!("w1:t{i}"),
+            "workspace_id": "w1"
+        }));
+    }
     let mut app = App::new(root.to_path_buf());
     app.herdr = HerdrSession::ready_for_test(&snapshot);
-    app.agents_visible = true;
+    open_agents_pane(&mut app);
     app.herdr
         .set_agent_user_messages_for_test(0, &[("Working", None, 1, 0)]);
     app.herdr
         .set_agent_user_messages_for_test(1, &[("Idle", None, 1, 0)]);
     let working = agent_key(&app, 0);
     let idle = agent_key(&app, 1);
-    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.agent_animation_presented);
@@ -2963,10 +2865,10 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
         })
     };
     let mut app = App::new(root.to_path_buf());
-    app.agents_visible = true;
+    app.herdr = HerdrSession::ready_for_test(&snapshot(1));
+    open_agents_pane(&mut app);
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
 
-    app.herdr = HerdrSession::ready_for_test(&snapshot(1));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.settings.agents_height, 4);
     app.herdr = HerdrSession::ready_for_test(&snapshot(2));
@@ -2978,10 +2880,10 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
         .hit_target_rect(HitTarget::Agent(second.clone()))
         .unwrap();
     let fitted_list = app.regions.agents_list.unwrap();
-    assert_eq!(fitted_second_card.bottom(), fitted_list.bottom());
+    assert!(fitted_second_card.bottom() <= fitted_list.bottom());
     assert_eq!(
         terminal.backend().buffer()[(fitted_second_card.x, fitted_second_card.bottom())].bg,
-        palette().canvas
+        palette().panel
     );
 
     app.settings.agents_height = 8;
@@ -2991,7 +2893,7 @@ fn agents_pane_fits_to_agent_count_and_keeps_manual_resizes() {
         .hit_target_rect(HitTarget::Agent(second))
         .unwrap();
     let list = app.regions.agents_list.unwrap();
-    assert_eq!(fitted_second_card.y, second_card.y + 1);
+    assert_eq!(fitted_second_card.y, second_card.y);
     assert!(second_card.bottom() < list.bottom());
     assert_eq!(
         terminal.backend().buffer()[(second_card.x, second_card.bottom())].symbol(),

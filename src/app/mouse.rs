@@ -1814,9 +1814,6 @@ impl App {
     }
 
     fn select_explorer_row(&mut self, point: Position) -> bool {
-        if self.changes.pane != LeftPane::Files {
-            return false;
-        }
         let Some(rect) = self
             .regions
             .explorer_list
@@ -1824,6 +1821,7 @@ impl App {
         else {
             return false;
         };
+        self.changes.pane = LeftPane::Files;
         let index = self.changes.explorer_scroll + usize::from(point.y - rect.y);
         let Some(repo) = self.session.data() else {
             return false;
@@ -1926,10 +1924,10 @@ impl App {
         let Some(bounds) = self.regions.split_bounds else {
             return;
         };
-        let minimum = bounds.x.saturating_add(24);
-        let maximum = bounds.right().saturating_sub(25).max(minimum);
+        let minimum = bounds.x.saturating_add(25);
+        let maximum = bounds.right().saturating_sub(24).max(minimum);
         let position = column.clamp(minimum, maximum);
-        self.settings.worktree_width = position.saturating_sub(bounds.x);
+        self.settings.worktree_width = bounds.right().saturating_sub(position);
     }
 
     fn resize_explorer_panes(&mut self, column: u16) {

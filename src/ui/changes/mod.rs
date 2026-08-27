@@ -57,17 +57,19 @@ pub(super) enum ChangesPlan {
         area: Rect,
     },
     Columns {
-        areas: [Rect; 2],
-        sidebar_pane: LeftPane,
+        files_area: Rect,
+        editor_area: Rect,
+        changes_area: Rect,
         preview_pane: Option<LeftPane>,
-        agents: ColumnAgents,
     },
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum ColumnAgents {
     Hidden,
+    #[allow(dead_code)]
     Master,
+    #[allow(dead_code)]
     MasterDetail,
 }
 
@@ -99,15 +101,23 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, plan: ChangesPlan) {
             draw_agent_history_pane(frame, app, area, true);
         }
         ChangesPlan::Columns {
-            areas,
-            sidebar_pane,
+            files_area,
+            editor_area,
+            changes_area,
             preview_pane,
-            agents,
         } => {
-            draw_master(frame, app, areas[0], sidebar_pane, Some(areas[1]), agents);
+            draw_explorer_master(frame, app, files_area, false, ColumnAgents::Hidden);
             if let Some(preview_pane) = preview_pane {
-                draw_detail(frame, app, areas[1], preview_pane, false);
+                draw_detail(frame, app, editor_area, preview_pane, false);
             }
+            draw_master(
+                frame,
+                app,
+                changes_area,
+                LeftPane::Worktree,
+                Some(editor_area),
+                ColumnAgents::Hidden,
+            );
         }
     }
 }
@@ -123,9 +133,9 @@ fn draw_master(
     let single_panel = detail_area.is_none();
     let workspace = detail_area.map_or(area, |detail| {
         Rect::new(
-            area.x,
+            area.x.min(detail.x),
             area.y,
-            detail.right().saturating_sub(area.x),
+            detail.right().max(area.right()).saturating_sub(area.x.min(detail.x)),
             area.height,
         )
     });
@@ -136,20 +146,17 @@ fn draw_master(
 
     app.regions.worktree = Some(area);
     app.regions.split_bounds = detail_area.map(|_| workspace);
-    app.regions.splitter = detail_area.map(|_| Rect::new(area.right(), area.y, 1, area.height));
+    app.regions.splitter = detail_area.map(|_| Rect::new(area.x.saturating_sub(1), area.y, 1, area.height));
     frame.render_widget(Clear, area);
     app.regions.clear_targets_in(area);
     app.regions.worktree_list = None;
-    app.regions.explorer_list = None;
     app.regions.commit = None;
     app.regions.actions = None;
-    app.regions.files_add = None;
-    app.regions.files_root = None;
     fill(frame, area, palette().panel);
     if app.dragging_splitter {
         fill(
             frame,
-            Rect::new(area.right(), area.y, 1, area.height),
+            Rect::new(area.x.saturating_sub(1), area.y, 1, area.height),
             palette().accent,
         );
     }
@@ -200,7 +207,31 @@ fn draw_master(
         HitTarget::Changes(app.changes.worktree_background_target()),
         worktree_list,
     );
-    draw_sidebar_tabs(frame, app, worktree_header, pane);
+    if single_panel {
+        draw_sidebar_tabs(frame, app, worktree_header, pane);
+    } else {
+        let active = app.sidebar_pane() == LeftPane::Worktree;
+        frame.render_widget(
+            Paragraph::new("CHANGES").style(
+                Style::default()
+                    .fg(if active {
+                        palette().muted
+                    } else {
+                        palette().faint
+                    })
+                    .add_modifier(if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            worktree_header,
+        );
+        app.regions.register_hit_target(
+            HitTarget::Changes(ChangesHitTarget::WorktreeTab),
+            worktree_header,
+        );
+    }
     let repo = app.session.data().expect("checked above");
     let local_workspace = repo.is_local();
     let details_ready = repo.details_ready;
@@ -678,11 +709,12 @@ fn draw_detail(
     draw_hunk_actions(frame, app, &layout, visible_hunks);
 }
 
-fn draw_agents_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+pub(super) fn draw_agents_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     fill(frame, area, palette().panel);
     let content = area.inner(Margin::new(1, 0));
     let tabs = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);
     let header = Rect::new(content.x, tabs.bottom().saturating_add(1), content.width, 1);
+    let _ = layout_agents_pane(app, content, header.bottom(), true);
     let list = Rect::new(
         content.x,
         header.bottom(),
@@ -718,22 +750,18 @@ pub(super) fn draw_sidebar_tabs(
     area: Rect,
     pane: LeftPane,
 ) -> Rect {
-    let agents_active = app.agents_pane_visible();
-    let mut tabs = vec![
+    let tabs = vec![
         (
             "CHANGES",
             ChangesHitTarget::WorktreeTab,
-            !agents_active && pane == LeftPane::Worktree,
+            pane == LeftPane::Worktree,
         ),
         (
             "FILES",
             ChangesHitTarget::FilesTab,
-            !agents_active && pane == LeftPane::Files,
+            pane == LeftPane::Files,
         ),
     ];
-    if app.agents_available() {
-        tabs.push(("AGENTS", ChangesHitTarget::AgentsTab, agents_active));
-    }
     let mut spans = Vec::new();
     let mut x = area.x;
     for (index, (label, target, active)) in tabs.into_iter().enumerate() {

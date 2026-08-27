@@ -159,6 +159,7 @@ impl WorkspaceNavigation {
         self.agents = Some(WorkspaceSurface::Master);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn show_agent_detail(&mut self) {
         self.agents = Some(WorkspaceSurface::Detail);
     }
@@ -781,6 +782,7 @@ pub struct Regions {
     pub help: Option<Rect>,
     pub actions: Option<Rect>,
     pub worktree: Option<Rect>,
+    pub files_panel: Option<Rect>,
     pub worktree_list: Option<Rect>,
     pub explorer_list: Option<Rect>,
     pub agents_list: Option<Rect>,

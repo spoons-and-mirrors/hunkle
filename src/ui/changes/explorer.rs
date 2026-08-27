@@ -7,8 +7,13 @@ pub(super) fn draw_explorer_master(
     single_panel: bool,
     agents: ColumnAgents,
 ) {
-    app.regions.worktree_list = None;
-    app.regions.commit = None;
+    app.regions.files_panel = Some(area);
+    frame.render_widget(Clear, area);
+    app.regions.clear_targets_in(area);
+    app.regions.explorer_list = None;
+    app.regions.files_add = None;
+    app.regions.files_root = None;
+    fill(frame, area, palette().panel);
     let content = area.inner(Margin::new(1, 0));
     let header = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);
     let controls = Rect::new(
@@ -32,7 +37,31 @@ pub(super) fn draw_explorer_master(
         1,
     );
     let drop_target = app.file_drop_target().cloned();
-    draw_sidebar_tabs(frame, app, header, LeftPane::Files);
+    if single_panel {
+        draw_sidebar_tabs(frame, app, header, LeftPane::Files);
+    } else {
+        let active = app.sidebar_pane() == LeftPane::Files;
+        frame.render_widget(
+            Paragraph::new("FILES").style(
+                Style::default()
+                    .fg(if active {
+                        palette().muted
+                    } else {
+                        palette().faint
+                    })
+                    .add_modifier(if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            header,
+        );
+        app.regions.register_hit_target(
+            HitTarget::Changes(ChangesHitTarget::FilesTab),
+            header,
+        );
+    }
     frame.render_widget(
         Paragraph::new(format!("{} FILES", app.changes.explorer_rows().len()))
             .style(Style::default().fg(palette().faint)),

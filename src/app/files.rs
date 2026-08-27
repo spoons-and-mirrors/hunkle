@@ -389,10 +389,7 @@ impl App {
     }
 
     pub(super) fn begin_file_drag(&mut self, point: Position) -> bool {
-        if self.mode != Mode::Normal
-            || self.view() != View::Changes
-            || self.changes.pane != LeftPane::Files
-        {
+        if self.mode != Mode::Normal || self.view() != View::Changes {
             return false;
         }
         let Some(rect) = self
@@ -402,6 +399,7 @@ impl App {
         else {
             return false;
         };
+        self.changes.pane = LeftPane::Files;
         let index = self.changes.explorer_scroll + usize::from(point.y - rect.y);
         let Some(repo) = self.session.data() else {
             return false;

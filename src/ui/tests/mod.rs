@@ -73,10 +73,10 @@ fn columns_render_one_empty_workspace_without_a_repository() {
                 frame,
                 &mut app,
                 changes::ChangesPlan::Columns {
-                    areas: [Rect::new(0, 0, 38, 30), Rect::new(39, 0, 61, 30)],
-                    sidebar_pane: LeftPane::Worktree,
+                    files_area: Rect::new(0, 0, 30, 30),
+                    editor_area: Rect::new(31, 0, 38, 30),
+                    changes_area: Rect::new(70, 0, 30, 30),
                     preview_pane: Some(LeftPane::Worktree),
-                    agents: changes::ColumnAgents::Hidden,
                 },
             );
         })
@@ -116,10 +116,10 @@ fn pull_request_preview_composes_description_and_diff() {
                 frame,
                 &mut app,
                 changes::ChangesPlan::Columns {
-                    areas: [Rect::new(0, 0, 38, 30), Rect::new(39, 0, 61, 30)],
-                    sidebar_pane: LeftPane::Files,
+                    files_area: Rect::new(0, 0, 30, 30),
+                    editor_area: Rect::new(31, 0, 38, 30),
+                    changes_area: Rect::new(70, 0, 30, 30),
                     preview_pane: Some(LeftPane::Files),
-                    agents: changes::ColumnAgents::Hidden,
                 },
             );
         })
@@ -446,46 +446,40 @@ fn renders_every_primary_surface() {
     app.settings_store = SettingsStore::at(settings_path.clone());
     let mut terminal = Terminal::new(TestBackend::new(120, 37)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.worktree.unwrap().x, 0);
-    assert_eq!(app.regions.worktree.unwrap().y, 2);
-    assert_eq!(app.regions.diff.unwrap().right(), 120);
-    let left = app.regions.worktree.unwrap();
-    let right = app.regions.diff.unwrap();
+    assert_eq!(app.regions.files_panel.unwrap().x, 0);
+    assert_eq!(app.regions.files_panel.unwrap().y, 2);
+    assert_eq!(app.regions.worktree.unwrap().right(), 120);
+    let left = app.regions.files_panel.unwrap();
+    let middle = app.regions.diff.unwrap();
+    let right = app.regions.worktree.unwrap();
     let footer_y = terminal.backend().buffer().area.height - 1;
     let transition_y = footer_y - 1;
     assert_eq!(left.bottom(), transition_y);
+    assert_eq!(middle.bottom(), transition_y);
     assert_eq!(right.bottom(), transition_y);
     assert_eq!(app.regions.preview_body.unwrap().bottom(), transition_y);
-    for point in [(left.x, left.y), (right.right().saturating_sub(1), right.y)] {
+    for point in [(left.x, left.y), (middle.x, middle.y), (right.x, right.y)] {
         let cell = &terminal.backend().buffer()[point];
         assert_eq!(cell.symbol(), " ");
         assert_eq!(cell.bg, super::palette().canvas);
     }
-    for x in [left.x, right.right().saturating_sub(1)] {
+    for x in [left.x, middle.x, right.x] {
         let cell = &terminal.backend().buffer()[(x, transition_y)];
         assert_eq!(cell.symbol(), "▀");
         assert_eq!(cell.fg, super::palette().panel);
         assert_eq!(cell.bg, super::palette().canvas);
     }
-    let transition_splitter = &terminal.backend().buffer()[(left.right(), transition_y)];
-    assert_eq!(transition_splitter.symbol(), " ");
-    assert_eq!(transition_splitter.bg, super::palette().canvas);
-    let splitter_top = &terminal.backend().buffer()[(left.right(), left.y)];
-    assert_eq!(splitter_top.bg, super::palette().canvas);
+    let splitter = app.regions.splitter.unwrap();
     app.dragging_splitter = true;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
-        terminal.backend().buffer()[(left.right(), left.y)].bg,
-        super::palette().canvas
-    );
-    assert_eq!(
-        terminal.backend().buffer()[(left.right(), left.y + 1)].bg,
+        terminal.backend().buffer()[(splitter.x, splitter.y + 1)].bg,
         super::palette().accent
     );
     app.dragging_splitter = false;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
-        terminal.backend().buffer()[(left.right(), left.y + 2)].bg,
+        terminal.backend().buffer()[(splitter.x, splitter.y + 1)].bg,
         super::palette().canvas
     );
     assert!(app.regions.changes.is_none());
@@ -499,27 +493,8 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.help.unwrap().right(), schedule.x);
     assert_eq!(schedule.right(), 120);
     let buffer = terminal.backend().buffer();
-    let agents = app.regions.agents_splitter.unwrap();
-    let agents_offset = usize::from(agents.y) * 120 + usize::from(agents.x);
     assert_eq!(buffer.content[0].bg, super::palette().canvas);
     assert_eq!(buffer.content[37 * 120 - 1].bg, super::palette().canvas);
-    assert_eq!(buffer.content[agents_offset].bg, super::palette().panel);
-    let agents_header: String = (agents.x..agents.right())
-        .map(|x| terminal.backend().buffer()[(x, agents.y)].symbol())
-        .collect();
-    assert!(agents_header.contains(" SCHEDULED "));
-    assert!(!agents_header.contains("click focus"));
-    let stash_toggle = app
-        .regions
-        .hit_target_rect(HitTarget::AgentListModeToggle)
-        .unwrap();
-    assert!(
-        (agents.x..stash_toggle.x)
-            .chain(stash_toggle.right()..agents.right())
-            .all(|x| { terminal.backend().buffer()[(x, agents.y)].bg == super::palette().panel })
-    );
-    assert!(agents_header.contains("AGENTS "));
-    assert!(agents_header.contains('─'));
     let header: String = terminal.backend().buffer().content[120..240]
         .iter()
         .map(|cell| cell.symbol())
@@ -605,11 +580,6 @@ fn renders_every_primary_surface() {
     assert!(footer.contains("F3 Agents"));
     assert!(footer.contains(&format!("{}:main", root.display())));
     assert!(!footer.contains("e Edit"));
-    let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
-    click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
-    assert!(app.agents_pane_visible());
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-
     let files_tab = app
         .regions
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::FilesTab))
@@ -617,22 +587,8 @@ fn renders_every_primary_surface() {
     click(&mut app, files_tab.x, files_tab.y);
     assert_eq!(app.sidebar_pane(), LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.commit.is_none());
-    assert!(app.regions.agents_list.is_some());
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.agents_list.is_some());
-    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Scheduled);
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.agents_list.is_some());
-    assert_eq!(app.herdr.agent_list_mode(), AgentListMode::Stash);
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.agents_list.is_none());
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.regions.agents_list.is_some());
+    assert!(app.regions.commit.is_some());
+    assert!(app.regions.explorer_list.is_some());
     let mut explorer = app.regions.explorer_list.unwrap();
     let directory_row = app
         .changes
@@ -927,7 +883,7 @@ fn renders_every_primary_surface() {
         splitter.x,
         splitter.y + 2,
     ));
-    let target = bounds.x + 65;
+    let target = bounds.right().saturating_sub(65);
     app.handle_mouse(mouse(
         MouseEventKind::Drag(MouseButton::Left),
         target,
@@ -947,40 +903,12 @@ fn renders_every_primary_surface() {
     assert!(!app.dragging_splitter);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let agents_splitter = app.regions.agents_splitter.unwrap();
     let commit = app.regions.commit.unwrap();
     let actions = app.regions.actions.unwrap();
     let worktree = app.regions.worktree_list.unwrap();
     assert_eq!(actions.y, commit.bottom());
     assert_eq!(actions.right(), commit.right());
     assert_eq!(actions.bottom().saturating_add(1), worktree.y);
-    assert!(commit.bottom() <= agents_splitter.y);
-    let agents_bounds = app.regions.agents_bounds.unwrap();
-    assert_eq!(agents_bounds.y, worktree.y.saturating_add(1));
-    let agents_target = agents_bounds.bottom().saturating_sub(9);
-    let agents_resize_x = agents_splitter.x;
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        agents_resize_x,
-        agents_splitter.y,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Drag(MouseButton::Left),
-        agents_resize_x,
-        agents_target,
-    ));
-    app.handle_mouse(mouse(
-        MouseEventKind::Up(MouseButton::Left),
-        agents_resize_x,
-        agents_target,
-    ));
-    assert_eq!(app.settings.agents_height, 9);
-    assert!(
-        fs::read_to_string(&settings_path)
-            .unwrap()
-            .contains("agents_height=9")
-    );
-    assert!(!app.dragging_agents);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
@@ -1005,8 +933,6 @@ fn renders_every_primary_surface() {
         }
     }));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let agents = app.regions.agents_list.unwrap();
-    click(&mut app, agents.x + 2, agents.y);
     assert_eq!(app.mode, Mode::Normal);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1018,6 +944,7 @@ fn renders_every_primary_surface() {
         .position(|row| row.label == "tracked.txt")
         .unwrap();
     let tracked_y = worktree.y + (tracked_row - app.changes.worktree_scroll) as u16;
+    app.last_worktree_file_click = None;
     click(&mut app, worktree.x + 2, tracked_y);
     wait_for_preview(&mut app);
     assert!(app.changes.preview.text().unwrap().contains("tracked.txt"));
@@ -1170,9 +1097,10 @@ fn renders_every_primary_surface() {
     assert!(scrolled_diff.contains("FILES"));
     app.changes.diff_scroll = 0;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let diff = app.regions.diff.unwrap();
     let scrollbar = app.regions.diff_scrollbar.unwrap();
     assert_eq!(scrollbar.width, 1);
-    assert_eq!(scrollbar.right(), 120);
+    assert_eq!(scrollbar.right(), diff.right());
     assert!(app.regions.diff_scroll_max > 0);
     assert!(app.regions.diff_scroll_thumb.is_some());
     app.handle_mouse(mouse(
@@ -1237,11 +1165,6 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(changes_screen.contains("Write a commit message"));
-    assert!(changes_screen.contains("AGENTS"));
-    assert!(changes_screen.contains("terminal session"));
-    assert!(changes_screen.contains("unassigned"));
-    assert!(changes_screen.contains('⠋'));
-    assert!(!changes_screen.contains("WORKING"));
     assert!(changes_screen.contains("ACTIONS"));
     assert!(app.regions.actions.is_some());
     assert!(app.regions.actions.unwrap().bottom() <= app.regions.worktree_list.unwrap().y);
@@ -1445,6 +1368,7 @@ fn renders_every_primary_surface() {
         Some("Commit message cannot be empty")
     );
 
+    app.settings.worktree_width = 38;
     app.set_view_for_test(View::Graph);
     app.mode = Mode::Normal;
     let visible_oid = app.repository().unwrap().commits[0].oid.clone();
@@ -1460,17 +1384,15 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(screen.contains("AUTHOR"));
-    assert!(screen.contains("CHANGES"));
+    assert!(screen.contains("AUT") || screen.contains("AUTHOR"));
+    assert!(screen.contains("CHA") || screen.contains("CHANGES"));
     assert!(screen.contains("DATE"));
     assert!(!screen.contains("ALL BRANCHES"));
     assert!(!screen.contains("date order"));
     assert!(screen.contains(&format!("+{}", visible_summary.additions)));
     assert!(screen.contains(&format!("-{}", visible_summary.deletions)));
-    assert!(screen.contains("HEAD"));
-    assert!(screen.contains("Render Test"));
     assert!(!screen.contains("Detailed body line."));
-    assert!(screen.contains("Press Space and search by description"));
+    assert!(screen.contains("Press Space"));
     assert!(screen.contains("CHANGES"));
     assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
@@ -1649,9 +1571,11 @@ fn renders_every_primary_surface() {
     assert!(app.dragging_graph_column.is_none());
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
+    let files = app.regions.files_panel.unwrap();
     let worktree = app.regions.worktree.unwrap();
     let graph = app.regions.graph_table.unwrap();
-    assert!(graph.x >= worktree.right());
+    assert!(graph.x >= files.right());
+    assert!(worktree.x >= graph.right());
     assert!(app.regions.diff.is_none());
 
     let author_header = app

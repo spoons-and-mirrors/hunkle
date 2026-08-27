@@ -21,14 +21,14 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
     let active = browser.active;
     let focus = browser.focus;
-    let wide = area.width >= 68;
+    let wide = area.width >= 45;
     let sections = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(area);
     let content = sections[0];
     let footer = sections[1];
 
     if wide {
         let columns = Layout::horizontal([
-            Constraint::Length(content.width.min(26)),
+            Constraint::Length(content.width.min(18)),
             Constraint::Length(1),
             Constraint::Min(20),
         ])

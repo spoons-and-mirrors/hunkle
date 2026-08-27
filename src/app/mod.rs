@@ -201,7 +201,7 @@ pub struct App {
     last_agent_click: Option<(AgentActivationTarget, Instant)>,
     pending_fullscreen_agent: Option<AgentActivationTarget>,
     pending_agent_preview_pane: Option<(String, Instant, u64)>,
-    last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
+    pub(crate) last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
     last_explorer_file_click: Option<(RepoPath, Instant)>,
     last_file_editor_click: Option<(Position, Instant)>,
     last_file_search_click: Option<(SearchDestination, Instant)>,

@@ -10,10 +10,10 @@ enum WorkspacePlan {
     Search,
     Single(SingleSurface),
     Columns {
-        areas: [Rect; 2],
-        sidebar_pane: LeftPane,
+        files: Rect,
+        detail_area: Rect,
+        changes: Rect,
         detail: DetailSurface,
-        agents: changes::ColumnAgents,
         companion: Option<Rect>,
     },
 }
@@ -28,6 +28,7 @@ enum SingleSurface {
 
 enum DetailSurface {
     Preview(LeftPane),
+    Agents,
     Graph,
 }
 
@@ -38,29 +39,30 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
         WorkspacePlan::Search => draw_search(frame, app, area),
         WorkspacePlan::Single(surface) => draw_single(frame, app, area, surface),
         WorkspacePlan::Columns {
-            areas,
-            sidebar_pane,
+            files,
+            detail_area,
+            changes,
             detail,
-            agents,
             companion,
         } => {
             let preview_pane = match detail {
-                DetailSurface::Preview(pane) => pane,
-                DetailSurface::Graph => app.changes.preview.pane(),
+                DetailSurface::Preview(pane) => Some(pane),
+                DetailSurface::Agents | DetailSurface::Graph => None,
             };
             changes::draw(
                 frame,
                 app,
                 changes::ChangesPlan::Columns {
-                    areas,
-                    sidebar_pane,
-                    preview_pane: matches!(detail, DetailSurface::Preview(_))
-                        .then_some(preview_pane),
-                    agents,
+                    files_area: files,
+                    editor_area: detail_area,
+                    changes_area: changes,
+                    preview_pane,
                 },
             );
-            if matches!(detail, DetailSurface::Graph) {
-                draw_graph(frame, app, areas[1]);
+            match detail {
+                DetailSurface::Graph => draw_graph(frame, app, detail_area),
+                DetailSurface::Agents => changes::draw_agents_panel(frame, app, detail_area),
+                DetailSurface::Preview(_) => {}
             }
             if let Some(area) = companion {
                 changes::draw_agent_preview_companion(frame, app, area);
@@ -74,7 +76,7 @@ impl WorkspacePlan {
         match self {
             Self::Single(SingleSurface::Agents) => true,
             Self::Columns {
-                agents: changes::ColumnAgents::Master | changes::ColumnAgents::MasterDetail,
+                detail: DetailSurface::Agents,
                 ..
             } if repository_present => true,
             _ => false,
@@ -107,7 +109,9 @@ fn plan(app: &App, area: Rect, profile: LayoutProfile) -> WorkspacePlan {
         return WorkspacePlan::Single(surface);
     }
 
-    let detail = if view == View::Graph && !app.graph_commit_open() {
+    let detail = if app.agents_pane_visible() {
+        DetailSurface::Agents
+    } else if view == View::Graph && !app.graph_commit_open() {
         DetailSurface::Graph
     } else {
         DetailSurface::Preview(preview_pane)
@@ -118,40 +122,31 @@ fn plan(app: &App, area: Rect, profile: LayoutProfile) -> WorkspacePlan {
         (app.herdr_available() && app.agent_preview_index().is_some())
             .then_some(app.settings.agent_preview_split_width),
     );
-    let agents = if !app.agents_available() || !app.agents_visible {
-        changes::ColumnAgents::Hidden
-    } else if app.agents_pane_visible() {
-        if columns.companion.is_some() {
-            changes::ColumnAgents::Master
-        } else {
-            changes::ColumnAgents::MasterDetail
-        }
-    } else {
-        changes::ColumnAgents::Master
-    };
     WorkspacePlan::Columns {
-        areas: columns.primary,
-        sidebar_pane,
+        files: columns.files,
+        detail_area: columns.detail,
+        changes: columns.changes,
         detail,
-        agents,
         companion: columns.companion,
     }
 }
 
 struct ColumnAreas {
-    primary: [Rect; 2],
+    files: Rect,
+    detail: Rect,
+    changes: Rect,
     companion: Option<Rect>,
 }
 
 fn column_areas(worktree_width: u16, area: Rect, companion_min_width: Option<u16>) -> ColumnAreas {
-    let left_width = worktree_width.clamp(24, area.width.saturating_sub(25));
-    let master = Rect::new(area.x, area.y, left_width, area.height);
-    let viewer = Rect::new(
-        master.right().saturating_add(1),
-        area.y,
-        area.width.saturating_sub(left_width).saturating_sub(1),
-        area.height,
-    );
+    let files_width = (worktree_width.saturating_sub(10)).clamp(20, area.width.saturating_sub(50).max(20));
+    let changes_width = (worktree_width.saturating_sub(2)).clamp(24, area.width.saturating_sub(files_width).saturating_sub(26).max(24));
+    let files = Rect::new(area.x, area.y, files_width, area.height);
+    let changes_x = area.right().saturating_sub(changes_width);
+    let changes = Rect::new(changes_x, area.y, changes_width, area.height);
+    let viewer_x = files.right().saturating_add(1);
+    let viewer_width = changes_x.saturating_sub(viewer_x).saturating_sub(1);
+    let viewer = Rect::new(viewer_x, area.y, viewer_width, area.height);
     let (detail, companion) = if companion_min_width.is_some_and(|width| viewer.width >= width) {
         let detail_width = viewer.width.saturating_sub(1) / 2;
         let detail = Rect::new(viewer.x, viewer.y, detail_width, viewer.height);
@@ -168,7 +163,9 @@ fn column_areas(worktree_width: u16, area: Rect, companion_min_width: Option<u16
         (viewer, None)
     };
     ColumnAreas {
-        primary: [master, detail],
+        files,
+        detail,
+        changes,
         companion,
     }
 }
@@ -235,53 +232,55 @@ mod tests {
 
     #[test]
     fn columns_respect_the_persisted_master_width() {
-        let areas = column_areas(31, Rect::new(2, 3, 100, 40), None).primary;
+        let columns = column_areas(31, Rect::new(2, 3, 100, 40), None);
 
-        assert_eq!(areas[0], Rect::new(2, 3, 31, 40));
-        assert_eq!(areas[1], Rect::new(34, 3, 68, 40));
+        assert_eq!(columns.files, Rect::new(2, 3, 21, 40));
+        assert_eq!(columns.detail, Rect::new(24, 3, 48, 40));
+        assert_eq!(columns.changes, Rect::new(73, 3, 29, 40));
     }
 
     #[test]
     fn wide_viewer_adds_an_equal_companion_column() {
-        let columns = column_areas(38, Rect::new(0, 0, 180, 40), Some(120));
+        let columns = column_areas(38, Rect::new(0, 0, 180, 40), Some(100));
 
-        assert_eq!(columns.primary[0], Rect::new(0, 0, 38, 40));
-        assert_eq!(columns.primary[1], Rect::new(39, 0, 70, 40));
-        assert_eq!(columns.companion, Some(Rect::new(110, 0, 70, 40)));
+        assert_eq!(columns.files, Rect::new(0, 0, 28, 40));
+        assert_eq!(columns.detail, Rect::new(29, 0, 56, 40));
+        assert_eq!(columns.companion, Some(Rect::new(86, 0, 57, 40)));
+        assert_eq!(columns.changes, Rect::new(144, 0, 36, 40));
     }
 
     #[test]
     fn companion_waits_for_usable_main_viewer_width() {
-        let columns = column_areas(38, Rect::new(0, 0, 158, 40), Some(120));
+        let columns = column_areas(38, Rect::new(0, 0, 158, 40), Some(100));
 
-        assert_eq!(columns.primary[1], Rect::new(39, 0, 119, 40));
+        assert_eq!(columns.detail, Rect::new(29, 0, 92, 40));
         assert_eq!(columns.companion, None);
     }
 
     #[test]
     fn companion_threshold_uses_the_configured_viewer_width() {
-        let columns = column_areas(38, Rect::new(0, 0, 158, 40), Some(100));
+        let columns = column_areas(38, Rect::new(0, 0, 158, 40), Some(80));
 
-        assert_eq!(columns.primary[1], Rect::new(39, 0, 59, 40));
-        assert_eq!(columns.companion, Some(Rect::new(99, 0, 59, 40)));
+        assert_eq!(columns.detail, Rect::new(29, 0, 45, 40));
+        assert_eq!(columns.companion, Some(Rect::new(75, 0, 46, 40)));
     }
 
     #[test]
     fn composition_declares_agent_card_interest() {
         let area = Rect::new(0, 0, 80, 40);
-        let columns = |agents| WorkspacePlan::Columns {
-            areas: [area, area],
-            sidebar_pane: LeftPane::Worktree,
-            detail: DetailSurface::Preview(LeftPane::Worktree),
-            agents,
+        let columns = |detail| WorkspacePlan::Columns {
+            files: area,
+            detail_area: area,
+            changes: area,
+            detail,
             companion: None,
         };
 
         assert!(WorkspacePlan::Single(SingleSurface::Agents).agent_cards_presented(false));
         assert!(!WorkspacePlan::Single(SingleSurface::AgentHistory).agent_cards_presented(false));
-        assert!(columns(changes::ColumnAgents::Master).agent_cards_presented(true));
-        assert!(!columns(changes::ColumnAgents::Master).agent_cards_presented(false));
-        assert!(!columns(changes::ColumnAgents::Hidden).agent_cards_presented(true));
+        assert!(columns(DetailSurface::Agents).agent_cards_presented(true));
+        assert!(!columns(DetailSurface::Agents).agent_cards_presented(false));
+        assert!(!columns(DetailSurface::Preview(LeftPane::Worktree)).agent_cards_presented(true));
         assert!(!WorkspacePlan::Search.agent_cards_presented(true));
     }
 }

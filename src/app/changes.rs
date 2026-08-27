@@ -33,6 +33,7 @@ pub enum LeftPane {
 pub(crate) enum ChangesHitTarget {
     WorktreeTab,
     FilesTab,
+    #[allow(dead_code)]
     AgentsTab,
     StageAll,
     WorktreeBackground(u64),
@@ -759,6 +760,7 @@ impl ChangesState {
         if row.section.is_some() && row.section_stats.is_none() {
             return false;
         }
+        self.pane = LeftPane::Worktree;
         self.clear_issue_preview();
         self.worktree_state.select(Some(index));
         self.preview.origin = PreviewOrigin::IdlePane(LeftPane::Worktree);
@@ -1084,13 +1086,14 @@ impl ChangesState {
     }
 
     fn is_current_worktree_target(&self, generation: u64) -> bool {
-        self.pane == LeftPane::Worktree && generation == self.worktree_rows_generation
+        generation == self.worktree_rows_generation
     }
 
     pub(super) fn select_explorer_row(&mut self, repo: &RepositoryData, index: usize) -> bool {
         if index >= self.explorer_rows().len() {
             return false;
         }
+        self.pane = LeftPane::Files;
         self.clear_issue_preview();
         self.pending_explorer_selection = None;
         self.pending_preview_line = None;
