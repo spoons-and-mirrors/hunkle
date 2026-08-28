@@ -554,7 +554,7 @@ fn renders_every_primary_surface() {
         .hit_target_rect(HitTarget::CommitMessageGenerate)
         .unwrap();
     assert_eq!(generate.width, 3);
-    assert_eq!(generate.x, app.regions.commit.unwrap().x);
+    assert_eq!(generate.right(), app.regions.commit.unwrap().right());
     assert_eq!(generate.y, app.regions.commit.unwrap().bottom());
     assert_eq!(
         terminal.backend().buffer()[(generate.x + 1, generate.y)].bg,
@@ -907,7 +907,7 @@ fn renders_every_primary_surface() {
     let actions = app.regions.actions.unwrap();
     let worktree = app.regions.worktree_list.unwrap();
     assert_eq!(actions.y, commit.bottom());
-    assert_eq!(actions.right(), commit.right());
+    assert_eq!(actions.x, commit.x + 1);
     assert_eq!(actions.bottom().saturating_add(1), worktree.y);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

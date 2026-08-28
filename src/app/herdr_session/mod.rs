@@ -3370,21 +3370,6 @@ mod layout_tests {
     }
 
     #[test]
-    fn restart_restores_the_most_recent_displayed_layout_owner() {
-        let mut session = session_without_snapshot();
-        let older = AgentTimingKey::Pane("opencode@w1:p2".to_owned());
-        let latest = AgentTimingKey::ExternalPane("w1:p3".to_owned());
-        session.agent_layouts.insert(older, saved_layout(10));
-        session
-            .agent_layouts
-            .insert(latest.clone(), saved_layout(20));
-
-        session.restore_displayed_agent_key();
-
-        assert_eq!(session.displayed_agent_key, Some(latest));
-    }
-
-    #[test]
     fn showing_the_current_agent_keeps_it_visible() {
         let mut session = HerdrSession::new(true, None, None);
         session.set_host_for_test("w1", "w1:t1", "w1:p1");

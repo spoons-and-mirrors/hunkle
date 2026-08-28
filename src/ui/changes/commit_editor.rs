@@ -125,7 +125,7 @@ pub(super) fn draw_commit_editor(
 pub(super) fn draw_actions(frame: &mut Frame<'_>, area: Rect, mode: Mode) -> Rect {
     let label = " x ACTIONS ▾ ";
     let width = (UnicodeWidthStr::width(label) as u16).min(area.width);
-    let button = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
+    let button = Rect::new(area.x.saturating_add(1), area.y, width, 1);
     fill(frame, area, palette().panel);
     frame.render_widget(
         Paragraph::new(Line::styled(
@@ -154,7 +154,7 @@ pub(super) fn draw_commit_message_action(
         return;
     }
 
-    let button = Rect::new(area.x, area.y, 3, 1);
+    let button = Rect::new(area.right().saturating_sub(3), area.y, 3, 1);
     app.regions
         .register_hit_target(HitTarget::CommitMessageGenerate, button);
     let hovered = app.hovered_hit_target == Some(HitTarget::CommitMessageGenerate);

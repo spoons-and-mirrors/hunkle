@@ -330,7 +330,7 @@ fn draw_master(
         app.regions.register_hit_target(
             HitTarget::Changes(ChangesHitTarget::StageAll),
             Rect::new(
-                staging_row.right().saturating_sub(stage_target_width),
+                staging_row.x.saturating_add(1),
                 staging_row.y,
                 stage_target_width,
                 1,
@@ -343,11 +343,8 @@ fn draw_master(
         "LOADING CHANGES…".to_owned()
     };
     let stage_padding = usize::from(staging_row.width)
-        .saturating_sub(UnicodeWidthStr::width(files_label.as_str()) + stage_width);
-    let mut staging = vec![
-        Span::styled(files_label, Style::default().fg(palette().faint)),
-        Span::raw(" ".repeat(stage_padding)),
-    ];
+        .saturating_sub(UnicodeWidthStr::width(files_label.as_str()) + stage_width + 1);
+    let mut staging = vec![Span::raw(" ")];
     if let Some(stage_label) = stage_label {
         staging.push(Span::styled(
             stage_label,
@@ -360,6 +357,11 @@ fn draw_master(
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    staging.push(Span::raw(" ".repeat(stage_padding)));
+    staging.push(Span::styled(
+        files_label,
+        Style::default().fg(palette().faint),
+    ));
     frame.render_widget(Paragraph::new(Line::from(staging)), staging_row);
     frame.render_widget(list, worktree_list);
 
