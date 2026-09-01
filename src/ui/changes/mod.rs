@@ -10,8 +10,8 @@ pub(super) use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) use crate::{
     app::{
-        AgentListMode, App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode,
-        PreviewOrigin, ScrollTarget, ShortcutAction, TextInput, View,
+        App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, PreviewOrigin,
+        ScrollTarget, ShortcutAction, TextInput, View,
     },
     git::{Change, Commit, DiffSummary},
     repo_path::{RepoPath, display_os_str},
@@ -19,7 +19,7 @@ pub(super) use crate::{
 };
 
 pub(super) use super::{
-    agents, fill, palette,
+    fill, palette,
     preview::{
         MediaRenderState, PreparedPreview, PreviewInput, take_inline_transmission,
         take_kitty_transmission,
@@ -50,12 +50,6 @@ pub(super) enum ChangesPlan {
         area: Rect,
         pane: LeftPane,
     },
-    SingleAgents {
-        area: Rect,
-    },
-    SingleAgentHistory {
-        area: Rect,
-    },
     Columns {
         files_area: Rect,
         editor_area: Rect,
@@ -64,41 +58,14 @@ pub(super) enum ChangesPlan {
     },
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum ColumnAgents {
-    Hidden,
-    #[allow(dead_code)]
-    Master,
-    #[allow(dead_code)]
-    MasterDetail,
-}
-
-impl ColumnAgents {
-    fn master_visible(self) -> bool {
-        !matches!(self, Self::Hidden)
-    }
-
-    fn detail_visible(self) -> bool {
-        matches!(self, Self::MasterDetail)
-    }
-}
-
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, plan: ChangesPlan) {
     match plan {
         ChangesPlan::SingleMaster { area, pane } => {
             app.reset_media_presentation();
-            draw_master(frame, app, area, pane, None, ColumnAgents::Hidden);
+            draw_master(frame, app, area, pane, None);
         }
         ChangesPlan::SinglePreview { area, pane } => {
             draw_detail(frame, app, area, pane, true);
-        }
-        ChangesPlan::SingleAgents { area } => {
-            app.reset_media_presentation();
-            draw_agents_panel(frame, app, area);
-        }
-        ChangesPlan::SingleAgentHistory { area } => {
-            app.reset_media_presentation();
-            draw_agent_history_pane(frame, app, area, true);
         }
         ChangesPlan::Columns {
             files_area,
@@ -106,7 +73,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, plan: ChangesPlan) {
             changes_area,
             preview_pane,
         } => {
-            draw_explorer_master(frame, app, files_area, false, ColumnAgents::Hidden);
+            draw_explorer_master(frame, app, files_area, false);
             if let Some(preview_pane) = preview_pane {
                 draw_detail(frame, app, editor_area, preview_pane, false);
             }
@@ -116,7 +83,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, plan: ChangesPlan) {
                 changes_area,
                 LeftPane::Worktree,
                 Some(editor_area),
-                ColumnAgents::Hidden,
             );
         }
     }
@@ -128,14 +94,16 @@ fn draw_master(
     area: Rect,
     pane: LeftPane,
     detail_area: Option<Rect>,
-    agents: ColumnAgents,
 ) {
     let single_panel = detail_area.is_none();
     let workspace = detail_area.map_or(area, |detail| {
         Rect::new(
             area.x.min(detail.x),
             area.y,
-            detail.right().max(area.right()).saturating_sub(area.x.min(detail.x)),
+            detail
+                .right()
+                .max(area.right())
+                .saturating_sub(area.x.min(detail.x)),
             area.height,
         )
     });
@@ -146,7 +114,8 @@ fn draw_master(
 
     app.regions.worktree = Some(area);
     app.regions.split_bounds = detail_area.map(|_| workspace);
-    app.regions.splitter = detail_area.map(|_| Rect::new(area.x.saturating_sub(1), area.y, 1, area.height));
+    app.regions.splitter =
+        detail_area.map(|_| Rect::new(area.x.saturating_sub(1), area.y, 1, area.height));
     frame.render_widget(Clear, area);
     app.regions.clear_targets_in(area);
     app.regions.worktree_list = None;
@@ -161,7 +130,7 @@ fn draw_master(
         );
     }
     if pane == LeftPane::Files {
-        draw_explorer_master(frame, app, area, single_panel, agents);
+        draw_explorer_master(frame, app, area, single_panel);
         return;
     }
 
@@ -194,11 +163,11 @@ fn draw_master(
         1,
     );
     let worktree_list_y = staging_row.bottom();
-    let worktree_list = layout_agents_pane(
-        app,
-        worktree_content,
+    let worktree_list = Rect::new(
+        worktree_content.x,
         worktree_list_y,
-        agents.master_visible(),
+        worktree_content.width,
+        worktree_content.bottom().saturating_sub(worktree_list_y),
     );
     app.regions.worktree_list = Some(worktree_list);
     app.regions
@@ -235,7 +204,6 @@ fn draw_master(
     let repo = app.session.data().expect("checked above");
     let local_workspace = repo.is_local();
     let details_ready = repo.details_ready;
-    let has_changes = !repo.changes.is_empty();
     let staged_count = repo.change_counts.0;
     let checkbox = if !repo.changes.is_empty() && staged_count == repo.changes.len() {
         "◉"
@@ -377,21 +345,7 @@ fn draw_master(
     } else {
         Some(draw_actions(frame, actions_row, app.mode))
     };
-    if agents.master_visible() {
-        draw_agents_section(frame, app);
-    }
-    draw_commit_editor(
-        frame,
-        app,
-        commit_area,
-        actions_row,
-        local_workspace,
-        has_changes,
-        details_ready,
-    );
-    if agents.detail_visible() {
-        draw_agent_history_pane(frame, app, worktree_content, single_panel);
-    }
+    draw_commit_editor(frame, app, commit_area, local_workspace, details_ready);
 }
 
 fn draw_detail(
@@ -711,35 +665,10 @@ fn draw_detail(
     draw_hunk_actions(frame, app, &layout, visible_hunks);
 }
 
-pub(super) fn draw_agents_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    fill(frame, area, palette().panel);
-    let content = area.inner(Margin::new(1, 0));
-    let tabs = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);
-    let header = Rect::new(content.x, tabs.bottom().saturating_add(1), content.width, 1);
-    let _ = layout_agents_pane(app, content, header.bottom(), true);
-    let list = Rect::new(
-        content.x,
-        header.bottom(),
-        content.width,
-        content.bottom().saturating_sub(header.bottom()),
-    );
-    app.regions.worktree = Some(area);
-    app.regions.agents_splitter = Some(header);
-    app.regions.agents_bounds = Some(list);
-    app.regions.agents_list = Some(list);
-    app.regions
-        .register_scroll_target(ScrollTarget::Agents, list);
-    draw_sidebar_tabs(frame, app, tabs, app.sidebar_pane());
-    draw_agents_section(frame, app);
-}
-
 fn clear_sidebar_regions(app: &mut App) {
     app.regions.worktree = None;
     app.regions.worktree_list = None;
     app.regions.explorer_list = None;
-    app.regions.agents_list = None;
-    app.regions.agents_splitter = None;
-    app.regions.agents_bounds = None;
     app.regions.commit = None;
     app.regions.actions = None;
     app.regions.files_add = None;
@@ -758,11 +687,7 @@ pub(super) fn draw_sidebar_tabs(
             ChangesHitTarget::WorktreeTab,
             pane == LeftPane::Worktree,
         ),
-        (
-            "FILES",
-            ChangesHitTarget::FilesTab,
-            pane == LeftPane::Files,
-        ),
+        ("FILES", ChangesHitTarget::FilesTab, pane == LeftPane::Files),
     ];
     let mut spans = Vec::new();
     let mut x = area.x;
@@ -800,242 +725,6 @@ pub(super) fn draw_sidebar_tabs(
         area.right().saturating_sub(trailing_x),
         area.height,
     )
-}
-
-pub(super) fn draw_agent_history_pane(
-    frame: &mut Frame<'_>,
-    app: &mut App,
-    content: Rect,
-    _single_panel: bool,
-) {
-    let bottom = app
-        .regions
-        .agents_splitter
-        .map_or(content.bottom(), |splitter| splitter.y);
-    let pane = Rect::new(
-        content.x,
-        content.y,
-        content.width,
-        bottom.saturating_sub(content.y),
-    );
-    frame.render_widget(Clear, pane);
-    fill(frame, pane, palette().panel);
-    app.regions.clear_targets_in(pane);
-    app.regions.worktree_list = None;
-    app.regions.explorer_list = None;
-    app.regions.commit = None;
-    app.regions.actions = None;
-    app.regions.files_add = None;
-    app.regions.files_root = None;
-
-    let header = Rect::new(
-        pane.x,
-        pane.y.saturating_add(1),
-        pane.width,
-        u16::from(pane.height > 1),
-    );
-    let tabs_trailing = draw_sidebar_tabs(frame, app, header, app.sidebar_pane());
-    let history_y = header.bottom().saturating_add(2);
-    let history = Rect::new(
-        pane.x,
-        history_y,
-        pane.width,
-        pane.bottom().saturating_sub(history_y),
-    );
-    let Some(index) = app.agents_pane_index() else {
-        frame.render_widget(
-            Paragraph::new("NO AGENT SELECTED")
-                .style(Style::default().fg(palette().faint))
-                .alignment(Alignment::Center),
-            history,
-        );
-        return;
-    };
-    draw_agent_history_content(frame, app, index, tabs_trailing, history);
-}
-
-pub(super) fn draw_agent_preview_companion(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    frame.render_widget(Clear, area);
-    fill(frame, area, palette().panel);
-    app.regions.clear_targets_in(area);
-    app.regions.agent_preview_companion = Some(area);
-    let content = area.inner(Margin::new(1, 0));
-    let header = Rect::new(
-        content.x,
-        content.y.saturating_add(1),
-        content.width,
-        u16::from(content.height > 1),
-    );
-    frame.render_widget(
-        Paragraph::new("AGENT PREVIEW").style(
-            Style::default()
-                .fg(palette().muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        header,
-    );
-    let history_y = header.bottom().saturating_add(2);
-    let history = Rect::new(
-        content.x,
-        history_y,
-        content.width,
-        content.bottom().saturating_sub(history_y),
-    );
-    let Some(index) = app.agent_preview_index() else {
-        frame.render_widget(
-            Paragraph::new("NO AGENT SELECTED")
-                .style(Style::default().fg(palette().faint))
-                .alignment(Alignment::Center),
-            history,
-        );
-        return;
-    };
-    draw_agent_history_content(frame, app, index, header, history);
-}
-
-fn draw_agent_history_content(
-    frame: &mut Frame<'_>,
-    app: &mut App,
-    index: usize,
-    view_area: Rect,
-    history: Rect,
-) {
-    let selected_message = app.agent_preview_message(index);
-    let transcript_scroll = app.agent_preview_transcript_scroll(index);
-    let expanded_requests = app.agent_preview_expanded_requests(index).to_vec();
-    let user_message_expanded = app.agent_preview_user_message_expanded(index);
-    let picker_open = app.agent_preview_picker_open();
-    let hovered = app.hovered_hit_target.clone();
-    let replies = &app.agent_preview.replies;
-    let active_reply = app.agent_preview.active_reply.as_ref();
-    let (targets, scroll_max, scroll, animation_presented) = agents::draw_history(
-        frame,
-        &app.herdr,
-        &mut app.agent_preview.presentation,
-        index,
-        selected_message,
-        transcript_scroll,
-        &expanded_requests,
-        user_message_expanded,
-        picker_open,
-        hovered,
-        &app.agent_preview.prompt,
-        app.agent_preview.prompt_focused,
-        app.agent_preview.prompt_error.as_deref(),
-        app.agent_preview.prompt_delivery,
-        app.agent_preview.view,
-        replies,
-        active_reply,
-        view_area,
-        true,
-        None,
-        2,
-        1,
-        false,
-        history,
-    );
-    app.regions.agent_animation_presented |= animation_presented;
-    for (target, rect) in targets {
-        app.regions.register_hit_target(target, rect);
-    }
-    if let Some(key) = app.herdr.agent_key(index) {
-        app.regions.register_scroll_target_with_state(
-            ScrollTarget::AgentTranscript(key),
-            history,
-            scroll,
-            scroll_max,
-        );
-    }
-    if let Some((offset, neighbor)) = app.agent_preview_message_swipe(index) {
-        let label = format!("message {}", neighbor + 1);
-        slide_message_preview(frame, history, offset, &label);
-    }
-}
-
-pub(super) fn slide_message_preview(frame: &mut Frame<'_>, area: Rect, offset: i32, label: &str) {
-    let maximum = i32::from(area.width / 2);
-    let offset = offset.clamp(-maximum, maximum);
-    if offset == 0 || area.is_empty() {
-        return;
-    }
-    let width = usize::from(area.width);
-    let mut page = Vec::with_capacity(width.saturating_mul(usize::from(area.height)));
-    for y in area.y..area.bottom() {
-        for x in area.x..area.right() {
-            page.push(frame.buffer_mut().cell((x, y)).cloned().unwrap());
-        }
-    }
-
-    frame.render_widget(Clear, area);
-    fill(frame, area, palette().surface_alt);
-    let reveal_width = u16::try_from(offset.unsigned_abs())
-        .unwrap_or(u16::MAX)
-        .min(area.width);
-    let reveal = if offset > 0 {
-        Rect::new(area.x, area.y, reveal_width, area.height)
-    } else {
-        Rect::new(
-            area.right().saturating_sub(reveal_width),
-            area.y,
-            reveal_width,
-            area.height,
-        )
-    };
-    let direction = if offset > 0 { "‹" } else { "›" };
-    let label = if offset > 0 {
-        format!("{direction} {label}")
-    } else {
-        format!("{label} {direction}")
-    };
-    frame.render_widget(
-        Paragraph::new(truncate_width(&label, usize::from(reveal.width)))
-            .alignment(Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(palette().accent)
-                    .bg(palette().surface_alt)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        Rect::new(
-            reveal.x,
-            reveal.y.saturating_add(reveal.height / 2),
-            reveal.width,
-            u16::from(reveal.height > 0),
-        ),
-    );
-
-    for source_y in 0..usize::from(area.height) {
-        for source_x in 0..width {
-            let destination_x = i32::try_from(source_x).unwrap_or(i32::MAX) + offset;
-            let Ok(destination_x) = usize::try_from(destination_x) else {
-                continue;
-            };
-            if destination_x >= width {
-                continue;
-            }
-            let source = page[source_y * width + source_x].clone();
-            if let Some(cell) = frame.buffer_mut().cell_mut((
-                area.x
-                    .saturating_add(u16::try_from(destination_x).unwrap_or(u16::MAX)),
-                area.y
-                    .saturating_add(u16::try_from(source_y).unwrap_or(u16::MAX)),
-            )) {
-                *cell = source;
-            }
-        }
-    }
-
-    let edge_x = if offset > 0 {
-        area.x.saturating_add(reveal_width)
-    } else {
-        area.right().saturating_sub(reveal_width).saturating_sub(1)
-    };
-    let edge = if offset > 0 { "▌" } else { "▐" };
-    for y in area.y..area.bottom() {
-        if let Some(cell) = frame.buffer_mut().cell_mut((edge_x, y)) {
-            cell.set_symbol(edge).set_fg(palette().accent);
-        }
-    }
 }
 
 #[cfg(test)]

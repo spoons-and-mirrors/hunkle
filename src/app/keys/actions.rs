@@ -82,55 +82,10 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_herdr_prompt(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc
-            || self
-                .settings
-                .shortcuts
-                .matches(ShortcutAction::OpenHerdr, key)
-        {
-            self.mode = Mode::Normal;
-            return;
-        }
-        if self.herdr_prompt.sending {
-            return;
-        }
-
-        match key.code {
-            KeyCode::Enter => self.herdr_prompt.submit(),
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.herdr_prompt.input.clear();
-                self.herdr_prompt.error = None;
-            }
-            KeyCode::Backspace
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.herdr_prompt.input.delete_word();
-                self.herdr_prompt.error = None;
-            }
-            _ => {
-                if self.herdr_prompt.input.handle_edit_key(key) == EditOutcome::Edited {
-                    self.herdr_prompt.error = None;
-                }
-            }
-        }
-    }
-
     pub(crate) fn open_actions(&mut self) {
         if self.require_git_repository() {
             self.mode = Mode::ActionMenu;
         }
-    }
-
-    pub(crate) fn open_herdr_prompt(&mut self) {
-        if !self.herdr_available() || self.herdr.is_background_attached() {
-            self.notice = Some("Herdr command prompt is only available inside Herdr".to_owned());
-            return;
-        }
-        self.herdr_prompt.open();
-        self.mode = Mode::HerdrPrompt;
     }
 
     pub(crate) fn open_git_command(&mut self) {

@@ -21,26 +21,7 @@ pub(crate) fn styled_markdown(
     width: usize,
     wrap_tables: bool,
 ) -> Vec<Line<'static>> {
-    styled_markdown_with_breaks(markdown, width, wrap_tables, false, true)
-}
-
-pub(crate) fn styled_markdown_preserving_breaks(
-    markdown: &str,
-    width: usize,
-    wrap_tables: bool,
-) -> Vec<Line<'static>> {
-    styled_markdown_with_breaks(markdown, width, wrap_tables, true, false)
-}
-
-fn styled_markdown_with_breaks(
-    markdown: &str,
-    width: usize,
-    wrap_tables: bool,
-    preserve_soft_breaks: bool,
-    show_code_language: bool,
-) -> Vec<Line<'static>> {
-    let mut renderer =
-        MarkdownRenderer::new(width, wrap_tables, preserve_soft_breaks, show_code_language);
+    let mut renderer = MarkdownRenderer::new(width, wrap_tables);
     for event in Parser::new_ext(markdown, markdown_options()) {
         if renderer.at_line_limit() {
             renderer.truncated = true;
@@ -104,8 +85,6 @@ struct TableState {
 struct MarkdownRenderer {
     width: usize,
     wrap_tables: bool,
-    preserve_soft_breaks: bool,
-    show_code_language: bool,
     lines: Vec<Line<'static>>,
     spans: Vec<Span<'static>>,
     styles: Vec<Style>,
@@ -119,17 +98,10 @@ struct MarkdownRenderer {
 }
 
 impl MarkdownRenderer {
-    fn new(
-        width: usize,
-        wrap_tables: bool,
-        preserve_soft_breaks: bool,
-        show_code_language: bool,
-    ) -> Self {
+    fn new(width: usize, wrap_tables: bool) -> Self {
         Self {
             width,
             wrap_tables,
-            preserve_soft_breaks,
-            show_code_language,
             lines: Vec::new(),
             spans: Vec::new(),
             styles: Vec::new(),
@@ -162,13 +134,7 @@ impl MarkdownRenderer {
                     .fg(palette().yellow)
                     .bg(palette().surface_alt),
             ),
-            Event::SoftBreak => {
-                if self.preserve_soft_breaks {
-                    self.finish_line(false);
-                } else {
-                    self.push_text(" ");
-                }
-            }
+            Event::SoftBreak => self.push_text(" "),
             Event::HardBreak => self.finish_line(false),
             Event::Rule => {
                 self.finish_line(false);
@@ -236,8 +202,7 @@ impl MarkdownRenderer {
                     }
                     CodeBlockKind::Indented => Language::Generic,
                 };
-                if self.show_code_language
-                    && let CodeBlockKind::Fenced(language) = kind
+                if let CodeBlockKind::Fenced(language) = kind
                     && !language.is_empty()
                 {
                     self.push_styled(
@@ -1125,53 +1090,6 @@ mod tests {
         assert!(text.contains("A strong link (https://example.com)."));
         assert!(text.contains("* one"));
         assert!(text.contains("fn main() {}"));
-    }
-
-    #[test]
-    fn can_preserve_soft_breaks_while_styling_inline_markdown() {
-        let lines = styled_markdown_preserving_breaks("**bold**\n`code`", 80, true);
-
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[0].content, "bold");
-        assert!(lines[0].spans[0].style != Style::default());
-        assert!(
-            lines[1]
-                .spans
-                .iter()
-                .any(|span| span.style.fg == Some(palette().yellow))
-        );
-    }
-
-    #[test]
-    fn syntax_highlights_fenced_code_without_a_language_caption() {
-        let lines = styled_markdown_preserving_breaks(
-            "```rust\nfn preview() {\n    println!(\"works\");\n}\n```",
-            80,
-            false,
-        );
-        let text = lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-
-        assert!(!text.contains("rust"), "{text:?}");
-        assert!(
-            lines
-                .iter()
-                .flat_map(|line| &line.spans)
-                .any(|span| { span.content == "fn" && span.style.fg == Some(palette().purple) })
-        );
-        assert!(
-            lines.iter().flat_map(|line| &line.spans).any(|span| {
-                span.content == "preview" && span.style.fg == Some(palette().orange)
-            })
-        );
-        assert!(
-            lines.iter().flat_map(|line| &line.spans).any(|span| {
-                span.content == "\"works\"" && span.style.fg == Some(palette().green)
-            })
-        );
     }
 
     #[test]

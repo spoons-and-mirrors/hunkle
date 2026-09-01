@@ -12,43 +12,28 @@ pub(super) use ratatui::{
 pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::app::{
-    AgentActivityPreview, AgentListMode, AgentPaneDirection, App, ChangesHitTarget,
-    CommitMessageGenerator, ExplorerHitTarget, FOOTER_MARQUEE_PAUSE, FOOTER_MARQUEE_STEP,
-    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HerdrPaneLayout,
-    HerdrPaneRect, HerdrSession, HitTarget, LeftPane, Mode, SchedulerHitTarget, ScrollTarget,
-    Settings, SettingsHitTarget, SettingsPage, SettingsStore, ShortcutAction, SqliteFocus,
-    StashedAgent, View,
+    App, ChangesHitTarget, ExplorerHitTarget, FOOTER_MARQUEE_PAUSE, FOOTER_MARQUEE_STEP,
+    GraphColumn, GraphHitTarget, HeaderPickerItem, HeaderPickerKind, HitTarget, LeftPane, Mode,
+    ScrollTarget, Settings, SettingsHitTarget, SettingsPage, SettingsStore, ShortcutAction,
+    SqliteFocus, View,
 };
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    BranchPickerStep, changes, display_path, draw, marquee_window, notice_is_error, palette,
-    selected_display_range, text, wrapped_editor_cursor,
+    BranchPickerStep, changes, display_path, draw, marquee_window, palette, selected_display_range,
+    text, wrapped_editor_cursor,
 };
 
-mod agents;
 mod editor;
 mod files;
 mod header;
 mod media;
-mod scheduler;
 mod sqlite;
 
 fn assert_black_underlay(terminal: &Terminal<TestBackend>) {
     let background = &terminal.backend().buffer()[(0, 0)];
     assert_eq!(background.bg, Color::Rgb(0, 0, 0));
     assert!(background.modifier.contains(Modifier::DIM));
-}
-
-fn enable_herdr(app: &mut App) {
-    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
-        "result": { "snapshot": {
-            "workspaces": [],
-            "agents": [],
-            "panes": []
-        } }
-    }));
-    app.agents_visible = true;
 }
 
 fn screen_text(terminal: &Terminal<TestBackend>) -> String {
@@ -141,16 +126,6 @@ fn footer_abbreviates_paths_under_home() {
     };
     let path = std::path::PathBuf::from(home).join("project");
     assert_eq!(display_path(&path), "~/project");
-}
-
-#[test]
-fn successful_stash_notice_is_not_an_error_when_the_session_title_contains_error() {
-    assert!(!notice_is_error(
-        "Stashed agent Sleev gateway launchctl bootstrap error"
-    ));
-    assert!(notice_is_error(
-        "Could not stash agent: Sleev gateway launchctl bootstrap error"
-    ));
 }
 
 #[test]
@@ -318,7 +293,7 @@ fn narrow_explorer_splitter_drag_stays_owned_by_the_modal() {
 }
 
 #[test]
-fn standalone_hides_herdr_surfaces() {
+fn repository_only_surfaces_keep_the_norm_creation_action() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -326,26 +301,15 @@ fn standalone_hides_herdr_surfaces() {
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let screen = screen_text(&terminal);
-    assert!(app.regions.agents_splitter.is_none());
     assert!(
         app.regions
             .hit_target_rect(HitTarget::HeaderAgent)
-            .is_none()
+            .is_some()
     );
-    assert!(!screen.contains("F3 Agents"));
 
     app.mode = Mode::Help;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen = screen_text(&terminal);
-    for label in [
-        "Toggle fullscreen",
-        "Show Agents",
-        "Send to Herdr",
-        "Cycle agents",
-    ] {
-        assert!(!screen.contains(label));
-    }
     assert!(screen.contains("Start agent in Norm"));
 
     app.mode = Mode::Settings;
@@ -354,37 +318,10 @@ fn standalone_hides_herdr_surfaces() {
     let screen = screen_text(&terminal);
     assert!(screen.contains("Media protocol"));
     assert!(screen.contains("Editor command"));
-    for label in [
-        "Cross-workspace agents",
-        "Agent harness",
-        "Agent card click",
-        "Agent preview split",
-        "Agent time",
-        "Agent timing history",
-    ] {
-        assert!(!screen.contains(label));
-    }
-    for target in [
-        SettingsHitTarget::CrossWorkspaceAgents,
-        SettingsHitTarget::AgentHarness,
-        SettingsHitTarget::AgentCardClick,
-        SettingsHitTarget::AgentPreviewSplit,
-        SettingsHitTarget::AgentTime,
-        SettingsHitTarget::ClearAgentTimings,
-    ] {
-        assert!(
-            app.regions
-                .hit_target_rect(HitTarget::Settings(target))
-                .is_none()
-        );
-    }
-
     app.settings_state.page = SettingsPage::Shortcuts;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen = screen_text(&terminal);
     assert!(screen.contains("Show Changes"));
-    assert!(!screen.contains("Show Agents"));
-    assert!(!screen.contains("Send to Herdr pane"));
 }
 
 #[test]
@@ -434,14 +371,12 @@ fn renders_every_primary_surface() {
     fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
-    enable_herdr(&mut app);
     app.settings.graph_lane_width = 0;
     app.settings.graph_description_width = 0;
     app.settings.graph_changes_width = 12;
     app.settings.graph_date_width = 12;
     app.settings.graph_author_width = 16;
     app.settings.graph_commit_width = 7;
-    app.commit_message_generator = CommitMessageGenerator::ready_for_test();
     let settings_path = root.join(".git/hunkle-test-config");
     app.settings_store = SettingsStore::at(settings_path.clone());
     let mut terminal = Terminal::new(TestBackend::new(120, 37)).unwrap();
@@ -491,12 +426,7 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.graph.unwrap().y, 36);
     assert_eq!(app.regions.help.unwrap().y, 36);
     assert!(app.regions.graph.unwrap().x > 0);
-    let schedule = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderSchedule)
-        .unwrap();
-    assert_eq!(app.regions.help.unwrap().right(), schedule.x);
-    assert_eq!(schedule.right(), 120);
+    assert!(app.regions.help.unwrap().right() <= 120);
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer.content[0].bg, super::palette().canvas);
     assert_eq!(buffer.content[37 * 120 - 1].bg, super::palette().canvas);
@@ -546,33 +476,8 @@ fn renders_every_primary_surface() {
         .map(|position| terminal.backend().buffer()[position].symbol())
         .collect();
     assert!(commit_text.contains("Write a commit message"));
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::CommitMessageGenerate)
-            .is_some()
-    );
     click(&mut app, graph_toggle.x, graph_toggle.y);
     assert_eq!(app.view(), View::Changes);
-
-    let generate = app
-        .regions
-        .hit_target_rect(HitTarget::CommitMessageGenerate)
-        .unwrap();
-    assert_eq!(generate.width, 3);
-    assert_eq!(generate.right(), app.regions.commit.unwrap().right());
-    assert_eq!(generate.y, app.regions.commit.unwrap().bottom());
-    assert_eq!(
-        terminal.backend().buffer()[(generate.x + 1, generate.y)].bg,
-        super::palette().raised
-    );
-    app.handle_mouse(mouse(MouseEventKind::Moved, generate.x + 1, generate.y));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(
-        terminal.backend().buffer()[(generate.x + 1, generate.y)].bg,
-        super::palette().accent
-    );
-    app.handle_mouse(mouse(MouseEventKind::Moved, 0, 0));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
@@ -582,7 +487,6 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(footer.contains("F3 Agents"));
     assert!(footer.contains(&format!("{}:main", root.display())));
     assert!(!footer.contains("e Edit"));
     let files_tab = app
@@ -916,28 +820,6 @@ fn renders_every_primary_surface() {
     assert_eq!(actions.bottom().saturating_add(1), worktree.y);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
-        "result": {
-            "snapshot": {
-                "workspaces": [],
-                "agents": [{
-                    "agent": "opencode",
-                    "agent_status": "idle",
-                    "focused": true,
-                    "pane_id": "w1:p1",
-                    "tab_id": "w1:t1",
-                    "workspace_id": "w1"
-                }],
-                "panes": [{
-                    "pane_id": "w1:p1",
-                    "tab_id": "w1:t1",
-                    "workspace_id": "w1",
-                    "focused": true
-                }]
-            }
-        }
-    }));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.mode, Mode::Normal);
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1136,27 +1018,6 @@ fn renders_every_primary_surface() {
     );
     app.changes.diff_wrap = true;
     app.changes.diff_scroll = usize::MAX;
-    app.herdr = HerdrSession::ready_for_test(&serde_json::json!({
-        "result": {
-            "snapshot": {
-                "workspaces": [],
-                "agents": [{
-                    "agent": "opencode",
-                    "agent_status": "working",
-                    "focused": true,
-                    "pane_id": "w1:p1",
-                    "tab_id": "w1:t1",
-                    "workspace_id": "w1"
-                }],
-                "panes": [{
-                    "pane_id": "w1:p1",
-                    "tab_id": "w1:t1",
-                    "workspace_id": "w1",
-                    "focused": true
-                }]
-            }
-        }
-    }));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.changes.preview_presentation.is_windowed());
     assert!(app.changes.diff_scroll > usize::from(u16::MAX));
@@ -1902,15 +1763,6 @@ fn renders_every_primary_surface() {
     assert!(settings_screen.contains("Auto-fetch remotes"));
     assert!(settings_screen.contains("Fetch interval"));
     assert!(settings_screen.contains("Format on save"));
-    assert!(settings_screen.contains("Cross-workspace agents"));
-    assert!(settings_screen.contains("Agent harness"));
-    assert!(settings_screen.contains("Agent card click"));
-    assert!(settings_screen.contains("Layout · Ctrl preview"));
-    assert!(settings_screen.contains("Agent preview split"));
-    assert!(settings_screen.contains("120 cols"));
-    assert!(settings_screen.contains("Agent time"));
-    assert!(settings_screen.contains("Latest loop"));
-    assert!(settings_screen.contains("Agent timing history"));
     assert!(settings_screen.contains("Media protocol"));
     assert!(settings_screen.contains("Auto"));
     assert!(settings_screen.contains("Sixel quality"));
@@ -1921,12 +1773,10 @@ fn renders_every_primary_surface() {
         .regions
         .hit_target_rect(HitTarget::Settings(SettingsHitTarget::AutoFetch))
         .unwrap();
-    let auto_switch_x = auto_fetch.right().saturating_sub(6);
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(auto_switch_x + 1, auto_fetch.y)].symbol(), "◼");
-    assert!(
-        (auto_switch_x..auto_switch_x + 5)
-            .all(|x| buffer[(x, auto_fetch.y)].bg == super::palette().faint)
+    assert_eq!(
+        buffer[(auto_fetch.x, auto_fetch.y)].bg,
+        super::palette().selected
     );
     assert!(
         app.regions
@@ -1939,41 +1789,15 @@ fn renders_every_primary_surface() {
             .unwrap()
     };
     let format_on_save_setting = setting_rect(SettingsHitTarget::FormatOnSave);
-    let cross_workspace_setting = setting_rect(SettingsHitTarget::CrossWorkspaceAgents);
-    let agent_harness_setting = setting_rect(SettingsHitTarget::AgentHarness);
-    let agent_card_click_setting = setting_rect(SettingsHitTarget::AgentCardClick);
-    let agent_preview_split_setting = setting_rect(SettingsHitTarget::AgentPreviewSplit);
-    let agent_time_setting = setting_rect(SettingsHitTarget::AgentTime);
-    let clear_agent_timings_setting = setting_rect(SettingsHitTarget::ClearAgentTimings);
     let media_preview_setting = setting_rect(SettingsHitTarget::MediaPreview);
     let sixel_quality_setting = setting_rect(SettingsHitTarget::SixelQuality);
     let editor_setting = setting_rect(SettingsHitTarget::Editor);
-    assert_eq!(cross_workspace_setting.y, format_on_save_setting.y + 4);
-    assert_eq!(agent_harness_setting.y, cross_workspace_setting.y + 2);
-    assert_eq!(agent_card_click_setting.y, agent_harness_setting.y + 2);
-    assert_eq!(
-        agent_preview_split_setting.y,
-        agent_card_click_setting.y + 2
-    );
-    assert_eq!(agent_time_setting.y, agent_preview_split_setting.y + 2);
-    assert_eq!(clear_agent_timings_setting.y, agent_time_setting.y + 2);
-    assert_eq!(media_preview_setting.y, clear_agent_timings_setting.y + 2);
+    assert_eq!(media_preview_setting.y, format_on_save_setting.y + 4);
     assert_eq!(sixel_quality_setting.y, media_preview_setting.y + 2);
     assert_eq!(editor_setting.y, sixel_quality_setting.y + 2);
-    let harness_switch_x = agent_harness_setting.right().saturating_sub(6);
-    assert_eq!(
-        buffer[(harness_switch_x + 1, agent_harness_setting.y)].symbol(),
-        "◼"
-    );
-    assert!(
-        (harness_switch_x..harness_switch_x + 5)
-            .all(|x| buffer[(x, agent_harness_setting.y)].bg == super::palette().faint)
-    );
 
     let mut short_terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
-    short_terminal
-        .draw(|frame| draw(frame, &mut app))
-        .unwrap();
+    short_terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let overlay = app
         .regions
         .hit_target_rect(HitTarget::Settings(SettingsHitTarget::Overlay))
@@ -1988,62 +1812,6 @@ fn renders_every_primary_surface() {
         .unwrap();
     assert!(quality.bottom() < overlay.bottom());
     assert!(editor.bottom() < overlay.bottom());
-
-    app.settings_state.page = SettingsPage::OpenCode;
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let opencode_screen = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(opencode_screen.contains("OpenCode"));
-    assert!(opencode_screen.contains("opencode/big-pickle"));
-    assert!(opencode_screen.contains("Reasoning"));
-    assert!(opencode_screen.contains("Max"));
-    let model_row = app
-        .regions
-        .hit_target_rect(HitTarget::Settings(SettingsHitTarget::OpenCodeModel))
-        .unwrap();
-    click(&mut app, model_row.x + 1, model_row.y);
-    assert!(app.settings_state.opencode_model_input.is_some());
-    app.settings_state.opencode_model_input = None;
-
-    app.settings_state.page = SettingsPage::Discord;
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let discord_screen = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(discord_screen.contains("DISCORD WEBHOOKS"));
-    assert!(discord_screen.contains("No webhooks configured"));
-    let webhook_row = app
-        .regions
-        .hit_target_rect(HitTarget::Settings(SettingsHitTarget::DiscordWebhook))
-        .unwrap();
-    click(&mut app, webhook_row.x + 1, webhook_row.y);
-    assert!(app.settings_state.discord_webhook_editor.is_some());
-    app.settings_state
-        .discord_webhook_editor
-        .as_mut()
-        .unwrap()
-        .url
-        .set("https://discord.com/api/webhooks/123456/token");
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let masked_screen = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(!masked_screen.contains("discord.com"));
-    assert!(!masked_screen.contains("token"));
-    app.settings_state.discord_webhook_editor = None;
 
     app.settings_state.page = SettingsPage::Shortcuts;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

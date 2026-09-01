@@ -4,14 +4,9 @@ pub(super) fn draw_commit_editor(
     frame: &mut Frame<'_>,
     app: &mut App,
     commit_area: Rect,
-    actions_row: Rect,
     local_workspace: bool,
-    has_changes: bool,
     details_ready: bool,
 ) {
-    if !local_workspace && details_ready {
-        draw_commit_message_action(frame, actions_row, app, has_changes);
-    }
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().panel);
     let commit_content = commit_area.inner(Margin::new(1, 0));
@@ -142,48 +137,6 @@ pub(super) fn draw_actions(frame: &mut Frame<'_>, area: Rect, mode: Mode) -> Rec
         button,
     );
     button
-}
-
-pub(super) fn draw_commit_message_action(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &mut App,
-    has_changes: bool,
-) {
-    if app.commit_running() || !app.commit_message_available() || !has_changes || area.width < 3 {
-        return;
-    }
-
-    let button = Rect::new(area.right().saturating_sub(3), area.y, 3, 1);
-    app.regions
-        .register_hit_target(HitTarget::CommitMessageGenerate, button);
-    let hovered = app.hovered_hit_target == Some(HitTarget::CommitMessageGenerate);
-    let running = app.commit_message_running();
-    let style = if hovered && !running {
-        Style::default()
-            .fg(palette().canvas)
-            .bg(palette().accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(if running {
-                palette().yellow
-            } else {
-                palette().accent
-            })
-            .bg(palette().raised)
-            .add_modifier(Modifier::BOLD)
-    };
-    frame.render_widget(
-        Paragraph::new(if running {
-            format!(" {} ", app.commit_message_spinner())
-        } else {
-            " ✦ ".to_owned()
-        })
-        .alignment(Alignment::Center)
-        .style(style),
-        button,
-    );
 }
 
 pub(super) fn commit_message_text(message: &str) -> Text<'static> {

@@ -301,41 +301,6 @@ impl IssueCatalog {
         self.issues()?.iter().find(|issue| issue.number == number)
     }
 
-    #[cfg(test)]
-    pub(crate) fn seed_pull_request_for_test(
-        &mut self,
-        root: PathBuf,
-        number: u64,
-        repository_url: String,
-        oid: String,
-    ) {
-        self.root = Some(root);
-        self.issues.insert(
-            self.scope,
-            vec![Issue {
-                repository: "owner/repository".to_owned(),
-                repository_url,
-                number,
-                title: "Preview this pull request".to_owned(),
-                body: "Pull request description".to_owned(),
-                author: Some("octocat".to_owned()),
-                labels: Vec::new(),
-                pull_request: true,
-                state: "OPEN".to_owned(),
-                is_draft: false,
-                changed_files: Some(1),
-                additions: Some(1),
-                deletions: Some(0),
-                base_ref_name: Some("main".to_owned()),
-                base_ref_oid: Some(oid.clone()),
-                head_ref_name: Some("topic".to_owned()),
-                head_ref_oid: Some(oid),
-                merged_at: None,
-                updated_at: "2026-01-01T00:00:00Z".to_owned(),
-            }],
-        );
-    }
-
     pub(crate) fn loading(&self) -> bool {
         self.pending.contains(&self.scope)
     }

@@ -186,11 +186,6 @@ impl PreviewLoader {
             .store(self.generation, Ordering::Relaxed);
     }
 
-    #[cfg(test)]
-    pub(super) fn generation_for_test(&self) -> u64 {
-        self.generation
-    }
-
     pub(super) fn request_file(&mut self, root: &Path, path: RepoPath) {
         self.request(root, Task::File(path));
     }

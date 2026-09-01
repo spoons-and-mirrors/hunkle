@@ -1,44 +1,36 @@
 pub(super) use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 pub(super) use unicode_width::UnicodeWidthStr;
 
 pub(super) use crate::app::{
-    ACTION_ITEMS, ActionsState, AgentPaneDirection, App, CommandLineSource, CommandStatus,
-    DiscordWebhookConfig, DiscordWebhookEditor, Explorer, ExplorerHitTarget, FileDialog,
-    FileDialogKind, FileNameAction, FileSearch, FileSearchHitTarget, FileSearchRow, HerdrPrompt,
-    HitTarget, LayoutProfile, PickerAction, PickerEntry, ScheduledRunStatus,
-    SchedulerDestinationCard, SchedulerField, SchedulerHitTarget, SchedulerSurface, ScrollTarget,
-    SearchScope, Settings, SettingsHitTarget, SettingsPage, ShortcutAction, Shortcuts,
-    SurroundingEntry, TextInput,
+    ACTION_ITEMS, ActionsState, CommandLineSource, CommandStatus, Explorer, ExplorerHitTarget,
+    FileDialog, FileDialogKind, FileNameAction, FileSearch, FileSearchHitTarget, FileSearchRow,
+    HitTarget, PickerAction, PickerEntry, SearchScope, Settings, SettingsHitTarget, SettingsPage,
+    ShortcutAction, Shortcuts, SurroundingEntry,
 };
 
 pub(super) use super::{
-    fill, location_picker_capacity, location_picker_row, palette, text::word_wrapped_height,
-    text_input_lines, truncate_start_width, truncate_width,
+    fill, palette, text::word_wrapped_height, truncate_start_width, truncate_width,
 };
 
 mod actions;
 pub(super) use actions::*;
-mod agent_preview;
-pub(super) use agent_preview::*;
 mod editor;
 pub(super) use editor::*;
 mod explorer;
 pub(super) use explorer::*;
 mod help;
 pub(super) use help::*;
-mod herdr;
-pub(super) use herdr::*;
+#[allow(dead_code)]
+mod layout_configuration;
 mod settings;
 pub(super) use settings::*;
-mod scheduler;
-pub(super) use scheduler::draw_scheduler;
 
 pub(super) struct FileSearchRegions {
     pub(super) overlay: Rect,

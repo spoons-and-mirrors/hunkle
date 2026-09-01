@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::{
     filesystem::same_path,
-    git::{self, Branch, LinkedWorktree, WorktreeSignature},
+    git::{self, LinkedWorktree, WorktreeSignature},
 };
 
 mod known_repositories;
@@ -37,8 +37,6 @@ pub(crate) struct LinkedWorktreeRepository {
     pub(crate) common_dir: PathBuf,
     pub(crate) label: String,
     pub(crate) worktrees: Vec<LinkedWorktree>,
-    pub(crate) branches: Vec<Branch>,
-    pub(crate) branch_error: Option<String>,
     pub(crate) error: Option<String>,
 }
 
@@ -48,44 +46,6 @@ pub(crate) struct RepositoryPickerItem {
     pub(crate) label: String,
     pub(crate) stats: Option<(u64, u64)>,
     pub(crate) branch: Option<String>,
-}
-
-pub(crate) struct AgentDestinationMetadata<'a> {
-    repository: &'a LinkedWorktreeRepository,
-    worktree: &'a LinkedWorktree,
-}
-
-impl<'a> AgentDestinationMetadata<'a> {
-    pub(crate) fn repository(&self) -> &'a str {
-        &self.repository.label
-    }
-
-    pub(crate) fn repository_root(&self) -> &'a Path {
-        self.repository
-            .worktrees
-            .iter()
-            .find(|worktree| worktree.is_main)
-            .unwrap_or(self.worktree)
-            .path
-            .as_path()
-    }
-
-    pub(crate) fn branch(&self) -> &'a str {
-        self.worktree
-            .branch
-            .as_deref()
-            .map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch))
-            .unwrap_or("detached HEAD")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LinkedWorktreeCandidate {
-    pub(crate) path: PathBuf,
-}
-
-pub(crate) struct LinkedWorktreeObservation {
-    pub(crate) candidates: Vec<LinkedWorktreeCandidate>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -116,32 +76,10 @@ impl LinkedWorktreeCatalogSnapshot {
             .and_then(|name| name.to_str())
             .map(str::to_owned)
     }
-
-    fn agent_destination(&self, path: &Path) -> Option<AgentDestinationMetadata<'_>> {
-        self.repositories.iter().find_map(|repository| {
-            repository
-                .worktrees
-                .iter()
-                .find(|worktree| same_path(&worktree.path, path))
-                .map(|worktree| AgentDestinationMetadata {
-                    repository,
-                    worktree,
-                })
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(repositories: Vec<LinkedWorktreeRepository>) -> Self {
-        Self {
-            loading: false,
-            repositories,
-        }
-    }
 }
 
 struct InventoryCompletion {
     generation: u64,
-    branches_loaded: bool,
     topology_epoch: u64,
     repositories: Vec<LinkedWorktreeRepository>,
     discovered: Vec<PathBuf>,
@@ -228,10 +166,8 @@ struct PersistenceCompletion {
 #[derive(Clone, PartialEq, Eq)]
 struct CatalogRefreshKey {
     known: Vec<PathBuf>,
-    candidates: Vec<LinkedWorktreeCandidate>,
     stats_roots: Vec<PathBuf>,
     topology_epoch: u64,
-    load_branches: bool,
 }
 
 #[derive(Clone)]
@@ -244,7 +180,6 @@ struct CatalogRefreshRequest {
 #[derive(Clone)]
 struct CachedRepository {
     topology_epoch: u64,
-    branches_loaded: bool,
     checked_at: Instant,
     repository: LinkedWorktreeRepository,
 }
@@ -265,19 +200,15 @@ impl CatalogRefreshFlight {
 #[derive(Default)]
 pub(crate) struct LinkedWorktreeCatalogPoll {
     pub(crate) changed: bool,
-    pub(crate) branches_changed: bool,
     pub(crate) notice: Option<String>,
-    pub(crate) worktree_creation: Option<Result<PathBuf, String>>,
 }
 
 pub(crate) struct LinkedWorktreeCatalog {
     snapshot: LinkedWorktreeCatalogSnapshot,
-    candidates: Vec<LinkedWorktreeCandidate>,
     relevant_common_dirs: Vec<PathBuf>,
     store: KnownRepositoryStore,
     generation: u64,
     topology_epoch: u64,
-    branches_requested: bool,
     inventory_cache: HashMap<PathBuf, CachedRepository>,
     active_refresh: Option<CatalogRefreshFlight>,
     pending_refresh: Option<CatalogRefreshRequest>,
@@ -297,9 +228,6 @@ pub(crate) struct LinkedWorktreeCatalog {
     active_persistence_generation: Option<u64>,
     pending_persistence: Option<(u64, known_repositories::PersistenceRequest)>,
     deferred_notice: Option<String>,
-    worktree_sender: Sender<Result<PathBuf, String>>,
-    worktree_receiver: Receiver<Result<PathBuf, String>>,
-    creating_worktree: bool,
     #[cfg(test)]
     stats_loader: TestStatsLoader,
 }
@@ -309,7 +237,6 @@ impl LinkedWorktreeCatalog {
         let (sender, receiver) = mpsc::channel();
         let (stats_sender, stats_receiver) = mpsc::channel();
         let (persistence_sender, persistence_receiver) = mpsc::channel();
-        let (worktree_sender, worktree_receiver) = mpsc::channel();
         let store = KnownRepositoryStore::new(store_path);
         let stats = store
             .recent
@@ -322,12 +249,10 @@ impl LinkedWorktreeCatalog {
             .collect();
         Self {
             snapshot: LinkedWorktreeCatalogSnapshot::default(),
-            candidates: Vec::new(),
             relevant_common_dirs: Vec::new(),
             store,
             generation: 0,
             topology_epoch: 0,
-            branches_requested: false,
             inventory_cache: HashMap::new(),
             active_refresh: None,
             pending_refresh: None,
@@ -347,9 +272,6 @@ impl LinkedWorktreeCatalog {
             active_persistence_generation: None,
             pending_persistence: None,
             deferred_notice: None,
-            worktree_sender,
-            worktree_receiver,
-            creating_worktree: false,
             #[cfg(test)]
             stats_loader: Arc::new(|root, previous| {
                 git::load_change_line_counts(root, previous).map_err(|error| error.to_string())
@@ -359,10 +281,6 @@ impl LinkedWorktreeCatalog {
 
     pub(crate) fn repository(&self, common_dir: &Path) -> Option<&LinkedWorktreeRepository> {
         self.snapshot.repository(common_dir)
-    }
-
-    pub(crate) fn snapshot(&self) -> &LinkedWorktreeCatalogSnapshot {
-        &self.snapshot
     }
 
     pub(crate) fn change_stats(&self, root: &Path) -> Option<ChangeStats> {
@@ -440,10 +358,6 @@ impl LinkedWorktreeCatalog {
         self.snapshot.worktree_name(path)
     }
 
-    pub(crate) fn agent_destination(&self, path: &Path) -> Option<AgentDestinationMetadata<'_>> {
-        self.snapshot.agent_destination(path)
-    }
-
     pub(crate) fn recent_repository_picker_items(&self) -> Vec<RepositoryPickerItem> {
         let repositories = self
             .snapshot
@@ -502,37 +416,6 @@ impl LinkedWorktreeCatalog {
         Ok(())
     }
 
-    pub(crate) fn observe_herdr(&mut self, observation: LinkedWorktreeObservation) -> bool {
-        let mut seen = HashSet::new();
-        let candidates = observation
-            .candidates
-            .into_iter()
-            .filter(|candidate| seen.insert(candidate.path.clone()))
-            .collect::<Vec<_>>();
-        let candidates_changed = self.candidates != candidates;
-        self.candidates = candidates;
-        candidates_changed
-    }
-
-    pub(crate) fn create_worktree_for_branch(
-        &mut self,
-        repository: PathBuf,
-        branch: String,
-        remote: bool,
-    ) -> Result<(), String> {
-        if self.creating_worktree {
-            return Err("A linked worktree is already being created".to_owned());
-        }
-        self.creating_worktree = true;
-        let sender = self.worktree_sender.clone();
-        thread::spawn(move || {
-            let result = git::create_worktree_for_branch(&repository, &branch, remote)
-                .map_err(|error| error.to_string());
-            let _ = sender.send(result);
-        });
-        Ok(())
-    }
-
     pub(crate) fn refresh(&mut self) {
         let request = self.refresh_request();
         if let Some(active) = &self.active_refresh {
@@ -549,13 +432,6 @@ impl LinkedWorktreeCatalog {
         self.refresh();
     }
 
-    pub(crate) fn request_branches(&mut self) {
-        if !self.branches_requested {
-            self.branches_requested = true;
-            self.refresh();
-        }
-    }
-
     fn refresh_request(&self) -> CatalogRefreshRequest {
         let prioritized_stats_roots = recent_git_roots(self.store.recent.clone());
         let mut stats_roots = prioritized_stats_roots.clone();
@@ -563,10 +439,8 @@ impl LinkedWorktreeCatalog {
         CatalogRefreshRequest {
             key: CatalogRefreshKey {
                 known: self.store.repositories.clone(),
-                candidates: self.candidates.clone(),
                 stats_roots,
                 topology_epoch: self.topology_epoch,
-                load_branches: self.branches_requested,
             },
             prioritized_stats_roots,
             cached_repositories: self.inventory_cache.clone(),
@@ -577,9 +451,7 @@ impl LinkedWorktreeCatalog {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         let known = request.key.known.clone();
-        let candidates = request.key.candidates.clone();
         let stats_roots = request.prioritized_stats_roots;
-        let load_branches = request.key.load_branches;
         let cached_repositories = request.cached_repositories;
         let topology_epoch = request.key.topology_epoch;
         self.active_refresh = Some(CatalogRefreshFlight {
@@ -592,101 +464,26 @@ impl LinkedWorktreeCatalog {
         self.snapshot.loading = true;
         thread::spawn(move || {
             let mut common_dirs = known;
-            let mut seen = common_dirs.iter().cloned().collect::<HashSet<_>>();
-            let mut candidate_ranks = HashMap::new();
-            let mut candidate_paths = HashMap::<PathBuf, Vec<PathBuf>>::new();
-            let mut relevant = Vec::new();
-            let mut discovered = Vec::new();
-            for (rank, candidate) in candidates.into_iter().enumerate() {
-                let Ok(common_dir) = git::common_git_dir(&candidate.path) else {
-                    continue;
-                };
-                if !candidate_ranks.contains_key(&common_dir) {
-                    candidate_ranks.insert(common_dir.clone(), rank);
-                    relevant.push(common_dir.clone());
-                }
-                candidate_paths
-                    .entry(common_dir.clone())
-                    .or_default()
-                    .push(candidate.path);
-                if seen.insert(common_dir.clone()) {
-                    discovered.push(common_dir.clone());
-                    common_dirs.push(common_dir);
-                }
-            }
-            common_dirs.sort_by_cached_key(|path| {
-                (
-                    !candidate_ranks.contains_key(path),
-                    candidate_ranks.get(path).copied().unwrap_or(usize::MAX),
-                    path.to_string_lossy().to_lowercase(),
-                )
-            });
+            let discovered = Vec::new();
+            common_dirs.sort_by_cached_key(|path| path.to_string_lossy().to_lowercase());
             let mut pruned = Vec::new();
             let repositories = common_dirs
                 .into_iter()
                 .filter_map(|common_dir| {
-                    let is_candidate = candidate_ranks.contains_key(&common_dir);
-                    let cached = cached_repositories.get(&common_dir).filter(|cached| {
-                        cached_repository_is_reusable(
-                            cached,
-                            topology_epoch,
-                            load_branches,
-                            candidate_paths.get(&common_dir).map(Vec::as_slice),
-                        )
-                    });
+                    let cached = cached_repositories
+                        .get(&common_dir)
+                        .filter(|cached| cached_repository_is_reusable(cached, topology_epoch));
                     if let Some(cached) = cached {
-                        let mut repository = cached.repository.clone();
-                        if load_branches && !cached.branches_loaded {
-                            let branch_root = repository
-                                .worktrees
-                                .iter()
-                                .find(|worktree| worktree.is_main && !worktree.is_bare)
-                                .or_else(|| {
-                                    repository
-                                        .worktrees
-                                        .iter()
-                                        .find(|worktree| !worktree.is_bare)
-                                });
-                            (repository.branches, repository.branch_error) = branch_root
-                                .map_or_else(
-                                    || (Vec::new(), Some("No usable worktree".to_owned())),
-                                    |worktree| match git::repository_branches(&worktree.path) {
-                                        Ok(branches) => (branches, None),
-                                        Err(error) => (Vec::new(), Some(error.to_string())),
-                                    },
-                                );
-                        }
-                        return Some(repository);
+                        return Some(cached.repository.clone());
                     }
                     match git::list_worktrees(&common_dir) {
-                        Ok(worktrees) => {
-                            let (branches, branch_error) = if load_branches {
-                                let branch_root = worktrees
-                                    .iter()
-                                    .find(|worktree| worktree.is_main && !worktree.is_bare)
-                                    .or_else(|| {
-                                        worktrees.iter().find(|worktree| !worktree.is_bare)
-                                    });
-                                branch_root.map_or_else(
-                                    || (Vec::new(), Some("No usable worktree".to_owned())),
-                                    |worktree| match git::repository_branches(&worktree.path) {
-                                        Ok(branches) => (branches, None),
-                                        Err(error) => (Vec::new(), Some(error.to_string())),
-                                    },
-                                )
-                            } else {
-                                (Vec::new(), None)
-                            };
-                            Some(LinkedWorktreeRepository {
-                                label: repository_label(&common_dir, &worktrees),
-                                common_dir,
-                                worktrees,
-                                branches,
-                                branch_error,
-                                error: None,
-                            })
-                        }
-                        Err(_) if !is_candidate && !common_dir.exists() => {
+                        Ok(worktrees) => Some(LinkedWorktreeRepository {
+                            label: repository_label(&common_dir, &worktrees),
+                            common_dir,
+                            worktrees,
+                            error: None,
+                        }),
+                        Err(_) if !common_dir.exists() => {
                             pruned.push(common_dir);
                             None
                         }
@@ -694,8 +491,6 @@ impl LinkedWorktreeCatalog {
                             label: repository_label(&common_dir, &[]),
                             common_dir,
                             worktrees: Vec::new(),
-                            branches: Vec::new(),
-                            branch_error: None,
                             error: Some(error.to_string()),
                         }),
                     }
@@ -703,12 +498,11 @@ impl LinkedWorktreeCatalog {
                 .collect();
             let _ = sender.send(InventoryCompletion {
                 generation,
-                branches_loaded: load_branches,
                 topology_epoch,
                 repositories,
                 discovered,
                 pruned,
-                relevant,
+                relevant: Vec::new(),
             });
         });
         self.request_stats_for_refresh(stats_roots, generation, Instant::now());
@@ -735,7 +529,6 @@ impl LinkedWorktreeCatalog {
                             repository.common_dir.clone(),
                             CachedRepository {
                                 topology_epoch: completion.topology_epoch,
-                                branches_loaded: completion.branches_loaded,
                                 checked_at: Instant::now(),
                                 repository: repository.clone(),
                             },
@@ -751,7 +544,6 @@ impl LinkedWorktreeCatalog {
                 continue;
             }
             self.snapshot.repositories = completion.repositories;
-            result.branches_changed = completion.branches_loaded;
             self.relevant_common_dirs = completion.relevant;
             match self.store.reconcile(
                 completion.discovered,
@@ -857,10 +649,6 @@ impl LinkedWorktreeCatalog {
             } else {
                 self.snapshot.loading = false;
             }
-        }
-        if let Ok(completion) = self.worktree_receiver.try_recv() {
-            self.creating_worktree = false;
-            result.worktree_creation = Some(completion);
         }
         result
     }
@@ -1101,24 +889,10 @@ fn repository_label(common_dir: &Path, worktrees: &[LinkedWorktree]) -> String {
         .unwrap_or_else(|| common_dir.display().to_string())
 }
 
-fn cached_repository_is_reusable(
-    cached: &CachedRepository,
-    topology_epoch: u64,
-    load_branches: bool,
-    candidate_paths: Option<&[PathBuf]>,
-) -> bool {
+fn cached_repository_is_reusable(cached: &CachedRepository, topology_epoch: u64) -> bool {
     cached.topology_epoch == topology_epoch
         && cached.repository.error.is_none()
-        && (load_branches || cached.checked_at.elapsed() <= INVENTORY_CACHE_TTL)
-        && candidate_paths.is_none_or(|paths| {
-            paths.iter().all(|path| {
-                cached
-                    .repository
-                    .worktrees
-                    .iter()
-                    .any(|worktree| same_path(&worktree.path, path))
-            })
-        })
+        && cached.checked_at.elapsed() <= INVENTORY_CACHE_TTL
 }
 
 fn workspace_label(root: &Path) -> String {

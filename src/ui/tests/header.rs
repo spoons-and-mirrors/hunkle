@@ -5,7 +5,6 @@ use crate::app::WorktreePickerStep;
 fn local_workspace_keeps_the_agent_action() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
-    enable_herdr(&mut app);
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -25,7 +24,6 @@ fn mobile_header_cards_scroll_horizontally_without_losing_taps() {
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
     let mut app = App::new(root.to_path_buf());
-    enable_herdr(&mut app);
     let mut terminal = Terminal::new(TestBackend::new(49, 24)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -34,13 +32,6 @@ fn mobile_header_cards_scroll_horizontally_without_losing_taps() {
         .hit_target_rect(HitTarget::HeaderRepository)
         .unwrap();
     assert!(app.regions.header_scroll_max > 0);
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::HeaderSchedule)
-            .is_none()
-    );
-    assert!(!screen_text(&terminal).contains("SCHEDULE F4"));
-
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
         repository.x,
@@ -728,7 +719,6 @@ fn header_cards_open_pickers_and_checkout_branches() {
     run_git(root, &["commit", "-m", "feature change"]);
 
     let mut app = App::new(root.to_path_buf());
-    enable_herdr(&mut app);
     let mut terminal = Terminal::new(TestBackend::new(121, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -891,16 +881,16 @@ fn header_cards_open_pickers_and_checkout_branches() {
 
     click(&mut app, agent.x, agent.y);
     assert_eq!(app.header_picker.kind, None);
-    assert_eq!(app.herdr_prompt.agent_destination(), None);
     assert_eq!(
         app.notice.as_deref(),
         Some("No running Norm TUI is available")
     );
-    assert!(!app.herdr_prompt.cancel_pending_agent());
 
     app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
-    assert_eq!(app.herdr_prompt.agent_destination(), None);
-    assert!(!app.herdr_prompt.cancel_pending_agent());
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("No running Norm TUI is available")
+    );
 
     click(&mut app, diff.x, diff.y);
     assert_eq!(app.mode, Mode::Normal);
@@ -1256,209 +1246,4 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|x| terminal.backend().buffer()[(x, linked_card.y)].symbol())
         .collect::<String>();
     assert_eq!(linked_text, " linked ");
-}
-
-#[test]
-fn agent_pane_picker_preserves_tab_geometry_and_excludes_hunkle() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join("repository");
-    fs::create_dir(&root).unwrap();
-    run_git(&root, &["init", "-b", "main"]);
-    let mut app = App::new(root.clone());
-    wait_for(&mut app, |app| {
-        app.repository()
-            .is_some_and(|repository| repository.details_ready)
-    });
-    app.herdr_prompt.show_agent_pane_picker(
-        root,
-        "w0:p2".to_owned(),
-        HerdrPaneLayout {
-            workspace_id: "w0".to_owned(),
-            x: 0,
-            y: 0,
-            width: 120,
-            height: 40,
-            panes: vec![
-                HerdrPaneRect {
-                    pane_id: "w0:p1".to_owned(),
-                    x: 0,
-                    y: 0,
-                    width: 72,
-                    height: 40,
-                },
-                HerdrPaneRect {
-                    pane_id: "w0:p2".to_owned(),
-                    x: 72,
-                    y: 0,
-                    width: 48,
-                    height: 20,
-                },
-                HerdrPaneRect {
-                    pane_id: "w0:p3".to_owned(),
-                    x: 72,
-                    y: 20,
-                    width: 48,
-                    height: 20,
-                },
-            ],
-        },
-    );
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-
-    assert_eq!(
-        app.regions
-            .hit_target_rect(HitTarget::AgentPanePickerOverlay),
-        Some(ratatui::layout::Rect::new(0, 2, 100, 28))
-    );
-    let left = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPane(0))
-        .unwrap();
-    let bottom_right = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPane(2))
-        .unwrap();
-    assert!(left.width > bottom_right.width);
-    assert!(left.height > bottom_right.height);
-    assert_eq!(left.right(), bottom_right.x);
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::AgentPane(1))
-            .is_none()
-    );
-    let up = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Up))
-        .unwrap();
-    let left_edge = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Left))
-        .unwrap();
-    assert_eq!(up.width, left.width.saturating_sub(1));
-    assert_eq!(up.height, left.height.saturating_sub(1).div_ceil(5));
-    assert_eq!(left_edge.height, left.height.saturating_sub(1));
-    assert_eq!(left_edge.width, left.width.saturating_sub(1).div_ceil(5));
-    for index in 0..3 {
-        for direction in [
-            AgentPaneDirection::Up,
-            AgentPaneDirection::Down,
-            AgentPaneDirection::Left,
-            AgentPaneDirection::Right,
-        ] {
-            let edge = app
-                .regions
-                .hit_target_rect(HitTarget::AgentPaneSplit(index, direction))
-                .unwrap();
-            let point = Position::new(
-                edge.x.saturating_add(edge.width / 2),
-                edge.y.saturating_add(edge.height / 2),
-            );
-            assert_eq!(
-                app.regions.hit_target_at(point),
-                Some(HitTarget::AgentPaneSplit(index, direction))
-            );
-        }
-    }
-    let screen: String = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(screen.contains("START AGENT"));
-    assert!(screen.contains("repository"));
-    assert!(screen.contains("basetree"));
-    assert!(screen.contains("main"));
-    assert!(screen.contains("HUNKLE"));
-    assert!(screen.contains("SELECT"));
-    assert!(screen.contains("ENTER ACTIVATE"));
-    assert!(!screen.contains("w0:p1"));
-    assert!(!screen.contains("w0:p3"));
-    assert!(!screen.contains("w0:t1"));
-    let repository = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderRepository)
-        .unwrap();
-    let worktree = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderWorktrees)
-        .unwrap();
-    let branch = app
-        .regions
-        .hit_target_rect(HitTarget::HeaderBranch)
-        .unwrap();
-    assert!(app.regions.hit_target_rect(HitTarget::HeaderDiff).is_none());
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::HeaderAgent)
-            .is_none()
-    );
-    assert_eq!((repository.y, worktree.y, branch.y), (1, 1, 1));
-    assert_eq!(
-        terminal.backend().buffer()[(repository.x - 1, repository.y)].fg,
-        super::palette().yellow
-    );
-    assert_eq!(
-        terminal.backend().buffer()[(worktree.x - 1, worktree.y)].fg,
-        super::palette().orange
-    );
-    assert_eq!(
-        terminal.backend().buffer()[(branch.x - 1, branch.y)].fg,
-        super::palette().accent
-    );
-
-    assert_eq!(
-        app.herdr_prompt.agent_pane_focus(),
-        Some(HitTarget::AgentPane(0))
-    );
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(
-        app.herdr_prompt.agent_pane_focus(),
-        Some(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Down))
-    );
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let down = app
-        .regions
-        .hit_target_rect(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Down))
-        .unwrap();
-    assert_eq!(
-        terminal.backend().buffer()[(down.x + down.width / 2, down.y + down.height / 2)].symbol(),
-        "+"
-    );
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(
-        app.herdr_prompt.agent_pane_focus(),
-        Some(HitTarget::AgentPane(2))
-    );
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(
-        app.herdr_prompt.agent_pane_focus(),
-        Some(HitTarget::AgentPaneSplit(2, AgentPaneDirection::Up))
-    );
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(
-        app.herdr_prompt.agent_pane_focus(),
-        Some(HitTarget::AgentPane(1))
-    );
-    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    assert_eq!(
-        app.herdr_prompt.agent_pane_focus(),
-        Some(HitTarget::AgentPaneSplit(0, AgentPaneDirection::Left))
-    );
-
-    click(&mut app, repository.x, repository.y);
-    assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::Repositories));
-    assert!(app.herdr_prompt.agent_pane_picker_open());
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::HeaderPickerOverlay)
-            .is_some()
-    );
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.header_picker.kind, None);
-    assert!(app.herdr_prompt.agent_pane_picker_open());
 }

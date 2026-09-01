@@ -1,12 +1,6 @@
 use super::*;
 
-pub(crate) fn draw_help(
-    frame: &mut Frame<'_>,
-    shortcuts: &Shortcuts,
-    herdr_available: bool,
-    herdr_embedded: bool,
-    agents_available: bool,
-) {
+pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
     let area = centered_min(frame.area(), 72, 0, 58, 24);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
@@ -49,7 +43,7 @@ pub(crate) fn draw_help(
         Constraint::Percentage(50),
     ])
     .split(body);
-    let mut navigation = vec![
+    let navigation = vec![
         Line::styled(
             "NAVIGATION",
             Style::default()
@@ -70,6 +64,11 @@ pub(crate) fn draw_help(
         shortcut_help(shortcuts, ShortcutAction::OpenSettings, "Settings"),
         shortcut_help(shortcuts, ShortcutAction::OpenActions, "Git actions"),
         shortcut_help(shortcuts, ShortcutAction::OpenGitCommand, "Git command"),
+        shortcut_help(
+            shortcuts,
+            ShortcutAction::OpenNormTab,
+            "Start agent in Norm",
+        ),
         shortcut_pair_help(
             shortcuts,
             ShortcutAction::EditFile,
@@ -92,33 +91,7 @@ pub(crate) fn draw_help(
             "Toggle preview wrapping",
         ),
     ];
-    if herdr_embedded {
-        navigation.insert(
-            1,
-            shortcut_help(
-                shortcuts,
-                ShortcutAction::ToggleFullscreen,
-                "Toggle fullscreen",
-            ),
-        );
-        navigation.push(shortcut_help(
-            shortcuts,
-            ShortcutAction::OpenHerdr,
-            "Send to Herdr pane below",
-        ));
-    }
-    if agents_available {
-        navigation.insert(
-            4,
-            shortcut_help(shortcuts, ShortcutAction::ShowAgents, "Show Agents"),
-        );
-    }
-    navigation.push(shortcut_help(
-        shortcuts,
-        ShortcutAction::StartAgent,
-        "Start agent in Norm",
-    ));
-    let mut worktree = vec![
+    let worktree = vec![
         Line::styled(
             "CHANGES / FILES",
             Style::default()
@@ -158,16 +131,6 @@ pub(crate) fn draw_help(
         help_line("Esc", "Close / unfocus"),
         shortcut_help(shortcuts, ShortcutAction::Quit, "Quit"),
     ];
-    if herdr_available {
-        worktree.insert(
-            4,
-            shortcut_help(
-                shortcuts,
-                ShortcutAction::ToggleAgents,
-                "Cycle agents / stash / off",
-            ),
-        );
-    }
     frame.render_widget(Paragraph::new(navigation), columns[0]);
     frame.render_widget(Paragraph::new(worktree), columns[2]);
     frame.render_widget(

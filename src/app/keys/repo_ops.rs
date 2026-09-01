@@ -93,17 +93,17 @@ impl App {
         self.start_repository_open(path, false);
     }
 
-    pub(crate) fn queue_workspace_restore(&mut self, path: PathBuf) {
-        self.pending_workspace_restore = Some(path);
-        self.try_start_workspace_restore();
+    pub(crate) fn queue_workspace_open(&mut self, path: PathBuf) {
+        self.pending_workspace_open = Some(path);
+        self.try_start_workspace_open();
     }
 
-    pub(crate) fn try_start_workspace_restore(&mut self) {
-        let Some(path) = self.pending_workspace_restore.as_ref() else {
+    pub(crate) fn try_start_workspace_open(&mut self) {
+        let Some(path) = self.pending_workspace_open.as_ref() else {
             return;
         };
         // The loaded repository still names the source while a speculative open is in flight.
-        // Wait for that open before deciding whether the restore is already satisfied.
+        // Wait for that open before deciding whether the queued request is already satisfied.
         if self.session.open_running() || !self.session.can_start_open() {
             return;
         }
@@ -111,16 +111,16 @@ impl App {
             .repository()
             .is_some_and(|repository| same_path(&repository.root, path))
         {
-            self.pending_workspace_restore = None;
+            self.pending_workspace_open = None;
             return;
         }
         let path = self
-            .pending_workspace_restore
+            .pending_workspace_open
             .as_ref()
-            .expect("checked pending workspace restore")
+            .expect("checked pending workspace open")
             .clone();
         if self.start_repository_open(path, false) {
-            self.pending_workspace_restore = None;
+            self.pending_workspace_open = None;
         }
     }
 

@@ -107,11 +107,7 @@ fn sixel_cache_key(
     }
 }
 
-fn encode_fast_sixel(
-    image: &DynamicImage,
-    size: Size,
-    is_tmux: bool,
-) -> Result<Sixel, ImageError> {
+fn encode_fast_sixel(image: &DynamicImage, size: Size, is_tmux: bool) -> Result<Sixel, ImageError> {
     let rgba = image.to_rgba8();
     let options = icy_sixel::EncodeOptions {
         max_colors: 256,
@@ -276,10 +272,7 @@ struct SixelCacheEntry {
 }
 
 impl MediaProtocolState {
-    fn new(
-        request_sender: Sender<MediaWorkerRequest>,
-        latest_request: Arc<AtomicU64>,
-    ) -> Self {
+    fn new(request_sender: Sender<MediaWorkerRequest>, latest_request: Arc<AtomicU64>) -> Self {
         Self {
             protocol: None,
             request_sender,
@@ -290,7 +283,8 @@ impl MediaProtocolState {
 
     fn next_request_id(&mut self) -> u64 {
         self.request_id = self.request_id.wrapping_add(1);
-        self.latest_request.store(self.request_id, Ordering::Release);
+        self.latest_request
+            .store(self.request_id, Ordering::Release);
         self.request_id
     }
 
@@ -769,9 +763,8 @@ impl Default for PreviewPresentation {
                             if worker_latest_request.load(Ordering::Acquire) != id {
                                 Ok(None)
                             } else {
-                                encode_fast_sixel(&image, size, is_tmux).map(|sixel| {
-                                    Some(MediaWorkerOutput::FastSixel { sixel, key })
-                                })
+                                encode_fast_sixel(&image, size, is_tmux)
+                                    .map(|sixel| Some(MediaWorkerOutput::FastSixel { sixel, key }))
                             }
                         };
                         (id, MediaPreviewProtocol::Sixel, result)
@@ -853,7 +846,9 @@ impl PreviewPresentation {
         if let Some(index) = self.sixel_cache.iter().position(|entry| entry.key == key)
             && let Some(previous) = self.sixel_cache.remove(index)
         {
-            self.sixel_cache_bytes = self.sixel_cache_bytes.saturating_sub(previous.sixel.data.len());
+            self.sixel_cache_bytes = self
+                .sixel_cache_bytes
+                .saturating_sub(previous.sixel.data.len());
         }
         while self.sixel_cache.len() >= MAX_CACHED_SIXEL_FRAMES
             || self.sixel_cache_bytes.saturating_add(bytes) > MAX_CACHED_SIXEL_BYTES
@@ -861,7 +856,9 @@ impl PreviewPresentation {
             let Some(previous) = self.sixel_cache.pop_front() else {
                 break;
             };
-            self.sixel_cache_bytes = self.sixel_cache_bytes.saturating_sub(previous.sixel.data.len());
+            self.sixel_cache_bytes = self
+                .sixel_cache_bytes
+                .saturating_sub(previous.sixel.data.len());
         }
         self.sixel_cache_bytes = self.sixel_cache_bytes.saturating_add(bytes);
         self.sixel_cache.push_back(SixelCacheEntry { key, sixel });
@@ -1721,11 +1718,9 @@ impl PreviewPresentation {
                 }
                 self.effective_media_protocol = MediaPreviewProtocol::Halfblocks;
             } else {
-                if self
-                    .media_preview
-                    .as_ref()
-                    .is_none_or(|preview| protocol_kind(preview) != MediaPreviewProtocol::Halfblocks)
-                {
+                if self.media_preview.as_ref().is_none_or(|preview| {
+                    protocol_kind(preview) != MediaPreviewProtocol::Halfblocks
+                }) {
                     match interaction_preview(
                         image,
                         crop_x,
@@ -1862,7 +1857,12 @@ impl PreviewPresentation {
             .expect("media worker is running")
             .protocol_mut()
             .map_or(MediaRenderState::Empty, MediaRenderState::Threaded);
-        (area, self.effective_media_protocol, self.media_frame_revision, render_state)
+        (
+            area,
+            self.effective_media_protocol,
+            self.media_frame_revision,
+            render_state,
+        )
     }
 
     #[cfg(test)]

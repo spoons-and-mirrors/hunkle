@@ -294,12 +294,12 @@ impl App {
         self.header_picker.message = message;
     }
 
-    pub(crate) fn start_header_agent(&mut self) {
+    pub(crate) fn open_norm_tab(&mut self) {
         if self.mode != Mode::Normal || self.session.open_running() {
             return;
         }
         self.header_picker.close();
-        let Some(path) = self.agent_destination_for_start() else {
+        let Some(path) = self.norm_destination() else {
             self.notice = Some("Open a workspace first".to_owned());
             return;
         };
@@ -310,7 +310,7 @@ impl App {
         }
     }
 
-    pub(crate) fn agent_destination_for_start(&self) -> Option<PathBuf> {
+    pub(crate) fn norm_destination(&self) -> Option<PathBuf> {
         Some(self.repository()?.root.clone())
     }
 
@@ -730,9 +730,9 @@ impl App {
             self.notice = Some("Another workspace operation is still running".to_owned());
             return;
         }
-        if self.start_repository_open(path.clone(), true) {
-            self.herdr_prompt.update_agent_destination(path);
-        } else if let Some(error) = self.workspace_explorer.error.clone() {
+        if !self.start_repository_open(path, true)
+            && let Some(error) = self.workspace_explorer.error.clone()
+        {
             self.notice = Some(error);
         }
     }

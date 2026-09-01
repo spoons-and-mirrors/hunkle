@@ -3,7 +3,7 @@ use ratatui::layout::Position;
 use std::time::Instant;
 
 use crate::{
-    filesystem::{FileOperation, clipboard_import_operation, validate_name},
+    filesystem::{FileOperation, validate_name},
     git::Change,
     repo_path::{RepoPath, display_os_str},
 };
@@ -51,34 +51,6 @@ pub(crate) struct FileDrag {
 }
 
 impl App {
-    pub(super) fn paste_clipboard_files(&mut self, text: &str) -> bool {
-        if self.view() != View::Changes || self.changes.pane != LeftPane::Files {
-            return false;
-        }
-        let destination = self
-            .session
-            .data()
-            .and_then(|repo| self.changes.selected_explorer_entry(repo))
-            .map_or_else(RepoPath::default, |entry| {
-                if entry.is_directory {
-                    entry.path
-                } else {
-                    relative_parent(&entry.path)
-                }
-            });
-        match clipboard_import_operation(text, destination) {
-            Ok(Some(operation)) => {
-                self.start_file_operation(operation);
-                true
-            }
-            Ok(None) => false,
-            Err(error) => {
-                self.notice = Some(error.to_string());
-                true
-            }
-        }
-    }
-
     pub(super) fn handle_file_dialog(&mut self, key: KeyEvent) {
         let Some(kind) = self.file_dialog.as_ref().map(|dialog| dialog.kind.clone()) else {
             self.mode = Mode::Normal;

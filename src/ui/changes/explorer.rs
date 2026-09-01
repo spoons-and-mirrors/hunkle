@@ -5,7 +5,6 @@ pub(super) fn draw_explorer_master(
     app: &mut App,
     area: Rect,
     single_panel: bool,
-    agents: ColumnAgents,
 ) {
     app.regions.files_panel = Some(area);
     frame.render_widget(Clear, area);
@@ -22,7 +21,12 @@ pub(super) fn draw_explorer_master(
         content.width,
         1,
     );
-    let list_area = layout_agents_pane(app, content, controls.bottom(), agents.master_visible());
+    let list_area = Rect::new(
+        content.x,
+        controls.bottom(),
+        content.width,
+        content.bottom().saturating_sub(controls.bottom()),
+    );
     let add_width = 7.min(controls.width);
     let add_button = Rect::new(
         controls.right().saturating_sub(add_width),
@@ -57,10 +61,8 @@ pub(super) fn draw_explorer_master(
             ),
             header,
         );
-        app.regions.register_hit_target(
-            HitTarget::Changes(ChangesHitTarget::FilesTab),
-            header,
-        );
+        app.regions
+            .register_hit_target(HitTarget::Changes(ChangesHitTarget::FilesTab), header);
     }
     frame.render_widget(
         Paragraph::new(format!("{} FILES", app.changes.explorer_rows().len()))
@@ -126,12 +128,6 @@ pub(super) fn draw_explorer_master(
             .collect()
     };
     frame.render_widget(List::new(items), list_area);
-    if agents.master_visible() {
-        draw_agents_section(frame, app);
-    }
-    if agents.detail_visible() {
-        draw_agent_history_pane(frame, app, content, single_panel);
-    }
 }
 
 pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: Rect) {

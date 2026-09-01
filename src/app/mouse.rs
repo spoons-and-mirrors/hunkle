@@ -5,103 +5,16 @@ use std::time::Instant;
 use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, AgentActivationTarget, AgentKey, AgentPreview, App, CloneField,
-    DOUBLE_CLICK_INTERVAL, ExplorerHitTarget, FileSearchHitTarget, GraphColumnDrag, GraphHitTarget,
-    HeaderPickerKind, HitTarget, LeftPane, MobileDragAxis, MobileScrollDrag, Mode, PreviewOrigin,
-    ScrollTarget, SettingsHitTarget, View, changes::ChangesEffect, file_editor::FileEditor,
-    scroll_table,
+    ACTION_ITEMS, App, CloneField, DOUBLE_CLICK_INTERVAL, ExplorerHitTarget, FileSearchHitTarget,
+    GraphColumnDrag, GraphHitTarget, HeaderPickerKind, HitTarget, LeftPane, MobileDragAxis,
+    MobileScrollDrag, Mode, PreviewOrigin, ScrollTarget, SettingsHitTarget, View,
+    changes::ChangesEffect, file_editor::FileEditor, scroll_table,
 };
 
-const AGENT_PREVIEW_SWIPE_THRESHOLD: u16 = 4;
 const HEADER_SCROLL_THRESHOLD: u16 = 2;
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.mode == Mode::AgentPreview {
-            if self.layout_profile().is_single() && self.handle_mobile_scroll_gesture(mouse) {
-                return;
-            }
-            let point = Position::new(mouse.column, mouse.row);
-            match mouse.kind {
-                MouseEventKind::Moved => {
-                    self.hovered_hit_target = self.regions.hit_target_at(point);
-                    if let Some(target) = self.hovered_hit_target.as_ref() {
-                        let agent = match target {
-                            HitTarget::AgentPreviewOutput { agent, .. }
-                            | HitTarget::AgentPreviewOutputReply { agent, .. }
-                            | HitTarget::AgentPreviewOutputReplyInput { agent, .. }
-                            | HitTarget::AgentTooltip { agent, .. } => Some(agent),
-                            _ => None,
-                        };
-                        if let Some(index) = agent.and_then(|key| self.herdr.agent_index(key)) {
-                            self.herdr.request_agent_latest_user_message(index);
-                        }
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    self.handle_agent_preview_modal_click(point)
-                }
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    if let Some(
-                        target @ (ScrollTarget::AgentTimeline(_)
-                        | ScrollTarget::AgentTranscript(_)
-                        | ScrollTarget::AgentScheduledTranscript(_)),
-                    ) = self.regions.scroll_target_at(point)
-                    {
-                        let delta = if mouse.kind == MouseEventKind::ScrollUp {
-                            -1
-                        } else {
-                            1
-                        };
-                        self.scroll_target(target, delta, true);
-                    }
-                }
-                MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
-                    if let Some(target) = self.regions.scroll_target_at(point)
-                        && matches!(
-                            target,
-                            ScrollTarget::AgentTimeline(_)
-                                | ScrollTarget::AgentTranscript(_)
-                                | ScrollTarget::AgentScheduledTranscript(_)
-                        )
-                    {
-                        let live = self.agent_preview_live_context_for_scroll_target(&target);
-                        let effect = self.agent_preview.handle_horizontal_scroll(
-                            &target,
-                            mouse.kind == MouseEventKind::ScrollRight,
-                            live,
-                        );
-                        self.apply_agent_preview_effect(effect);
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-        if self.mode == Mode::Scheduler {
-            let point = Position::new(mouse.column, mouse.row);
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => self.handle_left_click(point),
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    if let Some(
-                        target @ (ScrollTarget::SchedulerTasks
-                        | ScrollTarget::SchedulerRuns
-                        | ScrollTarget::SchedulerPrompt
-                        | ScrollTarget::SchedulerDestinations),
-                    ) = self.regions.scroll_target_at(point)
-                    {
-                        let delta = if mouse.kind == MouseEventKind::ScrollUp {
-                            -1
-                        } else {
-                            1
-                        };
-                        self.scroll_target(target, delta, true);
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
         if self.handle_mobile_scroll_gesture(mouse) {
             return;
         }
@@ -110,45 +23,8 @@ impl App {
 
     fn handle_mouse_inner(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(HitTarget::AgentPaneId(pane_id)) = self.regions.hit_target_at(point)
-        {
-            self.selection.clear();
-            self.copy_request = Some(format!("herdr_pane_id {pane_id}"));
-            return;
-        }
-        if self.agent_preview.picker_open
-            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && !matches!(
-                self.regions.hit_target_at(point),
-                Some(HitTarget::AgentPreviewPicker(_) | HitTarget::AgentPreviewPickerItem(_))
-            )
-        {
-            self.agent_preview.close_picker();
-        }
         if mouse.kind == MouseEventKind::Moved {
             self.hovered_hit_target = self.regions.hit_target_at(point);
-            if let Some(target) = self.hovered_hit_target.as_ref() {
-                let agent = match target {
-                    HitTarget::Agent(key) | HitTarget::AgentStash(key) => Some(key),
-                    HitTarget::AgentPreviewPicker(agent)
-                    | HitTarget::AgentPreviewPickerItem(agent)
-                    | HitTarget::AgentPreviewMessageTimeline(agent)
-                    | HitTarget::AgentPreviewMessageStep { agent, .. }
-                    | HitTarget::AgentPreviewPrompt(agent)
-                    | HitTarget::AgentPreviewPromptDelivery(agent)
-                    | HitTarget::AgentPreviewRequest { agent, .. }
-                    | HitTarget::AgentPreviewOutput { agent, .. }
-                    | HitTarget::AgentPreviewOutputReply { agent, .. }
-                    | HitTarget::AgentPreviewOutputReplyInput { agent, .. }
-                    | HitTarget::AgentTooltip { agent, .. }
-                    | HitTarget::AgentMessage { agent, .. } => Some(agent),
-                    _ => None,
-                };
-                if let Some(index) = agent.and_then(|key| self.herdr.agent_index(key)) {
-                    self.herdr.request_agent_latest_user_message(index);
-                }
-            }
         }
         if self.dragging_splitter {
             match mouse.kind {
@@ -156,18 +32,6 @@ impl App {
                 MouseEventKind::Up(MouseButton::Left) => {
                     self.resize_worktree(mouse.column);
                     self.dragging_splitter = false;
-                    self.persist_settings();
-                }
-                _ => {}
-            }
-            return;
-        }
-        if self.dragging_agents {
-            match mouse.kind {
-                MouseEventKind::Drag(MouseButton::Left) => self.resize_agents(mouse.row),
-                MouseEventKind::Up(MouseButton::Left) => {
-                    self.resize_agents(mouse.row);
-                    self.dragging_agents = false;
                     self.persist_settings();
                 }
                 _ => {}
@@ -237,15 +101,7 @@ impl App {
                     return;
                 }
                 Some(HitTarget::HeaderAgent) => {
-                    self.start_header_agent();
-                    return;
-                }
-                Some(HitTarget::HeaderSchedule) => {
-                    self.open_scheduler();
-                    return;
-                }
-                Some(HitTarget::HeaderFullscreen) => {
-                    self.toggle_fullscreen();
+                    self.open_norm_tab();
                     return;
                 }
                 _ => {}
@@ -338,28 +194,6 @@ impl App {
             }
             return;
         }
-        if self.herdr_prompt.agent_pane_picker_open() {
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                match self.regions.hit_target_at(point) {
-                    Some(HitTarget::AgentPane(index)) => {
-                        match self.herdr_prompt.select_agent_pane(index) {
-                            Ok(()) => {
-                                self.notice = Some("Starting agent in selected pane".to_owned())
-                            }
-                            Err(error) => self.notice = Some(error),
-                        }
-                    }
-                    Some(HitTarget::AgentPaneSplit(index, direction)) => {
-                        match self.herdr_prompt.split_agent_pane(index, direction) {
-                            Ok(()) => self.notice = Some("Starting agent in new pane".to_owned()),
-                            Err(error) => self.notice = Some(error),
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            return;
-        }
         if self.mode == Mode::FileEdit {
             self.handle_file_editor_mouse(mouse, point);
             return;
@@ -375,33 +209,15 @@ impl App {
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
-        ) {
-            if self.regions.scroll_target_at(point) == Some(ScrollTarget::Header) {
-                let delta = if mouse.kind == MouseEventKind::ScrollRight {
-                    1
-                } else {
-                    -1
-                };
-                self.scroll_target(ScrollTarget::Header, delta, true);
-                return;
-            }
-            if let Some(target) = self.regions.scroll_target_at(point)
-                && matches!(
-                    target,
-                    ScrollTarget::AgentTimeline(_)
-                        | ScrollTarget::AgentTranscript(_)
-                        | ScrollTarget::AgentScheduledTranscript(_)
-                )
-            {
-                let live = self.agent_preview_live_context_for_scroll_target(&target);
-                let effect = self.agent_preview.handle_horizontal_scroll(
-                    &target,
-                    mouse.kind == MouseEventKind::ScrollRight,
-                    live,
-                );
-                self.apply_agent_preview_effect(effect);
-                return;
-            }
+        ) && self.regions.scroll_target_at(point) == Some(ScrollTarget::Header)
+        {
+            let delta = if mouse.kind == MouseEventKind::ScrollRight {
+                1
+            } else {
+                -1
+            };
+            self.scroll_target(ScrollTarget::Header, delta, true);
+            return;
         }
 
         if matches!(
@@ -417,57 +233,6 @@ impl App {
                 self.scroll_target(target, delta, true);
             }
             return;
-        }
-
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            match self.regions.hit_target_at(point) {
-                Some(HitTarget::Agent(key)) => {
-                    let Some(index) = self.herdr.agent_index(&key) else {
-                        return;
-                    };
-                    self.selection.clear();
-                    self.handle_agent_card_action(
-                        key,
-                        index,
-                        mouse.modifiers.contains(KeyModifiers::CONTROL),
-                    );
-                    return;
-                }
-                Some(HitTarget::NormAgent(identity)) => {
-                    self.selection.clear();
-                    self.activate_norm_agent(&identity);
-                    return;
-                }
-                Some(HitTarget::AgentListModeToggle) => {
-                    self.herdr.cycle_agent_list_mode();
-                    return;
-                }
-                Some(HitTarget::AgentScheduledRun(run_id)) => {
-                    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
-                        self.promote_scheduled_run(run_id);
-                    } else {
-                        self.open_scheduled_run_preview(run_id);
-                    }
-                    return;
-                }
-                Some(HitTarget::AgentStash(key)) => {
-                    let Some(index) = self.herdr.agent_index(&key) else {
-                        return;
-                    };
-                    self.stash_agent(index);
-                    return;
-                }
-                Some(HitTarget::StashedAgent(index)) => {
-                    self.restore_stashed_agent(index);
-                    return;
-                }
-                Some(target) if AgentPreview::owns_target(&target) => {
-                    let effect = self.agent_preview.activate_target(&target);
-                    self.apply_agent_preview_effect(effect);
-                    return;
-                }
-                _ => {}
-            }
         }
 
         if self.file_drag.is_some() {
@@ -523,9 +288,6 @@ impl App {
             return;
         }
         if self.mode == Mode::Command {
-            return;
-        }
-        if self.mode == Mode::HerdrPrompt {
             return;
         }
         if self.mode == Mode::Editor {
@@ -594,7 +356,6 @@ impl App {
             return false;
         }
         if self.dragging_splitter
-            || self.dragging_agents
             || self.dragging_diff_scrollbar
             || self.dragging_graph_column.is_some()
             || self.workspace_explorer.dragging_splitter
@@ -604,18 +365,6 @@ impl App {
             return false;
         }
         let point = Position::new(mouse.column, mouse.row);
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && matches!(
-                self.regions.hit_target_at(point),
-                Some(
-                    HitTarget::AgentPreviewMessageStep { .. }
-                        | HitTarget::AgentPreviewScheduledMessageStep { .. }
-                )
-            )
-        {
-            self.handle_mouse_inner(mouse);
-            return true;
-        }
         if let Some(mut drag) = self.mobile_scroll_drag.clone() {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left)
@@ -627,16 +376,12 @@ impl App {
                         let header = drag.scroll_target == Some(ScrollTarget::Header);
                         let vertical_threshold = if header { HEADER_SCROLL_THRESHOLD } else { 1 };
                         if drag.axis.is_none() {
-                            drag.axis = if (drag.agent_preview.is_some()
-                                && horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD)
-                                || (header
-                                    && horizontal >= HEADER_SCROLL_THRESHOLD
-                                    && horizontal > vertical)
+                            drag.axis = if header
+                                && horizontal >= HEADER_SCROLL_THRESHOLD
+                                && horizontal > vertical
                             {
                                 Some(MobileDragAxis::Horizontal)
-                            } else if vertical >= vertical_threshold
-                                && (drag.agent_preview.is_none() || vertical >= horizontal)
-                            {
+                            } else if vertical >= vertical_threshold {
                                 Some(MobileDragAxis::Vertical)
                             } else {
                                 None
@@ -651,14 +396,13 @@ impl App {
                             drag.moved = true;
                             if drag.axis == Some(MobileDragAxis::Vertical) {
                                 let delta = drag.previous.y as isize - point.y as isize;
-                                if delta != 0 {
-                                    if let Some(target) = drag
+                                if delta != 0
+                                    && let Some(target) = drag
                                         .scroll_target
                                         .clone()
                                         .filter(|target| *target != ScrollTarget::Header)
-                                    {
-                                        self.scroll_target(target, delta, false);
-                                    }
+                                {
+                                    self.scroll_target(target, delta, false);
                                 }
                             } else if drag.axis == Some(MobileDragAxis::Horizontal)
                                 && drag.scroll_target == Some(ScrollTarget::Header)
@@ -674,22 +418,7 @@ impl App {
                     let released = mouse.kind == MouseEventKind::Up(MouseButton::Left);
                     if released {
                         self.mobile_scroll_drag = None;
-                        if drag.axis == Some(MobileDragAxis::Horizontal) {
-                            let horizontal = drag.start.x.abs_diff(point.x);
-                            if horizontal >= AGENT_PREVIEW_SWIPE_THRESHOLD
-                                && let Some(agent) = drag.agent_preview.as_ref()
-                            {
-                                let target = ScrollTarget::AgentTimeline(agent.clone());
-                                let live =
-                                    self.agent_preview_live_context_for_scroll_target(&target);
-                                let effect = self.agent_preview.handle_horizontal_scroll(
-                                    &target,
-                                    point.x < drag.start.x,
-                                    live,
-                                );
-                                self.apply_agent_preview_effect(effect);
-                            }
-                        } else if !drag.moved {
+                        if !drag.moved {
                             self.handle_mouse_inner(MouseEvent {
                                 kind: MouseEventKind::Down(MouseButton::Left),
                                 column: drag.start.x,
@@ -724,50 +453,15 @@ impl App {
         if !self.regions.has_hard_scroll_capture() && self.begin_mouse_control(point) {
             return true;
         }
-        let agent_preview = (self.mode == Mode::AgentPreview || !self.regions.has_scroll_capture())
-            .then(|| self.agent_preview_at(point))
-            .flatten();
         self.mobile_scroll_drag = Some(MobileScrollDrag {
             start: point,
             previous: point,
             moved: false,
             axis: None,
-            agent_preview,
             scroll_target,
             modifiers: mouse.modifiers,
         });
         true
-    }
-
-    fn agent_preview_at(&self, point: Position) -> Option<AgentKey> {
-        if !self.agents_pane_visible()
-            || (!self.single_panel_detail_visible() && self.mode != Mode::AgentPreview)
-        {
-            return None;
-        }
-        match self.regions.hit_target_at(point) {
-            Some(
-                HitTarget::AgentTooltip { agent, .. }
-                | HitTarget::AgentMessage { agent, .. }
-                | HitTarget::AgentExpandedMessage { agent, .. }
-                | HitTarget::AgentPreviewMessageTimeline(agent)
-                | HitTarget::AgentPreviewMessageStep { agent, .. }
-                | HitTarget::AgentPreviewRequest { agent, .. },
-            ) => Some(agent),
-            _ => None,
-        }
-    }
-
-    fn agent_preview_live_context_for_scroll_target(
-        &self,
-        target: &ScrollTarget,
-    ) -> Option<super::LiveAgentPreviewContext> {
-        match target {
-            ScrollTarget::AgentTimeline(key) | ScrollTarget::AgentTranscript(key) => {
-                self.agent_preview_live_context_for_key(key)
-            }
-            _ => None,
-        }
     }
 
     fn scroll_target(&mut self, target: ScrollTarget, delta: isize, wheel: bool) {
@@ -806,15 +500,9 @@ impl App {
                     self.handle_shortcut_settings(KeyEvent::new(key, KeyModifiers::NONE));
                 }
             }
-            ScrollTarget::SchedulerTasks
-            | ScrollTarget::SchedulerRuns
-            | ScrollTarget::SchedulerPrompt
-            | ScrollTarget::SchedulerDestinations => self.scroll_scheduler(target, delta),
             ScrollTarget::Commit => self.scroll_commit(delta, wheel),
             ScrollTarget::Worktree => self.scroll_worktree(wheel_amount(delta)),
             ScrollTarget::Explorer => self.scroll_explorer(wheel_amount(delta)),
-            ScrollTarget::Agents => self.herdr.scroll_agents(delta),
-            ScrollTarget::NormAgents => self.norm_presence.scroll_agents(delta),
             ScrollTarget::Preview => self.scroll_diff_by(wheel_amount(delta)),
             ScrollTarget::SqliteObjects => {
                 let viewport = self
@@ -834,24 +522,6 @@ impl App {
             }
             ScrollTarget::Graph => self.scroll_graph(wheel_amount(delta)),
             ScrollTarget::RepositorySearch => self.file_search.move_selection(delta),
-            target @ (ScrollTarget::AgentTimeline(_)
-            | ScrollTarget::AgentTranscript(_)
-            | ScrollTarget::AgentScheduledTranscript(_)) => {
-                let live = match &target {
-                    ScrollTarget::AgentTimeline(key) | ScrollTarget::AgentTranscript(key) => {
-                        self.agent_preview_live_context_for_key(key)
-                    }
-                    _ => None,
-                };
-                let maximum = self
-                    .regions
-                    .scroll_state(&target)
-                    .map_or(0, |state| state.maximum);
-                let effect =
-                    self.agent_preview
-                        .handle_scroll(&target, wheel_amount(delta), live, maximum);
-                self.apply_agent_preview_effect(effect);
-            }
         }
     }
 
@@ -1012,17 +682,6 @@ impl App {
         }
         if self
             .regions
-            .agents_splitter
-            .is_some_and(|rect| rect.contains(point))
-            && !self.layout_profile().is_single()
-        {
-            self.mode = Mode::Normal;
-            self.dragging_agents = true;
-            self.resize_agents(point.y);
-            return true;
-        }
-        if self
-            .regions
             .diff_scrollbar
             .is_some_and(|rect| rect.contains(point))
             && self.regions.diff_scroll_max > 0
@@ -1050,7 +709,6 @@ impl App {
     fn selection_region(&self, point: Position) -> Rect {
         [
             self.regions.command_overlay,
-            self.regions.herdr_prompt_overlay,
             self.regions.editor_overlay,
             self.regions.file_search,
             self.regions.file_dialog_overlay,
@@ -1058,8 +716,6 @@ impl App {
                 .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Overlay)),
             self.regions
                 .hit_target_rect(HitTarget::Settings(SettingsHitTarget::Overlay)),
-            self.regions
-                .hit_target_rect(HitTarget::AgentPreviewModalOverlay),
             self.regions.action_menu,
             self.regions
                 .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterOverlay)),
@@ -1085,7 +741,6 @@ impl App {
         match self.mode {
             Mode::ActionMenu => self.handle_action_mouse(mouse),
             Mode::Command => {}
-            Mode::HerdrPrompt => {}
             Mode::FileEdit => self.place_file_editor_cursor(point, false),
             Mode::Explorer => self.handle_explorer_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
@@ -1093,12 +748,6 @@ impl App {
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
-            Mode::Scheduler => {
-                if let Some(HitTarget::Scheduler(target)) = self.regions.hit_target_at(point) {
-                    self.activate_scheduler_target(target);
-                }
-            }
-            Mode::AgentPreview => self.handle_agent_preview_modal_click(point),
             Mode::Normal if self.view() == View::RepositorySearch => {
                 let global_navigation = [
                     self.regions.graph,
@@ -1151,10 +800,6 @@ impl App {
                 self.apply_changes_effect(effect);
                 return;
             }
-            Some(HitTarget::CommitMessageGenerate) => {
-                self.generate_commit_message();
-                return;
-            }
             Some(HitTarget::RenderedPreviewToggle) => {
                 self.toggle_rendered_preview();
                 return;
@@ -1163,47 +808,6 @@ impl App {
                 self.open_author_filter();
                 return;
             }
-            Some(HitTarget::Agent(key)) => {
-                let Some(index) = self.herdr.agent_index(&key) else {
-                    return;
-                };
-                self.handle_agent_card_action(key, index, false);
-                return;
-            }
-            Some(HitTarget::NormAgent(identity)) => {
-                self.activate_norm_agent(&identity);
-                return;
-            }
-            Some(HitTarget::AgentListModeToggle) => {
-                self.herdr.cycle_agent_list_mode();
-                return;
-            }
-            Some(HitTarget::AgentScheduledRun(run_id)) => {
-                self.open_scheduled_run_preview(run_id);
-                return;
-            }
-            Some(HitTarget::AgentStash(key)) => {
-                let Some(index) = self.herdr.agent_index(&key) else {
-                    return;
-                };
-                self.stash_agent(index);
-                return;
-            }
-            Some(HitTarget::StashedAgent(index)) => {
-                self.restore_stashed_agent(index);
-                return;
-            }
-            Some(target) if AgentPreview::owns_target(&target) => {
-                let effect = self.agent_preview.activate_target(&target);
-                self.apply_agent_preview_effect(effect);
-                return;
-            }
-            Some(
-                HitTarget::AgentTooltip { .. }
-                | HitTarget::AgentMessage { .. }
-                | HitTarget::AgentExpandedMessage { .. }
-                | HitTarget::AgentScheduledMessage { .. },
-            ) => return,
             _ => {}
         }
         if self
@@ -1259,7 +863,6 @@ impl App {
             } else {
                 self.show_detail_panel();
             }
-        } else if self.select_agents_row(point) {
         } else if self.select_graph_row(point) {
             self.open_selected_graph_commit();
         } else if self
@@ -1427,20 +1030,14 @@ impl App {
     fn apply_changes_effect(&mut self, effect: Option<ChangesEffect>) {
         match effect {
             Some(ChangesEffect::SidebarPaneActivated) => {
-                self.dismiss_agent_preview();
                 self.last_worktree_file_click = None;
                 self.mode = Mode::Normal;
                 self.navigation.close_changes_detail();
             }
             Some(ChangesEffect::PaneActivated) => {
-                self.dismiss_agent_preview();
                 self.last_worktree_file_click = None;
                 self.mode = Mode::Normal;
                 self.show_detail_panel();
-            }
-            Some(ChangesEffect::AgentsPaneActivated) => {
-                self.show_agents_pane();
-                self.mode = Mode::Normal;
             }
             Some(ChangesEffect::WorktreeDirectoryActivated) => {
                 self.last_worktree_file_click = None;
@@ -1501,167 +1098,6 @@ impl App {
         self.show_left_pane(LeftPane::Files);
         self.mode = Mode::Normal;
         true
-    }
-
-    pub(super) fn show_agent(&mut self, index: usize) {
-        if let Err(error) = self.herdr.show_agent(index) {
-            self.notice = Some(error);
-        }
-    }
-
-    pub(super) fn activate_agent_card(&mut self, key: AgentKey, index: usize) {
-        if self.herdr.is_background_attached() {
-            if let Some(path) = self
-                .herdr
-                .agent_destination(index)
-                .map(|path| path.to_path_buf())
-            {
-                self.queue_workspace_restore(path);
-            } else {
-                self.notice = Some("Agent has not reported its working directory".to_owned());
-            }
-            return;
-        }
-        if self.herdr.fullscreen() {
-            let target = AgentActivationTarget::Herdr(key.clone());
-            let double_click = self
-                .last_agent_click
-                .as_ref()
-                .is_some_and(|(previous, at)| {
-                    previous == &target && at.elapsed() <= DOUBLE_CLICK_INTERVAL
-                });
-            self.last_agent_click = (!double_click).then(|| (target.clone(), Instant::now()));
-            if double_click {
-                match self.herdr.toggle_fullscreen() {
-                    Ok(()) => self.pending_fullscreen_agent = Some(target),
-                    Err(error) => {
-                        self.notice = Some(format!("Could not toggle fullscreen: {error}"));
-                    }
-                }
-            } else if let Some(path) = self
-                .herdr
-                .agent_destination(index)
-                .map(|path| path.to_path_buf())
-            {
-                self.queue_workspace_restore(path);
-            } else {
-                self.notice = Some("Agent has not reported its working directory".to_owned());
-            }
-            return;
-        }
-
-        self.last_agent_click = None;
-        if self.layout_profile().is_single() && self.agents_pane_visible() {
-            self.open_agent_preview_modal(index);
-        } else {
-            self.show_agent(index);
-        }
-    }
-
-    pub(super) fn activate_norm_agent(&mut self, identity: &super::NormAgentIdentity) {
-        let agent = self
-            .norm_presence
-            .agents()
-            .iter()
-            .find(|agent| &agent.identity == identity)
-            .cloned();
-        let Some(agent) = agent else {
-            return;
-        };
-        if self.herdr_embedded() {
-            match &agent.view {
-                super::NormAgentView::ActiveHerdrPane(_) if self.herdr.fullscreen() => {
-                    let target = AgentActivationTarget::Norm(identity.clone());
-                    let double_click =
-                        self.last_agent_click
-                            .as_ref()
-                            .is_some_and(|(previous, at)| {
-                                previous == &target && at.elapsed() <= DOUBLE_CLICK_INTERVAL
-                            });
-                    self.last_agent_click =
-                        (!double_click).then(|| (target.clone(), Instant::now()));
-                    if double_click {
-                        match self.herdr.toggle_fullscreen() {
-                            Ok(()) => self.pending_fullscreen_agent = Some(target),
-                            Err(error) => {
-                                self.notice = Some(format!("Could not toggle fullscreen: {error}"));
-                            }
-                        }
-                    } else {
-                        self.queue_workspace_restore(agent.workspace);
-                    }
-                    return;
-                }
-                super::NormAgentView::ActiveHerdrPane(pane_id) => {
-                    self.last_agent_click = None;
-                    match self
-                        .herdr
-                        .show_external_pane(pane_id.clone(), agent.workspace.clone())
-                    {
-                        Ok(()) => {
-                            self.notice = Some("Restoring Norm side panel…".to_owned());
-                        }
-                        Err(error) => self.notice = Some(error),
-                    }
-                    return;
-                }
-                super::NormAgentView::InactiveHerdrPane => {
-                    self.last_agent_click = None;
-                    self.queue_workspace_restore(agent.workspace);
-                    self.notice =
-                        Some("Norm agent is not the active tab; opened its workspace".to_owned());
-                    return;
-                }
-                super::NormAgentView::MissingHerdrPane => {
-                    self.last_agent_click = None;
-                    self.queue_workspace_restore(agent.workspace);
-                    self.notice = Some(
-                        "Restart Norm to enable side-panel restoration; opened its workspace"
-                            .to_owned(),
-                    );
-                    return;
-                }
-                super::NormAgentView::NoView => {}
-            }
-        }
-        self.last_agent_click = None;
-        self.queue_workspace_restore(agent.workspace);
-    }
-
-    fn handle_agent_card_action(&mut self, key: AgentKey, index: usize, control: bool) {
-        if self.settings.agent_card_click_action.opens_preview(control) {
-            self.open_agent_preview_modal(index);
-        } else {
-            self.activate_agent_card(key, index);
-        }
-    }
-
-    pub(super) fn select_agent_preview(&mut self, index: usize) {
-        let Some(key) = self.herdr.agent_key(index) else {
-            return;
-        };
-        self.agent_preview.select_agent(key.clone());
-        self.hovered_hit_target = self
-            .herdr
-            .agent_user_messages(index)
-            .filter(|messages| !messages.is_empty())
-            .map_or(Some(HitTarget::Agent(key.clone())), |messages| {
-                Some(HitTarget::AgentTooltip {
-                    agent: key,
-                    message: messages.len() - 1,
-                })
-            });
-        self.herdr.request_agent_latest_user_message(index);
-    }
-
-    fn handle_agent_preview_modal_click(&mut self, point: Position) {
-        let Some(target) = self.regions.hit_target_at(point) else {
-            return;
-        };
-        if AgentPreview::owns_target(&target) {
-            let effect = self.agent_preview.activate_target(&target);
-            self.apply_agent_preview_effect(effect);
-        }
     }
 
     fn handle_action_mouse(&mut self, mouse: MouseEvent) {
@@ -1729,8 +1165,8 @@ impl App {
 
     fn handle_explorer_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            match self.regions.hit_target_at(point) {
                 Some(HitTarget::Explorer(target)) => {
                     let command = self.workspace_explorer.activate_target(target);
                     self.apply_explorer_command(command);
@@ -1739,65 +1175,56 @@ impl App {
                     self.mode = Mode::Normal;
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
     }
 
     fn handle_file_search_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                let Some(HitTarget::FileSearch(target)) = self.regions.hit_target_at(point) else {
-                    self.last_file_search_click = None;
-                    return;
-                };
-                match target {
-                    FileSearchHitTarget::Result { generation, row } => {
-                        if !self.file_search.select(generation, row) {
-                            return;
-                        }
-                        let Some(destination) = self.file_search.selected_destination() else {
-                            return;
-                        };
-                        let double_click =
-                            self.last_file_search_click
-                                .as_ref()
-                                .is_some_and(|(previous, at)| {
-                                    previous == &destination
-                                        && at.elapsed() <= DOUBLE_CLICK_INTERVAL
-                                });
-                        self.last_file_search_click =
-                            (!double_click).then(|| (destination, Instant::now()));
-                        if double_click {
-                            self.activate_file_search_result();
-                        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            let Some(HitTarget::FileSearch(target)) = self.regions.hit_target_at(point) else {
+                self.last_file_search_click = None;
+                return;
+            };
+            match target {
+                FileSearchHitTarget::Result { generation, row } => {
+                    if !self.file_search.select(generation, row) {
+                        return;
                     }
-                    target => {
-                        self.last_file_search_click = None;
-                        let Some(repo) = self.session.data() else {
-                            return;
-                        };
-                        match target {
-                            FileSearchHitTarget::Scope(scope) => {
-                                self.file_search.set_scope(scope, repo)
-                            }
-                            FileSearchHitTarget::CaseSensitive => {
-                                self.file_search.toggle_case(repo)
-                            }
-                            FileSearchHitTarget::WholeWord => {
-                                self.file_search.toggle_whole_word(repo)
-                            }
-                            FileSearchHitTarget::Regex => self.file_search.toggle_regex(repo),
-                            FileSearchHitTarget::IncludeIgnored => {
-                                self.file_search.toggle_ignored(repo)
-                            }
-                            FileSearchHitTarget::Result { .. } => unreachable!(),
+                    let Some(destination) = self.file_search.selected_destination() else {
+                        return;
+                    };
+                    let double_click =
+                        self.last_file_search_click
+                            .as_ref()
+                            .is_some_and(|(previous, at)| {
+                                previous == &destination && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+                            });
+                    self.last_file_search_click =
+                        (!double_click).then(|| (destination, Instant::now()));
+                    if double_click {
+                        self.activate_file_search_result();
+                    }
+                }
+                target => {
+                    self.last_file_search_click = None;
+                    let Some(repo) = self.session.data() else {
+                        return;
+                    };
+                    match target {
+                        FileSearchHitTarget::Scope(scope) => {
+                            self.file_search.set_scope(scope, repo)
                         }
+                        FileSearchHitTarget::CaseSensitive => self.file_search.toggle_case(repo),
+                        FileSearchHitTarget::WholeWord => self.file_search.toggle_whole_word(repo),
+                        FileSearchHitTarget::Regex => self.file_search.toggle_regex(repo),
+                        FileSearchHitTarget::IncludeIgnored => {
+                            self.file_search.toggle_ignored(repo)
+                        }
+                        FileSearchHitTarget::Result { .. } => unreachable!(),
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -1827,19 +1254,6 @@ impl App {
             return false;
         };
         self.changes.select_explorer_row(repo, index)
-    }
-
-    fn select_agents_row(&mut self, point: Position) -> bool {
-        if !self
-            .regions
-            .agents_list
-            .is_some_and(|rect| rect.contains(point))
-        {
-            return false;
-        }
-        // Agent cards have semantic hit targets. Consume clicks on the padding
-        // between them without translating visual rows into agent indexes.
-        true
     }
 
     fn select_graph_row(&mut self, point: Position) -> bool {
@@ -1943,14 +1357,6 @@ impl App {
             bounds.width.saturating_sub(4),
         );
         self.settings.explorer_left_pane_width = self.workspace_explorer.left_pane_width;
-    }
-
-    fn resize_agents(&mut self, row: u16) {
-        let Some(bounds) = self.regions.agents_bounds else {
-            return;
-        };
-        let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(4));
-        self.settings.agents_height = bounds.bottom().saturating_sub(top).max(4);
     }
 
     fn resize_graph_column(&mut self, drag: GraphColumnDrag, column: u16) {

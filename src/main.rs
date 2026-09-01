@@ -14,7 +14,6 @@ mod selection;
 mod theme;
 mod tree;
 mod ui;
-mod workspace_state;
 
 use std::{
     io::{self, Write},
@@ -55,11 +54,10 @@ const UI_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const FAST_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn main() -> Result<()> {
-    let startup = workspace_state::WorkspaceState::resolve(
-        std::env::args_os().nth(1).map(PathBuf::from),
-        std::env::current_dir()?,
-    );
-    let path = startup.path;
+    let path = std::env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
 
     if let Ok(log_path) = diagnostics::init() {
         diagnostics::event(format!(
@@ -82,7 +80,6 @@ fn main() -> Result<()> {
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
     let mut app = App::opening(path.clone());
-    app.set_workspace_state(startup.state);
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     app.configure_media_picker(picker, auto_kitty_supported());
     #[cfg(unix)]

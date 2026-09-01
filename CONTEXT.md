@@ -26,11 +26,11 @@ The tracked and untracked changes shown in the left CHANGES pane. Staging action
 
 A Git checkout registered through `git worktree`. This is distinct from the CHANGES-pane Worktree.
 
-Git inventory is authoritative for whether a linked worktree exists and for its checkout state. Herdr observations do not create catalog entries. Known repositories are discovery memory rather than authoritative topology.
+Git inventory is authoritative for whether a linked worktree exists and for its checkout state. Known repositories are discovery memory rather than authoritative topology.
 
 ## Linked worktree catalog
 
-The application-owned catalog that reconciles Git inventory, known repository discovery, and Herdr observations. Header pickers and linked-worktree labels consume its snapshot rather than independently reconstructing topology.
+The application-owned catalog that reconciles Git inventory and known repository discovery. Header pickers and linked-worktree labels consume its snapshot rather than independently reconstructing topology.
 
 ## Files
 
@@ -40,20 +40,18 @@ The complete filesystem tree inside the workspace, including Git-ignored content
 
 The `o` interaction for finding and opening another workspace. Confirming a file path opens the file's parent directory as a workspace and selects the file.
 
-## Agent destination
+## Norm destination
 
-The active Git Repository or Linked worktree where Hunkle asks Norm to open an
-agent tab. The Repository, Worktree, and Branch header cards define this
-filesystem destination; clicking Agent or pressing `Ctrl+Space` uses it
-directly.
+The active Repository, Linked worktree, or Local workspace where Hunkle asks
+Norm to open a tab. The header cards define this filesystem destination;
+clicking Agent or pressing `Ctrl+Space` uses it directly.
 
-## Agent pane
+## Norm workspace following
 
-A legacy Herdr pane with attached agent runtime metadata. The pane owns
-location, working directories, and focus; Herdr's agent record contributes
-runtime status, session, and timing identity. Hunkle does not maintain a
-second flattened agent entity. New agent creation uses Norm tabs instead; the
-Herdr placement flow remains available in code for later reuse.
+Hunkle treats the first Norm presence snapshot as a baseline. A later active-tab
+change from the same Norm daemon opens that tab's workspace in Hunkle. Hunkle
+does not inspect or manage the tab's agent, model, conversation, process, or
+terminal layout.
 
 ## Interaction
 

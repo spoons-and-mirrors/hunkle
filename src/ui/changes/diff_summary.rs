@@ -150,11 +150,11 @@ pub(super) fn wrapped_file_summary(
                 continue;
             }
         }
-        if !line.is_empty() {
-            if !push_summary_line(&mut lines, std::mem::take(&mut line), maximum_lines) {
-                truncated = true;
-                break;
-            }
+        if !line.is_empty()
+            && !push_summary_line(&mut lines, std::mem::take(&mut line), maximum_lines)
+        {
+            truncated = true;
+            break;
         }
         let mut remaining = file.as_str();
         let mut remaining_width = file_width;

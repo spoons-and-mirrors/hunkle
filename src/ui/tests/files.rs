@@ -20,7 +20,6 @@ fn narrow_layout_drills_from_changes_into_a_full_width_detail_panel() {
     assert_eq!(app.regions.worktree.unwrap().width, 49);
     assert!(app.regions.diff.is_none());
     assert!(app.regions.splitter.is_none());
-    assert!(app.regions.agents_list.is_none());
     let tabs = app
         .regions
         .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
@@ -316,7 +315,6 @@ fn renders_colored_file_type_icons_in_the_files_view() {
     }
 
     let mut app = App::new(root.to_path_buf());
-    app.agents_visible = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -355,7 +353,6 @@ fn keeps_file_tree_connectors_faint_and_folder_names_bright() {
     fs::write(root.join("root.txt"), "root\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
-    app.agents_visible = false;
     let src = app
         .changes
         .explorer_rows()
@@ -466,7 +463,6 @@ fn colors_changed_files_in_the_files_view() {
 
     let mut app = App::new(root.to_path_buf());
     app.set_sidebar_pane_for_test(LeftPane::Files);
-    app.agents_visible = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -509,7 +505,6 @@ fn refreshes_file_and_folder_colors_after_the_worktree_changes() {
 
     let mut app = App::new(root.to_path_buf());
     app.set_sidebar_pane_for_test(LeftPane::Files);
-    app.agents_visible = false;
     fs::write(
         root.join("src/main.rs"),
         "fn main() { println!(\"changed\"); }\n",
@@ -596,7 +591,6 @@ fn shows_worktree_file_status_letters() {
     fs::write(root.join("new.txt"), "new\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
-    app.settings.agents_height = 9;
     let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
@@ -643,7 +637,6 @@ fn colors_collapsed_folders_for_the_changes_they_contain() {
 
     let mut app = App::new(root.to_path_buf());
     app.set_sidebar_pane_for_test(LeftPane::Files);
-    app.agents_visible = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 

@@ -174,20 +174,22 @@ fn threaded_sixel_view_queues_positioned_terminal_output() {
     let mut progressive_buffer = Buffer::empty(Rect::new(0, 0, 60, 20));
     Widget::render(Image::new(progressive), area, &mut progressive_buffer);
     assert!(area.positions().any(|position| {
-        matches!(progressive_buffer.cell(position).unwrap().symbol(), "▀" | "▄")
+        matches!(
+            progressive_buffer.cell(position).unwrap().symbol(),
+            "▀" | "▄"
+        )
     }));
 
     loop {
         preview.poll_media();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 20));
-        let (area, protocol, frame_revision, render_state) =
-            preview.media_state(
-                1,
-                &image,
-                MediaPreviewProtocol::Sixel,
-                SixelQuality::Fast,
-                available,
-            );
+        let (area, protocol, frame_revision, render_state) = preview.media_state(
+            1,
+            &image,
+            MediaPreviewProtocol::Sixel,
+            SixelQuality::Fast,
+            available,
+        );
         match render_state {
             MediaRenderState::Immediate(state) => {
                 Widget::render(Image::new(state), area, &mut buffer);
@@ -277,11 +279,8 @@ fn media_picker_uses_the_panel_color_for_cell_padding() {
 
 #[test]
 fn fast_sixel_declares_its_raster_and_wraps_tmux() {
-    let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
-        20,
-        20,
-        Rgba([40, 120, 220, 255]),
-    ));
+    let image =
+        DynamicImage::ImageRgba8(ImageBuffer::from_pixel(20, 20, Rgba([40, 120, 220, 255])));
     let plain = encode_fast_sixel(&image, Size::new(2, 1), false).unwrap();
     let tmux = encode_fast_sixel(&image, Size::new(2, 1), true).unwrap();
 
@@ -428,14 +427,13 @@ fn media_interactions_render_immediately_then_restore_sixel() {
     let available = Rect::new(5, 6, 40, 10);
 
     assert!(preview.zoom_media(true, None));
-    let (area, protocol, _, render_state) =
-        preview.media_state(
-            1,
-            &image,
-            MediaPreviewProtocol::Sixel,
-            SixelQuality::Fast,
-            available,
-        );
+    let (area, protocol, _, render_state) = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
     assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
     let MediaRenderState::Immediate(state) = render_state else {
         panic!("zoom did not produce an immediate preview");
@@ -450,28 +448,26 @@ fn media_interactions_render_immediately_then_restore_sixel() {
     let settled = preview.media_view.preview_until.unwrap() + Duration::from_millis(1);
     assert!(preview.poll_media_at(settled));
     assert!(!preview.media_live_preview_active_at(settled));
-    let (_, protocol, _, render_state) =
-        preview.media_state(
-            1,
-            &image,
-            MediaPreviewProtocol::Sixel,
-            SixelQuality::Fast,
-            available,
-        );
+    let (_, protocol, _, render_state) = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
     assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
     assert!(matches!(render_state, MediaRenderState::Immediate(_)));
 
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if preview.poll_media() {
-            let (_, protocol, _, render_state) =
-                preview.media_state(
-                    1,
-                    &image,
-                    MediaPreviewProtocol::Sixel,
-                    SixelQuality::Fast,
-                    available,
-                );
+            let (_, protocol, _, render_state) = preview.media_state(
+                1,
+                &image,
+                MediaPreviewProtocol::Sixel,
+                SixelQuality::Fast,
+                available,
+            );
             if protocol == MediaPreviewProtocol::Sixel {
                 assert!(matches!(render_state, MediaRenderState::Immediate(_)));
                 break;
@@ -496,14 +492,13 @@ fn large_media_drag_previews_stay_interactive() {
     let available = Rect::new(0, 0, 120, 40);
 
     assert!(preview.zoom_media(true, None));
-    let (_, protocol, _, render_state) =
-        preview.media_state(
-            1,
-            &image,
-            MediaPreviewProtocol::Sixel,
-            SixelQuality::Fast,
-            available,
-        );
+    let (_, protocol, _, render_state) = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
     assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
     assert!(matches!(render_state, MediaRenderState::Immediate(_)));
     preview.begin_media_pan(Position::new(80, 20));
@@ -512,14 +507,13 @@ fn large_media_drag_previews_stay_interactive() {
     for step in 0..40 {
         let column = if step % 2 == 0 { 79 } else { 80 };
         assert!(preview.pan_media(Position::new(column, 20)));
-        let (_, protocol, _, render_state) =
-            preview.media_state(
-                1,
-                &image,
-                MediaPreviewProtocol::Sixel,
-                SixelQuality::Fast,
-                available,
-            );
+        let (_, protocol, _, render_state) = preview.media_state(
+            1,
+            &image,
+            MediaPreviewProtocol::Sixel,
+            SixelQuality::Fast,
+            available,
+        );
         assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
         assert!(matches!(render_state, MediaRenderState::Immediate(_)));
     }
@@ -611,27 +605,25 @@ fn media_view_zooms_pans_and_resets_to_fit() {
     )));
     let available = Rect::new(5, 6, 40, 10);
 
-    let (fit_area, _, _, _) =
-        preview.media_state(
-            1,
-            &image,
-            MediaPreviewProtocol::Halfblocks,
-            SixelQuality::Fast,
-            available,
-        );
+    let (fit_area, _, _, _) = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Halfblocks,
+        SixelQuality::Fast,
+        available,
+    );
     assert_eq!(fit_area, available);
     assert_eq!(preview.media_zoom_percent(), 100);
 
     assert!(preview.zoom_media(true, None));
     assert_eq!(preview.media_zoom_percent(), 125);
-    let (zoomed_area, _, _, _) =
-        preview.media_state(
-            1,
-            &image,
-            MediaPreviewProtocol::Halfblocks,
-            SixelQuality::Fast,
-            available,
-        );
+    let (zoomed_area, _, _, _) = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Halfblocks,
+        SixelQuality::Fast,
+        available,
+    );
     assert_eq!(zoomed_area, available);
 
     preview.begin_media_pan(Position::new(25, 10));

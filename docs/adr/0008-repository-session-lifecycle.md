@@ -20,7 +20,7 @@ This split ownership made the lifecycle shallow at both seams. Correctness depen
 - Worker invalidations and external worktree changes request refreshes inside the session.
 - Load generations, repository generations, status baselines, and operation state continue to reject stale results independently.
 
-`App` submits refresh intents and consumes whether a refresh started or queued. It retains application concerns: preserving selections, updating panes and caches, displaying notices, and enforcing editor, draft, Herdr, and navigation guards.
+`App` submits refresh intents and consumes whether a refresh started or queued. It retains application concerns: preserving selections, updating panes and caches, displaying notices, and enforcing editor, draft, and navigation guards.
 
 Repository execution remains on concrete worker channels. `RepositoryData` remains an aggregate snapshot, and initial hydration remains atomic.
 

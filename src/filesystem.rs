@@ -8,9 +8,6 @@ use anyhow::{Context, Result, bail};
 
 use crate::repo_path::RepoPath;
 
-mod clipboard_import;
-pub(crate) use clipboard_import::operation as clipboard_import_operation;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceEntry {
     pub(crate) path: RepoPath,
@@ -48,48 +45,10 @@ pub(crate) fn read_workspace_directory(
     Ok(entries)
 }
 
-pub(crate) fn read_optional_workspace_directory(
-    root: &Path,
-    relative: &RepoPath,
-) -> Result<Vec<WorkspaceEntry>> {
-    match read_workspace_directory(root, relative) {
-        Ok(entries) => Ok(entries),
-        Err(error)
-            if error
-                .chain()
-                .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
-                .any(|error| error.kind() == std::io::ErrorKind::NotFound) =>
-        {
-            Ok(Vec::new())
-        }
-        Err(error) => Err(error),
-    }
-}
-
 pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
     file.write_all(content)?;
     file.commit()
-}
-
-#[cfg(unix)]
-pub(crate) fn atomic_write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let mut options = atomic_write_file::OpenOptions::new();
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    atomic_write_file::unix::OpenOptionsExt::preserve_mode(&mut options, false);
-    let mut file = options.open(path)?;
-    file.write_all(content)?;
-    file.commit()
-}
-
-#[cfg(not(unix))]
-pub(crate) fn atomic_write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    atomic_write(path, content)
-}
-
-pub(crate) fn read_workspace_file(root: &Path, relative: &RepoPath) -> Result<Vec<u8>> {
-    let path = safe_regular_file(root, relative)?;
-    fs::read(&path).with_context(|| format!("could not read {}", relative.display()))
 }
 
 pub(crate) fn atomic_write_if_unchanged(
@@ -150,28 +109,11 @@ pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
 
 #[derive(Debug, Clone)]
 pub(crate) enum FileOperation {
-    CreateFile {
-        path: RepoPath,
-    },
-    CreateDirectory {
-        path: RepoPath,
-    },
-    Rename {
-        from: RepoPath,
-        to: RepoPath,
-    },
-    Move {
-        from: RepoPath,
-        to: RepoPath,
-    },
-    Delete {
-        path: RepoPath,
-    },
-    ImportClipboard {
-        source: PathBuf,
-        destination: RepoPath,
-        selection: RepoPath,
-    },
+    CreateFile { path: RepoPath },
+    CreateDirectory { path: RepoPath },
+    Rename { from: RepoPath, to: RepoPath },
+    Move { from: RepoPath, to: RepoPath },
+    Delete { path: RepoPath },
 }
 
 impl FileOperation {
@@ -180,7 +122,6 @@ impl FileOperation {
             Self::CreateFile { path } | Self::CreateDirectory { path } => Some(path.clone()),
             Self::Rename { to, .. } | Self::Move { to, .. } => Some(to.clone()),
             Self::Delete { .. } => None,
-            Self::ImportClipboard { selection, .. } => Some(selection.clone()),
         }
     }
 
@@ -191,12 +132,6 @@ impl FileOperation {
             Self::Rename { to, .. } => format!("Renamed to {to}"),
             Self::Move { to, .. } => format!("Moved to {to}"),
             Self::Delete { path } => format!("Deleted {path}"),
-            Self::ImportClipboard { destination, .. } if destination.is_empty() => {
-                "Pasted files into the workspace".to_owned()
-            }
-            Self::ImportClipboard { destination, .. } => {
-                format!("Pasted files into {destination}/")
-            }
         }
     }
 }
@@ -259,11 +194,6 @@ pub(crate) fn perform(root: &Path, operation: &FileOperation) -> Result<()> {
                     .with_context(|| format!("could not delete file {}", path.display()))?;
             }
         }
-        FileOperation::ImportClipboard {
-            source,
-            destination,
-            ..
-        } => clipboard_import::perform(root, source, destination)?,
     }
     Ok(())
 }

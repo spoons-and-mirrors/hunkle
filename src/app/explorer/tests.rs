@@ -375,8 +375,8 @@ fn directory_index_skips_build_trees() {
 fn includes_config_directories_in_browsing_and_global_search() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let opencode = root.join(".config/opencode");
-    fs::create_dir_all(opencode.join("themes")).unwrap();
+    let tool_config = root.join(".config/toolbox");
+    fs::create_dir_all(tool_config.join("themes")).unwrap();
     fs::create_dir_all(root.join(".cache/ignored")).unwrap();
     fs::create_dir_all(root.join(".git/objects")).unwrap();
 
@@ -396,14 +396,14 @@ fn includes_config_directories_in_browsing_and_global_search() {
 
     let index = index_directories(&[root.to_path_buf()]);
     let paths: Vec<_> = index.iter().map(|entry| &entry.path).collect();
-    assert!(paths.contains(&&opencode));
+    assert!(paths.contains(&&tool_config));
     assert!(!paths.contains(&&root.join(".cache")));
 
     let mut picker = Explorer::new(root.to_path_buf());
     picker.directory_index = Arc::new(index.into());
-    picker.begin_search(Some("opencode"));
+    picker.begin_search(Some("toolbox"));
     wait_for_matches(&mut picker);
-    assert_eq!(picker.matches[0].path, opencode);
+    assert_eq!(picker.matches[0].path, tool_config);
 }
 
 #[test]
@@ -411,8 +411,8 @@ fn path_completion_adds_a_separator_and_immediately_lists_children() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let config = root.join(".config");
-    let opencode = config.join("opencode");
-    fs::create_dir_all(opencode.join("themes")).unwrap();
+    let tool_config = config.join("toolbox");
+    fs::create_dir_all(tool_config.join("themes")).unwrap();
     fs::create_dir_all(config.join("other")).unwrap();
 
     let mut picker = Explorer::new(root.to_path_buf());
@@ -423,7 +423,7 @@ fn path_completion_adds_a_separator_and_immediately_lists_children() {
         picker
             .preview_entries
             .iter()
-            .any(|entry| entry.path == opencode)
+            .any(|entry| entry.path == tool_config)
     );
 
     picker.accept_completion();
@@ -433,7 +433,7 @@ fn path_completion_adds_a_separator_and_immediately_lists_children() {
             .path_input
             .ends_with(&format!(".config{}", std::path::MAIN_SEPARATOR))
     );
-    assert!(picker.matches.iter().any(|entry| entry.path == opencode));
+    assert!(picker.matches.iter().any(|entry| entry.path == tool_config));
 
     assert!(matches!(picker.confirm_path(), PickerCommand::None));
     assert_eq!(picker.directory, config);

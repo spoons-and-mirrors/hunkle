@@ -11,9 +11,7 @@ use crate::repo_path::RepoPath;
 
 mod markdown;
 mod syntax;
-pub(super) use markdown::{
-    markdown_prefix_style, styled_markdown, styled_markdown_preserving_breaks,
-};
+pub(super) use markdown::{markdown_prefix_style, styled_markdown};
 use syntax::{Language, syntax_spans_for_language};
 
 pub(super) fn styled_source(source: &str, path: &str, width: usize) -> Vec<Line<'static>> {

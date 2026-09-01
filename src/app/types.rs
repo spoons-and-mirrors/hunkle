@@ -63,14 +63,13 @@ enum WorkspaceContent {
 pub(crate) struct WorkspaceNavigation {
     content: WorkspaceContent,
     search_return: WorkspaceContent,
-    agents: Option<WorkspaceSurface>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum WorkspaceBack {
     None,
     GraphCommit,
-    Detail { changes: bool, agent: bool },
+    Detail,
 }
 
 impl Default for WorkspaceNavigation {
@@ -79,7 +78,6 @@ impl Default for WorkspaceNavigation {
         Self {
             content,
             search_return: content,
-            agents: None,
         }
     }
 }
@@ -146,49 +144,15 @@ impl WorkspaceNavigation {
         }
     }
 
-    pub(crate) fn agents_selected(self) -> bool {
-        self.agents.is_some()
-    }
-
-    pub(crate) fn agent_detail_open(self) -> bool {
-        self.agents == Some(WorkspaceSurface::Detail)
-    }
-
-    pub(crate) fn select_agents(&mut self) {
-        self.close_changes_detail();
-        self.agents = Some(WorkspaceSurface::Master);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn show_agent_detail(&mut self) {
-        self.agents = Some(WorkspaceSurface::Detail);
-    }
-
-    pub(crate) fn close_agent_detail(&mut self) {
-        if self.agent_detail_open() {
-            self.agents = Some(WorkspaceSurface::Master);
-        }
-    }
-
-    pub(crate) fn select_sidebar(&mut self) {
-        self.agents = None;
-    }
-
     pub(crate) fn back(&mut self) -> WorkspaceBack {
         if self.graph_commit_open() {
             self.close_graph_commit();
             return WorkspaceBack::GraphCommit;
         }
 
-        let changes_detail = self.changes_detail_open();
-        let agent_detail = self.agent_detail_open();
-        self.close_changes_detail();
-        self.close_agent_detail();
-        if changes_detail || agent_detail {
-            WorkspaceBack::Detail {
-                changes: changes_detail,
-                agent: agent_detail,
-            }
+        if self.changes_detail_open() {
+            self.close_changes_detail();
+            WorkspaceBack::Detail
         } else {
             WorkspaceBack::None
         }
@@ -206,50 +170,31 @@ mod workspace_tests {
     }
 
     #[test]
-    fn workspace_navigation_preserves_primary_selection_across_layers() {
+    fn workspace_navigation_preserves_primary_selection_across_search() {
         let mut navigation = WorkspaceNavigation::default();
-        navigation.select_agents();
-        navigation.show_agent_detail();
         navigation.show_graph();
         navigation.show_graph_commit();
         navigation.open_search();
 
         assert!(navigation.showing(View::RepositorySearch));
-        assert!(navigation.agents_selected());
-        assert!(navigation.agent_detail_open());
 
         navigation.close_search();
         assert!(navigation.showing(View::Graph));
-        assert!(navigation.agents_selected());
-        assert!(navigation.agent_detail_open());
         assert!(navigation.graph_commit_open());
 
         navigation.close_graph_commit();
         assert!(!navigation.graph_commit_open());
-        assert!(navigation.agent_detail_open());
-
-        navigation.close_agent_detail();
-        assert!(navigation.agents_selected());
-        assert!(!navigation.agent_detail_open());
     }
 
     #[test]
     fn workspace_navigation_owns_back_priority() {
         let mut navigation = WorkspaceNavigation::default();
-        navigation.select_agents();
-        navigation.show_agent_detail();
+        navigation.show_changes_detail();
         navigation.show_graph_commit();
 
         assert_eq!(navigation.back(), WorkspaceBack::GraphCommit);
-        assert!(navigation.agent_detail_open());
-        assert_eq!(
-            navigation.back(),
-            WorkspaceBack::Detail {
-                changes: false,
-                agent: true,
-            }
-        );
-        assert!(!navigation.agent_detail_open());
+        navigation.show_changes_detail();
+        assert_eq!(navigation.back(), WorkspaceBack::Detail);
     }
 
     #[test]
@@ -299,28 +244,21 @@ pub enum Mode {
     AuthorFilter,
     ActionMenu,
     Command,
-    HerdrPrompt,
     FileEdit,
     Editor,
     Files,
-    Scheduler,
-    AgentPreview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsPage {
     General,
-    OpenCode,
-    Discord,
     Shortcuts,
 }
 
 impl SettingsPage {
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::General => Self::OpenCode,
-            Self::OpenCode => Self::Discord,
-            Self::Discord => Self::Shortcuts,
+            Self::General => Self::Shortcuts,
             Self::Shortcuts => Self::General,
         }
     }
@@ -328,9 +266,7 @@ impl SettingsPage {
     pub(crate) fn previous(self) -> Self {
         match self {
             Self::General => Self::Shortcuts,
-            Self::OpenCode => Self::General,
-            Self::Discord => Self::OpenCode,
-            Self::Shortcuts => Self::Discord,
+            Self::Shortcuts => Self::General,
         }
     }
 }
@@ -360,11 +296,6 @@ pub(crate) enum HitTarget {
     HeaderDiff,
     HeaderIssue,
     HeaderAgent,
-    HeaderSchedule,
-    HeaderFullscreen,
-    AgentPanePickerOverlay,
-    AgentPane(usize),
-    AgentPaneSplit(usize, AgentPaneDirection),
     HeaderPickerOverlay,
     HeaderPickerNewBranch,
     HeaderPickerOpenExplorer,
@@ -383,123 +314,12 @@ pub(crate) enum HitTarget {
     HeaderPickerCheckoutPullRequest(usize),
     HeaderPickerIssueScope,
     Changes(ChangesHitTarget),
-    CommitMessageGenerate,
     RenderedPreviewToggle,
     MediaPreview,
     Graph(GraphHitTarget),
     Explorer(ExplorerHitTarget),
     FileSearch(FileSearchHitTarget),
     Settings(SettingsHitTarget),
-    Scheduler(SchedulerHitTarget),
-    Agent(AgentKey),
-    NormAgent(NormAgentIdentity),
-    AgentPreviewModalBackdrop,
-    AgentPreviewModalOverlay,
-    AgentPreviewModalClose,
-    AgentPreviewViewToggle,
-    AgentPaneId(String),
-    AgentListModeToggle,
-    AgentScheduledRun(i64),
-    AgentStash(AgentKey),
-    StashedAgent(usize),
-    AgentPreviewPicker(AgentKey),
-    AgentPreviewPickerItem(AgentKey),
-    AgentPreviewMessageTimeline(AgentKey),
-    AgentPreviewMessageStep {
-        agent: AgentKey,
-        forward: bool,
-    },
-    AgentPreviewScheduledMessageStep {
-        run_id: i64,
-        forward: bool,
-    },
-    AgentPreviewPrompt(AgentKey),
-    AgentPreviewPromptDelivery(AgentKey),
-    AgentPreviewScheduledPrompt(i64),
-    AgentPreviewRequest {
-        agent: AgentKey,
-        message: usize,
-        request: usize,
-    },
-    AgentPreviewScheduledRequest {
-        run_id: i64,
-        request: usize,
-    },
-    AgentPreviewOutput {
-        agent: AgentKey,
-        message: usize,
-        request: usize,
-        part: usize,
-    },
-    AgentPreviewOutputReply {
-        agent: AgentKey,
-        message: usize,
-        request: usize,
-        part: usize,
-    },
-    AgentPreviewOutputReplyInput {
-        agent: AgentKey,
-        message: usize,
-        request: usize,
-        part: usize,
-    },
-    AgentPreviewScheduledOutput {
-        run_id: i64,
-        message: usize,
-        request: usize,
-        part: usize,
-    },
-    AgentPreviewScheduledOutputReply {
-        run_id: i64,
-        message: usize,
-        request: usize,
-        part: usize,
-    },
-    AgentPreviewScheduledOutputReplyInput {
-        run_id: i64,
-        message: usize,
-        request: usize,
-        part: usize,
-    },
-    AgentTooltip {
-        agent: AgentKey,
-        message: usize,
-    },
-    AgentMessage {
-        agent: AgentKey,
-        message: usize,
-    },
-    AgentExpandedMessage {
-        agent: AgentKey,
-        message: usize,
-    },
-    AgentScheduledMessage {
-        run_id: i64,
-        message: usize,
-    },
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentPromptDelivery {
-    #[default]
-    NextRequest,
-    OnIdle,
-}
-
-impl AgentPromptDelivery {
-    pub(crate) fn toggle(self) -> Self {
-        match self {
-            Self::NextRequest => Self::OnIdle,
-            Self::OnIdle => Self::NextRequest,
-        }
-    }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::NextRequest => "send now",
-            Self::OnIdle => "send on idle",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,53 +327,14 @@ pub(crate) enum SettingsHitTarget {
     Overlay,
     Page(SettingsPage),
     Shortcut(ShortcutAction),
-    OpenCodeModel,
-    OpenCodeReasoning,
-    DiscordWebhook,
-    DiscordAdd,
-    DiscordField(usize),
-    DiscordSave,
-    DiscordCancel,
-    DiscordTest,
-    DiscordRemove,
     AutoFetch,
     FetchInterval,
     FetchIntervalDown,
     FetchIntervalUp,
-    AgentPreviewSplit,
-    AgentPreviewSplitDown,
-    AgentPreviewSplitUp,
     FormatOnSave,
-    CrossWorkspaceAgents,
-    AgentHarness,
-    AgentCardClick,
-    AgentTime,
-    ClearAgentTimings,
     MediaPreview,
     SixelQuality,
     Editor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SchedulerHitTarget {
-    Close,
-    Back,
-    New,
-    Edit,
-    Save,
-    Cancel,
-    Task(i64),
-    Run(i64),
-    Field(SchedulerField),
-    PromptExpand,
-    DestinationCard(SchedulerDestinationCard),
-    DestinationPickerOverlay,
-    Destination(usize),
-    Toggle,
-    RunNow,
-    Delete,
-    Refresh,
-    OpenConversation,
 }
 
 impl SettingsHitTarget {
@@ -562,12 +343,6 @@ impl SettingsHitTarget {
             Self::AutoFetch,
             Self::FetchInterval,
             Self::FormatOnSave,
-            Self::CrossWorkspaceAgents,
-            Self::AgentHarness,
-            Self::AgentCardClick,
-            Self::AgentPreviewSplit,
-            Self::AgentTime,
-            Self::ClearAgentTimings,
             Self::MediaPreview,
             Self::SixelQuality,
             Self::Editor,
@@ -581,29 +356,10 @@ impl SettingsHitTarget {
             Self::AutoFetch => Some(0),
             Self::FetchInterval | Self::FetchIntervalDown | Self::FetchIntervalUp => Some(1),
             Self::FormatOnSave => Some(2),
-            Self::CrossWorkspaceAgents => Some(3),
-            Self::AgentHarness => Some(4),
-            Self::AgentCardClick => Some(5),
-            Self::AgentPreviewSplit | Self::AgentPreviewSplitDown | Self::AgentPreviewSplitUp => {
-                Some(6)
-            }
-            Self::AgentTime => Some(7),
-            Self::ClearAgentTimings => Some(8),
-            Self::MediaPreview => Some(9),
-            Self::SixelQuality => Some(10),
-            Self::Editor => Some(11),
-            Self::Overlay
-            | Self::Page(_)
-            | Self::Shortcut(_)
-            | Self::OpenCodeModel
-            | Self::OpenCodeReasoning
-            | Self::DiscordWebhook
-            | Self::DiscordAdd
-            | Self::DiscordField(_)
-            | Self::DiscordSave
-            | Self::DiscordCancel
-            | Self::DiscordTest
-            | Self::DiscordRemove => None,
+            Self::MediaPreview => Some(3),
+            Self::SixelQuality => Some(4),
+            Self::Editor => Some(5),
+            Self::Overlay | Self::Page(_) | Self::Shortcut(_) => None,
         }
     }
 }
@@ -616,25 +372,6 @@ pub(crate) enum FileSearchHitTarget {
     Regex,
     IncludeIgnored,
     Result { generation: u64, row: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentPaneDirection {
-    Up,
-    Down,
-    Left,
-    Right,
-}
-
-impl AgentPaneDirection {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Up => "up",
-            Self::Down => "down",
-            Self::Left => "left",
-            Self::Right => "right",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -691,7 +428,6 @@ pub(crate) struct MobileScrollDrag {
     pub(crate) previous: Position,
     pub(crate) moved: bool,
     pub(crate) axis: Option<MobileDragAxis>,
-    pub(crate) agent_preview: Option<AgentKey>,
     pub(crate) scroll_target: Option<ScrollTarget>,
     pub(crate) modifiers: KeyModifiers,
 }
@@ -712,23 +448,14 @@ pub(crate) enum ScrollTarget {
     WorkspaceExplorerSurroundings,
     CommandOutput,
     SettingsShortcuts,
-    SchedulerTasks,
-    SchedulerRuns,
-    SchedulerPrompt,
-    SchedulerDestinations,
     Commit,
     Worktree,
     Explorer,
-    Agents,
-    NormAgents,
     Preview,
     SqliteObjects,
     SqliteRows,
     Graph,
     RepositorySearch,
-    AgentTimeline(AgentKey),
-    AgentTranscript(AgentKey),
-    AgentScheduledTranscript(i64),
 }
 
 #[derive(Clone, Debug)]
@@ -788,12 +515,6 @@ pub struct Regions {
     pub files_panel: Option<Rect>,
     pub worktree_list: Option<Rect>,
     pub explorer_list: Option<Rect>,
-    pub agents_list: Option<Rect>,
-    pub agents_splitter: Option<Rect>,
-    pub agents_bounds: Option<Rect>,
-    pub(crate) agent_cards_presented: bool,
-    pub(crate) agent_animation_presented: bool,
-    pub(crate) agent_preview_companion: Option<Rect>,
     pub diff: Option<Rect>,
     pub preview_body: Option<Rect>,
     pub preview_path: Option<RepoPath>,
@@ -819,7 +540,6 @@ pub struct Regions {
     pub action_list: Option<Rect>,
     pub command_overlay: Option<Rect>,
     pub command_output: Option<Rect>,
-    pub herdr_prompt_overlay: Option<Rect>,
     pub editor_overlay: Option<Rect>,
     pub file_search: Option<Rect>,
     pub file_search_list: Option<Rect>,
@@ -886,24 +606,12 @@ impl Regions {
         });
     }
 
-    pub(crate) fn scroll_target_rect(&self, target: ScrollTarget) -> Option<Rect> {
-        self.scroll_regions
-            .iter()
-            .rev()
-            .find(|region| region.target == target)
-            .map(|region| region.rect)
-    }
-
     pub(crate) fn scroll_state(&self, target: &ScrollTarget) -> Option<ScrollState> {
         self.scroll_regions
             .iter()
             .rev()
             .find(|region| &region.target == target)
             .and_then(|region| region.state)
-    }
-
-    pub(crate) fn hit_targets(&self) -> impl Iterator<Item = &HitTarget> {
-        self.hit_regions.iter().map(|region| &region.target)
     }
 
     pub(crate) fn capture_scroll_target(&mut self, target: ScrollTarget) {
@@ -915,10 +623,6 @@ impl Regions {
             hit_region: self.hit_regions.len(),
             scroll_region: self.scroll_regions.len(),
         });
-    }
-
-    pub(crate) fn has_scroll_capture(&self) -> bool {
-        self.scroll_capture.is_some()
     }
 
     pub(crate) fn has_hard_scroll_capture(&self) -> bool {
@@ -967,30 +671,9 @@ impl Regions {
             | HitTarget::HeaderPickerCheckoutPullRequest(_)
             | HitTarget::HeaderPickerDeleteBranch(_)
             | HitTarget::HeaderPickerDeleteWorktree(_) => Some(ScrollTarget::HeaderPicker),
-            HitTarget::AgentPreviewMessageTimeline(agent)
-            | HitTarget::AgentPreviewMessageStep { agent, .. }
-            | HitTarget::AgentMessage { agent, .. } => {
-                Some(ScrollTarget::AgentTimeline(agent.clone()))
-            }
             HitTarget::Explorer(
                 ExplorerHitTarget::SurroundingsPane | ExplorerHitTarget::Surrounding { .. },
             ) => Some(ScrollTarget::WorkspaceExplorerSurroundings),
-            HitTarget::AgentTooltip { agent, .. }
-            | HitTarget::AgentPreviewRequest { agent, .. }
-            | HitTarget::AgentPreviewOutput { agent, .. }
-            | HitTarget::AgentPreviewOutputReply { agent, .. }
-            | HitTarget::AgentPreviewOutputReplyInput { agent, .. }
-            | HitTarget::AgentExpandedMessage { agent, .. } => {
-                Some(ScrollTarget::AgentTranscript(agent.clone()))
-            }
-            HitTarget::AgentScheduledMessage { run_id, .. }
-            | HitTarget::AgentPreviewScheduledMessageStep { run_id, .. }
-            | HitTarget::AgentPreviewScheduledRequest { run_id, .. }
-            | HitTarget::AgentPreviewScheduledOutput { run_id, .. }
-            | HitTarget::AgentPreviewScheduledOutputReply { run_id, .. }
-            | HitTarget::AgentPreviewScheduledOutputReplyInput { run_id, .. } => {
-                Some(ScrollTarget::AgentScheduledTranscript(*run_id))
-            }
             _ => None,
         }
     }

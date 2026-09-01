@@ -5,8 +5,6 @@ pub(super) fn draw_header(
     area: Rect,
     profile: LayoutProfile,
 ) {
-    let herdr_available = app.herdr_available();
-    let herdr_embedded = app.herdr_embedded();
     let row = area;
     let content_y = area.bottom().saturating_sub(1);
     let card_gap = if profile.is_single() { " " } else { "  " };
@@ -15,35 +13,7 @@ pub(super) fn draw_header(
         Block::default().style(Style::default().bg(palette().canvas)),
         row,
     );
-    let fullscreen_rect = (herdr_embedded && !profile.is_single()).then(|| {
-        let label = " ⛶ ";
-        let width = UnicodeWidthStr::width(label) as u16;
-        let rect = Rect::new(area.right().saturating_sub(width), content_y, width, 1);
-        let hovered = app.hovered_hit_target == Some(HitTarget::HeaderFullscreen);
-        frame.render_widget(
-            Paragraph::new(label).alignment(Alignment::Center).style(
-                Style::default()
-                    .fg(if app.herdr.fullscreen_running() {
-                        palette().faint
-                    } else if hovered || app.herdr.fullscreen() {
-                        palette().accent
-                    } else {
-                        palette().cyan
-                    })
-                    .bg(palette().canvas)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            rect,
-        );
-        if !app.herdr.fullscreen_running() {
-            app.regions
-                .register_hit_target(HitTarget::HeaderFullscreen, rect);
-        }
-        rect
-    });
-    let header_right = fullscreen_rect
-        .map(|rect| rect.x.saturating_sub(1))
-        .unwrap_or_else(|| area.right());
+    let header_right = area.right();
     let Some(repo) = app.repository() else {
         frame.render_widget(
             Paragraph::new("  No workspace selected").style(Style::default().fg(palette().muted)),
@@ -67,38 +37,22 @@ pub(super) fn draw_header(
     let (ahead, behind) = (repo.ahead, repo.behind);
     let full_branch_badge = branch_badge(&branch, dirty, ahead, behind, usize::MAX);
     let branch_width = UnicodeWidthStr::width(full_branch_badge.as_str()) as u16;
-    let show_agent_actions = !app.herdr_prompt.agent_pane_picker_open();
     let diff_badge = " DIFF ";
-    let diff_width = show_agent_actions
-        .then(|| UnicodeWidthStr::width(diff_badge) as u16)
-        .unwrap_or_default();
+    let diff_width = UnicodeWidthStr::width(diff_badge) as u16;
     let issue_badge = " ISSUE ";
-    let issue_width = if show_agent_actions {
-        UnicodeWidthStr::width(issue_badge) as u16
-    } else {
-        0
-    };
+    let issue_width = UnicodeWidthStr::width(issue_badge) as u16;
     let agent_badge = " AGENT ";
-    let agent_width = (show_agent_actions && herdr_available)
-        .then(|| UnicodeWidthStr::width(agent_badge) as u16)
-        .unwrap_or_default();
-    let local_agent_width = if agent_width > 0 {
-        usize::from(card_gap_width) + usize::from(agent_width)
-    } else {
-        0
-    };
-    let comparison = show_agent_actions
-        .then(|| {
-            app.changes
-                .branch_comparison()
-                .map(|comparison| format!(" {}...{}", comparison.target, comparison.current))
-        })
-        .flatten();
+    let agent_width = UnicodeWidthStr::width(agent_badge) as u16;
+    let local_agent_width = usize::from(card_gap_width) + usize::from(agent_width);
+    let comparison = app
+        .changes
+        .branch_comparison()
+        .map(|comparison| format!(" {}...{}", comparison.target, comparison.current));
     let requested_comparison_width = comparison
         .as_deref()
         .map_or(0, |comparison| UnicodeWidthStr::width(comparison).min(40));
     let available = usize::from(header_right.saturating_sub(area.x));
-    let comparison_width = if is_local || !show_agent_actions {
+    let comparison_width = if is_local {
         0
     } else if profile.is_single() {
         requested_comparison_width
@@ -123,17 +77,13 @@ pub(super) fn draw_header(
     let worktree_width = UnicodeWidthStr::width(worktree.as_str())
         .saturating_add(2)
         .min(18);
-    let action_width = if show_agent_actions {
-        usize::from(card_gap_width)
-            + usize::from(diff_width)
-            + usize::from(card_gap_width)
-            + usize::from(issue_width)
-            + usize::from(card_gap_width)
-            + usize::from(agent_width)
-            + comparison_width
-    } else {
-        0
-    };
+    let action_width = usize::from(card_gap_width)
+        + usize::from(diff_width)
+        + usize::from(card_gap_width)
+        + usize::from(issue_width)
+        + usize::from(card_gap_width)
+        + usize::from(agent_width)
+        + comparison_width;
     let badge_width = if is_local {
         2 + repository_width + usize::from(card_gap_width) + "LOCAL".len() + local_agent_width
     } else {
@@ -144,10 +94,11 @@ pub(super) fn draw_header(
             + usize::from(branch_width)
             + action_width
     };
-    let header_scroll_max = profile
-        .is_single()
-        .then(|| badge_width.saturating_sub(available))
-        .unwrap_or_default();
+    let header_scroll_max = if profile.is_single() {
+        badge_width.saturating_sub(available)
+    } else {
+        0
+    };
     app.regions.header_scroll_max = header_scroll_max;
     if profile.is_single() {
         app.header_scroll = app.header_scroll.min(header_scroll_max);
@@ -281,22 +232,20 @@ pub(super) fn draw_header(
             Style::default().fg(palette().muted),
             room,
         );
-        if agent_width > 0 {
-            let room = remaining(x);
-            let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-            let room = remaining(x);
-            let agent_rect = render_card(
-                frame,
-                &mut x,
-                agent_badge.to_owned(),
-                palette().green,
-                app.hovered_hit_target == Some(HitTarget::HeaderAgent),
-                room,
-            );
-            if let Some(rect) = agent_rect {
-                app.regions
-                    .register_hit_target(HitTarget::HeaderAgent, rect);
-            }
+        let room = remaining(x);
+        let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
+        let room = remaining(x);
+        let agent_rect = render_card(
+            frame,
+            &mut x,
+            agent_badge.to_owned(),
+            palette().green,
+            app.hovered_hit_target == Some(HitTarget::HeaderAgent),
+            room,
+        );
+        if let Some(rect) = agent_rect {
+            app.regions
+                .register_hit_target(HitTarget::HeaderAgent, rect);
         }
     } else {
         let room = remaining(x);
@@ -342,70 +291,66 @@ pub(super) fn draw_header(
             app.regions
                 .register_hit_target(HitTarget::HeaderBranch, rect);
         }
-        if show_agent_actions {
+        let room = remaining(x);
+        let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
+        let room = remaining(x);
+        let diff_rect = render_card(
+            frame,
+            &mut x,
+            diff_badge.to_owned(),
+            palette().purple,
+            app.hovered_hit_target == Some(HitTarget::HeaderDiff),
+            room.saturating_sub(
+                issue_width
+                    .saturating_add(agent_width)
+                    .saturating_add(card_gap_width.saturating_mul(2)),
+            ),
+        );
+        if let Some(rect) = diff_rect {
+            app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
+        }
+        let room = remaining(x);
+        let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
+        let room = remaining(x);
+        let issue_rect = render_card(
+            frame,
+            &mut x,
+            issue_badge.to_owned(),
+            palette().cyan,
+            app.hovered_hit_target == Some(HitTarget::HeaderIssue)
+                || app.header_picker.kind == Some(HeaderPickerKind::Issues),
+            room.saturating_sub(agent_width.saturating_add(card_gap_width)),
+        );
+        if let Some(rect) = issue_rect {
+            app.regions
+                .register_hit_target(HitTarget::HeaderIssue, rect);
+        }
+        let room = remaining(x);
+        let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
+        let room = remaining(x);
+        let agent_rect = render_card(
+            frame,
+            &mut x,
+            agent_badge.to_owned(),
+            palette().green,
+            app.hovered_hit_target == Some(HitTarget::HeaderAgent),
+            room,
+        );
+        if let Some(rect) = agent_rect {
+            app.regions
+                .register_hit_target(HitTarget::HeaderAgent, rect);
+        }
+        if let Some(comparison) = comparison {
             let room = remaining(x);
-            let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-            let room = remaining(x);
-            let diff_rect = render_card(
+            let _ = render(
                 frame,
                 &mut x,
-                diff_badge.to_owned(),
-                palette().purple,
-                app.hovered_hit_target == Some(HitTarget::HeaderDiff),
-                room.saturating_sub(
-                    issue_width
-                        .saturating_add(agent_width)
-                        .saturating_add(card_gap_width.saturating_mul(2)),
-                ),
+                comparison,
+                Style::default()
+                    .fg(palette().purple)
+                    .add_modifier(Modifier::BOLD),
+                room.min(comparison_width as u16),
             );
-            if let Some(rect) = diff_rect {
-                app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
-            }
-            let room = remaining(x);
-            let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-            let room = remaining(x);
-            let issue_rect = render_card(
-                frame,
-                &mut x,
-                issue_badge.to_owned(),
-                palette().cyan,
-                app.hovered_hit_target == Some(HitTarget::HeaderIssue)
-                    || app.header_picker.kind == Some(HeaderPickerKind::Issues),
-                room.saturating_sub(agent_width.saturating_add(card_gap_width)),
-            );
-            if let Some(rect) = issue_rect {
-                app.regions
-                    .register_hit_target(HitTarget::HeaderIssue, rect);
-            }
-            if herdr_available {
-                let room = remaining(x);
-                let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-                let room = remaining(x);
-                let agent_rect = render_card(
-                    frame,
-                    &mut x,
-                    agent_badge.to_owned(),
-                    palette().green,
-                    app.hovered_hit_target == Some(HitTarget::HeaderAgent),
-                    room,
-                );
-                if let Some(rect) = agent_rect {
-                    app.regions
-                        .register_hit_target(HitTarget::HeaderAgent, rect);
-                }
-            }
-            if let Some(comparison) = comparison {
-                let room = remaining(x);
-                let _ = render(
-                    frame,
-                    &mut x,
-                    comparison,
-                    Style::default()
-                        .fg(palette().purple)
-                        .add_modifier(Modifier::BOLD),
-                    room.min(comparison_width as u16),
-                );
-            }
         }
     }
 
@@ -532,9 +477,7 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App, profile: 
     let deleting_worktree = app.header_picker.deleting_worktree();
     let row_count = if cloning_repository {
         5
-    } else if creating_worktree {
-        3
-    } else if deleting_worktree || deleting_branch {
+    } else if creating_worktree || deleting_worktree || deleting_branch {
         3
     } else if naming_branch {
         2
@@ -783,7 +726,6 @@ pub(super) fn draw_header_picker(frame: &mut Frame<'_>, app: &mut App, profile: 
             .register_hit_target(HitTarget::HeaderPickerConfirmDeleteWorktree, delete);
         app.regions
             .register_hit_target(HitTarget::HeaderPickerCancelDeleteWorktree, cancel);
-        return;
     }
 }
 

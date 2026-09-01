@@ -30,8 +30,6 @@ fn repository() -> LinkedWorktreeRepository {
         common_dir: PathBuf::from("/repo/.git"),
         label: "repo".to_owned(),
         worktrees: vec![linked("/repo", true), linked("/repo-feature", false)],
-        branches: Vec::new(),
-        branch_error: None,
         error: None,
     }
 }
@@ -69,66 +67,21 @@ fn persist_store(catalog: &LinkedWorktreeCatalog) {
 }
 
 #[test]
-fn resolves_agent_destination_metadata_from_its_worktree() {
-    let snapshot = LinkedWorktreeCatalogSnapshot::for_test(vec![repository()]);
-
-    let basetree = snapshot.agent_destination(Path::new("/repo")).unwrap();
-    assert_eq!(basetree.repository(), "repo");
-    assert_eq!(basetree.branch(), "feature");
-
-    let linked = snapshot
-        .agent_destination(Path::new("/repo-feature"))
-        .unwrap();
-    assert_eq!(linked.repository(), "repo");
-    assert_eq!(linked.branch(), "feature");
-}
-
-#[test]
-fn defers_branch_discovery_until_scheduler_requests_it() {
-    let mut catalog = LinkedWorktreeCatalog::new(None);
-
-    assert!(!catalog.refresh_request().key.load_branches);
-    catalog.request_branches();
-
-    assert!(catalog.branches_requested);
-    assert!(
-        catalog
-            .active_refresh
-            .as_ref()
-            .is_some_and(|refresh| refresh.key.load_branches)
-    );
-}
-
-#[test]
 fn inventory_cache_reuses_only_fresh_matching_topology() {
     let cached = CachedRepository {
         topology_epoch: 3,
-        branches_loaded: false,
         checked_at: Instant::now(),
         repository: repository(),
     };
-    let known_worktree = PathBuf::from("/repo-feature");
 
-    assert!(cached_repository_is_reusable(
-        &cached,
-        3,
-        false,
-        Some(std::slice::from_ref(&known_worktree)),
-    ));
-    assert!(!cached_repository_is_reusable(&cached, 4, false, None,));
-    assert!(!cached_repository_is_reusable(
-        &cached,
-        3,
-        false,
-        Some(&[PathBuf::from("/new-worktree")]),
-    ));
+    assert!(cached_repository_is_reusable(&cached, 3));
+    assert!(!cached_repository_is_reusable(&cached, 4));
 
     let stale = CachedRepository {
         checked_at: Instant::now() - INVENTORY_CACHE_TTL - Duration::from_millis(1),
         ..cached
     };
-    assert!(!cached_repository_is_reusable(&stale, 3, false, None));
-    assert!(cached_repository_is_reusable(&stale, 3, true, None));
+    assert!(!cached_repository_is_reusable(&stale, 3));
 }
 
 #[test]
@@ -140,7 +93,7 @@ fn repeated_presented_card_requests_stay_inside_the_backoff_window() {
         Ok((WorktreeSignature::for_test(1, 1), Some((12, 4))))
     });
     let mut catalog = LinkedWorktreeCatalog::new_with_stats_loader(None, loader);
-    let root = PathBuf::from("/agent-destination");
+    let root = PathBuf::from("/catalog-workspace");
 
     catalog.request_stats([root.clone()]);
     wait_for_stats(&mut catalog);
@@ -358,7 +311,6 @@ fn ignores_stale_inventory_completions() {
         .sender
         .send(InventoryCompletion {
             generation: 1,
-            branches_loaded: false,
             topology_epoch: 0,
             repositories: Vec::new(),
             discovered: Vec::new(),
@@ -389,17 +341,9 @@ fn changed_in_flight_refreshes_coalesce_to_one_follow_up() {
     let mut catalog = LinkedWorktreeCatalog::new(None);
     catalog.refresh();
 
-    catalog.observe_herdr(LinkedWorktreeObservation {
-        candidates: vec![LinkedWorktreeCandidate {
-            path: PathBuf::from("/first-change"),
-        }],
-    });
+    catalog.store.repositories = vec![PathBuf::from("/first-change")];
     catalog.refresh();
-    catalog.observe_herdr(LinkedWorktreeObservation {
-        candidates: vec![LinkedWorktreeCandidate {
-            path: PathBuf::from("/latest-change"),
-        }],
-    });
+    catalog.store.repositories = vec![PathBuf::from("/latest-change")];
     catalog.refresh();
     assert_eq!(catalog.generation, 1);
 
@@ -407,7 +351,6 @@ fn changed_in_flight_refreshes_coalesce_to_one_follow_up() {
         .sender
         .send(InventoryCompletion {
             generation: 1,
-            branches_loaded: false,
             topology_epoch: 0,
             repositories: Vec::new(),
             discovered: Vec::new(),
@@ -420,16 +363,8 @@ fn changed_in_flight_refreshes_coalesce_to_one_follow_up() {
     assert_eq!(catalog.generation, 2);
     assert!(catalog.pending_refresh.is_none());
     assert_eq!(
-        catalog
-            .active_refresh
-            .as_ref()
-            .unwrap()
-            .key
-            .candidates
-            .as_slice(),
-        [LinkedWorktreeCandidate {
-            path: PathBuf::from("/latest-change"),
-        }]
+        catalog.active_refresh.as_ref().unwrap().key.known,
+        [PathBuf::from("/latest-change")]
     );
 }
 
@@ -445,15 +380,9 @@ fn reverted_intent_still_follows_a_superseded_flight() {
         inventory_pending: true,
         stats_pending: false,
     });
-    catalog.observe_herdr(LinkedWorktreeObservation {
-        candidates: vec![LinkedWorktreeCandidate {
-            path: PathBuf::from("/transient-change"),
-        }],
-    });
+    catalog.store.repositories = vec![PathBuf::from("/transient-change")];
     catalog.refresh();
-    catalog.observe_herdr(LinkedWorktreeObservation {
-        candidates: Vec::new(),
-    });
+    catalog.store.repositories.clear();
     catalog.refresh();
     assert!(catalog.pending_refresh.as_ref().unwrap().key == active_key);
 
@@ -461,7 +390,6 @@ fn reverted_intent_still_follows_a_superseded_flight() {
         .sender
         .send(InventoryCompletion {
             generation: 1,
-            branches_loaded: false,
             topology_epoch: 0,
             repositories: Vec::new(),
             discovered: Vec::new(),
@@ -519,7 +447,6 @@ fn superseded_topology_and_stale_stats_completions_cannot_publish() {
         .sender
         .send(InventoryCompletion {
             generation: 7,
-            branches_loaded: false,
             topology_epoch: 0,
             repositories: Vec::new(),
             discovered: Vec::new(),
@@ -918,7 +845,7 @@ fn persists_non_utf8_repository_identity_without_loss() {
 }
 
 #[test]
-fn orders_repositories_by_observed_workspace_order() {
+fn orders_known_repositories_by_name() {
     let directory = tempfile::tempdir().unwrap();
     let alpha = directory.path().join("alpha");
     let zulu = directory.path().join("zulu");
@@ -935,12 +862,12 @@ fn orders_repositories_by_observed_workspace_order() {
     }
 
     let mut catalog = LinkedWorktreeCatalog::new(None);
-    catalog.observe_herdr(LinkedWorktreeObservation {
-        candidates: vec![
-            LinkedWorktreeCandidate { path: zulu },
-            LinkedWorktreeCandidate { path: alpha },
-        ],
-    });
+    catalog
+        .remember_workspace(Some(&zulu.join(".git")), &zulu)
+        .unwrap();
+    catalog
+        .remember_workspace(Some(&alpha.join(".git")), &alpha)
+        .unwrap();
     catalog.refresh();
     let deadline = Instant::now() + Duration::from_secs(2);
     while catalog.snapshot.loading && Instant::now() < deadline {
@@ -955,6 +882,6 @@ fn orders_repositories_by_observed_workspace_order() {
             .iter()
             .map(|repository| repository.label.as_str())
             .collect::<Vec<_>>(),
-        ["zulu", "alpha"]
+        ["alpha", "zulu"]
     );
 }

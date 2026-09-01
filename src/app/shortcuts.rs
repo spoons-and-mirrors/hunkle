@@ -4,20 +4,17 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum ShortcutAction {
-    ToggleFullscreen,
     ShowChanges,
     ShowFiles,
-    ShowAgents,
     ToggleGraph,
     Quit,
-    OpenHerdr,
     FindFile,
     Refresh,
     OpenExplorer,
     OpenSettings,
     OpenActions,
     OpenGitCommand,
-    StartAgent,
+    OpenNormTab,
     OpenHelp,
     ToggleWrap,
     ToggleRenderedPreview,
@@ -26,7 +23,6 @@ pub(crate) enum ShortcutAction {
     EditFile,
     ConfigureEditor,
     FocusCommit,
-    ToggleAgents,
     UnstageAll,
     StageSelection,
     DiscardChanges,
@@ -35,34 +31,6 @@ pub(crate) enum ShortcutAction {
     ExplorerFavorite,
     AuthorEnableAll,
     AuthorDisableAll,
-}
-
-impl ShortcutAction {
-    pub(crate) fn requires_herdr(self) -> bool {
-        matches!(
-            self,
-            Self::ToggleFullscreen | Self::OpenHerdr | Self::ToggleAgents
-        )
-    }
-
-    pub(crate) fn requires_embedded_herdr(self) -> bool {
-        matches!(self, Self::ToggleFullscreen | Self::OpenHerdr)
-    }
-
-    fn requires_agents(self) -> bool {
-        self == Self::ShowAgents
-    }
-
-    fn is_available(
-        self,
-        herdr_available: bool,
-        herdr_embedded: bool,
-        agents_available: bool,
-    ) -> bool {
-        (!self.requires_herdr() || herdr_available)
-            && (!self.requires_embedded_herdr() || herdr_embedded)
-            && (!self.requires_agents() || agents_available)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,14 +194,6 @@ macro_rules! shortcut {
 
 pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
     shortcut!(
-        ToggleFullscreen,
-        "toggle-fullscreen",
-        "Toggle fullscreen",
-        "Navigation",
-        MAIN | COMMIT,
-        KeyCode::Tab
-    ),
-    shortcut!(
         ShowChanges,
         "show-changes",
         "Show Changes",
@@ -248,14 +208,6 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         "Navigation",
         MAIN | COMMIT,
         KeyCode::F(2)
-    ),
-    shortcut!(
-        ShowAgents,
-        "show-agents",
-        "Show Agents",
-        "Navigation",
-        MAIN | COMMIT,
-        KeyCode::F(3)
     ),
     shortcut!(
         ToggleGraph,
@@ -315,16 +267,7 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         KeyModifiers::SHIFT
     ),
     shortcut!(
-        OpenHerdr,
-        "open-herdr",
-        "Send to Herdr pane",
-        "Navigation",
-        MAIN,
-        KeyCode::F(1),
-        KeyModifiers::SHIFT
-    ),
-    shortcut!(
-        StartAgent,
+        OpenNormTab,
         "start-agent",
         "Start agent",
         "Navigation",
@@ -401,14 +344,6 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         KeyCode::Char('c')
     ),
     shortcut!(
-        ToggleAgents,
-        "toggle-agents",
-        "Cycle agents / scheduled / stash / off",
-        "Changes / files",
-        MAIN,
-        KeyCode::Char('a')
-    ),
-    shortcut!(
         UnstageAll,
         "unstage-all",
         "Unstage all",
@@ -483,16 +418,8 @@ pub struct Shortcuts {
 }
 
 impl Shortcuts {
-    pub(crate) fn definitions(
-        herdr_available: bool,
-        herdr_embedded: bool,
-        agents_available: bool,
-    ) -> impl Iterator<Item = &'static ShortcutDefinition> {
-        SHORTCUTS.iter().filter(move |definition| {
-            definition
-                .action
-                .is_available(herdr_available, herdr_embedded, agents_available)
-        })
+    pub(crate) fn definitions() -> impl Iterator<Item = &'static ShortcutDefinition> {
+        SHORTCUTS.iter()
     }
 
     pub(crate) fn binding(&self, action: ShortcutAction) -> KeyChord {
@@ -510,22 +437,10 @@ impl Shortcuts {
         self.binding(action) == KeyChord::from_event(event)
     }
 
-    pub(crate) fn main_action(
-        &self,
-        event: KeyEvent,
-        herdr_available: bool,
-        herdr_embedded: bool,
-        agents_available: bool,
-    ) -> Option<ShortcutAction> {
+    pub(crate) fn main_action(&self, event: KeyEvent) -> Option<ShortcutAction> {
         let chord = KeyChord::from_event(event);
         SHORTCUTS.iter().find_map(|definition| {
-            (definition.scope & MAIN != 0
-                && definition.action.is_available(
-                    herdr_available,
-                    herdr_embedded,
-                    agents_available,
-                )
-                && self.binding(definition.action) == chord)
+            (definition.scope & MAIN != 0 && self.binding(definition.action) == chord)
                 .then_some(definition.action)
         })
     }
@@ -614,10 +529,7 @@ impl Shortcuts {
     }
 
     pub(crate) fn load_override(&mut self, id: &str, value: &str) {
-        let Some(definition) = SHORTCUTS.iter().find(|definition| {
-            definition.id == id
-                || (id == "toggle-pane" && definition.action == ShortcutAction::ToggleFullscreen)
-        }) else {
+        let Some(definition) = SHORTCUTS.iter().find(|definition| definition.id == id) else {
             return;
         };
         let Some(chord) = KeyChord::parse(value) else {
@@ -695,32 +607,15 @@ mod tests {
     }
 
     #[test]
-    fn control_space_starts_an_agent_by_default() {
+    fn control_space_opens_a_norm_tab_by_default() {
         let shortcuts = Shortcuts::default();
         let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
 
         assert_eq!(
-            shortcuts.main_action(key, true, true, true),
-            Some(ShortcutAction::StartAgent)
+            shortcuts.main_action(key),
+            Some(ShortcutAction::OpenNormTab)
         );
-        assert_eq!(shortcuts.label(ShortcutAction::StartAgent), "Ctrl+Space");
-    }
-
-    #[test]
-    fn tab_toggles_fullscreen_and_loads_the_previous_override_id() {
-        let mut shortcuts = Shortcuts::default();
-
-        assert_eq!(
-            shortcuts.main_action(
-                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-                true,
-                true,
-                true,
-            ),
-            Some(ShortcutAction::ToggleFullscreen)
-        );
-        shortcuts.load_override("toggle-pane", "Alt+f");
-        assert_eq!(shortcuts.label(ShortcutAction::ToggleFullscreen), "Alt+f");
+        assert_eq!(shortcuts.label(ShortcutAction::OpenNormTab), "Ctrl+Space");
     }
 
     #[test]
@@ -728,110 +623,12 @@ mod tests {
         let shortcuts = Shortcuts::default();
 
         assert_eq!(
-            shortcuts.main_action(
-                KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
-                true,
-                true,
-                true,
-            ),
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
             Some(ShortcutAction::ShowChanges)
         );
         assert_eq!(
-            shortcuts.main_action(
-                KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
-                true,
-                true,
-                true,
-            ),
+            shortcuts.main_action(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
             Some(ShortcutAction::ShowFiles)
-        );
-        assert_eq!(
-            shortcuts.main_action(
-                KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE),
-                true,
-                true,
-                true,
-            ),
-            Some(ShortcutAction::ShowAgents)
-        );
-    }
-
-    #[test]
-    fn herdr_shortcuts_are_unavailable_without_herdr_but_norm_creation_remains_available() {
-        let shortcuts = Shortcuts::default();
-
-        assert!(
-            Shortcuts::definitions(false, false, false)
-                .all(|definition| !definition.action.requires_herdr())
-        );
-        for key in [
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::F(1), KeyModifiers::SHIFT),
-            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
-        ] {
-            assert_eq!(shortcuts.main_action(key, false, false, false), None);
-        }
-        assert_eq!(
-            shortcuts.main_action(
-                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
-                false,
-                false,
-                false,
-            ),
-            Some(ShortcutAction::StartAgent)
-        );
-    }
-
-    #[test]
-    fn detached_herdr_keeps_agent_shortcuts_but_hides_embedded_actions() {
-        let shortcuts = Shortcuts::default();
-        let actions = Shortcuts::definitions(true, false, true)
-            .map(|definition| definition.action)
-            .collect::<Vec<_>>();
-
-        assert!(actions.contains(&ShortcutAction::ShowAgents));
-        assert!(actions.contains(&ShortcutAction::StartAgent));
-        assert!(!actions.contains(&ShortcutAction::ToggleFullscreen));
-        assert!(!actions.contains(&ShortcutAction::OpenHerdr));
-        assert_eq!(
-            shortcuts.main_action(
-                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
-                true,
-                false,
-                true,
-            ),
-            Some(ShortcutAction::StartAgent)
-        );
-        assert_eq!(
-            shortcuts.main_action(
-                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-                true,
-                false,
-                true,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn norm_presence_exposes_read_only_navigation_and_agent_creation() {
-        let shortcuts = Shortcuts::default();
-        let actions = Shortcuts::definitions(false, false, true)
-            .map(|definition| definition.action)
-            .collect::<Vec<_>>();
-
-        assert!(actions.contains(&ShortcutAction::ShowAgents));
-        assert!(actions.contains(&ShortcutAction::StartAgent));
-        assert!(!actions.contains(&ShortcutAction::ToggleAgents));
-        assert_eq!(
-            shortcuts.main_action(
-                KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE),
-                false,
-                false,
-                true,
-            ),
-            Some(ShortcutAction::ShowAgents)
         );
     }
 

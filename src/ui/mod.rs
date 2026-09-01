@@ -1,5 +1,3 @@
-mod agents;
-pub(crate) use agents::AgentTranscriptPresentation;
 mod changes;
 mod header_card;
 mod history;
@@ -44,11 +42,9 @@ use header::*;
 use header_card::*;
 use location_picker::*;
 
-const FULLSCREEN_AGENT_HINT: &str = " double click or press tab to show agent";
-
 fn palette() -> &'static Palette {
     static THEME: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
-    THEME.get_or_init(|| load_theme().palette)
+    THEME.get_or_init(load_theme)
 }
 
 fn text_input_lines(input: &TextInput, active: bool, inactive: Color) -> Vec<Line<'static>> {
@@ -118,16 +114,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .style(Style::default().fg(palette().ink)),
             frame.area(),
         );
-        draw_agent_pane_picker_overlay(frame, app);
         finish_selection(frame, app);
         return;
     }
 
-    let hide_navigation = profile.is_single()
-        && app.workspace_detail_open()
-        && app.agents_pane_visible()
-        && !app.notice.as_deref().is_some_and(notice_is_error);
-    let footer_height = u16::from(!hide_navigation);
+    let footer_height = 1;
     let layout = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(6),
@@ -144,7 +135,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.reset_media_presentation();
         draw_empty(frame, main_content, "Loading workspace…");
         draw_navigation(frame, app, layout[3], profile);
-        draw_agent_pane_picker_overlay(frame, app);
         finish_selection(frame, app);
         return;
     }
@@ -160,12 +150,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             | Mode::AuthorFilter
             | Mode::ActionMenu
             | Mode::Command
-            | Mode::HerdrPrompt
             | Mode::Editor
             | Mode::Files
             | Mode::Help
-            | Mode::Scheduler
-            | Mode::AgentPreview
     ) {
         app.regions.capture_scroll_boundary();
     }
@@ -207,17 +194,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     shortcut_scroll: app.settings_state.shortcut_scroll,
                     shortcut_capture: app.settings_state.shortcut_capture,
                     shortcut_error: app.settings_state.shortcut_error.as_deref(),
-                    opencode_selection: app.settings_state.opencode_selection,
-                    opencode_model_input: app.settings_state.opencode_model_input.as_deref(),
-                    opencode_error: app.settings_state.opencode_error.as_deref(),
-                    discord_selection: app.settings_state.discord_selection,
-                    discord_webhooks: &app.discord_webhooks,
-                    discord_webhook_index: app.settings_state.discord_webhook_index,
-                    discord_webhook_editor: app.settings_state.discord_webhook_editor.as_ref(),
-                    discord_webhook_error: app.settings_state.discord_webhook_error.as_deref(),
-                    herdr_available: app.herdr_available(),
-                    herdr_embedded: app.herdr_embedded(),
-                    agents_available: app.agents_available(),
                 },
                 app.fetch_running(),
             );
@@ -226,13 +202,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     && target == HitTarget::Settings(crate::app::SettingsHitTarget::Overlay)
                 {
                     let viewport = settings_regions.shortcut_viewport.unwrap_or(1);
-                    let maximum = crate::app::Shortcuts::definitions(
-                        app.herdr_available(),
-                        app.herdr_embedded(),
-                        app.agents_available(),
-                    )
-                    .count()
-                    .saturating_sub(viewport);
+                    let maximum = crate::app::Shortcuts::definitions()
+                        .count()
+                        .saturating_sub(viewport);
                     app.regions.register_scroll_target_with_state(
                         ScrollTarget::SettingsShortcuts,
                         rect,
@@ -282,14 +254,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions
                 .register_scroll_target(ScrollTarget::CommandOutput, regions.output);
         }
-        Mode::HerdrPrompt => {
-            dim(frame);
-            app.regions.herdr_prompt_overlay = Some(overlays::draw_herdr_prompt(
-                frame,
-                &app.herdr_prompt,
-                &app.settings.shortcuts,
-            ));
-        }
         Mode::FileEdit => {
             draw_file_editor(frame, app, profile);
             draw_main_top_padding(frame, app, layout[1], profile);
@@ -324,39 +288,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Help => {
             dim(frame);
-            overlays::draw_help(
-                frame,
-                &app.settings.shortcuts,
-                app.herdr_available(),
-                app.herdr_embedded(),
-                app.agents_available(),
-            );
-        }
-        Mode::Scheduler => {
-            dim(frame);
-            let regions = overlays::draw_scheduler(frame, app, profile);
-            for (target, rect) in regions.targets {
-                app.regions.register_hit_target(target, rect);
-            }
-            for (target, rect) in regions.scrolls {
-                app.regions.register_scroll_target(target, rect);
-            }
-        }
-        Mode::AgentPreview => {
-            dim(frame);
-            let regions = overlays::draw_agent_preview_modal(frame, app, profile);
-            app.regions.agent_animation_presented |= regions.animation_presented;
-            for (target, rect) in regions.targets {
-                app.regions.register_hit_target(target, rect);
-            }
-            if let Some((target, rect, scroll, scroll_max)) = regions.scroll_target {
-                app.regions
-                    .register_scroll_target_with_state(target, rect, scroll, scroll_max);
-            }
+            overlays::draw_help(frame, &app.settings.shortcuts);
         }
         Mode::Normal | Mode::Commit => {}
     }
-    draw_agent_pane_picker_overlay(frame, app);
     if app.header_picker.is_open() {
         dim_except_header_controls(frame, app);
         draw_header_picker(frame, app, profile);
@@ -364,20 +299,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .capture_scroll_target(ScrollTarget::HeaderPicker);
     }
     finish_selection(frame, app);
-}
-
-fn draw_agent_pane_picker_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    if app.herdr_prompt.agent_pane_picker_open() {
-        app.regions.capture_scroll_boundary();
-        dim_except_header_controls(frame, app);
-        for (target, rect) in overlays::draw_agent_pane_picker(
-            frame,
-            &app.herdr_prompt,
-            app.hovered_hit_target.clone(),
-        ) {
-            app.regions.register_hit_target(target, rect);
-        }
-    }
 }
 
 fn finish_selection(frame: &mut Frame<'_>, app: &mut App) {
@@ -410,8 +331,6 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
         HitTarget::HeaderDiff,
         HitTarget::HeaderIssue,
         HitTarget::HeaderAgent,
-        HitTarget::HeaderSchedule,
-        HitTarget::HeaderFullscreen,
     ] {
         let Some(rect) = app.regions.hit_target_rect(target) else {
             continue;
@@ -468,18 +387,6 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
         app.regions.explorer = None;
         app.regions.settings = None;
         app.regions.help = None;
-        if app.fullscreen_agent_activation_pending() {
-            app.clear_footer_marquee();
-            frame.render_widget(
-                Paragraph::new(truncate_width(
-                    FULLSCREEN_AGENT_HINT,
-                    usize::from(area.width),
-                ))
-                .style(Style::default().fg(palette().orange)),
-                area,
-            );
-            return;
-        }
         if let Some(path) = app.repository().map(|repository| {
             let path = display_path(&repository.root);
             if repository.is_local() || repository.branch.is_empty() {
@@ -510,12 +417,8 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
     app.clear_footer_marquee();
 
     let compact = area.width < 100;
-    let (left_pane_action, left_pane_label) = if app.agents_pane_visible() {
-        (ShortcutAction::ShowChanges, "Changes")
-    } else if app.sidebar_pane() == LeftPane::Worktree {
+    let (left_pane_action, left_pane_label) = if app.sidebar_pane() == LeftPane::Worktree {
         (ShortcutAction::ShowFiles, "Files")
-    } else if app.agents_available() {
-        (ShortcutAction::ShowAgents, "Agents")
     } else {
         (ShortcutAction::ShowChanges, "Changes")
     };
@@ -541,9 +444,6 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
         (key_label(ShortcutAction::OpenSettings), "Settings"),
         (key_label(ShortcutAction::OpenHelp), "Help"),
     ]);
-    labels.push(("F4".to_owned(), "Schedule"));
-    let schedule_index = labels.len() - 1;
-
     let total_width = labels.iter().fold(0_u16, |width, (key, label)| {
         let label_width = if compact {
             0
@@ -556,19 +456,15 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
     let start_x = area.right().saturating_sub(total_width).max(area.x);
     if start_x > area.x {
         let width = usize::from(start_x.saturating_sub(area.x));
-        let label = if app.fullscreen_agent_activation_pending() {
-            Some((FULLSCREEN_AGENT_HINT.to_owned(), palette().orange))
-        } else {
-            app.repository().map(|repository| {
-                let path = display_path(&repository.root);
-                let path = if repository.is_local() || repository.branch.is_empty() {
-                    path
-                } else {
-                    format!("{path}:{}", repository.branch)
-                };
-                (format!(" {path}"), palette().soft)
-            })
-        };
+        let label = app.repository().map(|repository| {
+            let path = display_path(&repository.root);
+            let path = if repository.is_local() || repository.branch.is_empty() {
+                path
+            } else {
+                format!("{path}:{}", repository.branch)
+            };
+            (format!(" {path}"), palette().soft)
+        });
         if let Some((label, color)) = label {
             frame.render_widget(
                 Paragraph::new(truncate_width(&label, width)).style(Style::default().fg(color)),
@@ -634,11 +530,6 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect, profile: La
     app.regions.explorer = rects.get(offset + 2).copied();
     app.regions.settings = rects.get(offset + 3).copied();
     app.regions.help = rects.get(offset + 4).copied();
-    if let Some(rect) = rects.get(schedule_index).copied() {
-        app.regions
-            .register_hit_target(HitTarget::HeaderSchedule, rect);
-    }
-
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
         Rect::new(start_x, area.y, area.right().saturating_sub(start_x), 1),
@@ -659,9 +550,6 @@ fn clear_workspace_bottom_splitter(frame: &mut Frame<'_>, app: &App, area: Rect)
 
 fn notice_is_error(notice: &str) -> bool {
     let notice = notice.to_ascii_lowercase();
-    if notice.starts_with("stashed agent ") {
-        return false;
-    }
     [
         "could not",
         "cannot",
@@ -729,10 +617,8 @@ fn marquee_window(value: &str, width: usize, frame: usize) -> String {
         frame
     } else if frame <= travel + pause_frames {
         travel
-    } else if frame <= travel * 2 + pause_frames {
-        travel * 2 + pause_frames - frame
     } else {
-        0
+        (travel * 2 + pause_frames).saturating_sub(frame)
     };
 
     let mut skipped = 0;

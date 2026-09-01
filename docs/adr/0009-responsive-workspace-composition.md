@@ -5,7 +5,7 @@
 
 ## Context
 
-Hunkle must provide useful narrow-screen workflows rather than only compressing its desktop columns. Narrow layouts already drill from lists into diffs and agent transcripts, but layout and navigation policy had accumulated as independent width checks and boolean detail flags across rendering, keyboard handling, and pointer handling.
+Hunkle must provide useful narrow-screen workflows rather than only compressing its desktop columns. Narrow layouts drill from repository lists into previews and diffs, but layout and navigation policy had accumulated as independent width checks and boolean detail flags across rendering, keyboard handling, and pointer handling.
 
 The application can also resize while running. Desktop and mobile are therefore not separate platforms with separate feature state; they are different compositions of the same active workspace.
 
@@ -15,7 +15,7 @@ Use one responsive workspace shell over shared application and feature state.
 
 `LayoutProfile` is the authoritative classification of the rendered viewport. It initially selects either a single surface or columns. Additional compositions, such as rows, will be added only for a concrete workflow with usable panel dimensions.
 
-`WorkspaceNavigation` owns the current content route, Search return route, and Agents selection independently of composition. Content and Agents retain separate master/detail surfaces because columns can display them together. A single composition chooses the primary surface, while a multi-surface composition may render both. Worktree and Files remain hierarchical navigation owned by Changes because that state also restores preview provenance and selection.
+`WorkspaceNavigation` owns the current content route and Search return route independently of composition. Changes and Graph retain master/detail surfaces. A single composition chooses the primary surface, while a multi-surface composition may render repository lists and previews together. Worktree and Files remain hierarchical navigation owned by Changes because that state also restores preview provenance and selection.
 
 Feature renderers receive the pane or surface they are rendering explicitly. They must not temporarily mutate application navigation state to render another surface.
 

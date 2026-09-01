@@ -107,10 +107,6 @@ impl TextInput {
         self.visual_metrics(width).0
     }
 
-    pub(crate) fn visual_height(&self, width: usize) -> usize {
-        self.visual_metrics(width).1
-    }
-
     pub(crate) fn visual_metrics(&self, width: usize) -> (usize, usize) {
         visual_metrics(&self.text, self.cursor, width)
     }
