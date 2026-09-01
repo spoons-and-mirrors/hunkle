@@ -189,6 +189,10 @@ impl PreviewState {
         self.generation
     }
 
+    pub(crate) fn loading(&self) -> bool {
+        matches!(self.payload, PreviewPayload::Loading)
+    }
+
     pub(crate) fn origin(&self) -> &PreviewOrigin {
         &self.origin
     }

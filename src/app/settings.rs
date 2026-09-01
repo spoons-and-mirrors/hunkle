@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     filesystem::{atomic_write, atomic_write_private},
-    media::MediaPreviewProtocol,
+    media::{MediaPreviewProtocol, SixelQuality},
 };
 
 use super::{GraphColumn, Shortcuts, TextInput, explorer::MINIMUM_EXPLORER_PANE_WIDTH};
@@ -61,6 +61,7 @@ pub(crate) enum SettingsEffect {
     ToggleAgentTime,
     ClearAgentTimings,
     ToggleMediaPreview,
+    ToggleSixelQuality,
     OpenEditor,
 }
 
@@ -236,6 +237,7 @@ impl SettingsState {
             super::SettingsHitTarget::AgentTime => SettingsEffect::ToggleAgentTime,
             super::SettingsHitTarget::ClearAgentTimings => SettingsEffect::ClearAgentTimings,
             super::SettingsHitTarget::MediaPreview => SettingsEffect::ToggleMediaPreview,
+            super::SettingsHitTarget::SixelQuality => SettingsEffect::ToggleSixelQuality,
             super::SettingsHitTarget::Editor => SettingsEffect::OpenEditor,
         }
     }
@@ -388,6 +390,7 @@ pub struct Settings {
     pub opencode_model: String,
     pub opencode_reasoning: OpenCodeReasoning,
     pub media_preview_protocol: MediaPreviewProtocol,
+    pub sixel_quality: SixelQuality,
     pub shortcuts: Shortcuts,
 }
 
@@ -444,6 +447,7 @@ impl Default for Settings {
             opencode_model: "opencode/big-pickle".to_owned(),
             opencode_reasoning: OpenCodeReasoning::Max,
             media_preview_protocol: MediaPreviewProtocol::Auto,
+            sixel_quality: SixelQuality::Fast,
             shortcuts: Shortcuts::default(),
         }
     }
@@ -710,7 +714,7 @@ impl SettingsStore {
             fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nagent_preview_split_width={}\ncross_workspace_agents={}\nshow_agent_harness={}\nagent_card_click_action={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nopencode_model={}\nopencode_reasoning={}\nmedia_preview_protocol={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nagent_preview_split_width={}\ncross_workspace_agents={}\nshow_agent_harness={}\nagent_card_click_action={}\nagent_time_display={}\nagents_height={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nopencode_model={}\nopencode_reasoning={}\nmedia_preview_protocol={}\nsixel_quality={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.format_on_save,
@@ -735,6 +739,7 @@ impl SettingsStore {
             settings.opencode_model,
             settings.opencode_reasoning.as_str(),
             settings.media_preview_protocol.as_str(),
+            settings.sixel_quality.as_str(),
         );
         for (id, binding) in settings.shortcuts.serialized() {
             contents.push_str(&format!("shortcut.{id}={binding}\n"));
@@ -883,6 +888,12 @@ fn load(path: &Path) -> Settings {
                     _ => MediaPreviewProtocol::Halfblocks,
                 };
             }
+            "sixel_quality" => {
+                settings.sixel_quality = match value.trim() {
+                    "quality" => SixelQuality::Quality,
+                    _ => SixelQuality::Fast,
+                };
+            }
             _ => {}
         }
     }
@@ -995,6 +1006,7 @@ mod tests {
             opencode_model: "anthropic/claude-sonnet-4-5".to_owned(),
             opencode_reasoning: OpenCodeReasoning::High,
             media_preview_protocol: MediaPreviewProtocol::Sixel,
+            sixel_quality: SixelQuality::Quality,
             shortcuts: {
                 let mut shortcuts = Shortcuts::default();
                 shortcuts
@@ -1029,9 +1041,12 @@ mod tests {
             MediaPreviewProtocol::Iterm2
         );
 
+        fs::write(&path, "sixel_quality=quality\n").unwrap();
+        assert_eq!(store.load().sixel_quality, SixelQuality::Quality);
+
         fs::write(
             path,
-            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nagent_preview_split_width=20\nhistory_height=1\nexplorer_left_pane_width=2\nmedia_preview_protocol=unknown\n",
+            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nagent_preview_split_width=20\nhistory_height=1\nexplorer_left_pane_width=2\nmedia_preview_protocol=unknown\nsixel_quality=unknown\n",
         )
         .unwrap();
         let loaded = store.load();
@@ -1048,6 +1063,7 @@ mod tests {
             loaded.media_preview_protocol,
             MediaPreviewProtocol::Halfblocks
         );
+        assert_eq!(loaded.sixel_quality, SixelQuality::Fast);
     }
 
     #[test]

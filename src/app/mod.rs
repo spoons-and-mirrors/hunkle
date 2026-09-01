@@ -90,9 +90,9 @@ pub(super) use std::{
 };
 
 const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
-const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 9, 10];
-const BACKGROUND_HERDR_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 6, 7, 8, 9, 10];
-const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const STANDALONE_SETTINGS: &[usize] = &[0, 1, 2, 9, 10, 11];
+const BACKGROUND_HERDR_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11];
+const ALL_SETTINGS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 const AGENT_PREVIEW_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -434,6 +434,11 @@ impl App {
 
     pub(crate) fn workspace_loading_initial_state(&self) -> bool {
         self.repository().is_none() && self.mode == Mode::Normal
+    }
+
+    pub(crate) fn preview_work_running(&self) -> bool {
+        self.changes.preview.loading()
+            || self.changes.preview_presentation.media_work_pending()
     }
 
     pub(crate) fn visible_view(&self) -> View {

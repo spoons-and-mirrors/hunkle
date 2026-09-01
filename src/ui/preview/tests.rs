@@ -16,6 +16,17 @@ fn shutdown_joins_the_media_worker_once() {
 }
 
 #[test]
+fn disconnected_media_worker_clears_pending_fast_polling() {
+    let mut preview = PreviewPresentation::default();
+    preview.media_request_pending = true;
+    preview.shutdown();
+
+    assert!(preview.poll_media());
+    assert!(!preview.media_work_pending());
+    assert_eq!(preview.media_error(), Some("Media preview worker stopped"));
+}
+
+#[test]
 fn extracts_superfile_style_kitty_transmission_after_placeholders() {
     let command =
         "\u{1b}_Gq=2,i=42,a=T,U=1,f=32,t=d,s=80,v=48,m=0;data\u{1b}\\\u{1b}[splaceholders";
@@ -149,20 +160,46 @@ fn threaded_sixel_view_queues_positioned_terminal_output() {
     let available = Rect::new(5, 6, 40, 10);
     let deadline = Instant::now() + Duration::from_secs(2);
 
+    let (area, protocol, _, render_state) = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
+    assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
+    let MediaRenderState::Immediate(progressive) = render_state else {
+        panic!("initial SIXEL render did not use a progressive preview");
+    };
+    let mut progressive_buffer = Buffer::empty(Rect::new(0, 0, 60, 20));
+    Widget::render(Image::new(progressive), area, &mut progressive_buffer);
+    assert!(area.positions().any(|position| {
+        matches!(progressive_buffer.cell(position).unwrap().symbol(), "▀" | "▄")
+    }));
+
     loop {
         preview.poll_media();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 20));
         let (area, protocol, frame_revision, render_state) =
-            preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
-        let MediaRenderState::Threaded(state) = render_state else {
-            panic!("initial SIXEL render unexpectedly used an interactive preview");
-        };
-        StatefulWidget::render(
-            StatefulImage::new().resize(Resize::Scale(None)),
-            area,
-            &mut buffer,
-            state,
-        );
+            preview.media_state(
+                1,
+                &image,
+                MediaPreviewProtocol::Sixel,
+                SixelQuality::Fast,
+                available,
+            );
+        match render_state {
+            MediaRenderState::Immediate(state) => {
+                Widget::render(Image::new(state), area, &mut buffer);
+            }
+            MediaRenderState::Threaded(state) => StatefulWidget::render(
+                StatefulImage::new().resize(Resize::Scale(None)),
+                area,
+                &mut buffer,
+                state,
+            ),
+            MediaRenderState::Empty => {}
+        }
         let transmission = take_inline_transmission(&mut buffer, area, protocol);
         preview.queue_inline_frame(frame_revision, protocol, area, transmission);
         let output = preview.take_terminal_output();
@@ -182,6 +219,202 @@ fn threaded_sixel_view_queues_positioned_terminal_output() {
 }
 
 #[test]
+fn fast_sixel_is_smaller_than_quality_sixel() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(800, 400, |x, y| {
+        Rgba([
+            x.wrapping_mul(13) as u8,
+            y.wrapping_mul(17) as u8,
+            x.wrapping_add(y).wrapping_mul(7) as u8,
+            255,
+        ])
+    }));
+    let size = Size::new(40, 10);
+    let font_size = Picker::halfblocks().font_size();
+    let resized = Resize::Scale(None).resize(&image, font_size, size, None);
+    let fast = encode_fast_sixel(&resized, size, false).unwrap();
+    let mut picker = Picker::halfblocks();
+    picker.set_protocol_type(ProtocolType::Sixel);
+    let mut quality = picker.new_resize_protocol(image);
+    quality.resize_encode(&Resize::Scale(None), size);
+    quality.last_encoding_result().unwrap().unwrap();
+    let StatefulProtocolType::Sixel(quality) = quality.protocol_type() else {
+        panic!("quality encoder did not produce SIXEL");
+    };
+
+    assert!(fast.data.contains("\u{1b}P"));
+    assert!(fast.data.len() < quality.data.len());
+}
+
+#[test]
+fn fast_sixel_keeps_a_photo_sized_color_palette() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(64, 64, |x, y| {
+        Rgba([
+            x.wrapping_mul(5) as u8,
+            y.wrapping_mul(7) as u8,
+            x.wrapping_add(y).wrapping_mul(11) as u8,
+            255,
+        ])
+    }));
+    let sixel = encode_fast_sixel(&image, Size::new(8, 4), false).unwrap();
+    let palette_entries = sixel.data.matches(";2;").count();
+
+    assert!(
+        palette_entries >= 128,
+        "fast SIXEL only encoded {palette_entries} colors"
+    );
+}
+
+#[test]
+fn media_picker_uses_the_panel_color_for_cell_padding() {
+    let mut preview = PreviewPresentation::default();
+    preview.configure_media_picker(Picker::halfblocks(), false);
+    let state = preview
+        .media_picker
+        .new_resize_protocol(DynamicImage::new_rgba8(1, 1));
+
+    assert_eq!(state.background_color(), Some(media_background_color()));
+}
+
+#[test]
+fn fast_sixel_declares_its_raster_and_wraps_tmux() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+        20,
+        20,
+        Rgba([40, 120, 220, 255]),
+    ));
+    let plain = encode_fast_sixel(&image, Size::new(2, 1), false).unwrap();
+    let tmux = encode_fast_sixel(&image, Size::new(2, 1), true).unwrap();
+
+    assert!(plain.data.starts_with("\u{1b}[2X\u{1b}P9;1;0q\"1;1;20;20"));
+    assert!(plain.data.ends_with("\u{1b}\\"));
+    assert!(
+        tmux.data
+            .starts_with("\u{1b}Ptmux;\u{1b}\u{1b}[2X\u{1b}\u{1b}P9;1;0q\"1;1;20;20")
+    );
+    assert!(tmux.data.ends_with("\u{1b}\\"));
+}
+
+#[test]
+fn fast_sixel_cache_reuses_an_encoded_frame_after_selection_changes() {
+    let mut preview = PreviewPresentation::default();
+    let mut picker = Picker::halfblocks();
+    picker.set_protocol_type(ProtocolType::Sixel);
+    preview.configure_media_picker(picker, false);
+    let image = Arc::new(DynamicImage::ImageRgba8(ImageBuffer::from_fn(
+        400,
+        200,
+        |x, y| Rgba([x as u8, y as u8, x.wrapping_add(y) as u8, 255]),
+    )));
+    let available = Rect::new(0, 0, 40, 10);
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    let _ = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
+    assert!(preview.media_work_pending());
+
+    loop {
+        preview.poll_media();
+        let (_, protocol, _, render_state) = preview.media_state(
+            1,
+            &image,
+            MediaPreviewProtocol::Sixel,
+            SixelQuality::Fast,
+            available,
+        );
+        if protocol == MediaPreviewProtocol::Sixel
+            && matches!(render_state, MediaRenderState::Immediate(_))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "fast SIXEL did not finish");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!preview.media_work_pending());
+    assert_eq!(preview.sixel_cache.len(), 1);
+    let cached_bytes = preview.sixel_cache_bytes;
+
+    preview.hide_media();
+    let (_, protocol, _, render_state) = preview.media_state(
+        2,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
+
+    assert_eq!(protocol, MediaPreviewProtocol::Sixel);
+    assert!(matches!(render_state, MediaRenderState::Immediate(_)));
+    assert_eq!(preview.sixel_cache.len(), 1);
+    assert_eq!(preview.sixel_cache_bytes, cached_bytes);
+}
+
+#[test]
+fn rapid_sixel_replacement_fences_stale_worker_results() {
+    let mut preview = PreviewPresentation::default();
+    let mut picker = Picker::halfblocks();
+    picker.set_protocol_type(ProtocolType::Sixel);
+    preview.configure_media_picker(picker, false);
+    let stale = Arc::new(DynamicImage::ImageRgba8(ImageBuffer::from_fn(
+        1200,
+        700,
+        |x, y| Rgba([x as u8, y as u8, x.wrapping_add(y) as u8, 255]),
+    )));
+    let current = Arc::new(DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+        200,
+        100,
+        Rgba([20, 180, 90, 255]),
+    )));
+    let available = Rect::new(0, 0, 60, 20);
+
+    let _ = preview.media_state(
+        1,
+        &stale,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Quality,
+        available,
+    );
+    let stale_id = preview.media_state.as_ref().unwrap().request_id;
+    let _ = preview.media_state(
+        2,
+        &current,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
+    let current_id = preview.media_state.as_ref().unwrap().request_id;
+    assert_ne!(stale_id, current_id);
+    assert!(!preview.media_state.as_ref().unwrap().accepts(stale_id));
+    assert!(preview.media_state.as_ref().unwrap().accepts(current_id));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        preview.poll_media();
+        let (_, protocol, _, render_state) = preview.media_state(
+            2,
+            &current,
+            MediaPreviewProtocol::Sixel,
+            SixelQuality::Fast,
+            available,
+        );
+        if protocol == MediaPreviewProtocol::Sixel
+            && matches!(render_state, MediaRenderState::Immediate(_))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "latest SIXEL did not finish");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(preview.sixel_cache.len(), 1);
+    assert_eq!(preview.sixel_cache[0].key.source_width, current.width());
+    assert_eq!(preview.sixel_cache[0].key.source_height, current.height());
+}
+
+#[test]
 fn media_interactions_render_immediately_then_restore_sixel() {
     let mut preview = PreviewPresentation::default();
     let mut picker = Picker::halfblocks();
@@ -196,7 +429,13 @@ fn media_interactions_render_immediately_then_restore_sixel() {
 
     assert!(preview.zoom_media(true, None));
     let (area, protocol, _, render_state) =
-        preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+        preview.media_state(
+            1,
+            &image,
+            MediaPreviewProtocol::Sixel,
+            SixelQuality::Fast,
+            available,
+        );
     assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
     let MediaRenderState::Immediate(state) = render_state else {
         panic!("zoom did not produce an immediate preview");
@@ -212,7 +451,13 @@ fn media_interactions_render_immediately_then_restore_sixel() {
     assert!(preview.poll_media_at(settled));
     assert!(!preview.media_live_preview_active_at(settled));
     let (_, protocol, _, render_state) =
-        preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+        preview.media_state(
+            1,
+            &image,
+            MediaPreviewProtocol::Sixel,
+            SixelQuality::Fast,
+            available,
+        );
     assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
     assert!(matches!(render_state, MediaRenderState::Immediate(_)));
 
@@ -220,9 +465,15 @@ fn media_interactions_render_immediately_then_restore_sixel() {
     loop {
         if preview.poll_media() {
             let (_, protocol, _, render_state) =
-                preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+                preview.media_state(
+                    1,
+                    &image,
+                    MediaPreviewProtocol::Sixel,
+                    SixelQuality::Fast,
+                    available,
+                );
             if protocol == MediaPreviewProtocol::Sixel {
-                assert!(matches!(render_state, MediaRenderState::Threaded(_)));
+                assert!(matches!(render_state, MediaRenderState::Immediate(_)));
                 break;
             }
         }
@@ -246,7 +497,13 @@ fn large_media_drag_previews_stay_interactive() {
 
     assert!(preview.zoom_media(true, None));
     let (_, protocol, _, render_state) =
-        preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+        preview.media_state(
+            1,
+            &image,
+            MediaPreviewProtocol::Sixel,
+            SixelQuality::Fast,
+            available,
+        );
     assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
     assert!(matches!(render_state, MediaRenderState::Immediate(_)));
     preview.begin_media_pan(Position::new(80, 20));
@@ -256,7 +513,13 @@ fn large_media_drag_previews_stay_interactive() {
         let column = if step % 2 == 0 { 79 } else { 80 };
         assert!(preview.pan_media(Position::new(column, 20)));
         let (_, protocol, _, render_state) =
-            preview.media_state(1, &image, MediaPreviewProtocol::Sixel, available);
+            preview.media_state(
+                1,
+                &image,
+                MediaPreviewProtocol::Sixel,
+                SixelQuality::Fast,
+                available,
+            );
         assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
         assert!(matches!(render_state, MediaRenderState::Immediate(_)));
     }
@@ -280,7 +543,8 @@ fn queues_inline_output_only_when_placement_changes() {
     let output = preview.take_terminal_output();
     assert!(!output.kitty);
     let output = String::from_utf8(output.bytes).unwrap();
-    assert!(output.contains("\u{1b}[s\u{1b}[4;3Hinline-image\u{1b}[u"));
+    assert!(output.starts_with("\u{1b}[s\u{1b}[4;3H\u{1b}[48;2;"));
+    assert!(output.ends_with("minline-image\u{1b}[49m\u{1b}[u"));
 
     preview.queue_inline_frame(
         7,
@@ -297,8 +561,9 @@ fn queues_inline_output_only_when_placement_changes() {
         Some(b"inline-image".to_vec()),
     );
     let cleanup = String::from_utf8(preview.take_terminal_cleanup()).unwrap();
-    assert!(cleanup.starts_with("\u{1b}[s\u{1b}[4;3H\u{1b}[10X"));
-    assert!(cleanup.ends_with("\u{1b}[u"));
+    assert!(cleanup.starts_with("\u{1b}[s\u{1b}[4;3H\u{1b}[48;2;"));
+    assert!(cleanup.contains("m\u{1b}[10X"));
+    assert!(cleanup.ends_with("\u{1b}[49m\u{1b}[u"));
     assert!(!preview.take_terminal_output().bytes.is_empty());
 
     preview.queue_inline_frame(8, MediaPreviewProtocol::Iterm2, area, None);
@@ -306,8 +571,9 @@ fn queues_inline_output_only_when_placement_changes() {
 
     preview.hide_media();
     let cleanup = String::from_utf8(preview.take_terminal_cleanup()).unwrap();
-    assert!(cleanup.starts_with("\u{1b}[s\u{1b}[6;5H\u{1b}[10X"));
-    assert!(cleanup.ends_with("\u{1b}[u"));
+    assert!(cleanup.starts_with("\u{1b}[s\u{1b}[6;5H\u{1b}[48;2;"));
+    assert!(cleanup.contains("m\u{1b}[10X"));
+    assert!(cleanup.ends_with("\u{1b}[49m\u{1b}[u"));
 }
 
 #[test]
@@ -346,14 +612,26 @@ fn media_view_zooms_pans_and_resets_to_fit() {
     let available = Rect::new(5, 6, 40, 10);
 
     let (fit_area, _, _, _) =
-        preview.media_state(1, &image, MediaPreviewProtocol::Halfblocks, available);
+        preview.media_state(
+            1,
+            &image,
+            MediaPreviewProtocol::Halfblocks,
+            SixelQuality::Fast,
+            available,
+        );
     assert_eq!(fit_area, available);
     assert_eq!(preview.media_zoom_percent(), 100);
 
     assert!(preview.zoom_media(true, None));
     assert_eq!(preview.media_zoom_percent(), 125);
     let (zoomed_area, _, _, _) =
-        preview.media_state(1, &image, MediaPreviewProtocol::Halfblocks, available);
+        preview.media_state(
+            1,
+            &image,
+            MediaPreviewProtocol::Halfblocks,
+            SixelQuality::Fast,
+            available,
+        );
     assert_eq!(zoomed_area, available);
 
     preview.begin_media_pan(Position::new(25, 10));
@@ -391,7 +669,13 @@ fn wheel_zoom_keeps_the_source_point_under_the_cursor() {
         )
     };
 
-    let _ = preview.media_state(1, &image, MediaPreviewProtocol::Halfblocks, available);
+    let _ = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Halfblocks,
+        SixelQuality::Fast,
+        available,
+    );
     let before = source_at_cursor(
         preview.media_view.metrics.unwrap(),
         preview.media_center_for_test(),
@@ -414,7 +698,13 @@ fn wheel_zoom_keeps_the_source_point_under_the_cursor() {
     assert!((before.0 - after_queued_wheel.0).abs() < 1e-9);
     assert!((before.1 - after_queued_wheel.1).abs() < 1e-9);
 
-    let _ = preview.media_state(1, &image, MediaPreviewProtocol::Halfblocks, available);
+    let _ = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Halfblocks,
+        SixelQuality::Fast,
+        available,
+    );
     let after = source_at_cursor(
         preview.media_view.metrics.unwrap(),
         preview.media_center_for_test(),

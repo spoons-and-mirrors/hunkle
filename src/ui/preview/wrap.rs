@@ -3,8 +3,9 @@ use super::*;
 pub(super) fn append_positioned_output(output: &mut Vec<u8>, area: Rect, command: &[u8]) {
     output.extend_from_slice(b"\x1b[s");
     output.extend_from_slice(format!("\x1b[{};{}H", area.y + 1, area.x + 1).as_bytes());
+    append_panel_background(output);
     output.extend_from_slice(command);
-    output.extend_from_slice(b"\x1b[u");
+    output.extend_from_slice(b"\x1b[49m\x1b[u");
 }
 
 pub(super) fn append_clear_area(output: &mut Vec<u8>, area: Rect) {
@@ -13,13 +14,21 @@ pub(super) fn append_clear_area(output: &mut Vec<u8>, area: Rect) {
     }
     output.extend_from_slice(b"\x1b[s");
     output.extend_from_slice(format!("\x1b[{};{}H", area.y + 1, area.x + 1).as_bytes());
+    append_panel_background(output);
     for row in 0..area.height {
         output.extend_from_slice(format!("\x1b[{}X", area.width).as_bytes());
         if row + 1 < area.height {
             output.extend_from_slice(b"\x1b[1B");
         }
     }
-    output.extend_from_slice(b"\x1b[u");
+    output.extend_from_slice(b"\x1b[49m\x1b[u");
+}
+
+fn append_panel_background(output: &mut Vec<u8>) {
+    let ratatui::style::Color::Rgb(red, green, blue) = crate::ui::palette().panel else {
+        unreachable!("theme colors are resolved to RGB")
+    };
+    output.extend_from_slice(format!("\x1b[48;2;{red};{green};{blue}m").as_bytes());
 }
 
 pub(super) fn wrapped_styled_line_starts(lines: &[Line<'static>], width: usize) -> Vec<usize> {

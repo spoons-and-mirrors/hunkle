@@ -530,6 +530,7 @@ pub(crate) enum SettingsHitTarget {
     AgentTime,
     ClearAgentTimings,
     MediaPreview,
+    SixelQuality,
     Editor,
 }
 
@@ -568,6 +569,7 @@ impl SettingsHitTarget {
             Self::AgentTime,
             Self::ClearAgentTimings,
             Self::MediaPreview,
+            Self::SixelQuality,
             Self::Editor,
         ]
         .get(index)
@@ -588,7 +590,8 @@ impl SettingsHitTarget {
             Self::AgentTime => Some(7),
             Self::ClearAgentTimings => Some(8),
             Self::MediaPreview => Some(9),
-            Self::Editor => Some(10),
+            Self::SixelQuality => Some(10),
+            Self::Editor => Some(11),
             Self::Overlay
             | Self::Page(_)
             | Self::Shortcut(_)

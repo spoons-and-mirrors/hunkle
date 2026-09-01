@@ -29,3 +29,33 @@ impl MediaPreviewProtocol {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SixelQuality {
+    #[default]
+    Fast,
+    Quality,
+}
+
+impl SixelQuality {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Quality => "quality",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "Fast",
+            Self::Quality => "Quality",
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Fast => Self::Quality,
+            Self::Quality => Self::Fast,
+        }
+    }
+}

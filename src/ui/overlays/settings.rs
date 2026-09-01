@@ -51,7 +51,7 @@ pub(crate) fn draw_settings(
         herdr_embedded,
         agents_available,
     } = view;
-    let area = centered_min(frame.area(), 58, 0, 48, 32);
+    let area = centered_min(frame.area(), 58, 0, 48, 34);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -511,28 +511,25 @@ pub(crate) fn draw_settings(
         area.width.saturating_sub(4),
         area.height,
     );
-    let compact = area.height < 30;
+    let compact = area.height < 34;
     let automation_header_y = if compact { 3 } else { 4 };
     let auto_y = if compact { 4 } else { 7 };
     let interval_y = if compact { 5 } else { 9 };
     let format_on_save_y = if compact { 6 } else { 11 };
-    let interface_header_y = if compact { 8 } else { 14 };
-    let cross_workspace_y = if compact { 9 } else { 15 };
-    let agent_y = if compact { 10 } else { 17 };
-    let agent_card_click_y = if compact { 11 } else { 19 };
-    let agent_preview_split_y = if compact { 12 } else { 21 };
-    let agent_time_y = if compact { 13 } else { 23 };
-    let clear_timings_y = if compact { 14 } else { 25 };
-    let media_y = if herdr_available {
-        if compact { 15 } else { 27 }
+    let interface_header_y = if compact { 7 } else { 14 };
+    let cross_workspace_y = if compact { 8 } else { 15 };
+    let agent_y = if compact { 9 } else { 17 };
+    let agent_card_click_y = if compact { 10 } else { 19 };
+    let agent_preview_split_y = if compact { 11 } else { 21 };
+    let agent_time_y = if compact { 12 } else { 23 };
+    let clear_timings_y = if compact { 13 } else { 25 };
+    let media_y: u16 = if herdr_available {
+        if compact { 14 } else { 27 }
     } else {
         cross_workspace_y
     };
-    let editor_y = if herdr_available {
-        if compact { 16 } else { 29 }
-    } else {
-        agent_y
-    };
+    let sixel_quality_y = media_y.saturating_add(if compact { 1 } else { 2 });
+    let editor_y = sixel_quality_y.saturating_add(if compact { 1 } else { 2 });
     let auto_row = Rect::new(inner.x, area.y.saturating_add(auto_y), inner.width, 1);
     let interval_row = Rect::new(inner.x, area.y.saturating_add(interval_y), inner.width, 1);
     let format_on_save_row = Rect::new(
@@ -568,6 +565,12 @@ pub(crate) fn draw_settings(
         1,
     );
     let media_preview_row = Rect::new(inner.x, area.y.saturating_add(media_y), inner.width, 1);
+    let sixel_quality_row = Rect::new(
+        inner.x,
+        area.y.saturating_add(sixel_quality_y),
+        inner.width,
+        1,
+    );
     let editor_row = Rect::new(inner.x, area.y.saturating_add(editor_y), inner.width, 1);
     let interval_down = Rect::new(
         interval_row.right().saturating_sub(15),
@@ -607,6 +610,25 @@ pub(crate) fn draw_settings(
             palette().surface_alt
         })),
         media_preview_row,
+    );
+    let sixel_quality_label = settings.sixel_quality.label();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Sixel quality", Style::default().fg(palette().ink)),
+            Span::raw(
+                " ".repeat(
+                    usize::from(sixel_quality_row.width)
+                        .saturating_sub("Sixel quality".len() + sixel_quality_label.len()),
+                ),
+            ),
+            Span::styled(sixel_quality_label, Style::default().fg(palette().accent)),
+        ]))
+        .style(Style::default().bg(if selection == 10 {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        sixel_quality_row,
     );
 
     frame.render_widget(
@@ -887,7 +909,7 @@ pub(crate) fn draw_settings(
                 }),
             ),
         ]))
-        .style(Style::default().bg(if selection == 10 {
+        .style(Style::default().bg(if selection == 11 {
             palette().selected
         } else {
             palette().surface_alt
@@ -916,6 +938,10 @@ pub(crate) fn draw_settings(
         (
             HitTarget::Settings(SettingsHitTarget::MediaPreview),
             media_preview_row,
+        ),
+        (
+            HitTarget::Settings(SettingsHitTarget::SixelQuality),
+            sixel_quality_row,
         ),
         (HitTarget::Settings(SettingsHitTarget::Editor), editor_row),
     ]);

@@ -460,8 +460,13 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.preview_body.unwrap().bottom(), transition_y);
     for point in [(left.x, left.y), (middle.x, middle.y), (right.x, right.y)] {
         let cell = &terminal.backend().buffer()[point];
-        assert_eq!(cell.symbol(), " ");
-        assert_eq!(cell.bg, super::palette().canvas);
+        if point == (middle.x, middle.y) && cell.symbol() == "▀" {
+            assert_eq!(cell.fg, super::palette().panel);
+            assert_eq!(cell.bg, super::palette().canvas);
+        } else {
+            assert_eq!(cell.symbol(), " ");
+            assert_eq!(cell.bg, super::palette().canvas);
+        }
     }
     for x in [left.x, middle.x, right.x] {
         let cell = &terminal.backend().buffer()[(x, transition_y)];
@@ -1908,6 +1913,8 @@ fn renders_every_primary_surface() {
     assert!(settings_screen.contains("Agent timing history"));
     assert!(settings_screen.contains("Media protocol"));
     assert!(settings_screen.contains("Auto"));
+    assert!(settings_screen.contains("Sixel quality"));
+    assert!(settings_screen.contains("Fast"));
     assert!(settings_screen.contains("Editor command"));
     assert!(!settings_screen.contains('┌'));
     let auto_fetch = app
@@ -1939,6 +1946,7 @@ fn renders_every_primary_surface() {
     let agent_time_setting = setting_rect(SettingsHitTarget::AgentTime);
     let clear_agent_timings_setting = setting_rect(SettingsHitTarget::ClearAgentTimings);
     let media_preview_setting = setting_rect(SettingsHitTarget::MediaPreview);
+    let sixel_quality_setting = setting_rect(SettingsHitTarget::SixelQuality);
     let editor_setting = setting_rect(SettingsHitTarget::Editor);
     assert_eq!(cross_workspace_setting.y, format_on_save_setting.y + 4);
     assert_eq!(agent_harness_setting.y, cross_workspace_setting.y + 2);
@@ -1950,7 +1958,8 @@ fn renders_every_primary_surface() {
     assert_eq!(agent_time_setting.y, agent_preview_split_setting.y + 2);
     assert_eq!(clear_agent_timings_setting.y, agent_time_setting.y + 2);
     assert_eq!(media_preview_setting.y, clear_agent_timings_setting.y + 2);
-    assert_eq!(editor_setting.y, media_preview_setting.y + 2);
+    assert_eq!(sixel_quality_setting.y, media_preview_setting.y + 2);
+    assert_eq!(editor_setting.y, sixel_quality_setting.y + 2);
     let harness_switch_x = agent_harness_setting.right().saturating_sub(6);
     assert_eq!(
         buffer[(harness_switch_x + 1, agent_harness_setting.y)].symbol(),
@@ -1960,6 +1969,25 @@ fn renders_every_primary_surface() {
         (harness_switch_x..harness_switch_x + 5)
             .all(|x| buffer[(x, agent_harness_setting.y)].bg == super::palette().faint)
     );
+
+    let mut short_terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    short_terminal
+        .draw(|frame| draw(frame, &mut app))
+        .unwrap();
+    let overlay = app
+        .regions
+        .hit_target_rect(HitTarget::Settings(SettingsHitTarget::Overlay))
+        .unwrap();
+    let editor = app
+        .regions
+        .hit_target_rect(HitTarget::Settings(SettingsHitTarget::Editor))
+        .unwrap();
+    let quality = app
+        .regions
+        .hit_target_rect(HitTarget::Settings(SettingsHitTarget::SixelQuality))
+        .unwrap();
+    assert!(quality.bottom() < overlay.bottom());
+    assert!(editor.bottom() < overlay.bottom());
 
     app.settings_state.page = SettingsPage::OpenCode;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

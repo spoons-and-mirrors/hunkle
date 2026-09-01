@@ -21,7 +21,7 @@ use std::{
     path::PathBuf,
     process::Command,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
         let ready = {
             let _activity = diagnostics::activity("terminal-poll", app.diagnostic_context());
             let mut ready = false;
-            let poll_interval = if app.workspace_open_running() {
+            let poll_interval = if app.workspace_open_running() || app.preview_work_running() {
                 FAST_POLL_INTERVAL
             } else {
                 UI_POLL_INTERVAL
@@ -426,9 +426,16 @@ fn write_media_terminal_output(app: &mut App) -> Result<()> {
     if output.kitty {
         KITTY_MEDIA_EMITTED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    let bytes = output.bytes.len();
+    let started = Instant::now();
     let mut stdout = io::stdout().lock();
     stdout.write_all(&output.bytes)?;
     stdout.flush()?;
+    diagnostics::event(format!(
+        "media stdout flushed bytes={} elapsed_ms={}",
+        bytes,
+        started.elapsed().as_millis()
+    ));
     Ok(())
 }
 

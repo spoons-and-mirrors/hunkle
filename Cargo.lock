@@ -696,6 +696,7 @@ dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
  "crossterm",
+ "icy_sixel",
  "image",
  "interprocess",
  "libc",

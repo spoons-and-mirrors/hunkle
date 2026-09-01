@@ -449,6 +449,7 @@ impl App {
             SettingsEffect::ToggleAgentTime => self.toggle_agent_time_display(),
             SettingsEffect::ClearAgentTimings => self.clear_agent_timing_history(),
             SettingsEffect::ToggleMediaPreview => self.toggle_media_preview_protocol(),
+            SettingsEffect::ToggleSixelQuality => self.toggle_sixel_quality(),
             SettingsEffect::OpenEditor => self.open_editor_setting(),
         }
     }
@@ -553,6 +554,12 @@ impl App {
 
     pub(crate) fn toggle_media_preview_protocol(&mut self) {
         self.settings.media_preview_protocol = self.settings.media_preview_protocol.next();
+        self.reset_media_presentation();
+        self.settings_changed();
+    }
+
+    pub(crate) fn toggle_sixel_quality(&mut self) {
+        self.settings.sixel_quality = self.settings.sixel_quality.next();
         self.reset_media_presentation();
         self.settings_changed();
     }

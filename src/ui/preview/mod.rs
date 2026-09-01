@@ -1,14 +1,16 @@
 pub(super) use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     sync::{
         Arc,
-        mpsc::{self, Receiver},
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, Sender, TryRecvError},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
-pub(super) use image::{DynamicImage, GenericImageView, RgbaImage};
+pub(super) use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 pub(super) use ratatui::{
     buffer::{Buffer, CellDiffOption},
     layout::{Position, Rect, Size},
@@ -16,19 +18,21 @@ pub(super) use ratatui::{
     text::{Line, Span},
 };
 pub(super) use ratatui_image::{
-    Resize, ResizeEncodeRender,
+    FontSize, Resize, ResizeEncodeRender,
     errors::Errors as ImageError,
     picker::{Picker, ProtocolType},
     protocol::{
         Protocol, StatefulProtocol, StatefulProtocolType, halfblocks::Halfblocks,
-        kitty::StatefulKitty,
+        kitty::StatefulKitty, sixel::Sixel,
     },
-    thread::{ResizeRequest, ResizeResponse, ThreadProtocol},
 };
 pub(super) use unicode_segmentation::UnicodeSegmentation;
 pub(super) use unicode_width::UnicodeWidthStr;
 
-pub(super) use crate::{media::MediaPreviewProtocol, repo_path::RepoPath};
+pub(super) use crate::{
+    media::{MediaPreviewProtocol, SixelQuality},
+    repo_path::RepoPath,
+};
 
 pub(super) use super::text::{
     markdown_prefix_style, styled_diff, styled_diff_window, styled_editor_source_window_from,
@@ -51,6 +55,14 @@ const SOURCE_LINE_CHECKPOINT_STRIDE: usize = 256;
 const MEDIA_ZOOM_STEP: f64 = 1.25;
 const MAX_MEDIA_ZOOM_LEVEL: u8 = 10;
 const MEDIA_INTERACTION_SETTLE: Duration = Duration::from_millis(120);
+const MAX_CACHED_SIXEL_FRAMES: usize = 8;
+const MAX_CACHED_SIXEL_BYTES: usize = 16 * 1024 * 1024;
+fn media_background_color() -> Rgba<u8> {
+    let ratatui::style::Color::Rgb(red, green, blue) = super::palette().panel else {
+        unreachable!("theme colors are resolved to RGB")
+    };
+    Rgba([red, green, blue, 255])
+}
 
 fn interaction_preview(
     image: &DynamicImage,
@@ -75,6 +87,118 @@ fn sample_coordinate(extent: u32, index: u32, samples: u32) -> u32 {
     ((centered / (u64::from(samples) * 2)) as u32).min(extent - 1)
 }
 
+fn sixel_cache_key(
+    image: &DynamicImage,
+    size: Size,
+    font_size: FontSize,
+    is_tmux: bool,
+) -> SixelCacheKey {
+    let mut hasher = DefaultHasher::new();
+    image.as_bytes().hash(&mut hasher);
+    SixelCacheKey {
+        source_hash: hasher.finish(),
+        source_width: image.width(),
+        source_height: image.height(),
+        cell_width: size.width,
+        cell_height: size.height,
+        font_width: font_size.width,
+        font_height: font_size.height,
+        is_tmux,
+    }
+}
+
+fn encode_fast_sixel(
+    image: &DynamicImage,
+    size: Size,
+    is_tmux: bool,
+) -> Result<Sixel, ImageError> {
+    let rgba = image.to_rgba8();
+    let options = icy_sixel::EncodeOptions {
+        max_colors: 256,
+        diffusion: 0.0,
+        quantize_method: icy_sixel::QuantizeMethod::Wu,
+    };
+    let mut sixel = icy_sixel::sixel_encode(
+        rgba.as_raw(),
+        rgba.width() as usize,
+        rgba.height() as usize,
+        &options,
+    )
+    .map_err(|error| ImageError::Sixel(format!("sixel encoding error: {error}")))?;
+    let header_end = sixel
+        .find('q')
+        .map(|index| index + 1)
+        .ok_or_else(|| ImageError::Sixel("sixel header did not end with q".to_owned()))?;
+    // icy_sixel writes six-pixel bands, so declare the true raster to avoid a trailing cell row.
+    sixel.insert_str(
+        header_end,
+        &format!("\"1;1;{};{}", rgba.width(), rgba.height()),
+    );
+    let (start, escape, end) = if is_tmux {
+        ("\u{1b}Ptmux;", "\u{1b}\u{1b}", "\u{1b}\\")
+    } else {
+        ("", "\u{1b}", "")
+    };
+    let mut data = String::with_capacity(sixel.len().saturating_add(256));
+    data.push_str(start);
+    append_sixel_clear(&mut data, escape, size);
+    if is_tmux {
+        let Some(sixel) = sixel.strip_prefix('\u{1b}') else {
+            return Err(ImageError::Tmux("sixel string did not start with escape"));
+        };
+        data.push_str(escape);
+        data.push_str(sixel);
+    } else {
+        data.push_str(&sixel);
+    }
+    data.push_str(end);
+    Ok(Sixel {
+        data,
+        size,
+        is_tmux,
+    })
+}
+
+fn append_sixel_clear(output: &mut String, escape: &str, size: Size) {
+    use std::fmt::Write;
+
+    if size.height == 1 {
+        write!(output, "{escape}[{}X", size.width).unwrap();
+        return;
+    }
+    for _ in 0..size.height {
+        write!(output, "{escape}[{}X{escape}[1B", size.width).unwrap();
+    }
+    write!(output, "{escape}[{}A", size.height).unwrap();
+}
+
+fn picker_uses_tmux(picker: &Picker) -> bool {
+    let mut picker = picker.clone();
+    picker.set_protocol_type(ProtocolType::Sixel);
+    let probe = picker.new_resize_protocol(DynamicImage::new_rgba8(1, 1));
+    matches!(
+        probe.protocol_type(),
+        StatefulProtocolType::Sixel(Sixel { is_tmux: true, .. })
+    )
+}
+
+fn protocol_kind(protocol: &Protocol) -> MediaPreviewProtocol {
+    match protocol {
+        Protocol::Halfblocks(_) => MediaPreviewProtocol::Halfblocks,
+        Protocol::Kitty(_) => MediaPreviewProtocol::Kitty,
+        Protocol::ITerm2(_) => MediaPreviewProtocol::Iterm2,
+        Protocol::Sixel(_) => MediaPreviewProtocol::Sixel,
+    }
+}
+
+fn stateful_payload_len(protocol: &StatefulProtocol) -> usize {
+    match protocol.protocol_type() {
+        StatefulProtocolType::ITerm2(encoded) => encoded.data.len(),
+        StatefulProtocolType::Sixel(encoded) => encoded.data.len(),
+        StatefulProtocolType::Halfblocks(_) | StatefulProtocolType::Kitty(_) => 0,
+    }
+}
+
 const KITTY_DELETE_ALL: &str = "\u{1b}_Ga=d,d=A,q=2\u{1b}\\";
 const KITTY_DELETE_PLACEMENTS: &str = "\u{1b}_Ga=d,d=a,q=2\u{1b}\\";
 
@@ -92,7 +216,140 @@ pub(crate) struct MediaTerminalOutput {
 
 pub(crate) enum MediaRenderState<'a> {
     Immediate(&'a Protocol),
-    Threaded(&'a mut ThreadProtocol),
+    Threaded(&'a mut StatefulProtocol),
+    Empty,
+}
+
+struct MediaProtocolState {
+    protocol: Option<StatefulProtocol>,
+    request_sender: Sender<MediaWorkerRequest>,
+    latest_request: Arc<AtomicU64>,
+    request_id: u64,
+}
+
+enum MediaWorkerRequest {
+    Protocol {
+        id: u64,
+        protocol: StatefulProtocol,
+        resize: Resize,
+        size: Size,
+        kind: MediaPreviewProtocol,
+    },
+    FastSixel {
+        id: u64,
+        image: DynamicImage,
+        font_size: FontSize,
+        size: Size,
+        background: Rgba<u8>,
+        is_tmux: bool,
+        key: SixelCacheKey,
+    },
+}
+
+struct MediaWorkerCompletion {
+    id: u64,
+    kind: MediaPreviewProtocol,
+    elapsed: Duration,
+    result: Result<Option<MediaWorkerOutput>, ImageError>,
+}
+
+enum MediaWorkerOutput {
+    Protocol(StatefulProtocol),
+    FastSixel { sixel: Sixel, key: SixelCacheKey },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SixelCacheKey {
+    source_hash: u64,
+    source_width: u32,
+    source_height: u32,
+    cell_width: u16,
+    cell_height: u16,
+    font_width: u16,
+    font_height: u16,
+    is_tmux: bool,
+}
+
+struct SixelCacheEntry {
+    key: SixelCacheKey,
+    sixel: Sixel,
+}
+
+impl MediaProtocolState {
+    fn new(
+        request_sender: Sender<MediaWorkerRequest>,
+        latest_request: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            protocol: None,
+            request_sender,
+            latest_request,
+            request_id: 0,
+        }
+    }
+
+    fn next_request_id(&mut self) -> u64 {
+        self.request_id = self.request_id.wrapping_add(1);
+        self.latest_request.store(self.request_id, Ordering::Release);
+        self.request_id
+    }
+
+    fn request_protocol(
+        &mut self,
+        protocol: StatefulProtocol,
+        resize: Resize,
+        size: Size,
+        kind: MediaPreviewProtocol,
+    ) {
+        let id = self.next_request_id();
+        self.protocol = None;
+        let _ = self.request_sender.send(MediaWorkerRequest::Protocol {
+            id,
+            protocol,
+            resize,
+            size,
+            kind,
+        });
+    }
+
+    fn request_fast_sixel(
+        &mut self,
+        image: DynamicImage,
+        font_size: FontSize,
+        size: Size,
+        background: Rgba<u8>,
+        is_tmux: bool,
+        key: SixelCacheKey,
+    ) {
+        let id = self.next_request_id();
+        self.protocol = None;
+        let _ = self.request_sender.send(MediaWorkerRequest::FastSixel {
+            id,
+            image,
+            font_size,
+            size,
+            background,
+            is_tmux,
+            key,
+        });
+    }
+
+    fn accepts(&self, id: u64) -> bool {
+        self.request_id == id
+    }
+
+    fn set_protocol(&mut self, protocol: StatefulProtocol) {
+        self.protocol = Some(protocol);
+    }
+
+    fn protocol_mut(&mut self) -> Option<&mut StatefulProtocol> {
+        self.protocol.as_mut()
+    }
+
+    fn empty_protocol(&mut self) {
+        self.next_request_id();
+        self.protocol = None;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -332,19 +589,24 @@ pub(crate) struct PreviewPresentation {
     leading_markdown: Option<LeadingMarkdownCache>,
     editor_cache: Option<EditorPreviewCache>,
     editor_markers: Option<EditorMarkerCache>,
-    media_state: Option<ThreadProtocol>,
-    media_receiver: Receiver<Result<ResizeResponse, ImageError>>,
+    media_state: Option<MediaProtocolState>,
+    media_receiver: Receiver<MediaWorkerCompletion>,
     media_worker: Option<JoinHandle<()>>,
     media_picker: Picker,
+    media_sixel_tmux: bool,
     allow_auto_kitty: bool,
     media_generation: Option<u64>,
     media_protocol: Option<MediaPreviewProtocol>,
+    media_sixel_quality: Option<SixelQuality>,
     media_available: Size,
     media_applied_view_revision: u64,
     media_applied_immediate: bool,
     media_frame_revision: u64,
     media_view: MediaView,
     media_preview: Option<Protocol>,
+    media_request_pending: bool,
+    sixel_cache: VecDeque<SixelCacheEntry>,
+    sixel_cache_bytes: usize,
     effective_media_protocol: MediaPreviewProtocol,
     media_size: Size,
     media_error: Option<String>,
@@ -454,36 +716,106 @@ struct EditorMarkerCache {
 
 impl Default for PreviewPresentation {
     fn default() -> Self {
-        let (request_sender, request_receiver) = mpsc::channel::<ResizeRequest>();
+        let (request_sender, request_receiver) = mpsc::channel::<MediaWorkerRequest>();
         let (result_sender, media_receiver) = mpsc::channel();
+        let latest_request = Arc::new(AtomicU64::new(0));
+        let worker_latest_request = Arc::clone(&latest_request);
         let media_worker = thread::spawn(move || {
             while let Ok(mut request) = request_receiver.recv() {
                 while let Ok(newer_request) = request_receiver.try_recv() {
                     request = newer_request;
                 }
-                if result_sender.send(request.resize_encode()).is_err() {
+                let started = Instant::now();
+                let (id, kind, result) = match request {
+                    MediaWorkerRequest::Protocol {
+                        id,
+                        mut protocol,
+                        resize,
+                        size,
+                        kind,
+                    } => {
+                        let result = if worker_latest_request.load(Ordering::Acquire) != id {
+                            Ok(None)
+                        } else {
+                            protocol.resize_encode(&resize, size);
+                            match protocol
+                                .last_encoding_result()
+                                .expect("media encoding just completed")
+                            {
+                                Ok(()) => Ok(Some(MediaWorkerOutput::Protocol(protocol))),
+                                Err(error) => Err(error),
+                            }
+                        };
+                        (id, kind, result)
+                    }
+                    MediaWorkerRequest::FastSixel {
+                        id,
+                        image,
+                        font_size,
+                        size,
+                        background,
+                        is_tmux,
+                        key,
+                    } => {
+                        let result = if worker_latest_request.load(Ordering::Acquire) != id {
+                            Ok(None)
+                        } else {
+                            let image = Resize::Scale(None).resize(
+                                &image,
+                                font_size,
+                                size,
+                                Some(background),
+                            );
+                            if worker_latest_request.load(Ordering::Acquire) != id {
+                                Ok(None)
+                            } else {
+                                encode_fast_sixel(&image, size, is_tmux).map(|sixel| {
+                                    Some(MediaWorkerOutput::FastSixel { sixel, key })
+                                })
+                            }
+                        };
+                        (id, MediaPreviewProtocol::Sixel, result)
+                    }
+                };
+                if result_sender
+                    .send(MediaWorkerCompletion {
+                        id,
+                        kind,
+                        elapsed: started.elapsed(),
+                        result,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
         });
+        let mut media_picker = Picker::halfblocks();
+        media_picker.set_background_color(Some(media_background_color()));
+        let media_sixel_tmux = picker_uses_tmux(&media_picker);
         Self {
             cache: None,
             leading_markdown: None,
             editor_cache: None,
             editor_markers: None,
-            media_state: Some(ThreadProtocol::new(request_sender, None)),
+            media_state: Some(MediaProtocolState::new(request_sender, latest_request)),
             media_receiver,
             media_worker: Some(media_worker),
-            media_picker: Picker::halfblocks(),
+            media_picker,
+            media_sixel_tmux,
             allow_auto_kitty: false,
             media_generation: None,
             media_protocol: None,
+            media_sixel_quality: None,
             media_available: Size::default(),
             media_applied_view_revision: 0,
             media_applied_immediate: false,
             media_frame_revision: 0,
             media_view: MediaView::default(),
             media_preview: None,
+            media_request_pending: false,
+            sixel_cache: VecDeque::new(),
+            sixel_cache_bytes: 0,
             effective_media_protocol: MediaPreviewProtocol::Halfblocks,
             media_size: Size::default(),
             media_error: None,
@@ -503,6 +835,36 @@ impl PreviewPresentation {
         self.editor_markers = None;
         self.hide_media();
         self.media_view = MediaView::default();
+    }
+
+    fn cached_sixel(&mut self, key: SixelCacheKey) -> Option<Sixel> {
+        let index = self.sixel_cache.iter().position(|entry| entry.key == key)?;
+        let entry = self.sixel_cache.remove(index)?;
+        let sixel = entry.sixel.clone();
+        self.sixel_cache.push_back(entry);
+        Some(sixel)
+    }
+
+    fn cache_sixel(&mut self, key: SixelCacheKey, sixel: Sixel) {
+        let bytes = sixel.data.len();
+        if bytes > MAX_CACHED_SIXEL_BYTES {
+            return;
+        }
+        if let Some(index) = self.sixel_cache.iter().position(|entry| entry.key == key)
+            && let Some(previous) = self.sixel_cache.remove(index)
+        {
+            self.sixel_cache_bytes = self.sixel_cache_bytes.saturating_sub(previous.sixel.data.len());
+        }
+        while self.sixel_cache.len() >= MAX_CACHED_SIXEL_FRAMES
+            || self.sixel_cache_bytes.saturating_add(bytes) > MAX_CACHED_SIXEL_BYTES
+        {
+            let Some(previous) = self.sixel_cache.pop_front() else {
+                break;
+            };
+            self.sixel_cache_bytes = self.sixel_cache_bytes.saturating_sub(previous.sixel.data.len());
+        }
+        self.sixel_cache_bytes = self.sixel_cache_bytes.saturating_add(bytes);
+        self.sixel_cache.push_back(SixelCacheEntry { key, sixel });
     }
 
     pub(crate) fn leading_markdown(
@@ -922,10 +1284,12 @@ impl PreviewPresentation {
                 .empty_protocol();
         }
         self.media_protocol = None;
+        self.media_sixel_quality = None;
         self.media_available = Size::default();
         self.media_applied_immediate = false;
         self.media_size = Size::default();
         self.media_preview = None;
+        self.media_request_pending = false;
         self.media_error = None;
         self.media_view.drag_position = None;
         self.media_view.preview_until = None;
@@ -1052,20 +1416,58 @@ impl PreviewPresentation {
             self.media_view.revision = self.media_view.revision.wrapping_add(1);
             changed = true;
         }
-        while let Ok(result) = self.media_receiver.try_recv() {
-            match result {
-                Ok(response) => {
-                    let accepted = self
-                        .media_state
+        loop {
+            let completion = match self.media_receiver.try_recv() {
+                Ok(completion) => completion,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if self.media_request_pending {
+                        self.media_request_pending = false;
+                        self.media_error = Some("Media preview worker stopped".to_owned());
+                        changed = true;
+                    }
+                    break;
+                }
+            };
+            let accepted = self
+                .media_state
+                .as_ref()
+                .expect("media worker is running")
+                .accepts(completion.id);
+            if !accepted {
+                continue;
+            }
+            self.media_request_pending = false;
+            match completion.result {
+                Ok(Some(MediaWorkerOutput::Protocol(protocol))) => {
+                    let payload_bytes = stateful_payload_len(&protocol);
+                    self.media_state
                         .as_mut()
                         .expect("media worker is running")
-                        .update_resized_protocol(response);
-                    if accepted {
-                        self.media_error = None;
-                        self.media_preview = None;
-                    }
-                    changed |= accepted;
+                        .set_protocol(protocol);
+                    self.media_error = None;
+                    self.media_preview = None;
+                    crate::diagnostics::event(format!(
+                        "media encode finished protocol={} elapsed_ms={} payload_bytes={} cached=false",
+                        completion.kind.as_str(),
+                        completion.elapsed.as_millis(),
+                        payload_bytes
+                    ));
+                    changed = true;
                 }
+                Ok(Some(MediaWorkerOutput::FastSixel { sixel, key })) => {
+                    let payload_bytes = sixel.data.len();
+                    self.cache_sixel(key, sixel.clone());
+                    self.media_preview = Some(Protocol::Sixel(sixel));
+                    self.media_error = None;
+                    crate::diagnostics::event(format!(
+                        "media encode finished protocol=sixel-fast elapsed_ms={} payload_bytes={} cached=false",
+                        completion.elapsed.as_millis(),
+                        payload_bytes
+                    ));
+                    changed = true;
+                }
+                Ok(None) => {}
                 Err(error) => {
                     self.media_error = Some(format!("Could not render media preview: {error}"));
                     changed = true;
@@ -1077,6 +1479,10 @@ impl PreviewPresentation {
 
     pub(crate) fn media_error(&self) -> Option<&str> {
         self.media_error.as_deref()
+    }
+
+    pub(crate) fn media_work_pending(&self) -> bool {
+        self.media_request_pending
     }
 
     pub(crate) fn queue_kitty_frame(
@@ -1184,17 +1590,21 @@ impl PreviewPresentation {
                 .empty_protocol();
         }
         self.media_protocol = None;
+        self.media_sixel_quality = None;
         self.media_available = Size::default();
         self.media_applied_immediate = false;
         self.media_size = Size::default();
         self.media_preview = None;
+        self.media_request_pending = false;
         self.media_error = None;
         self.media_view.drag_position = None;
         self.media_view.preview_until = None;
     }
 
-    pub(crate) fn configure_media_picker(&mut self, picker: Picker, allow_auto_kitty: bool) {
+    pub(crate) fn configure_media_picker(&mut self, mut picker: Picker, allow_auto_kitty: bool) {
         self.terminal_restarted();
+        picker.set_background_color(Some(media_background_color()));
+        self.media_sixel_tmux = picker_uses_tmux(&picker);
         self.media_picker = picker;
         self.allow_auto_kitty = allow_auto_kitty;
     }
@@ -1216,6 +1626,7 @@ impl PreviewPresentation {
         generation: u64,
         image: &Arc<DynamicImage>,
         protocol: MediaPreviewProtocol,
+        sixel_quality: SixelQuality,
         available: Rect,
     ) -> (Rect, MediaPreviewProtocol, u64, MediaRenderState<'_>) {
         let final_protocol = self.effective_protocol(protocol);
@@ -1227,14 +1638,13 @@ impl PreviewPresentation {
                 Rect::new(available.x, available.y, 0, 0),
                 final_protocol,
                 self.media_frame_revision,
-                MediaRenderState::Threaded(
-                    self.media_state.as_mut().expect("media worker is running"),
-                ),
+                MediaRenderState::Empty,
             );
         }
         let available_size = available.into();
         if self.media_generation != Some(generation)
             || self.media_protocol != Some(protocol)
+            || self.media_sixel_quality != Some(sixel_quality)
             || self.media_available != available_size
             || self.media_applied_view_revision != self.media_view.revision
             || self.media_applied_immediate != immediate
@@ -1283,8 +1693,9 @@ impl PreviewPresentation {
                 viewport: available,
                 area: Rect::default(),
             });
+            self.clear_active_terminal_media();
+            self.media_request_pending = false;
             if immediate {
-                self.clear_active_terminal_media();
                 self.media_state
                     .as_mut()
                     .expect("media worker is running")
@@ -1310,38 +1721,112 @@ impl PreviewPresentation {
                 }
                 self.effective_media_protocol = MediaPreviewProtocol::Halfblocks;
             } else {
-                let view = image.crop_imm(crop_x, crop_y, crop_width, crop_height);
-                let mut picker = self.media_picker.clone();
-                let protocol_state = if final_protocol == MediaPreviewProtocol::Kitty {
-                    let image_id = ((generation % 99_999) + 1) as u32;
-                    StatefulProtocol::new(
-                        view,
-                        picker.font_size(),
-                        None,
-                        StatefulProtocolType::Kitty(StatefulKitty::new(image_id, false)),
-                    )
-                } else {
-                    picker.set_protocol_type(match final_protocol {
-                        MediaPreviewProtocol::Auto | MediaPreviewProtocol::Halfblocks => {
-                            ProtocolType::Halfblocks
+                if self
+                    .media_preview
+                    .as_ref()
+                    .is_none_or(|preview| protocol_kind(preview) != MediaPreviewProtocol::Halfblocks)
+                {
+                    match interaction_preview(
+                        image,
+                        crop_x,
+                        crop_y,
+                        crop_width,
+                        crop_height,
+                        self.media_size,
+                    ) {
+                        Ok(preview) => self.media_preview = Some(preview),
+                        Err(error) => {
+                            self.media_preview = None;
+                            self.media_error = Some(format!(
+                                "Could not render progressive media preview: {error}"
+                            ));
                         }
-                        MediaPreviewProtocol::Kitty => ProtocolType::Kitty,
-                        MediaPreviewProtocol::Iterm2 => ProtocolType::Iterm2,
-                        MediaPreviewProtocol::Sixel => ProtocolType::Sixel,
-                    });
-                    picker.new_resize_protocol(view)
-                };
-                let show_preview_while_encoding = self.media_preview.is_some();
-                let threaded_state = self.media_state.as_mut().expect("media worker is running");
-                threaded_state.replace_protocol(protocol_state);
-                if show_preview_while_encoding {
-                    threaded_state.resize_encode(&Resize::Scale(None), self.media_size);
+                    }
                 }
-                self.effective_media_protocol = final_protocol;
-                self.media_error = None;
+                if final_protocol == MediaPreviewProtocol::Halfblocks {
+                    self.media_state
+                        .as_mut()
+                        .expect("media worker is running")
+                        .empty_protocol();
+                    self.effective_media_protocol = MediaPreviewProtocol::Halfblocks;
+                    self.media_error = None;
+                } else {
+                    let view = image.crop_imm(crop_x, crop_y, crop_width, crop_height);
+                    if final_protocol == MediaPreviewProtocol::Sixel
+                        && sixel_quality == SixelQuality::Fast
+                    {
+                        let font_size = self.media_picker.font_size();
+                        let key = sixel_cache_key(
+                            &view,
+                            self.media_size,
+                            font_size,
+                            self.media_sixel_tmux,
+                        );
+                        if let Some(sixel) = self.cached_sixel(key) {
+                            let payload_bytes = sixel.data.len();
+                            self.media_state
+                                .as_mut()
+                                .expect("media worker is running")
+                                .empty_protocol();
+                            self.media_preview = Some(Protocol::Sixel(sixel));
+                            crate::diagnostics::event(format!(
+                                "media encode cache hit protocol=sixel-fast payload_bytes={payload_bytes}"
+                            ));
+                        } else {
+                            self.media_request_pending = true;
+                            self.media_state
+                                .as_mut()
+                                .expect("media worker is running")
+                                .request_fast_sixel(
+                                    view,
+                                    font_size,
+                                    self.media_size,
+                                    media_background_color(),
+                                    self.media_sixel_tmux,
+                                    key,
+                                );
+                        }
+                        self.effective_media_protocol = MediaPreviewProtocol::Sixel;
+                        self.media_error = None;
+                    } else {
+                        let mut picker = self.media_picker.clone();
+                        let protocol_state = if final_protocol == MediaPreviewProtocol::Kitty {
+                            let image_id = ((generation % 99_999) + 1) as u32;
+                            StatefulProtocol::new(
+                                view,
+                                picker.font_size(),
+                                None,
+                                StatefulProtocolType::Kitty(StatefulKitty::new(image_id, false)),
+                            )
+                        } else {
+                            picker.set_protocol_type(match final_protocol {
+                                MediaPreviewProtocol::Auto | MediaPreviewProtocol::Halfblocks => {
+                                    ProtocolType::Halfblocks
+                                }
+                                MediaPreviewProtocol::Kitty => ProtocolType::Kitty,
+                                MediaPreviewProtocol::Iterm2 => ProtocolType::Iterm2,
+                                MediaPreviewProtocol::Sixel => ProtocolType::Sixel,
+                            });
+                            picker.new_resize_protocol(view)
+                        };
+                        self.media_state
+                            .as_mut()
+                            .expect("media worker is running")
+                            .request_protocol(
+                                protocol_state,
+                                Resize::Scale(None),
+                                self.media_size,
+                                final_protocol,
+                            );
+                        self.media_request_pending = true;
+                        self.effective_media_protocol = final_protocol;
+                        self.media_error = None;
+                    }
+                }
             }
             self.media_generation = Some(generation);
             self.media_protocol = Some(protocol);
+            self.media_sixel_quality = Some(sixel_quality);
             self.media_available = available_size;
             self.media_applied_view_revision = self.media_view.revision;
             self.media_applied_immediate = immediate;
@@ -1366,17 +1851,18 @@ impl PreviewPresentation {
         if let Some(preview) = self.media_preview.as_ref() {
             return (
                 area,
-                MediaPreviewProtocol::Halfblocks,
+                protocol_kind(preview),
                 self.media_frame_revision,
                 MediaRenderState::Immediate(preview),
             );
         }
-        (
-            area,
-            self.effective_media_protocol,
-            self.media_frame_revision,
-            MediaRenderState::Threaded(self.media_state.as_mut().expect("media worker is running")),
-        )
+        let render_state = self
+            .media_state
+            .as_mut()
+            .expect("media worker is running")
+            .protocol_mut()
+            .map_or(MediaRenderState::Empty, MediaRenderState::Threaded);
+        (area, self.effective_media_protocol, self.media_frame_revision, render_state)
     }
 
     #[cfg(test)]

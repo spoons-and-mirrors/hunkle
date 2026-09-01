@@ -2,7 +2,7 @@ use std::{process::Command, thread};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
-use crate::media::MediaPreviewProtocol;
+use crate::media::{MediaPreviewProtocol, SixelQuality};
 
 use super::*;
 
@@ -1116,6 +1116,7 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
             opencode_model: "opencode/big-pickle".to_owned(),
             opencode_reasoning: OpenCodeReasoning::Max,
             media_preview_protocol: MediaPreviewProtocol::Auto,
+            sixel_quality: SixelQuality::Fast,
             shortcuts: Shortcuts::default(),
         }
     );
@@ -1162,6 +1163,10 @@ fn primary_navigation_has_stable_precedence_and_edits_settings() {
     assert_eq!(app.settings_store.load(), app.settings);
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.settings.sixel_quality, SixelQuality::Quality);
+    assert_eq!(app.settings_store.load(), app.settings);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Editor);
     assert!(app.editor_configure_only);
     app.editor_input.clear();
@@ -1204,6 +1209,23 @@ fn agent_preview_split_setting_adjusts_and_persists() {
 
     assert_eq!(app.settings.agent_preview_split_width, 120);
     assert_eq!(app.settings_store.load().agent_preview_split_width, 120);
+}
+
+#[test]
+fn standalone_settings_navigate_sixel_quality_before_editor() {
+    let directory = tempfile::tempdir().unwrap();
+    initialize_repository(directory.path());
+    let mut app = App::new(directory.path().to_path_buf());
+    app.mode = Mode::Settings;
+    app.settings_state.selection = 9;
+
+    assert_eq!(app.general_settings(), &[0, 1, 2, 9, 10, 11]);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.settings_state.selection, 10);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.settings.sixel_quality, SixelQuality::Quality);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.settings_state.selection, 11);
 }
 
 #[test]

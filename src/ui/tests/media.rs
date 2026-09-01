@@ -90,7 +90,13 @@ fn renders_static_media_and_clears_it_for_text_and_overlays() {
 #[test]
 fn mouse_wheel_zooms_and_middle_drag_pans_media() {
     let directory = tempfile::tempdir().unwrap();
-    let image = image::RgbaImage::from_pixel(800, 400, image::Rgba([40, 120, 220, 255]));
+    let image = image::RgbaImage::from_fn(800, 400, |_x, y| {
+        if (y / 40) % 2 == 0 {
+            image::Rgba([40, 120, 220, 255])
+        } else {
+            image::Rgba([220, 80, 40, 255])
+        }
+    });
     image.save(directory.path().join("wide.png")).unwrap();
     let mut app = App::new(directory.path().to_path_buf());
     app.settings.media_preview_protocol = crate::media::MediaPreviewProtocol::Halfblocks;

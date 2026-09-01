@@ -306,10 +306,11 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
             .clone();
         let generation = app.changes.preview.generation();
         let protocol = app.settings.media_preview_protocol;
+        let sixel_quality = app.settings.sixel_quality;
         let (area, effective_protocol, frame_revision, render_state) = app
             .changes
             .preview_presentation
-            .media_state(generation, &image, protocol, preview_body);
+            .media_state(generation, &image, protocol, sixel_quality, preview_body);
         if !area.is_empty() {
             match render_state {
                 MediaRenderState::Immediate(preview) => {
@@ -322,6 +323,7 @@ pub(super) fn draw_explorer_detail(frame: &mut Frame<'_>, app: &mut App, area: R
                         state,
                     );
                 }
+                MediaRenderState::Empty => {}
             }
             match effective_protocol {
                 crate::media::MediaPreviewProtocol::Kitty => {
