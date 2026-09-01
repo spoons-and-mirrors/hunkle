@@ -310,6 +310,25 @@ fn owns_semantic_worktree_target_transitions() {
 }
 
 #[test]
+fn keeps_the_current_image_visible_while_the_next_preview_loads() {
+    let mut state = ChangesState::new(None);
+    let image = Arc::new(DynamicImage::new_rgba8(8, 4));
+    state.set_preview_payload(PreviewPayload::Image(Arc::clone(&image)));
+    let generation = state.preview.generation();
+
+    state.set_preview_payload(PreviewPayload::Loading);
+
+    assert!(state.preview.loading());
+    assert_eq!(state.preview.generation(), generation);
+    assert!(Arc::ptr_eq(state.preview.image(false).unwrap(), &image));
+
+    state.set_preview_payload(PreviewPayload::Source("ready".to_owned()));
+    assert!(!state.preview.loading());
+    assert_ne!(state.preview.generation(), generation);
+    assert_eq!(state.preview.text(), Some("ready"));
+}
+
+#[test]
 fn remembers_independent_markdown_source_and_preview_scrolls() {
     let mut state = ChangesState::new(None);
     state.diff_scroll = 80;

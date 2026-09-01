@@ -242,6 +242,112 @@ fn threaded_sixel_view_queues_positioned_terminal_output() {
 }
 
 #[test]
+fn retaining_sixel_media_cancels_work_without_hiding_the_current_frame() {
+    let mut preview = PreviewPresentation::default();
+    let mut picker = Picker::halfblocks();
+    picker.set_protocol_type(ProtocolType::Sixel);
+    preview.configure_media_picker(picker, false);
+    let image = Arc::new(DynamicImage::new_rgba8(800, 400));
+    let available = Rect::new(5, 6, 40, 10);
+
+    let (_, protocol, revision, render_state) = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
+    assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
+    assert!(matches!(render_state, MediaRenderState::Immediate(_)));
+    assert!(preview.media_work_pending());
+    preview.active_inline_image = Some(ActiveInlineImage {
+        revision,
+        protocol: MediaPreviewProtocol::Sixel,
+        area: available,
+    });
+
+    preview.retain_media_while_loading();
+
+    assert!(!preview.media_work_pending());
+    assert!(preview.take_terminal_cleanup().is_empty());
+    assert!(preview.active_inline_image.is_some());
+    let (_, protocol, retained_revision, render_state) = preview.media_state(
+        1,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
+    assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
+    assert_eq!(retained_revision, revision);
+    assert!(matches!(render_state, MediaRenderState::Immediate(_)));
+}
+
+#[test]
+fn cached_sixel_replacement_draws_a_halfblock_bridge_without_a_clear() {
+    let mut preview = PreviewPresentation::default();
+    let mut picker = Picker::halfblocks();
+    picker.set_protocol_type(ProtocolType::Sixel);
+    preview.configure_media_picker(picker, false);
+    let image = Arc::new(DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+        400,
+        200,
+        Rgba([30, 120, 210, 255]),
+    )));
+    let available = Rect::new(5, 6, 40, 10);
+    let cache_key = sixel_cache_key(
+        &image,
+        available.as_size(),
+        preview.media_picker.font_size(),
+        false,
+        SixelEncoding::Fast,
+    );
+    preview.cache_sixel(
+        cache_key,
+        Sixel {
+            data: "cached-final".to_owned(),
+            size: available.as_size(),
+            is_tmux: false,
+        },
+    );
+    preview.active_inline_image = Some(ActiveInlineImage {
+        revision: 1,
+        protocol: MediaPreviewProtocol::Sixel,
+        area: available,
+    });
+
+    preview.clear_for_media_replacement();
+    assert!(preview.active_inline_image.is_some());
+    let (_, protocol, bridge_revision, render_state) = preview.media_state(
+        2,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
+
+    assert_eq!(protocol, MediaPreviewProtocol::Halfblocks);
+    assert!(matches!(render_state, MediaRenderState::Immediate(_)));
+    assert!(preview.active_inline_image.is_none());
+    assert!(preview.take_terminal_cleanup().is_empty());
+    assert!(preview.deferred_cached_sixel.is_some());
+    assert!(preview.media_work_pending());
+
+    assert!(preview.poll_media());
+    let (_, protocol, final_revision, render_state) = preview.media_state(
+        2,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
+    assert_eq!(protocol, MediaPreviewProtocol::Sixel);
+    assert!(matches!(render_state, MediaRenderState::Immediate(_)));
+    assert!(final_revision > bridge_revision);
+    assert!(!preview.media_work_pending());
+}
+
+#[test]
 fn undiffused_sixel_is_smaller_than_quality_sixel() {
     let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(800, 400, |x, y| {
         Rgba([
@@ -356,13 +462,24 @@ fn custom_sixel_declares_its_raster_and_wraps_tmux() {
     let plain = encode_sixel(&image, Size::new(2, 1), false, SixelEncoding::Fast).unwrap();
     let tmux = encode_sixel(&image, Size::new(2, 1), true, SixelEncoding::Fast).unwrap();
 
-    assert!(plain.data.starts_with("\u{1b}[2X\u{1b}P9;1;0q\"1;1;20;20"));
+    assert!(plain.data.starts_with("\u{1b}P9;1;0q\"1;1;20;20"));
     assert!(plain.data.ends_with("\u{1b}\\"));
     assert!(
         tmux.data
-            .starts_with("\u{1b}Ptmux;\u{1b}\u{1b}[2X\u{1b}\u{1b}P9;1;0q\"1;1;20;20")
+            .starts_with("\u{1b}Ptmux;\u{1b}\u{1b}P9;1;0q\"1;1;20;20")
     );
     assert!(tmux.data.ends_with("\u{1b}\\"));
+}
+
+#[test]
+fn transparent_sixel_pixels_are_flattened_over_the_preview_background() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(2, 1, Rgba([210, 20, 10, 0])));
+    let background = Rgba([12, 34, 56, 255]);
+
+    let flattened = flatten_transparency(image, background).to_rgba8();
+
+    assert_eq!(flattened.get_pixel(0, 0), &background);
+    assert_eq!(flattened.get_pixel(1, 0), &background);
 }
 
 #[test]
@@ -841,20 +958,18 @@ fn queues_inline_output_only_when_placement_changes() {
         Rect::new(4, 5, 10, 4),
         Some(b"inline-image".to_vec()),
     );
-    let cleanup = String::from_utf8(preview.take_terminal_cleanup()).unwrap();
-    assert!(cleanup.starts_with("\u{1b}[s\u{1b}[4;3H\u{1b}[48;2;"));
-    assert!(cleanup.contains("m\u{1b}[10X"));
-    assert!(cleanup.ends_with("\u{1b}[49m\u{1b}[u"));
-    assert!(!preview.take_terminal_output().bytes.is_empty());
+    assert!(preview.take_terminal_cleanup().is_empty());
+    let output = String::from_utf8(preview.take_terminal_output().bytes).unwrap();
+    assert!(output.starts_with("\u{1b}[s\u{1b}[4;3H\u{1b}[48;2;"));
+    assert!(output.contains("m\u{1b}[10X"));
+    assert!(output.contains("\u{1b}[49m\u{1b}[u\u{1b}[s\u{1b}[6;5H"));
+    assert!(output.ends_with("minline-image\u{1b}[49m\u{1b}[u"));
 
     preview.queue_inline_frame(8, MediaPreviewProtocol::Iterm2, area, None);
     assert!(preview.take_terminal_cleanup().is_empty());
 
     preview.hide_media();
-    let cleanup = String::from_utf8(preview.take_terminal_cleanup()).unwrap();
-    assert!(cleanup.starts_with("\u{1b}[s\u{1b}[6;5H\u{1b}[48;2;"));
-    assert!(cleanup.contains("m\u{1b}[10X"));
-    assert!(cleanup.ends_with("\u{1b}[49m\u{1b}[u"));
+    assert!(preview.take_terminal_cleanup().is_empty());
 }
 
 #[test]

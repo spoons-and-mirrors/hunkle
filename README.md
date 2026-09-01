@@ -113,7 +113,9 @@ halfblock preview is followed by a detailed 64-color Sixel frame and then the
 final 256-color Sixel frame. The two Sixel encoders run concurrently after one
 shared resize, and a completed final frame is never replaced by a late preview.
 `Fast` uses the 256-color final palette without diffusion; `Quality` adds
-diffusion for smoother tonal transitions.
+diffusion for smoother tonal transitions. While switching images, the current
+frame stays painted until the replacement halfblocks are ready, and the final
+Sixel overwrites that bridge without an intermediate clear.
 
 Use `+` in the Files header to create a file or folder. Drag a Files entry onto a
 folder or the Files header to move it. Right-click a repository file or click its

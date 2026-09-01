@@ -105,6 +105,7 @@ pub(crate) struct PreviewState {
     generation: u64,
     origin: PreviewOrigin,
     payload: PreviewPayload,
+    loading: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,7 +188,7 @@ impl PreviewState {
     }
 
     pub(crate) fn loading(&self) -> bool {
-        matches!(self.payload, PreviewPayload::Loading)
+        self.loading
     }
 
     pub(crate) fn origin(&self) -> &PreviewOrigin {
@@ -395,6 +396,7 @@ impl ChangesState {
                 generation: 0,
                 origin: PreviewOrigin::IdlePane(initial_pane),
                 payload: PreviewPayload::Empty,
+                loading: false,
             },
             worktree_state: ListState::default(),
             explorer_state: ListState::default(),
@@ -1949,9 +1951,26 @@ impl ChangesState {
     }
 
     pub(crate) fn set_preview_payload(&mut self, payload: PreviewPayload) {
+        let loading = matches!(&payload, PreviewPayload::Loading);
+        let replacing_media = !loading
+            && self.preview.loading
+            && self.preview.image(self.rendered_preview).is_some()
+            && matches!(
+                &payload,
+                PreviewPayload::Image(_) | PreviewPayload::Svg { preview: Ok(_), .. }
+            );
+        self.preview.loading = loading;
+        if loading && self.preview.image(self.rendered_preview).is_some() {
+            self.preview_presentation.retain_media_while_loading();
+            return;
+        }
         self.preview.payload = payload;
         self.preview.generation = self.preview.generation.wrapping_add(1);
-        self.preview_presentation.clear();
+        if replacing_media {
+            self.preview_presentation.clear_for_media_replacement();
+        } else {
+            self.preview_presentation.clear();
+        }
     }
 
     #[cfg(test)]
@@ -2073,7 +2092,7 @@ impl ChangesState {
     }
 
     pub(crate) fn take_preview_line(&mut self, path: &RepoPath) -> Option<usize> {
-        if matches!(self.preview.payload, PreviewPayload::Loading) {
+        if self.preview.loading() {
             return None;
         }
         if self

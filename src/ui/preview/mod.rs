@@ -179,7 +179,6 @@ fn encode_sixel(
     };
     let mut data = String::with_capacity(sixel.len().saturating_add(256));
     data.push_str(start);
-    append_sixel_clear(&mut data, escape, size);
     if is_tmux {
         let Some(sixel) = sixel.strip_prefix('\u{1b}') else {
             return Err(ImageError::Tmux("sixel string did not start with escape"));
@@ -197,17 +196,23 @@ fn encode_sixel(
     })
 }
 
-fn append_sixel_clear(output: &mut String, escape: &str, size: Size) {
-    use std::fmt::Write;
-
-    if size.height == 1 {
-        write!(output, "{escape}[{}X", size.width).unwrap();
-        return;
+fn flatten_transparency(image: DynamicImage, background: Rgba<u8>) -> DynamicImage {
+    let mut rgba = image.into_rgba8();
+    for pixel in rgba.pixels_mut() {
+        let alpha = u16::from(pixel[3]);
+        if alpha == 255 {
+            continue;
+        }
+        let inverse = 255 - alpha;
+        for channel in 0..3 {
+            pixel[channel] = ((u16::from(pixel[channel]) * alpha
+                + u16::from(background[channel]) * inverse
+                + 127)
+                / 255) as u8;
+        }
+        pixel[3] = 255;
     }
-    for _ in 0..size.height {
-        write!(output, "{escape}[{}X{escape}[1B", size.width).unwrap();
-    }
-    write!(output, "{escape}[{}A", size.height).unwrap();
+    DynamicImage::ImageRgba8(rgba)
 }
 
 fn picker_uses_tmux(picker: &Picker) -> bool {
@@ -339,6 +344,11 @@ struct SixelCacheEntry {
 struct DeferredSixelPreview {
     sixel: Sixel,
     release_at: Instant,
+}
+
+struct DeferredCachedSixel {
+    sixel: Sixel,
+    encoding: SixelEncoding,
 }
 
 #[derive(Default)]
@@ -688,6 +698,7 @@ pub(crate) struct PreviewPresentation {
     media_preview: Option<Protocol>,
     media_pending: MediaPending,
     deferred_sixel_preview: Option<DeferredSixelPreview>,
+    deferred_cached_sixel: Option<DeferredCachedSixel>,
     sixel_cache: VecDeque<SixelCacheEntry>,
     sixel_cache_bytes: usize,
     effective_media_protocol: MediaPreviewProtocol,
@@ -894,12 +905,13 @@ fn spawn_media_worker(
                     if latest_request.load(Ordering::Acquire) != id {
                         continue;
                     }
-                    let image = Arc::new(Resize::Scale(None).resize(
+                    let image = Resize::Scale(None).resize(
                         &request.image,
                         request.font_size,
                         request.size,
                         Some(request.background),
-                    ));
+                    );
+                    let image = Arc::new(flatten_transparency(image, request.background));
                     if latest_request.load(Ordering::Acquire) != id {
                         continue;
                     }
@@ -1003,6 +1015,7 @@ impl Default for PreviewPresentation {
             media_preview: None,
             media_pending: MediaPending::default(),
             deferred_sixel_preview: None,
+            deferred_cached_sixel: None,
             sixel_cache: VecDeque::new(),
             sixel_cache_bytes: 0,
             effective_media_protocol: MediaPreviewProtocol::Halfblocks,
@@ -1023,6 +1036,15 @@ impl PreviewPresentation {
         self.editor_cache = None;
         self.editor_markers = None;
         self.hide_media();
+        self.media_view = MediaView::default();
+    }
+
+    pub(crate) fn clear_for_media_replacement(&mut self) {
+        self.cache = None;
+        self.leading_markdown = None;
+        self.editor_cache = None;
+        self.editor_markers = None;
+        self.reset_media(true);
         self.media_view = MediaView::default();
     }
 
@@ -1469,7 +1491,18 @@ impl PreviewPresentation {
     }
 
     pub(crate) fn hide_media(&mut self) {
-        self.clear_active_terminal_media();
+        self.reset_media(false);
+    }
+
+    fn reset_media(&mut self, preserve_inline: bool) {
+        if preserve_inline {
+            if self.active_kitty_image.take().is_some() {
+                self.pending_terminal_cleanup
+                    .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
+            }
+        } else {
+            self.clear_active_terminal_media();
+        }
         if self.media_generation.take().is_some() {
             self.media_state
                 .as_mut()
@@ -1484,9 +1517,25 @@ impl PreviewPresentation {
         self.media_preview = None;
         self.media_pending = MediaPending::default();
         self.deferred_sixel_preview = None;
+        self.deferred_cached_sixel = None;
         self.media_error = None;
         self.media_view.drag_position = None;
         self.media_view.preview_until = None;
+    }
+
+    pub(crate) fn retain_media_while_loading(&mut self) {
+        if self.effective_media_protocol == MediaPreviewProtocol::Sixel
+            && self.media_generation.is_some()
+        {
+            self.media_state
+                .as_mut()
+                .expect("media worker is running")
+                .empty_protocol();
+            self.media_pending = MediaPending::default();
+            self.deferred_sixel_preview = None;
+            self.deferred_cached_sixel = None;
+        }
+        self.media_error = None;
     }
 
     fn clear_active_terminal_media(&mut self) {
@@ -1494,9 +1543,7 @@ impl PreviewPresentation {
             self.pending_terminal_cleanup
                 .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
         }
-        if let Some(active) = self.active_inline_image.take() {
-            append_clear_area(&mut self.pending_terminal_cleanup, active.area);
-        }
+        self.active_inline_image = None;
     }
 
     pub(crate) fn media_zoom_percent(&self) -> u16 {
@@ -1620,6 +1667,7 @@ impl PreviewPresentation {
                 state.set_protocol(protocol);
                 state.mark_final_applied();
                 self.deferred_sixel_preview = None;
+                self.deferred_cached_sixel = None;
                 self.media_error = None;
                 self.media_preview = None;
                 self.media_frame_revision = self.media_frame_revision.wrapping_add(1);
@@ -1651,6 +1699,7 @@ impl PreviewPresentation {
                             .expect("media worker is running")
                             .mark_final_applied();
                         self.deferred_sixel_preview = None;
+                        self.deferred_cached_sixel = None;
                         self.media_error = None;
                     } else if self.media_pending.final_frame {
                         self.media_error = None;
@@ -1715,6 +1764,25 @@ impl PreviewPresentation {
         true
     }
 
+    fn apply_deferred_cached_sixel(&mut self) -> bool {
+        let Some(deferred) = self.deferred_cached_sixel.take() else {
+            return false;
+        };
+        self.media_state
+            .as_mut()
+            .expect("media worker is running")
+            .mark_final_applied();
+        let payload_bytes = deferred.sixel.data.len();
+        self.media_preview = Some(Protocol::Sixel(deferred.sixel));
+        self.media_frame_revision = self.media_frame_revision.wrapping_add(1);
+        self.media_error = None;
+        crate::diagnostics::event(format!(
+            "media encode cache bridge finished protocol={} payload_bytes={payload_bytes}",
+            deferred.encoding.diagnostic_name()
+        ));
+        true
+    }
+
     fn poll_media_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if self
@@ -1734,6 +1802,7 @@ impl PreviewPresentation {
                     if self.media_pending.any() {
                         self.media_pending = MediaPending::default();
                         self.deferred_sixel_preview = None;
+                        self.deferred_cached_sixel = None;
                         self.media_error = Some("Media preview worker stopped".to_owned());
                         changed = true;
                     }
@@ -1749,6 +1818,7 @@ impl PreviewPresentation {
         {
             changed |= self.apply_deferred_sixel_preview();
         }
+        changed |= self.apply_deferred_cached_sixel();
         changed
     }
 
@@ -1757,7 +1827,7 @@ impl PreviewPresentation {
     }
 
     pub(crate) fn media_work_pending(&self) -> bool {
-        self.media_pending.any()
+        self.media_pending.any() || self.deferred_cached_sixel.is_some()
     }
 
     pub(crate) fn queue_kitty_frame(
@@ -1767,7 +1837,7 @@ impl PreviewPresentation {
         transmission: Option<KittyTransmission>,
     ) {
         if let Some(active) = self.active_inline_image.take() {
-            append_clear_area(&mut self.pending_terminal_cleanup, active.area);
+            append_clear_area(&mut self.pending_terminal_output.bytes, active.area);
         }
         if let Some(transmission) = transmission {
             self.pending_terminal_cleanup
@@ -1835,10 +1905,11 @@ impl PreviewPresentation {
             return;
         }
         if let Some(active) = self.active_inline_image.take() {
-            append_clear_area(&mut self.pending_terminal_cleanup, active.area);
+            append_clear_area(&mut self.pending_terminal_output.bytes, active.area);
         }
         if self.active_kitty_image.take().is_some() {
-            self.pending_terminal_cleanup
+            self.pending_terminal_output
+                .bytes
                 .extend_from_slice(KITTY_DELETE_ALL.as_bytes());
         }
         append_positioned_output(&mut self.pending_terminal_output.bytes, area, &transmission);
@@ -1872,6 +1943,7 @@ impl PreviewPresentation {
         self.media_preview = None;
         self.media_pending = MediaPending::default();
         self.deferred_sixel_preview = None;
+        self.deferred_cached_sixel = None;
         self.media_error = None;
         self.media_view.drag_position = None;
         self.media_view.preview_until = None;
@@ -1969,9 +2041,11 @@ impl PreviewPresentation {
                 viewport: available,
                 area: Rect::default(),
             });
+            let replacing_inline_media = self.active_inline_image.is_some();
             self.clear_active_terminal_media();
             self.media_pending = MediaPending::default();
             self.deferred_sixel_preview = None;
+            self.deferred_cached_sixel = None;
             if immediate {
                 self.media_state
                     .as_mut()
@@ -2058,11 +2132,18 @@ impl PreviewPresentation {
                                 .as_mut()
                                 .expect("media worker is running")
                                 .empty_protocol();
-                            self.media_preview = Some(Protocol::Sixel(sixel));
+                            if replacing_inline_media {
+                                self.deferred_cached_sixel = Some(DeferredCachedSixel {
+                                    sixel,
+                                    encoding: final_encoding,
+                                });
+                            } else {
+                                self.media_preview = Some(Protocol::Sixel(sixel));
+                            }
                             self.media_error = None;
                             crate::diagnostics::event(format!(
-                                "media encode cache hit protocol={} payload_bytes={payload_bytes}",
-                                final_encoding.diagnostic_name()
+                                "media encode cache hit protocol={} payload_bytes={payload_bytes} bridged={replacing_inline_media}",
+                                final_encoding.diagnostic_name(),
                             ));
                         } else {
                             let alternate_final_key = SixelCacheKey {
