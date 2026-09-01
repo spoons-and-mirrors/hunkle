@@ -6,19 +6,40 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
+fn sixel_completion(id: u64, key: SixelCacheKey, payload: &str) -> MediaWorkerCompletion {
+    MediaWorkerCompletion {
+        id,
+        kind: MediaPreviewProtocol::Sixel,
+        stage: if key.encoding.is_final() {
+            MediaWorkerStage::Final
+        } else {
+            MediaWorkerStage::Preview
+        },
+        elapsed: Duration::ZERO,
+        result: Ok(Some(MediaWorkerOutput::Sixel {
+            sixel: Sixel {
+                data: payload.to_owned(),
+                size: Size::new(2, 1),
+                is_tmux: false,
+            },
+            key,
+        })),
+    }
+}
+
 #[test]
 fn shutdown_joins_the_media_worker_once() {
     let mut preview = PreviewPresentation::default();
     preview.shutdown();
     preview.shutdown();
-    assert!(preview.media_worker.is_none());
+    assert!(preview.media_workers.is_empty());
     assert!(preview.media_state.is_none());
 }
 
 #[test]
 fn disconnected_media_worker_clears_pending_fast_polling() {
     let mut preview = PreviewPresentation::default();
-    preview.media_request_pending = true;
+    preview.media_pending.final_frame = true;
     preview.shutdown();
 
     assert!(preview.poll_media());
@@ -221,7 +242,7 @@ fn threaded_sixel_view_queues_positioned_terminal_output() {
 }
 
 #[test]
-fn fast_sixel_is_smaller_than_quality_sixel() {
+fn undiffused_sixel_is_smaller_than_quality_sixel() {
     let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(800, 400, |x, y| {
         Rgba([
             x.wrapping_mul(13) as u8,
@@ -233,22 +254,15 @@ fn fast_sixel_is_smaller_than_quality_sixel() {
     let size = Size::new(40, 10);
     let font_size = Picker::halfblocks().font_size();
     let resized = Resize::Scale(None).resize(&image, font_size, size, None);
-    let fast = encode_fast_sixel(&resized, size, false).unwrap();
-    let mut picker = Picker::halfblocks();
-    picker.set_protocol_type(ProtocolType::Sixel);
-    let mut quality = picker.new_resize_protocol(image);
-    quality.resize_encode(&Resize::Scale(None), size);
-    quality.last_encoding_result().unwrap().unwrap();
-    let StatefulProtocolType::Sixel(quality) = quality.protocol_type() else {
-        panic!("quality encoder did not produce SIXEL");
-    };
+    let fast = encode_sixel(&resized, size, false, SixelEncoding::Fast).unwrap();
+    let quality = encode_sixel(&resized, size, false, SixelEncoding::Quality).unwrap();
 
     assert!(fast.data.contains("\u{1b}P"));
     assert!(fast.data.len() < quality.data.len());
 }
 
 #[test]
-fn fast_sixel_uses_its_bounded_color_palette() {
+fn preview_sixel_uses_its_bounded_color_palette() {
     let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(64, 64, |x, y| {
         Rgba([
             x.wrapping_mul(5) as u8,
@@ -257,21 +271,43 @@ fn fast_sixel_uses_its_bounded_color_palette() {
             255,
         ])
     }));
-    let sixel = encode_fast_sixel(&image, Size::new(8, 4), false).unwrap();
+    let sixel = encode_sixel(&image, Size::new(8, 4), false, SixelEncoding::Preview).unwrap();
     let palette_entries = sixel.data.matches(";2;").count();
 
     assert!(
-        palette_entries <= usize::from(FAST_SIXEL_MAX_COLORS),
-        "fast SIXEL encoded {palette_entries} colors"
+        palette_entries <= usize::from(PREVIEW_SIXEL_MAX_COLORS),
+        "preview SIXEL encoded {palette_entries} colors"
     );
     assert!(
         palette_entries >= 48,
-        "fast SIXEL only encoded {palette_entries} colors"
+        "preview SIXEL only encoded {palette_entries} colors"
     );
 }
 
 #[test]
-fn fast_sixel_preserves_gradient_quality() {
+fn final_sixel_encodings_use_more_than_the_preview_palette() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(128, 128, |x, y| {
+        Rgba([
+            x.wrapping_mul(3) as u8,
+            y.wrapping_mul(5) as u8,
+            x.wrapping_add(y).wrapping_mul(7) as u8,
+            255,
+        ])
+    }));
+    for encoding in [SixelEncoding::Fast, SixelEncoding::Quality] {
+        let sixel = encode_sixel(&image, Size::new(13, 7), false, encoding).unwrap();
+        let palette_entries = sixel.data.matches(";2;").count();
+
+        assert!(
+            palette_entries > usize::from(PREVIEW_SIXEL_MAX_COLORS),
+            "{encoding:?} SIXEL only encoded {palette_entries} colors"
+        );
+        assert!(palette_entries <= usize::from(FINAL_SIXEL_MAX_COLORS));
+    }
+}
+
+#[test]
+fn preview_sixel_preserves_gradient_quality() {
     let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(64, 64, |x, y| {
         Rgba([
             x.wrapping_mul(4) as u8,
@@ -280,7 +316,7 @@ fn fast_sixel_preserves_gradient_quality() {
             255,
         ])
     }));
-    let encoded = encode_fast_sixel(&image, Size::new(7, 4), false).unwrap();
+    let encoded = encode_sixel(&image, Size::new(7, 4), false, SixelEncoding::Preview).unwrap();
     let sixel_start = encoded.data.find("\u{1b}P").unwrap();
     let decoded = icy_sixel::SixelImage::decode(&encoded.data.as_bytes()[sixel_start..]).unwrap();
     let total_error = image
@@ -298,7 +334,7 @@ fn fast_sixel_preserves_gradient_quality() {
 
     assert!(
         mean_error <= 9.0,
-        "fast SIXEL gradient mean error was {mean_error:.2}"
+        "preview SIXEL gradient mean error was {mean_error:.2}"
     );
 }
 
@@ -314,11 +350,11 @@ fn media_picker_uses_the_panel_color_for_cell_padding() {
 }
 
 #[test]
-fn fast_sixel_declares_its_raster_and_wraps_tmux() {
+fn custom_sixel_declares_its_raster_and_wraps_tmux() {
     let image =
         DynamicImage::ImageRgba8(ImageBuffer::from_pixel(20, 20, Rgba([40, 120, 220, 255])));
-    let plain = encode_fast_sixel(&image, Size::new(2, 1), false).unwrap();
-    let tmux = encode_fast_sixel(&image, Size::new(2, 1), true).unwrap();
+    let plain = encode_sixel(&image, Size::new(2, 1), false, SixelEncoding::Fast).unwrap();
+    let tmux = encode_sixel(&image, Size::new(2, 1), true, SixelEncoding::Fast).unwrap();
 
     assert!(plain.data.starts_with("\u{1b}[2X\u{1b}P9;1;0q\"1;1;20;20"));
     assert!(plain.data.ends_with("\u{1b}\\"));
@@ -330,7 +366,159 @@ fn fast_sixel_declares_its_raster_and_wraps_tmux() {
 }
 
 #[test]
-fn fast_sixel_cache_reuses_an_encoded_frame_after_selection_changes() {
+fn preview_completion_is_replaced_by_the_final_frame() {
+    let mut presentation = PreviewPresentation::default();
+    let image = DynamicImage::new_rgba8(2, 2);
+    let font_size = presentation.media_picker.font_size();
+    let preview_key = sixel_cache_key(
+        &image,
+        Size::new(2, 1),
+        font_size,
+        false,
+        SixelEncoding::Preview,
+    );
+    let final_key = SixelCacheKey {
+        encoding: SixelEncoding::Quality,
+        ..preview_key
+    };
+    let id = presentation.media_state.as_mut().unwrap().next_request_id();
+    presentation.media_pending = MediaPending {
+        preview: true,
+        final_frame: true,
+        final_encoding: Some(SixelEncoding::Quality),
+    };
+    let now = Instant::now();
+
+    assert!(
+        presentation.apply_media_completion_at(sixel_completion(id, preview_key, "preview"), now,)
+    );
+    let preview_revision = presentation.media_frame_revision;
+    assert!(matches!(
+        presentation.media_preview.as_ref(),
+        Some(Protocol::Sixel(sixel)) if sixel.data == "preview"
+    ));
+
+    assert!(presentation.apply_media_completion_at(sixel_completion(id, final_key, "final"), now,));
+    assert!(presentation.media_frame_revision > preview_revision);
+    assert!(matches!(
+        presentation.media_preview.as_ref(),
+        Some(Protocol::Sixel(sixel)) if sixel.data == "final"
+    ));
+    assert!(!presentation.media_work_pending());
+}
+
+#[test]
+fn late_preview_completion_never_replaces_the_final_frame() {
+    let mut presentation = PreviewPresentation::default();
+    let image = DynamicImage::new_rgba8(2, 2);
+    let font_size = presentation.media_picker.font_size();
+    let preview_key = sixel_cache_key(
+        &image,
+        Size::new(2, 1),
+        font_size,
+        false,
+        SixelEncoding::Preview,
+    );
+    let final_key = SixelCacheKey {
+        encoding: SixelEncoding::Fast,
+        ..preview_key
+    };
+    let id = presentation.media_state.as_mut().unwrap().next_request_id();
+    presentation.media_pending = MediaPending {
+        preview: true,
+        final_frame: true,
+        final_encoding: Some(SixelEncoding::Fast),
+    };
+    let now = Instant::now();
+
+    assert!(presentation.apply_media_completion_at(sixel_completion(id, final_key, "final"), now,));
+    let final_revision = presentation.media_frame_revision;
+    assert!(
+        !presentation.apply_media_completion_at(sixel_completion(id, preview_key, "preview"), now,)
+    );
+    assert_eq!(presentation.media_frame_revision, final_revision);
+    assert!(matches!(
+        presentation.media_preview.as_ref(),
+        Some(Protocol::Sixel(sixel)) if sixel.data == "final"
+    ));
+    assert!(!presentation.media_work_pending());
+}
+
+#[test]
+fn fast_preview_waits_for_a_nearby_final_frame() {
+    let mut presentation = PreviewPresentation::default();
+    let image = DynamicImage::new_rgba8(2, 2);
+    let preview_key = sixel_cache_key(
+        &image,
+        Size::new(2, 1),
+        presentation.media_picker.font_size(),
+        false,
+        SixelEncoding::Preview,
+    );
+    let final_key = SixelCacheKey {
+        encoding: SixelEncoding::Fast,
+        ..preview_key
+    };
+    let id = presentation.media_state.as_mut().unwrap().next_request_id();
+    presentation.media_pending = MediaPending {
+        preview: true,
+        final_frame: true,
+        final_encoding: Some(SixelEncoding::Fast),
+    };
+    let now = Instant::now();
+
+    assert!(
+        !presentation.apply_media_completion_at(sixel_completion(id, preview_key, "preview"), now,)
+    );
+    assert!(presentation.media_preview.is_none());
+    assert!(presentation.deferred_sixel_preview.is_some());
+
+    assert!(presentation.apply_media_completion_at(
+        sixel_completion(id, final_key, "final"),
+        now + Duration::from_millis(5),
+    ));
+    assert!(presentation.deferred_sixel_preview.is_none());
+    assert!(matches!(
+        presentation.media_preview.as_ref(),
+        Some(Protocol::Sixel(sixel)) if sixel.data == "final"
+    ));
+}
+
+#[test]
+fn fast_preview_is_released_when_the_final_frame_is_slow() {
+    let mut presentation = PreviewPresentation::default();
+    let image = DynamicImage::new_rgba8(2, 2);
+    let preview_key = sixel_cache_key(
+        &image,
+        Size::new(2, 1),
+        presentation.media_picker.font_size(),
+        false,
+        SixelEncoding::Preview,
+    );
+    let id = presentation.media_state.as_mut().unwrap().next_request_id();
+    presentation.media_pending = MediaPending {
+        preview: true,
+        final_frame: true,
+        final_encoding: Some(SixelEncoding::Fast),
+    };
+    let now = Instant::now();
+
+    assert!(
+        !presentation.apply_media_completion_at(sixel_completion(id, preview_key, "preview"), now,)
+    );
+    assert!(!presentation.poll_media_at(now + FAST_SIXEL_PREVIEW_GRACE / 2));
+    assert!(presentation.media_preview.is_none());
+
+    assert!(presentation.poll_media_at(now + FAST_SIXEL_PREVIEW_GRACE));
+    assert!(matches!(
+        presentation.media_preview.as_ref(),
+        Some(Protocol::Sixel(sixel)) if sixel.data == "preview"
+    ));
+    assert!(presentation.media_work_pending());
+}
+
+#[test]
+fn progressive_quality_sixel_cache_reuses_both_frames_after_selection_changes() {
     let mut preview = PreviewPresentation::default();
     let mut picker = Picker::halfblocks();
     picker.set_protocol_type(ProtocolType::Sixel);
@@ -347,7 +535,7 @@ fn fast_sixel_cache_reuses_an_encoded_frame_after_selection_changes() {
         1,
         &image,
         MediaPreviewProtocol::Sixel,
-        SixelQuality::Fast,
+        SixelQuality::Quality,
         available,
     );
     assert!(preview.media_work_pending());
@@ -358,19 +546,31 @@ fn fast_sixel_cache_reuses_an_encoded_frame_after_selection_changes() {
             1,
             &image,
             MediaPreviewProtocol::Sixel,
-            SixelQuality::Fast,
+            SixelQuality::Quality,
             available,
         );
-        if protocol == MediaPreviewProtocol::Sixel
-            && matches!(render_state, MediaRenderState::Immediate(_))
-        {
+        let sixel_immediate = protocol == MediaPreviewProtocol::Sixel
+            && matches!(render_state, MediaRenderState::Immediate(_));
+        if sixel_immediate && !preview.media_work_pending() {
             break;
         }
-        assert!(Instant::now() < deadline, "fast SIXEL did not finish");
+        assert!(Instant::now() < deadline, "quality SIXEL did not finish");
         thread::sleep(Duration::from_millis(5));
     }
     assert!(!preview.media_work_pending());
-    assert_eq!(preview.sixel_cache.len(), 1);
+    assert_eq!(preview.sixel_cache.len(), 2);
+    assert!(
+        preview
+            .sixel_cache
+            .iter()
+            .any(|entry| entry.key.encoding == SixelEncoding::Preview)
+    );
+    assert!(
+        preview
+            .sixel_cache
+            .iter()
+            .any(|entry| entry.key.encoding == SixelEncoding::Quality)
+    );
     let cached_bytes = preview.sixel_cache_bytes;
 
     preview.hide_media();
@@ -378,14 +578,52 @@ fn fast_sixel_cache_reuses_an_encoded_frame_after_selection_changes() {
         2,
         &image,
         MediaPreviewProtocol::Sixel,
-        SixelQuality::Fast,
+        SixelQuality::Quality,
         available,
     );
 
     assert_eq!(protocol, MediaPreviewProtocol::Sixel);
     assert!(matches!(render_state, MediaRenderState::Immediate(_)));
-    assert_eq!(preview.sixel_cache.len(), 1);
+    assert_eq!(preview.sixel_cache.len(), 2);
     assert_eq!(preview.sixel_cache_bytes, cached_bytes);
+    let quality_payload = preview
+        .sixel_cache
+        .iter()
+        .find(|entry| entry.key.encoding == SixelEncoding::Quality)
+        .unwrap()
+        .sixel
+        .data
+        .clone();
+
+    let (_, protocol, _, render_state) = preview.media_state(
+        2,
+        &image,
+        MediaPreviewProtocol::Sixel,
+        SixelQuality::Fast,
+        available,
+    );
+    assert_eq!(protocol, MediaPreviewProtocol::Sixel);
+    assert!(matches!(render_state, MediaRenderState::Immediate(_)));
+    assert!(matches!(
+        preview.media_preview.as_ref(),
+        Some(Protocol::Sixel(sixel)) if sixel.data == quality_payload
+    ));
+    assert!(!preview.media_pending.preview);
+    assert!(preview.media_pending.final_frame);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while preview.media_work_pending() {
+        preview.poll_media();
+        assert!(Instant::now() < deadline, "fast final SIXEL did not finish");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(preview.sixel_cache.len(), 3);
+    assert!(
+        preview
+            .sixel_cache
+            .iter()
+            .any(|entry| entry.key.encoding == SixelEncoding::Fast)
+    );
 }
 
 #[test]
@@ -436,17 +674,30 @@ fn rapid_sixel_replacement_fences_stale_worker_results() {
             SixelQuality::Fast,
             available,
         );
-        if protocol == MediaPreviewProtocol::Sixel
-            && matches!(render_state, MediaRenderState::Immediate(_))
-        {
+        let sixel_immediate = protocol == MediaPreviewProtocol::Sixel
+            && matches!(render_state, MediaRenderState::Immediate(_));
+        if sixel_immediate && !preview.media_work_pending() {
             break;
         }
         assert!(Instant::now() < deadline, "latest SIXEL did not finish");
         thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(preview.sixel_cache.len(), 1);
-    assert_eq!(preview.sixel_cache[0].key.source_width, current.width());
-    assert_eq!(preview.sixel_cache[0].key.source_height, current.height());
+    assert_eq!(preview.sixel_cache.len(), 2);
+    assert!(preview.sixel_cache.iter().all(|entry| {
+        entry.key.source_width == current.width() && entry.key.source_height == current.height()
+    }));
+    assert!(
+        preview
+            .sixel_cache
+            .iter()
+            .any(|entry| entry.key.encoding == SixelEncoding::Preview)
+    );
+    assert!(
+        preview
+            .sixel_cache
+            .iter()
+            .any(|entry| entry.key.encoding == SixelEncoding::Fast)
+    );
 }
 
 #[test]

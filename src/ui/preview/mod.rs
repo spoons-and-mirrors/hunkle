@@ -56,9 +56,44 @@ const SOURCE_LINE_CHECKPOINT_STRIDE: usize = 256;
 const MEDIA_ZOOM_STEP: f64 = 1.25;
 const MAX_MEDIA_ZOOM_LEVEL: u8 = 10;
 const MEDIA_INTERACTION_SETTLE: Duration = Duration::from_millis(120);
+const FAST_SIXEL_PREVIEW_GRACE: Duration = Duration::from_millis(10);
 const MAX_CACHED_SIXEL_FRAMES: usize = 32;
 const MAX_CACHED_SIXEL_BYTES: usize = 48 * 1024 * 1024;
-const FAST_SIXEL_MAX_COLORS: u16 = 64;
+const PREVIEW_SIXEL_MAX_COLORS: u16 = 64;
+const FINAL_SIXEL_MAX_COLORS: u16 = 256;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SixelEncoding {
+    Preview,
+    Fast,
+    Quality,
+}
+
+impl SixelEncoding {
+    fn options(self) -> icy_sixel::EncodeOptions {
+        icy_sixel::EncodeOptions {
+            max_colors: match self {
+                Self::Preview => PREVIEW_SIXEL_MAX_COLORS,
+                Self::Fast | Self::Quality => FINAL_SIXEL_MAX_COLORS,
+            },
+            diffusion: if self == Self::Quality { 0.875 } else { 0.0 },
+            quantize_method: icy_sixel::QuantizeMethod::Wu,
+        }
+    }
+
+    fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::Preview => "sixel-preview",
+            Self::Fast => "sixel-fast-final",
+            Self::Quality => "sixel-quality-final",
+        }
+    }
+
+    fn is_final(self) -> bool {
+        self != Self::Preview
+    }
+}
+
 fn media_background_color() -> Rgba<u8> {
     let ratatui::style::Color::Rgb(red, green, blue) = super::palette().panel else {
         unreachable!("theme colors are resolved to RGB")
@@ -94,6 +129,7 @@ fn sixel_cache_key(
     size: Size,
     font_size: FontSize,
     is_tmux: bool,
+    encoding: SixelEncoding,
 ) -> SixelCacheKey {
     let mut hasher = DefaultHasher::new();
     image.as_bytes().hash(&mut hasher);
@@ -106,18 +142,20 @@ fn sixel_cache_key(
         font_width: font_size.width,
         font_height: font_size.height,
         is_tmux,
+        encoding,
     }
 }
 
-fn encode_fast_sixel(image: &DynamicImage, size: Size, is_tmux: bool) -> Result<Sixel, ImageError> {
+fn encode_sixel(
+    image: &DynamicImage,
+    size: Size,
+    is_tmux: bool,
+    encoding: SixelEncoding,
+) -> Result<Sixel, ImageError> {
     let rgba = image
         .as_rgba8()
         .map_or_else(|| Cow::Owned(image.to_rgba8()), Cow::Borrowed);
-    let options = icy_sixel::EncodeOptions {
-        max_colors: FAST_SIXEL_MAX_COLORS,
-        diffusion: 0.0,
-        quantize_method: icy_sixel::QuantizeMethod::Wu,
-    };
+    let options = encoding.options();
     let mut sixel = icy_sixel::sixel_encode(
         rgba.as_raw(),
         rgba.width() as usize,
@@ -225,6 +263,7 @@ struct MediaProtocolState {
     request_sender: Sender<MediaWorkerRequest>,
     latest_request: Arc<AtomicU64>,
     request_id: u64,
+    final_applied: bool,
 }
 
 enum MediaWorkerRequest {
@@ -235,27 +274,48 @@ enum MediaWorkerRequest {
         size: Size,
         kind: MediaPreviewProtocol,
     },
-    FastSixel {
+    ProgressiveSixel {
         id: u64,
-        image: Arc<DynamicImage>,
-        font_size: FontSize,
-        size: Size,
-        background: Rgba<u8>,
-        is_tmux: bool,
-        key: SixelCacheKey,
+        request: ProgressiveSixelRequest,
     },
+}
+
+struct ProgressiveSixelRequest {
+    image: Arc<DynamicImage>,
+    font_size: FontSize,
+    size: Size,
+    background: Rgba<u8>,
+    is_tmux: bool,
+    preview_key: Option<SixelCacheKey>,
+    final_key: SixelCacheKey,
+}
+
+struct SixelEncodeRequest {
+    id: u64,
+    image: Arc<DynamicImage>,
+    size: Size,
+    is_tmux: bool,
+    key: SixelCacheKey,
+    started: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MediaWorkerStage {
+    Preview,
+    Final,
 }
 
 struct MediaWorkerCompletion {
     id: u64,
     kind: MediaPreviewProtocol,
+    stage: MediaWorkerStage,
     elapsed: Duration,
     result: Result<Option<MediaWorkerOutput>, ImageError>,
 }
 
 enum MediaWorkerOutput {
     Protocol(StatefulProtocol),
-    FastSixel { sixel: Sixel, key: SixelCacheKey },
+    Sixel { sixel: Sixel, key: SixelCacheKey },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -268,11 +328,37 @@ struct SixelCacheKey {
     font_width: u16,
     font_height: u16,
     is_tmux: bool,
+    encoding: SixelEncoding,
 }
 
 struct SixelCacheEntry {
     key: SixelCacheKey,
     sixel: Sixel,
+}
+
+struct DeferredSixelPreview {
+    sixel: Sixel,
+    release_at: Instant,
+}
+
+#[derive(Default)]
+struct MediaPending {
+    preview: bool,
+    final_frame: bool,
+    final_encoding: Option<SixelEncoding>,
+}
+
+impl MediaPending {
+    fn any(&self) -> bool {
+        self.preview || self.final_frame
+    }
+
+    fn complete(&mut self, stage: MediaWorkerStage) {
+        match stage {
+            MediaWorkerStage::Preview => self.preview = false,
+            MediaWorkerStage::Final => self.final_frame = false,
+        }
+    }
 }
 
 impl MediaProtocolState {
@@ -282,11 +368,13 @@ impl MediaProtocolState {
             request_sender,
             latest_request,
             request_id: 0,
+            final_applied: false,
         }
     }
 
     fn next_request_id(&mut self) -> u64 {
         self.request_id = self.request_id.wrapping_add(1);
+        self.final_applied = false;
         self.latest_request
             .store(self.request_id, Ordering::Release);
         self.request_id
@@ -298,42 +386,38 @@ impl MediaProtocolState {
         resize: Resize,
         size: Size,
         kind: MediaPreviewProtocol,
-    ) {
+    ) -> bool {
         let id = self.next_request_id();
         self.protocol = None;
-        let _ = self.request_sender.send(MediaWorkerRequest::Protocol {
-            id,
-            protocol: Box::new(protocol),
-            resize,
-            size,
-            kind,
-        });
+        self.request_sender
+            .send(MediaWorkerRequest::Protocol {
+                id,
+                protocol: Box::new(protocol),
+                resize,
+                size,
+                kind,
+            })
+            .is_ok()
     }
 
-    fn request_fast_sixel(
-        &mut self,
-        image: Arc<DynamicImage>,
-        font_size: FontSize,
-        size: Size,
-        background: Rgba<u8>,
-        is_tmux: bool,
-        key: SixelCacheKey,
-    ) {
+    fn request_progressive_sixel(&mut self, request: ProgressiveSixelRequest) -> bool {
         let id = self.next_request_id();
         self.protocol = None;
-        let _ = self.request_sender.send(MediaWorkerRequest::FastSixel {
-            id,
-            image,
-            font_size,
-            size,
-            background,
-            is_tmux,
-            key,
-        });
+        self.request_sender
+            .send(MediaWorkerRequest::ProgressiveSixel { id, request })
+            .is_ok()
     }
 
     fn accepts(&self, id: u64) -> bool {
         self.request_id == id
+    }
+
+    fn final_applied(&self) -> bool {
+        self.final_applied
+    }
+
+    fn mark_final_applied(&mut self) {
+        self.final_applied = true;
     }
 
     fn set_protocol(&mut self, protocol: StatefulProtocol) {
@@ -589,7 +673,7 @@ pub(crate) struct PreviewPresentation {
     editor_markers: Option<EditorMarkerCache>,
     media_state: Option<MediaProtocolState>,
     media_receiver: Receiver<MediaWorkerCompletion>,
-    media_worker: Option<JoinHandle<()>>,
+    media_workers: Vec<JoinHandle<()>>,
     media_picker: Picker,
     media_sixel_tmux: bool,
     allow_auto_kitty: bool,
@@ -602,7 +686,8 @@ pub(crate) struct PreviewPresentation {
     media_frame_revision: u64,
     media_view: MediaView,
     media_preview: Option<Protocol>,
-    media_request_pending: bool,
+    media_pending: MediaPending,
+    deferred_sixel_preview: Option<DeferredSixelPreview>,
     sixel_cache: VecDeque<SixelCacheEntry>,
     sixel_cache_bytes: usize,
     effective_media_protocol: MediaPreviewProtocol,
@@ -712,81 +797,187 @@ struct EditorMarkerCache {
     markers: BTreeMap<usize, char>,
 }
 
+fn spawn_sixel_encoder(
+    request_receiver: Receiver<SixelEncodeRequest>,
+    result_sender: Sender<MediaWorkerCompletion>,
+    latest_request: Arc<AtomicU64>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while let Ok(mut request) = request_receiver.recv() {
+            while let Ok(newer_request) = request_receiver.try_recv() {
+                request = newer_request;
+            }
+            let stage = if request.key.encoding.is_final() {
+                MediaWorkerStage::Final
+            } else {
+                MediaWorkerStage::Preview
+            };
+            let result = if latest_request.load(Ordering::Acquire) != request.id {
+                Ok(None)
+            } else {
+                encode_sixel(
+                    &request.image,
+                    request.size,
+                    request.is_tmux,
+                    request.key.encoding,
+                )
+                .map(|sixel| {
+                    Some(MediaWorkerOutput::Sixel {
+                        sixel,
+                        key: request.key,
+                    })
+                })
+            };
+            if result_sender
+                .send(MediaWorkerCompletion {
+                    id: request.id,
+                    kind: MediaPreviewProtocol::Sixel,
+                    stage,
+                    elapsed: request.started.elapsed(),
+                    result,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
+fn spawn_media_worker(
+    request_receiver: Receiver<MediaWorkerRequest>,
+    preview_sender: Sender<SixelEncodeRequest>,
+    final_sender: Sender<SixelEncodeRequest>,
+    result_sender: Sender<MediaWorkerCompletion>,
+    latest_request: Arc<AtomicU64>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while let Ok(mut request) = request_receiver.recv() {
+            while let Ok(newer_request) = request_receiver.try_recv() {
+                request = newer_request;
+            }
+            let started = Instant::now();
+            match request {
+                MediaWorkerRequest::Protocol {
+                    id,
+                    mut protocol,
+                    resize,
+                    size,
+                    kind,
+                } => {
+                    let result = if latest_request.load(Ordering::Acquire) != id {
+                        Ok(None)
+                    } else {
+                        protocol.resize_encode(&resize, size);
+                        match protocol
+                            .last_encoding_result()
+                            .expect("media encoding just completed")
+                        {
+                            Ok(()) => Ok(Some(MediaWorkerOutput::Protocol(*protocol))),
+                            Err(error) => Err(error),
+                        }
+                    };
+                    if result_sender
+                        .send(MediaWorkerCompletion {
+                            id,
+                            kind,
+                            stage: MediaWorkerStage::Final,
+                            elapsed: started.elapsed(),
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                MediaWorkerRequest::ProgressiveSixel { id, request } => {
+                    if latest_request.load(Ordering::Acquire) != id {
+                        continue;
+                    }
+                    let image = Arc::new(Resize::Scale(None).resize(
+                        &request.image,
+                        request.font_size,
+                        request.size,
+                        Some(request.background),
+                    ));
+                    if latest_request.load(Ordering::Acquire) != id {
+                        continue;
+                    }
+                    let final_request = SixelEncodeRequest {
+                        id,
+                        image: Arc::clone(&image),
+                        size: request.size,
+                        is_tmux: request.is_tmux,
+                        key: request.final_key,
+                        started,
+                    };
+                    if final_sender.send(final_request).is_err()
+                        && result_sender
+                            .send(MediaWorkerCompletion {
+                                id,
+                                kind: MediaPreviewProtocol::Sixel,
+                                stage: MediaWorkerStage::Final,
+                                elapsed: started.elapsed(),
+                                result: Err(ImageError::Sixel(
+                                    "final SIXEL worker stopped".to_owned(),
+                                )),
+                            })
+                            .is_err()
+                    {
+                        break;
+                    }
+                    if let Some(key) = request.preview_key {
+                        let preview_request = SixelEncodeRequest {
+                            id,
+                            image,
+                            size: request.size,
+                            is_tmux: request.is_tmux,
+                            key,
+                            started,
+                        };
+                        if preview_sender.send(preview_request).is_err()
+                            && result_sender
+                                .send(MediaWorkerCompletion {
+                                    id,
+                                    kind: MediaPreviewProtocol::Sixel,
+                                    stage: MediaWorkerStage::Preview,
+                                    elapsed: started.elapsed(),
+                                    result: Err(ImageError::Sixel(
+                                        "preview SIXEL worker stopped".to_owned(),
+                                    )),
+                                })
+                                .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
 impl Default for PreviewPresentation {
     fn default() -> Self {
         let (request_sender, request_receiver) = mpsc::channel::<MediaWorkerRequest>();
         let (result_sender, media_receiver) = mpsc::channel();
+        let (preview_sender, preview_receiver) = mpsc::channel();
+        let (final_sender, final_receiver) = mpsc::channel();
         let latest_request = Arc::new(AtomicU64::new(0));
-        let worker_latest_request = Arc::clone(&latest_request);
-        let media_worker = thread::spawn(move || {
-            while let Ok(mut request) = request_receiver.recv() {
-                while let Ok(newer_request) = request_receiver.try_recv() {
-                    request = newer_request;
-                }
-                let started = Instant::now();
-                let (id, kind, result) = match request {
-                    MediaWorkerRequest::Protocol {
-                        id,
-                        mut protocol,
-                        resize,
-                        size,
-                        kind,
-                    } => {
-                        let result = if worker_latest_request.load(Ordering::Acquire) != id {
-                            Ok(None)
-                        } else {
-                            protocol.resize_encode(&resize, size);
-                            match protocol
-                                .last_encoding_result()
-                                .expect("media encoding just completed")
-                            {
-                                Ok(()) => Ok(Some(MediaWorkerOutput::Protocol(*protocol))),
-                                Err(error) => Err(error),
-                            }
-                        };
-                        (id, kind, result)
-                    }
-                    MediaWorkerRequest::FastSixel {
-                        id,
-                        image,
-                        font_size,
-                        size,
-                        background,
-                        is_tmux,
-                        key,
-                    } => {
-                        let result = if worker_latest_request.load(Ordering::Acquire) != id {
-                            Ok(None)
-                        } else {
-                            let image = Resize::Scale(None).resize(
-                                &image,
-                                font_size,
-                                size,
-                                Some(background),
-                            );
-                            if worker_latest_request.load(Ordering::Acquire) != id {
-                                Ok(None)
-                            } else {
-                                encode_fast_sixel(&image, size, is_tmux)
-                                    .map(|sixel| Some(MediaWorkerOutput::FastSixel { sixel, key }))
-                            }
-                        };
-                        (id, MediaPreviewProtocol::Sixel, result)
-                    }
-                };
-                if result_sender
-                    .send(MediaWorkerCompletion {
-                        id,
-                        kind,
-                        elapsed: started.elapsed(),
-                        result,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
+        let media_worker = spawn_media_worker(
+            request_receiver,
+            preview_sender,
+            final_sender,
+            result_sender.clone(),
+            Arc::clone(&latest_request),
+        );
+        let preview_worker = spawn_sixel_encoder(
+            preview_receiver,
+            result_sender.clone(),
+            Arc::clone(&latest_request),
+        );
+        let final_worker =
+            spawn_sixel_encoder(final_receiver, result_sender, Arc::clone(&latest_request));
         let mut media_picker = Picker::halfblocks();
         media_picker.set_background_color(Some(media_background_color()));
         let media_sixel_tmux = picker_uses_tmux(&media_picker);
@@ -797,7 +988,7 @@ impl Default for PreviewPresentation {
             editor_markers: None,
             media_state: Some(MediaProtocolState::new(request_sender, latest_request)),
             media_receiver,
-            media_worker: Some(media_worker),
+            media_workers: vec![media_worker, preview_worker, final_worker],
             media_picker,
             media_sixel_tmux,
             allow_auto_kitty: false,
@@ -810,7 +1001,8 @@ impl Default for PreviewPresentation {
             media_frame_revision: 0,
             media_view: MediaView::default(),
             media_preview: None,
-            media_request_pending: false,
+            media_pending: MediaPending::default(),
+            deferred_sixel_preview: None,
             sixel_cache: VecDeque::new(),
             sixel_cache_bytes: 0,
             effective_media_protocol: MediaPreviewProtocol::Halfblocks,
@@ -1290,7 +1482,8 @@ impl PreviewPresentation {
         self.media_applied_immediate = false;
         self.media_size = Size::default();
         self.media_preview = None;
-        self.media_request_pending = false;
+        self.media_pending = MediaPending::default();
+        self.deferred_sixel_preview = None;
         self.media_error = None;
         self.media_view.drag_position = None;
         self.media_view.preview_until = None;
@@ -1406,6 +1599,122 @@ impl PreviewPresentation {
         self.poll_media_at(Instant::now())
     }
 
+    fn apply_media_completion_at(
+        &mut self,
+        completion: MediaWorkerCompletion,
+        now: Instant,
+    ) -> bool {
+        let accepted = self
+            .media_state
+            .as_ref()
+            .expect("media worker is running")
+            .accepts(completion.id);
+        if !accepted {
+            return false;
+        }
+        self.media_pending.complete(completion.stage);
+        match completion.result {
+            Ok(Some(MediaWorkerOutput::Protocol(protocol))) => {
+                let payload_bytes = stateful_payload_len(&protocol);
+                let state = self.media_state.as_mut().expect("media worker is running");
+                state.set_protocol(protocol);
+                state.mark_final_applied();
+                self.deferred_sixel_preview = None;
+                self.media_error = None;
+                self.media_preview = None;
+                self.media_frame_revision = self.media_frame_revision.wrapping_add(1);
+                crate::diagnostics::event(format!(
+                    "media encode finished protocol={} elapsed_ms={} payload_bytes={} cached=false",
+                    completion.kind.as_str(),
+                    completion.elapsed.as_millis(),
+                    payload_bytes
+                ));
+                true
+            }
+            Ok(Some(MediaWorkerOutput::Sixel { sixel, key })) => {
+                let payload_bytes = sixel.data.len();
+                let final_applied = self
+                    .media_state
+                    .as_ref()
+                    .expect("media worker is running")
+                    .final_applied();
+                self.cache_sixel(key, sixel.clone());
+                let defer = key.encoding == SixelEncoding::Preview
+                    && !final_applied
+                    && self.media_pending.final_frame
+                    && self.media_pending.final_encoding == Some(SixelEncoding::Fast);
+                let apply = key.encoding.is_final() || (!final_applied && !defer);
+                if apply {
+                    if key.encoding.is_final() {
+                        self.media_state
+                            .as_mut()
+                            .expect("media worker is running")
+                            .mark_final_applied();
+                        self.deferred_sixel_preview = None;
+                        self.media_error = None;
+                    } else if self.media_pending.final_frame {
+                        self.media_error = None;
+                    }
+                    self.media_preview = Some(Protocol::Sixel(sixel));
+                    self.media_frame_revision = self.media_frame_revision.wrapping_add(1);
+                } else if defer {
+                    self.deferred_sixel_preview = Some(DeferredSixelPreview {
+                        sixel,
+                        release_at: now + FAST_SIXEL_PREVIEW_GRACE,
+                    });
+                }
+                crate::diagnostics::event(format!(
+                    "media encode finished protocol={} elapsed_ms={} payload_bytes={} cached=false applied={apply} deferred={defer}",
+                    key.encoding.diagnostic_name(),
+                    completion.elapsed.as_millis(),
+                    payload_bytes
+                ));
+                apply
+            }
+            Ok(None) => false,
+            Err(error) if completion.stage == MediaWorkerStage::Preview => {
+                crate::diagnostics::event(format!(
+                    "media preview encode failed elapsed_ms={} error={error}",
+                    completion.elapsed.as_millis()
+                ));
+                let final_applied = self
+                    .media_state
+                    .as_ref()
+                    .expect("media worker is running")
+                    .final_applied();
+                if !self.media_pending.final_frame && !final_applied {
+                    self.media_error = Some(format!("Could not render media preview: {error}"));
+                    return true;
+                }
+                false
+            }
+            Err(error) => {
+                self.apply_deferred_sixel_preview();
+                self.media_error = Some(format!("Could not render final media preview: {error}"));
+                true
+            }
+        }
+    }
+
+    fn apply_deferred_sixel_preview(&mut self) -> bool {
+        let Some(deferred) = self.deferred_sixel_preview.take() else {
+            return false;
+        };
+        let final_applied = self
+            .media_state
+            .as_ref()
+            .expect("media worker is running")
+            .final_applied();
+        if final_applied {
+            return false;
+        }
+        self.media_preview = Some(Protocol::Sixel(deferred.sixel));
+        self.media_frame_revision = self.media_frame_revision.wrapping_add(1);
+        self.media_error = None;
+        crate::diagnostics::event("media SIXEL preview grace elapsed; applying preview");
+        true
+    }
+
     fn poll_media_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if self
@@ -1422,58 +1731,23 @@ impl PreviewPresentation {
                 Ok(completion) => completion,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    if self.media_request_pending {
-                        self.media_request_pending = false;
+                    if self.media_pending.any() {
+                        self.media_pending = MediaPending::default();
+                        self.deferred_sixel_preview = None;
                         self.media_error = Some("Media preview worker stopped".to_owned());
                         changed = true;
                     }
                     break;
                 }
             };
-            let accepted = self
-                .media_state
-                .as_ref()
-                .expect("media worker is running")
-                .accepts(completion.id);
-            if !accepted {
-                continue;
-            }
-            self.media_request_pending = false;
-            match completion.result {
-                Ok(Some(MediaWorkerOutput::Protocol(protocol))) => {
-                    let payload_bytes = stateful_payload_len(&protocol);
-                    self.media_state
-                        .as_mut()
-                        .expect("media worker is running")
-                        .set_protocol(protocol);
-                    self.media_error = None;
-                    self.media_preview = None;
-                    crate::diagnostics::event(format!(
-                        "media encode finished protocol={} elapsed_ms={} payload_bytes={} cached=false",
-                        completion.kind.as_str(),
-                        completion.elapsed.as_millis(),
-                        payload_bytes
-                    ));
-                    changed = true;
-                }
-                Ok(Some(MediaWorkerOutput::FastSixel { sixel, key })) => {
-                    let payload_bytes = sixel.data.len();
-                    self.cache_sixel(key, sixel.clone());
-                    self.media_preview = Some(Protocol::Sixel(sixel));
-                    self.media_error = None;
-                    crate::diagnostics::event(format!(
-                        "media encode finished protocol=sixel-fast elapsed_ms={} payload_bytes={} cached=false",
-                        completion.elapsed.as_millis(),
-                        payload_bytes
-                    ));
-                    changed = true;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    self.media_error = Some(format!("Could not render media preview: {error}"));
-                    changed = true;
-                }
-            }
+            changed |= self.apply_media_completion_at(completion, now);
+        }
+        if self
+            .deferred_sixel_preview
+            .as_ref()
+            .is_some_and(|preview| preview.release_at <= now)
+        {
+            changed |= self.apply_deferred_sixel_preview();
         }
         changed
     }
@@ -1483,7 +1757,7 @@ impl PreviewPresentation {
     }
 
     pub(crate) fn media_work_pending(&self) -> bool {
-        self.media_request_pending
+        self.media_pending.any()
     }
 
     pub(crate) fn queue_kitty_frame(
@@ -1596,7 +1870,8 @@ impl PreviewPresentation {
         self.media_applied_immediate = false;
         self.media_size = Size::default();
         self.media_preview = None;
-        self.media_request_pending = false;
+        self.media_pending = MediaPending::default();
+        self.deferred_sixel_preview = None;
         self.media_error = None;
         self.media_view.drag_position = None;
         self.media_view.preview_until = None;
@@ -1695,7 +1970,8 @@ impl PreviewPresentation {
                 area: Rect::default(),
             });
             self.clear_active_terminal_media();
-            self.media_request_pending = false;
+            self.media_pending = MediaPending::default();
+            self.deferred_sixel_preview = None;
             if immediate {
                 self.media_state
                     .as_mut()
@@ -1750,9 +2026,7 @@ impl PreviewPresentation {
                     self.effective_media_protocol = MediaPreviewProtocol::Halfblocks;
                     self.media_error = None;
                 } else {
-                    if final_protocol == MediaPreviewProtocol::Sixel
-                        && sixel_quality == SixelQuality::Fast
-                    {
+                    if final_protocol == MediaPreviewProtocol::Sixel {
                         let view = if crop_x == 0
                             && crop_y == 0
                             && crop_width == image.width()
@@ -1763,38 +2037,88 @@ impl PreviewPresentation {
                             Arc::new(image.crop_imm(crop_x, crop_y, crop_width, crop_height))
                         };
                         let font_size = self.media_picker.font_size();
-                        let key = sixel_cache_key(
+                        let preview_key = sixel_cache_key(
                             &view,
                             self.media_size,
                             font_size,
                             self.media_sixel_tmux,
+                            SixelEncoding::Preview,
                         );
-                        if let Some(sixel) = self.cached_sixel(key) {
+                        let final_encoding = match sixel_quality {
+                            SixelQuality::Fast => SixelEncoding::Fast,
+                            SixelQuality::Quality => SixelEncoding::Quality,
+                        };
+                        let final_key = SixelCacheKey {
+                            encoding: final_encoding,
+                            ..preview_key
+                        };
+                        if let Some(sixel) = self.cached_sixel(final_key) {
                             let payload_bytes = sixel.data.len();
                             self.media_state
                                 .as_mut()
                                 .expect("media worker is running")
                                 .empty_protocol();
                             self.media_preview = Some(Protocol::Sixel(sixel));
+                            self.media_error = None;
                             crate::diagnostics::event(format!(
-                                "media encode cache hit protocol=sixel-fast payload_bytes={payload_bytes}"
+                                "media encode cache hit protocol={} payload_bytes={payload_bytes}",
+                                final_encoding.diagnostic_name()
                             ));
                         } else {
-                            self.media_request_pending = true;
-                            self.media_state
+                            let alternate_final_key = SixelCacheKey {
+                                encoding: match final_encoding {
+                                    SixelEncoding::Fast => SixelEncoding::Quality,
+                                    SixelEncoding::Quality => SixelEncoding::Fast,
+                                    SixelEncoding::Preview => unreachable!(),
+                                },
+                                ..preview_key
+                            };
+                            let preview_missing = if let Some(sixel) =
+                                self.cached_sixel(alternate_final_key)
+                            {
+                                let payload_bytes = sixel.data.len();
+                                self.media_preview = Some(Protocol::Sixel(sixel));
+                                crate::diagnostics::event(format!(
+                                    "media encode cache hit protocol={} payload_bytes={payload_bytes}",
+                                    alternate_final_key.encoding.diagnostic_name()
+                                ));
+                                false
+                            } else if let Some(sixel) = self.cached_sixel(preview_key) {
+                                let payload_bytes = sixel.data.len();
+                                self.media_preview = Some(Protocol::Sixel(sixel));
+                                crate::diagnostics::event(format!(
+                                    "media encode cache hit protocol={} payload_bytes={payload_bytes}",
+                                    SixelEncoding::Preview.diagnostic_name()
+                                ));
+                                false
+                            } else {
+                                true
+                            };
+                            let request_sent = self
+                                .media_state
                                 .as_mut()
                                 .expect("media worker is running")
-                                .request_fast_sixel(
-                                    view,
+                                .request_progressive_sixel(ProgressiveSixelRequest {
+                                    image: view,
                                     font_size,
-                                    self.media_size,
-                                    media_background_color(),
-                                    self.media_sixel_tmux,
-                                    key,
-                                );
+                                    size: self.media_size,
+                                    background: media_background_color(),
+                                    is_tmux: self.media_sixel_tmux,
+                                    preview_key: preview_missing.then_some(preview_key),
+                                    final_key,
+                                });
+                            if request_sent {
+                                self.media_pending = MediaPending {
+                                    preview: preview_missing,
+                                    final_frame: true,
+                                    final_encoding: Some(final_encoding),
+                                };
+                                self.media_error = None;
+                            } else {
+                                self.media_error = Some("Media preview worker stopped".to_owned());
+                            }
                         }
                         self.effective_media_protocol = MediaPreviewProtocol::Sixel;
-                        self.media_error = None;
                     } else {
                         let view = image.crop_imm(crop_x, crop_y, crop_width, crop_height);
                         let mut picker = self.media_picker.clone();
@@ -1817,7 +2141,8 @@ impl PreviewPresentation {
                             });
                             picker.new_resize_protocol(view)
                         };
-                        self.media_state
+                        let request_sent = self
+                            .media_state
                             .as_mut()
                             .expect("media worker is running")
                             .request_protocol(
@@ -1826,9 +2151,14 @@ impl PreviewPresentation {
                                 self.media_size,
                                 final_protocol,
                             );
-                        self.media_request_pending = true;
+                        self.media_pending.final_frame = request_sent;
+                        self.media_pending.final_encoding = None;
                         self.effective_media_protocol = final_protocol;
-                        self.media_error = None;
+                        self.media_error = if request_sent {
+                            None
+                        } else {
+                            Some("Media preview worker stopped".to_owned())
+                        };
                     }
                 }
             }
@@ -1885,7 +2215,7 @@ impl PreviewPresentation {
 
     pub(crate) fn shutdown(&mut self) {
         self.media_state.take();
-        if let Some(worker) = self.media_worker.take() {
+        for worker in self.media_workers.drain(..) {
             let _ = worker.join();
         }
     }
