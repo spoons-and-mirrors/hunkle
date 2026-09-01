@@ -10,3 +10,17 @@ incremental = true
 
 [profile.dev.package.hunkle]
 codegen-units = 128
+
+# The global launcher can hand off to this worktree-local debug build. Keep the
+# CPU-heavy media path optimized without slowing ordinary Hunkle recompiles.
+[profile.dev.package.icy_sixel]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.quantette]
+opt-level = 3

@@ -1,4 +1,5 @@
 pub(super) use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, VecDeque, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     sync::{
@@ -55,8 +56,9 @@ const SOURCE_LINE_CHECKPOINT_STRIDE: usize = 256;
 const MEDIA_ZOOM_STEP: f64 = 1.25;
 const MAX_MEDIA_ZOOM_LEVEL: u8 = 10;
 const MEDIA_INTERACTION_SETTLE: Duration = Duration::from_millis(120);
-const MAX_CACHED_SIXEL_FRAMES: usize = 8;
-const MAX_CACHED_SIXEL_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CACHED_SIXEL_FRAMES: usize = 32;
+const MAX_CACHED_SIXEL_BYTES: usize = 48 * 1024 * 1024;
+const FAST_SIXEL_MAX_COLORS: u16 = 64;
 fn media_background_color() -> Rgba<u8> {
     let ratatui::style::Color::Rgb(red, green, blue) = super::palette().panel else {
         unreachable!("theme colors are resolved to RGB")
@@ -108,9 +110,11 @@ fn sixel_cache_key(
 }
 
 fn encode_fast_sixel(image: &DynamicImage, size: Size, is_tmux: bool) -> Result<Sixel, ImageError> {
-    let rgba = image.to_rgba8();
+    let rgba = image
+        .as_rgba8()
+        .map_or_else(|| Cow::Owned(image.to_rgba8()), Cow::Borrowed);
     let options = icy_sixel::EncodeOptions {
-        max_colors: 256,
+        max_colors: FAST_SIXEL_MAX_COLORS,
         diffusion: 0.0,
         quantize_method: icy_sixel::QuantizeMethod::Wu,
     };
@@ -226,14 +230,14 @@ struct MediaProtocolState {
 enum MediaWorkerRequest {
     Protocol {
         id: u64,
-        protocol: StatefulProtocol,
+        protocol: Box<StatefulProtocol>,
         resize: Resize,
         size: Size,
         kind: MediaPreviewProtocol,
     },
     FastSixel {
         id: u64,
-        image: DynamicImage,
+        image: Arc<DynamicImage>,
         font_size: FontSize,
         size: Size,
         background: Rgba<u8>,
@@ -299,7 +303,7 @@ impl MediaProtocolState {
         self.protocol = None;
         let _ = self.request_sender.send(MediaWorkerRequest::Protocol {
             id,
-            protocol,
+            protocol: Box::new(protocol),
             resize,
             size,
             kind,
@@ -308,7 +312,7 @@ impl MediaProtocolState {
 
     fn request_fast_sixel(
         &mut self,
-        image: DynamicImage,
+        image: Arc<DynamicImage>,
         font_size: FontSize,
         size: Size,
         background: Rgba<u8>,
@@ -736,7 +740,7 @@ impl Default for PreviewPresentation {
                                 .last_encoding_result()
                                 .expect("media encoding just completed")
                             {
-                                Ok(()) => Ok(Some(MediaWorkerOutput::Protocol(protocol))),
+                                Ok(()) => Ok(Some(MediaWorkerOutput::Protocol(*protocol))),
                                 Err(error) => Err(error),
                             }
                         };
@@ -1746,10 +1750,18 @@ impl PreviewPresentation {
                     self.effective_media_protocol = MediaPreviewProtocol::Halfblocks;
                     self.media_error = None;
                 } else {
-                    let view = image.crop_imm(crop_x, crop_y, crop_width, crop_height);
                     if final_protocol == MediaPreviewProtocol::Sixel
                         && sixel_quality == SixelQuality::Fast
                     {
+                        let view = if crop_x == 0
+                            && crop_y == 0
+                            && crop_width == image.width()
+                            && crop_height == image.height()
+                        {
+                            Arc::clone(image)
+                        } else {
+                            Arc::new(image.crop_imm(crop_x, crop_y, crop_width, crop_height))
+                        };
                         let font_size = self.media_picker.font_size();
                         let key = sixel_cache_key(
                             &view,
@@ -1784,6 +1796,7 @@ impl PreviewPresentation {
                         self.effective_media_protocol = MediaPreviewProtocol::Sixel;
                         self.media_error = None;
                     } else {
+                        let view = image.crop_imm(crop_x, crop_y, crop_width, crop_height);
                         let mut picker = self.media_picker.clone();
                         let protocol_state = if final_protocol == MediaPreviewProtocol::Kitty {
                             let image_id = ((generation % 99_999) + 1) as u32;

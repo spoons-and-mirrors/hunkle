@@ -248,7 +248,7 @@ fn fast_sixel_is_smaller_than_quality_sixel() {
 }
 
 #[test]
-fn fast_sixel_keeps_a_photo_sized_color_palette() {
+fn fast_sixel_uses_its_bounded_color_palette() {
     let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(64, 64, |x, y| {
         Rgba([
             x.wrapping_mul(5) as u8,
@@ -261,8 +261,44 @@ fn fast_sixel_keeps_a_photo_sized_color_palette() {
     let palette_entries = sixel.data.matches(";2;").count();
 
     assert!(
-        palette_entries >= 128,
+        palette_entries <= usize::from(FAST_SIXEL_MAX_COLORS),
+        "fast SIXEL encoded {palette_entries} colors"
+    );
+    assert!(
+        palette_entries >= 48,
         "fast SIXEL only encoded {palette_entries} colors"
+    );
+}
+
+#[test]
+fn fast_sixel_preserves_gradient_quality() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(64, 64, |x, y| {
+        Rgba([
+            x.wrapping_mul(4) as u8,
+            y.wrapping_mul(4) as u8,
+            x.wrapping_add(y).wrapping_mul(2) as u8,
+            255,
+        ])
+    }));
+    let encoded = encode_fast_sixel(&image, Size::new(7, 4), false).unwrap();
+    let sixel_start = encoded.data.find("\u{1b}P").unwrap();
+    let decoded = icy_sixel::SixelImage::decode(&encoded.data.as_bytes()[sixel_start..]).unwrap();
+    let total_error = image
+        .to_rgba8()
+        .as_raw()
+        .chunks_exact(4)
+        .zip(decoded.pixels.chunks_exact(4))
+        .map(|(source, output)| {
+            (0..3)
+                .map(|channel| source[channel].abs_diff(output[channel]) as usize)
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+    let mean_error = total_error as f64 / (image.width() * image.height() * 3) as f64;
+
+    assert!(
+        mean_error <= 9.0,
+        "fast SIXEL gradient mean error was {mean_error:.2}"
     );
 }
 
