@@ -38,6 +38,34 @@ pub(crate) struct CommitDraftResult {
     pub(super) result: Result<(PathBuf, Option<String>), String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SidebarLayout {
+    #[default]
+    Both,
+    FilesOnly,
+    ChangesOnly,
+    Hidden,
+}
+
+impl SidebarLayout {
+    pub(crate) fn cycle(self) -> Self {
+        match self {
+            Self::Both => Self::FilesOnly,
+            Self::FilesOnly => Self::ChangesOnly,
+            Self::ChangesOnly => Self::Hidden,
+            Self::Hidden => Self::Both,
+        }
+    }
+
+    pub(crate) fn show_files(self) -> bool {
+        matches!(self, Self::Both | Self::FilesOnly)
+    }
+
+    pub(crate) fn show_changes(self) -> bool {
+        matches!(self, Self::Both | Self::ChangesOnly)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Changes,
@@ -529,6 +557,8 @@ pub struct Regions {
     pub sqlite_objects: Option<Rect>,
     pub sqlite_rows: Option<Rect>,
     pub splitter: Option<Rect>,
+    pub files_splitter: Option<Rect>,
+    pub files_split_bounds: Option<Rect>,
     pub split_bounds: Option<Rect>,
     pub commit: Option<Rect>,
     pub commit_scroll: usize,

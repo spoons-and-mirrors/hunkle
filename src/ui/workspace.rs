@@ -85,7 +85,12 @@ fn plan(app: &App, area: Rect, profile: LayoutProfile) -> WorkspacePlan {
     } else {
         DetailSurface::Preview(preview_pane)
     };
-    let columns = column_areas(app.settings.worktree_width, area);
+    let columns = column_areas(
+        app.settings.files_width,
+        app.settings.worktree_width,
+        area,
+        app.sidebar_layout(),
+    );
     WorkspacePlan::Columns {
         files: columns.files,
         detail_area: columns.detail,
@@ -100,16 +105,37 @@ struct ColumnAreas {
     changes: Rect,
 }
 
-fn column_areas(worktree_width: u16, area: Rect) -> ColumnAreas {
-    let files_width =
-        (worktree_width.saturating_sub(10)).clamp(20, area.width.saturating_sub(50).max(20));
-    let changes_width = (worktree_width.saturating_sub(2)).clamp(
-        24,
-        area.width
-            .saturating_sub(files_width)
-            .saturating_sub(26)
-            .max(24),
-    );
+fn column_areas(
+    files_width_setting: u16,
+    worktree_width: u16,
+    area: Rect,
+    layout: crate::app::SidebarLayout,
+) -> ColumnAreas {
+    let show_files = layout.show_files();
+    let show_changes = layout.show_changes();
+    if !show_files && !show_changes {
+        return ColumnAreas {
+            files: Rect::new(area.x, area.y, 0, area.height),
+            detail: area,
+            changes: Rect::new(area.x, area.y, 0, area.height),
+        };
+    }
+    let files_width = if show_files {
+        files_width_setting.clamp(20, area.width.saturating_sub(50).max(20))
+    } else {
+        0
+    };
+    let changes_width = if show_changes {
+        (worktree_width.saturating_sub(2)).clamp(
+            24,
+            area.width
+                .saturating_sub(files_width)
+                .saturating_sub(26)
+                .max(24),
+        )
+    } else {
+        0
+    };
     let files = Rect::new(area.x, area.y, files_width, area.height);
     let changes_x = area.right().saturating_sub(changes_width);
     let changes = Rect::new(changes_x, area.y, changes_width, area.height);
@@ -184,10 +210,50 @@ mod tests {
 
     #[test]
     fn columns_respect_the_persisted_master_width() {
-        let columns = column_areas(31, Rect::new(2, 3, 100, 40));
+        let columns = column_areas(
+            21,
+            31,
+            Rect::new(2, 3, 100, 40),
+            crate::app::SidebarLayout::Both,
+        );
 
         assert_eq!(columns.files, Rect::new(2, 3, 21, 40));
         assert_eq!(columns.detail, Rect::new(24, 3, 48, 40));
         assert_eq!(columns.changes, Rect::new(73, 3, 29, 40));
+    }
+
+    #[test]
+    fn sidebar_layout_cycles_through_all_visibility_states() {
+        use crate::app::SidebarLayout;
+        assert_eq!(SidebarLayout::Both.cycle(), SidebarLayout::FilesOnly);
+        assert_eq!(
+            SidebarLayout::FilesOnly.cycle(),
+            SidebarLayout::ChangesOnly
+        );
+        assert_eq!(SidebarLayout::ChangesOnly.cycle(), SidebarLayout::Hidden);
+        assert_eq!(SidebarLayout::Hidden.cycle(), SidebarLayout::Both);
+
+        let area = Rect::new(2, 3, 100, 40);
+        let hidden = column_areas(21, 31, area, SidebarLayout::Hidden);
+        assert_eq!(hidden.files.width, 0);
+        assert_eq!(hidden.changes.width, 0);
+        assert_eq!(hidden.detail, area);
+        let files_only = column_areas(21, 31, area, SidebarLayout::FilesOnly);
+        assert!(files_only.files.width > 0);
+        assert_eq!(files_only.changes.width, 0);
+        let changes_only = column_areas(21, 31, area, SidebarLayout::ChangesOnly);
+        assert_eq!(changes_only.files.width, 0);
+        assert!(changes_only.changes.width > 0);
+    }
+
+    #[test]
+    fn files_and_changes_widths_resize_independently() {
+        use crate::app::SidebarLayout;
+        let area = Rect::new(0, 0, 120, 40);
+        let narrow_files = column_areas(20, 40, area, SidebarLayout::Both);
+        let wide_files = column_areas(40, 40, area, SidebarLayout::Both);
+        assert_eq!(narrow_files.files.width, 20);
+        assert_eq!(wide_files.files.width, 40);
+        assert_eq!(narrow_files.changes.width, wide_files.changes.width);
     }
 }

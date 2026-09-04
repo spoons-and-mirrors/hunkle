@@ -153,6 +153,7 @@ pub struct Settings {
     pub fetch_interval_minutes: u16,
     pub format_on_save: bool,
     pub worktree_width: u16,
+    pub files_width: u16,
     pub graph_lane_width: u16,
     pub graph_description_width: u16,
     pub graph_changes_width: u16,
@@ -202,6 +203,7 @@ impl Default for Settings {
             fetch_interval_minutes: 5,
             format_on_save: true,
             worktree_width: 38,
+            files_width: 28,
             graph_lane_width: 0,
             graph_description_width: 0,
             graph_changes_width: 12,
@@ -268,11 +270,12 @@ impl SettingsStore {
             fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\nsixel_quality={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nformat_on_save={}\nworktree_width={}\nfiles_width={}\ngraph_lane_width={}\ngraph_description_width={}\ngraph_changes_width={}\ngraph_date_width={}\ngraph_author_width={}\ngraph_commit_width={}\nexplorer_left_pane_width={}\neditor_command={}\nmedia_preview_protocol={}\nsixel_quality={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.format_on_save,
             settings.worktree_width,
+            settings.files_width,
             settings.graph_lane_width,
             settings.graph_description_width,
             settings.graph_changes_width,
@@ -315,6 +318,7 @@ fn load(path: &Path) -> Settings {
         return Settings::default();
     };
     let mut settings = Settings::default();
+    let mut files_width_seen = false;
     for line in contents.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -336,6 +340,12 @@ fn load(path: &Path) -> Settings {
             "worktree_width" => {
                 if let Ok(width) = value.parse::<u16>() {
                     settings.worktree_width = width.clamp(24, 4096);
+                }
+            }
+            "files_width" => {
+                if let Ok(width) = value.parse::<u16>() {
+                    settings.files_width = width.clamp(20, 4096);
+                    files_width_seen = true;
                 }
             }
             "graph_changes_width" => set_graph_width(&mut settings, GraphColumn::Changes, value),
@@ -377,6 +387,11 @@ fn load(path: &Path) -> Settings {
             }
             _ => {}
         }
+    }
+    if !files_width_seen {
+        // Preserve the pre-split layout exactly: the files pane used to derive
+        // from worktree_width, so keep deriving until the user drags it.
+        settings.files_width = settings.worktree_width.saturating_sub(10).clamp(20, 4096);
     }
     settings
 }
@@ -427,6 +442,7 @@ mod tests {
             fetch_interval_minutes: 17,
             format_on_save: false,
             worktree_width: 61,
+            files_width: 41,
             graph_lane_width: 12,
             graph_description_width: 31,
             graph_changes_width: 13,
@@ -456,14 +472,19 @@ mod tests {
         assert_eq!(store.load(), settings);
 
         fs::write(
-            path,
-            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nexplorer_left_pane_width=2\nmedia_preview_protocol=unknown\nsixel_quality=unknown\n",
+            &path,
+            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nfiles_width=5\nexplorer_left_pane_width=2\nmedia_preview_protocol=unknown\nsixel_quality=unknown\n",
         )
         .unwrap();
         let loaded = store.load();
         assert!(loaded.format_on_save);
         assert_eq!(loaded.fetch_interval_minutes, 1);
         assert_eq!(loaded.worktree_width, 24);
+        assert_eq!(loaded.files_width, 20);
+
+        // Without an explicit files_width the old worktree-derived layout is kept.
+        fs::write(&path, "worktree_width=61\n").unwrap();
+        assert_eq!(store.load().files_width, 51);
         assert_eq!(
             loaded.explorer_left_pane_width,
             Some(MINIMUM_EXPLORER_PANE_WIDTH)

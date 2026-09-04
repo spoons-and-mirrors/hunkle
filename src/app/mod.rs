@@ -100,6 +100,7 @@ pub struct App {
     graph_hidden: bool,
     navigation: WorkspaceNavigation,
     layout_profile: LayoutProfile,
+    sidebar_layout: SidebarLayout,
     pub mode: Mode,
     pub changes: ChangesState,
     pub graph_state: TableState,
@@ -115,6 +116,7 @@ pub struct App {
     commit_draft_due: Option<Instant>,
     commit_draft_rx: Option<Receiver<CommitDraftResult>>,
     pub dragging_splitter: bool,
+    pub dragging_files_splitter: bool,
     pub dragging_diff_scrollbar: bool,
     pub(crate) dragging_graph_column: Option<GraphColumnDrag>,
     diff_scroll_drag_offset: u16,
@@ -252,6 +254,7 @@ impl App {
             graph_hidden: false,
             navigation: WorkspaceNavigation::default(),
             layout_profile: LayoutProfile::default(),
+            sidebar_layout: SidebarLayout::default(),
             mode,
             changes,
             graph_state,
@@ -267,6 +270,7 @@ impl App {
             commit_draft_due: None,
             commit_draft_rx: None,
             dragging_splitter: false,
+            dragging_files_splitter: false,
             dragging_diff_scrollbar: false,
             dragging_graph_column: None,
             diff_scroll_drag_offset: 0,
@@ -1344,6 +1348,15 @@ impl App {
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Tab
+            && key.modifiers.is_empty()
+            && self.mode == Mode::Normal
+            && self.view() == View::Changes
+            && !self.layout_profile().is_single()
+        {
+            self.cycle_sidebar_layout();
+            return;
+        }
         if self.graph_commit_open()
             && matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc)
         {
@@ -2119,6 +2132,14 @@ impl App {
 
     pub(crate) fn layout_profile(&self) -> LayoutProfile {
         self.layout_profile
+    }
+
+    pub(crate) fn sidebar_layout(&self) -> SidebarLayout {
+        self.sidebar_layout
+    }
+
+    pub(crate) fn cycle_sidebar_layout(&mut self) {
+        self.sidebar_layout = self.sidebar_layout.cycle();
     }
 
     pub(crate) fn begin_render_frame(&mut self, area: Rect) -> LayoutProfile {

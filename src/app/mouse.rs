@@ -38,6 +38,18 @@ impl App {
             }
             return;
         }
+        if self.dragging_files_splitter {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.resize_files_pane(mouse.column),
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.resize_files_pane(mouse.column);
+                    self.dragging_files_splitter = false;
+                    self.persist_settings();
+                }
+                _ => {}
+            }
+            return;
+        }
         if let Some(drag) = self.dragging_graph_column {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
@@ -243,19 +255,16 @@ impl App {
             }
             return;
         }
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && !mouse.modifiers.contains(KeyModifiers::SHIFT)
-            && self.begin_file_drag(point)
-        {
-            return;
-        }
-
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.selection.clear();
                 if self.begin_mouse_control(point) {
                     return;
                 }
+                if !mouse.modifiers.contains(KeyModifiers::SHIFT) && self.begin_file_drag(point)
+                {
+                    return;
+                }
+                self.selection.clear();
                 let region = self.selection_region(point);
                 self.selection.begin(point, region);
                 return;
@@ -356,6 +365,7 @@ impl App {
             return false;
         }
         if self.dragging_splitter
+            || self.dragging_files_splitter
             || self.dragging_diff_scrollbar
             || self.dragging_graph_column.is_some()
             || self.workspace_explorer.dragging_splitter
@@ -672,8 +682,22 @@ impl App {
         }
         if self
             .regions
+            .files_splitter
+            .is_some_and(|rect| widened_splitter(rect).contains(point))
+        {
+            self.mode = Mode::Normal;
+            self.dragging_files_splitter = true;
+            self.resize_files_pane(point.x);
+            return true;
+        }
+        if self
+            .regions
             .splitter
-            .is_some_and(|rect| rect.contains(point))
+            .is_some_and(|rect| widened_splitter(rect).contains(point))
+            && !self
+                .regions
+                .diff_scrollbar
+                .is_some_and(|rect| rect.contains(point))
         {
             self.mode = Mode::Normal;
             self.dragging_splitter = true;
@@ -1334,6 +1358,19 @@ impl App {
         );
     }
 
+    fn resize_files_pane(&mut self, column: u16) {
+        let Some(bounds) = self.regions.files_split_bounds else {
+            return;
+        };
+        let minimum = bounds.x.saturating_add(20);
+        let maximum = bounds
+            .x
+            .saturating_add(bounds.width.saturating_sub(50).max(20))
+            .max(minimum);
+        let position = column.clamp(minimum, maximum);
+        self.settings.files_width = position.saturating_sub(bounds.x).max(20);
+    }
+
     fn resize_worktree(&mut self, column: u16) {
         let Some(bounds) = self.regions.split_bounds else {
             return;
@@ -1370,4 +1407,13 @@ impl App {
         self.settings
             .set_graph_column_width(drag.right, right_width);
     }
+}
+
+fn widened_splitter(rect: Rect) -> Rect {
+    Rect::new(
+        rect.x.saturating_sub(1),
+        rect.y,
+        rect.width.saturating_add(2),
+        rect.height,
+    )
 }

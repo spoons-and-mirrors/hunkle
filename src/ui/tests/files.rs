@@ -1190,3 +1190,63 @@ fn renders_markdown_files_and_toggles_back_to_source() {
             .is_none()
     );
 }
+
+#[test]
+fn wide_files_splitter_drag_resizes_the_files_pane() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let splitter = app
+        .regions
+        .files_splitter
+        .expect("wide layout shows a files divider");
+    let initial = app.settings.files_width;
+
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        splitter.x,
+        splitter.y,
+    ));
+    assert!(app.dragging_files_splitter);
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        splitter.x + 5,
+        splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        splitter.x + 5,
+        splitter.y,
+    ));
+
+    assert!(!app.dragging_files_splitter);
+    assert_eq!(app.settings.files_width, initial + 5);
+
+    // The divider's grab zone overlaps the file list by one column: a press
+    // there must still grab the divider instead of starting a file drag.
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let splitter = app
+        .regions
+        .files_splitter
+        .expect("wide layout shows a files divider");
+    let list = app.regions.explorer_list.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        splitter.x - 1,
+        list.y,
+    ));
+    assert!(app.dragging_files_splitter);
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        splitter.x - 1,
+        list.y,
+    ));
+    assert!(!app.dragging_files_splitter);
+}

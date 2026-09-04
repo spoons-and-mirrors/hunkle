@@ -73,17 +73,40 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, plan: ChangesPlan) {
             changes_area,
             preview_pane,
         } => {
-            draw_explorer_master(frame, app, files_area, false);
+            if files_area.width > 0 {
+                draw_explorer_master(frame, app, files_area, false);
+            }
             if let Some(preview_pane) = preview_pane {
                 draw_detail(frame, app, editor_area, preview_pane, false);
             }
-            draw_master(
-                frame,
-                app,
-                changes_area,
-                LeftPane::Worktree,
-                Some(editor_area),
-            );
+            if changes_area.width > 0 {
+                draw_master(
+                    frame,
+                    app,
+                    changes_area,
+                    LeftPane::Worktree,
+                    Some(editor_area),
+                );
+            }
+            app.regions.files_splitter = (files_area.width > 0 && editor_area.width > 0)
+                .then(|| Rect::new(files_area.right(), files_area.y, 1, files_area.height));
+            let columns_right = changes_area
+                .right()
+                .max(editor_area.right())
+                .max(files_area.right());
+            app.regions.files_split_bounds = (files_area.width > 0).then(|| {
+                Rect::new(
+                    files_area.x,
+                    files_area.y,
+                    columns_right.saturating_sub(files_area.x),
+                    files_area.height,
+                )
+            });
+            if app.dragging_files_splitter
+                && let Some(splitter) = app.regions.files_splitter
+            {
+                fill(frame, splitter, palette().accent);
+            }
         }
     }
 }
@@ -367,6 +390,7 @@ fn draw_detail(
         app.regions.worktree = None;
         app.regions.split_bounds = None;
         app.regions.splitter = None;
+        app.regions.files_splitter = None;
     }
     app.regions.diff = Some(area);
     app.regions.clear_targets_in(area);

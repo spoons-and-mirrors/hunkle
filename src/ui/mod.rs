@@ -546,6 +546,11 @@ fn clear_workspace_bottom_splitter(frame: &mut Frame<'_>, app: &App, area: Rect)
         frame.render_widget(Clear, splitter);
         fill(frame, splitter, palette().canvas);
     }
+    if let Some(splitter) = app.regions.files_splitter {
+        let splitter = Rect::new(splitter.x, area.y, splitter.width, area.height);
+        frame.render_widget(Clear, splitter);
+        fill(frame, splitter, palette().canvas);
+    }
 }
 
 fn notice_is_error(notice: &str) -> bool {
