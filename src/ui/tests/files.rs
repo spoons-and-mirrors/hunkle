@@ -1250,3 +1250,111 @@ fn wide_files_splitter_drag_resizes_the_files_pane() {
     ));
     assert!(!app.dragging_files_splitter);
 }
+
+#[test]
+fn switching_locations_remembers_the_file_tree_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    for root in [&first, &second] {
+        fs::create_dir_all(root.join("src/app")).unwrap();
+        fs::write(root.join("src/app/mod.rs"), "mod\n").unwrap();
+        fs::write(root.join("src/main.rs"), "main\n").unwrap();
+        fs::write(root.join("README.md"), "readme\n").unwrap();
+        run_git(root, &["init", "-b", "main"]);
+        run_git(root, &["config", "user.name", "Location Test"]);
+        run_git(root, &["config", "user.email", "location@example.com"]);
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-m", "initial"]);
+    }
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let wait_for_root = |app: &mut App, root: &std::path::Path| {
+        wait_for(app, |app| {
+            app.repository()
+                .is_some_and(|repository| repository.root == root && repository.details_ready)
+        });
+    };
+    let explorer_labels = |app: &App| {
+        app.changes
+            .explorer_rows()
+            .iter()
+            .map(|row| row.label.clone())
+            .collect::<Vec<_>>()
+    };
+    let selected_label = |app: &App| {
+        app.changes
+            .explorer_state
+            .selected()
+            .and_then(|index| app.changes.explorer_rows().get(index))
+            .map(|row| row.label.clone())
+    };
+
+    let mut app = App::new(first.clone());
+    wait_for_root(&mut app, &first);
+    // Draw once so region-dependent navigation (reveal viewports) behaves
+    // like the running app, where every frame is drawn.
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    // Drill into src/app/mod.rs entirely with Files-pane keys.
+    app.handle_key(key(KeyCode::F(2)));
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
+    assert_eq!(explorer_labels(&app), ["src", "README.md"]);
+    // New workspaces start on the first file; move up to the src folder.
+    assert_eq!(selected_label(&app).as_deref(), Some("README.md"));
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(selected_label(&app).as_deref(), Some("src"));
+    app.handle_key(key(KeyCode::Enter));
+    wait_for(&mut app, |app| {
+        app.changes
+            .explorer_rows()
+            .iter()
+            .any(|row| row.label == "app")
+    });
+    assert_eq!(
+        explorer_labels(&app),
+        ["src", "app", "main.rs", "README.md"]
+    );
+    app.handle_key(key(KeyCode::Char('l')));
+    assert_eq!(selected_label(&app).as_deref(), Some("app"));
+    app.handle_key(key(KeyCode::Enter));
+    wait_for(&mut app, |app| {
+        app.changes
+            .explorer_rows()
+            .iter()
+            .any(|row| row.label == "mod.rs")
+    });
+    app.handle_key(key(KeyCode::Char('l')));
+    assert_eq!(selected_label(&app).as_deref(), Some("mod.rs"));
+    assert_eq!(
+        app.selected_explorer_file_path(),
+        Some(&RepoPath::from("src/app/mod.rs"))
+    );
+
+    // Switching locations starts the other root with a fresh tree...
+    assert!(app.start_repository_open(second.clone(), false));
+    wait_for_root(&mut app, &second);
+    assert!(app.changes.expanded_explorer_directories.is_empty());
+
+    // ...but coming back restores the open folders and the open file.
+    assert!(app.start_repository_open(first.clone(), false));
+    wait_for_root(&mut app, &first);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    wait_for(&mut app, |app| {
+        app.selected_explorer_file_path()
+            .is_some_and(|path| path == &RepoPath::from("src/app/mod.rs"))
+    });
+    assert_eq!(app.sidebar_pane(), LeftPane::Files);
+    assert!(
+        app.changes
+            .expanded_explorer_directories
+            .contains(&RepoPath::from("src"))
+    );
+    assert!(
+        app.changes
+            .expanded_explorer_directories
+            .contains(&RepoPath::from("src/app"))
+    );
+    assert_eq!(selected_label(&app).as_deref(), Some("mod.rs"));
+}

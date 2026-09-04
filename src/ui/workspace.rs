@@ -226,10 +226,7 @@ mod tests {
     fn sidebar_layout_cycles_through_all_visibility_states() {
         use crate::app::SidebarLayout;
         assert_eq!(SidebarLayout::Both.cycle(), SidebarLayout::FilesOnly);
-        assert_eq!(
-            SidebarLayout::FilesOnly.cycle(),
-            SidebarLayout::ChangesOnly
-        );
+        assert_eq!(SidebarLayout::FilesOnly.cycle(), SidebarLayout::ChangesOnly);
         assert_eq!(SidebarLayout::ChangesOnly.cycle(), SidebarLayout::Hidden);
         assert_eq!(SidebarLayout::Hidden.cycle(), SidebarLayout::Both);
 

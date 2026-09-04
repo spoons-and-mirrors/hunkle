@@ -260,8 +260,7 @@ impl App {
                 if self.begin_mouse_control(point) {
                     return;
                 }
-                if !mouse.modifiers.contains(KeyModifiers::SHIFT) && self.begin_file_drag(point)
-                {
+                if !mouse.modifiers.contains(KeyModifiers::SHIFT) && self.begin_file_drag(point) {
                     return;
                 }
                 self.selection.clear();

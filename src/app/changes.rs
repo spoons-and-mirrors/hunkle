@@ -3,8 +3,8 @@ mod preview_loader;
 pub(crate) mod sqlite_browser;
 
 use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
+    collections::{HashMap, HashSet, VecDeque},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -376,6 +376,57 @@ pub(super) struct ChangesSelection {
     explorer_directory: Option<RepoPath>,
 }
 
+/// File-tree UI state remembered per workspace root so switching locations
+/// restores the folders that were open and the file that was selected.
+pub(super) struct LocationSnapshot {
+    pane: LeftPane,
+    expanded_explorer_directories: HashSet<RepoPath>,
+    collapsed_directories: HashSet<RepoPath>,
+    selection: ChangesSelection,
+}
+
+pub(crate) struct LocationMemory {
+    snapshots: HashMap<PathBuf, LocationSnapshot>,
+    order: VecDeque<PathBuf>,
+}
+
+impl LocationMemory {
+    const CAPACITY: usize = 64;
+
+    pub(super) fn new() -> Self {
+        Self {
+            snapshots: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn key(root: &Path) -> PathBuf {
+        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+
+    pub(super) fn remember(&mut self, root: &Path, snapshot: LocationSnapshot) {
+        let key = Self::key(root);
+        self.snapshots.insert(key.clone(), snapshot);
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key);
+        while self.snapshots.len() > Self::CAPACITY {
+            match self.order.pop_front() {
+                Some(oldest) => {
+                    self.snapshots.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+    }
+
+    pub(super) fn recall(&mut self, root: &Path) -> Option<LocationSnapshot> {
+        let key = Self::key(root);
+        let snapshot = self.snapshots.remove(&key)?;
+        self.order.retain(|existing| existing != &key);
+        Some(snapshot)
+    }
+}
+
 impl ChangesState {
     pub(super) fn initial_pane(repo: Option<&RepositoryData>) -> LeftPane {
         if repo
@@ -493,6 +544,22 @@ impl ChangesState {
     }
 
     pub(super) fn capture_selection(&self, repo: &RepositoryData) -> ChangesSelection {
+        // An in-flight deep reveal is the user's current selection even though
+        // the row is not visible yet: report the pending path so a reload that
+        // lands before the reveal resolves restores the reveal target instead
+        // of the stale pre-reveal row.
+        let (pending_file, pending_directory) = match &self.pending_explorer_selection {
+            Some((path, _))
+                if self
+                    .explorer_rows()
+                    .iter()
+                    .any(|row| row.directory_path.as_ref() == Some(path)) =>
+            {
+                (None, Some(path.clone()))
+            }
+            Some((path, _)) => (Some(path.clone()), self.selected_explorer_directory_path()),
+            None => (None, None),
+        };
         ChangesSelection {
             change: self
                 .selected_change_index(repo)
@@ -503,8 +570,9 @@ impl ChangesState {
                 let section = self.selected_worktree_section()?;
                 Some((path, section))
             }),
-            explorer_file: self.selected_explorer_file_path(repo).cloned(),
-            explorer_directory: self.selected_explorer_directory_path(),
+            explorer_file: pending_file.or_else(|| self.selected_explorer_file_path(repo).cloned()),
+            explorer_directory: pending_directory
+                .or_else(|| self.selected_explorer_directory_path()),
         }
     }
 
@@ -581,6 +649,51 @@ impl ChangesState {
                 comparison.target_revision,
             );
         }
+    }
+
+    pub(super) fn snapshot_location(&self, repo: &RepositoryData) -> LocationSnapshot {
+        LocationSnapshot {
+            pane: self.pane,
+            expanded_explorer_directories: self.expanded_explorer_directories.clone(),
+            collapsed_directories: self.collapsed_directories.clone(),
+            selection: self.capture_selection(repo),
+        }
+    }
+
+    /// Restores a remembered location after the state was reset for a new root.
+    /// Returns the remembered pane so the caller can match the navigation to it.
+    /// Missing files or folders (renamed while away) fall back gracefully.
+    pub(super) fn restore_location(
+        &mut self,
+        repo: &RepositoryData,
+        snapshot: LocationSnapshot,
+        inventory_refresh: InventoryRefresh,
+        viewport: usize,
+    ) -> LeftPane {
+        let pane = snapshot.pane;
+        let explorer_path = snapshot
+            .selection
+            .explorer_file
+            .clone()
+            .or(snapshot.selection.explorer_directory.clone());
+        self.pane = pane;
+        self.preview.origin = PreviewOrigin::IdlePane(pane);
+        self.expanded_explorer_directories = snapshot.expanded_explorer_directories;
+        self.collapsed_directories = snapshot.collapsed_directories;
+        // Re-request every remembered folder so the tree re-expands as loads land.
+        let mut expanded: Vec<RepoPath> =
+            self.expanded_explorer_directories.iter().cloned().collect();
+        expanded.sort();
+        for directory in expanded {
+            self.request_explorer_directory(repo, directory);
+        }
+        self.restore_selection(repo, snapshot.selection, inventory_refresh);
+        // Resolve the remembered file through the async path so it still lands
+        // when its directory has not finished loading yet.
+        if let Some(path) = explorer_path {
+            self.select_explorer_path(repo, &path, viewport);
+        }
+        pane
     }
 
     pub(crate) fn worktree_rows(&self, _repo: &RepositoryData) -> &[WorktreeRow] {

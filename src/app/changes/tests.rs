@@ -407,3 +407,93 @@ fn hunk_selection_requires_a_stageable_preview_origin() {
     };
     assert!(!state.preview.hunk_actions());
 }
+
+fn poll_explorer_selection(state: &mut ChangesState, repo: &RepositoryData, path: &RepoPath) {
+    for _ in 0..100 {
+        state.poll_directories(Some(repo));
+        if state
+            .selected_explorer_file_path(repo)
+            .is_some_and(|selected| selected == path)
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    panic!("explorer selection did not resolve to {path:?}");
+}
+
+#[test]
+fn location_snapshot_restores_expanded_folders_and_open_file() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("src/app")).unwrap();
+    fs::write(directory.path().join("src/app/mod.rs"), "").unwrap();
+    fs::write(directory.path().join("src/main.rs"), "").unwrap();
+    fs::write(directory.path().join("README.md"), "").unwrap();
+    let mut repo = repository_data();
+    repo.root = directory.path().to_owned();
+
+    let mut state = ChangesState::new(Some(&repo));
+    state.set_pane(LeftPane::Files, Some(&repo));
+    let target = RepoPath::from("src/app/mod.rs");
+    assert!(state.select_explorer_path(&repo, &target, 20));
+    poll_explorer_selection(&mut state, &repo, &target);
+    assert!(
+        state
+            .expanded_explorer_directories
+            .contains(&RepoPath::from("src"))
+    );
+    assert!(
+        state
+            .expanded_explorer_directories
+            .contains(&RepoPath::from("src/app"))
+    );
+
+    let mut memory = LocationMemory::new();
+    memory.remember(&repo.root, state.snapshot_location(&repo));
+
+    // Switching locations resets the tree...
+    state.reset_repository(Some(&repo), None);
+    assert!(state.expanded_explorer_directories.is_empty());
+    assert!(
+        state
+            .selected_explorer_file_path(&repo)
+            .is_none_or(|selected| selected != &target)
+    );
+
+    // ...but coming back restores the open folders and the open file.
+    let snapshot = memory.recall(&repo.root).expect("remembered location");
+    assert_eq!(
+        state.restore_location(&repo, snapshot, InventoryRefresh::All, 20),
+        LeftPane::Files
+    );
+    assert_eq!(state.pane, LeftPane::Files);
+    poll_explorer_selection(&mut state, &repo, &target);
+    assert!(
+        state
+            .expanded_explorer_directories
+            .contains(&RepoPath::from("src"))
+    );
+    assert!(
+        state
+            .expanded_explorer_directories
+            .contains(&RepoPath::from("src/app"))
+    );
+    assert_eq!(state.selected_explorer_file_path(&repo), Some(&target));
+}
+
+#[test]
+fn location_memory_is_keyed_by_workspace_root() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let mut repo = repository_data();
+    repo.root = first.path().to_owned();
+    let state = ChangesState::new(Some(&repo));
+
+    let mut memory = LocationMemory::new();
+    assert!(memory.recall(first.path()).is_none());
+    memory.remember(first.path(), state.snapshot_location(&repo));
+    assert!(memory.recall(second.path()).is_none());
+    assert!(memory.recall(first.path()).is_some());
+    // Recalling consumes the snapshot, so the next visit starts fresh.
+    assert!(memory.recall(first.path()).is_none());
+}

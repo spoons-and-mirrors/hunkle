@@ -28,7 +28,7 @@ pub(crate) use actions::{
 };
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub(crate) use changes::{
-    ChangesHitTarget, PreviewOrigin, PullRequestPreview, SqliteFocus, SqlitePage,
+    ChangesHitTarget, LocationMemory, PreviewOrigin, PullRequestPreview, SqliteFocus, SqlitePage,
 };
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use commit_summary::CommitSummaryCache;
@@ -72,7 +72,7 @@ pub(super) use crate::{
     diagnostics,
     filesystem::{atomic_write, same_path},
     formatter,
-    git::{self, Branch, RefreshScope, RepositoryData},
+    git::{self, Branch, InventoryRefresh, RefreshScope, RepositoryData},
     repo_path::RepoPath,
     repository_session::{LoadKind, Mutation, RefreshRequest, RepositorySession, WorkerOutcome},
     selection::SelectionState,
@@ -155,6 +155,7 @@ pub struct App {
     pub(crate) file_editor_dragging: bool,
     pending_file_selection: Option<RepoPath>,
     pending_workspace_open: Option<PathBuf>,
+    location_memory: LocationMemory,
     initial_pane_pending: bool,
     recent_fetches: HashMap<PathBuf, Instant>,
     workspace_fetch_pending: bool,
@@ -309,6 +310,7 @@ impl App {
             file_editor_dragging: false,
             pending_file_selection: None,
             pending_workspace_open: None,
+            location_memory: LocationMemory::new(),
             initial_pane_pending,
             recent_fetches: HashMap::new(),
             workspace_fetch_pending: false,
@@ -1094,7 +1096,7 @@ impl App {
                         if let Some(repo) = self.session.data() {
                             self.changes.select_explorer_path(repo, &path, viewport);
                         }
-                    } else {
+                    } else if !self.restore_remembered_location(inventory_refresh) {
                         self.show_main_pane();
                     }
                     self.file_search.invalidate();
@@ -2128,6 +2130,33 @@ impl App {
 
     pub(super) fn show_main_pane(&mut self) {
         self.navigation.show_changes();
+    }
+
+    /// Restores the remembered file-tree state for the just-opened workspace
+    /// root, when this location was visited before. Explicit file requests
+    /// still win (the caller handles those before this runs). Returns true
+    /// when a snapshot was applied.
+    fn restore_remembered_location(&mut self, inventory_refresh: InventoryRefresh) -> bool {
+        let root = match self.session.data() {
+            Some(repository) => repository.root.clone(),
+            None => return false,
+        };
+        let Some(snapshot) = self.location_memory.recall(&root) else {
+            return false;
+        };
+        let viewport = self
+            .regions
+            .explorer_list
+            .map_or(0, |rect| usize::from(rect.height));
+        if let Some(repository) = self.session.data() {
+            self.changes
+                .restore_location(repository, snapshot, inventory_refresh, viewport);
+        } else {
+            return false;
+        }
+        self.navigation.show_changes();
+        self.initial_pane_pending = false;
+        true
     }
 
     pub(crate) fn layout_profile(&self) -> LayoutProfile {

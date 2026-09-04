@@ -139,6 +139,12 @@ impl App {
                 Some("Could not open workspace until the commit draft is saved".to_owned());
             return false;
         }
+        // Remember this location's file-tree state before leaving it, so
+        // coming back restores the open folders and selected file.
+        if let Some(repository) = self.session.data() {
+            let snapshot = self.changes.snapshot_location(repository);
+            self.location_memory.remember(&repository.root, snapshot);
+        }
         if self
             .session
             .start_open(path, self.settings.fetch_interval())
