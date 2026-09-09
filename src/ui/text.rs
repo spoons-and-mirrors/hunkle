@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use super::palette;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -463,6 +465,77 @@ fn push_syntax_spans(spans: &mut Vec<Span<'static>>, code: &str, language: Langu
     }
 }
 
+fn push_styled_syntax_spans(
+    spans: &mut Vec<Span<'static>>,
+    code: &str,
+    language: Language,
+    highlights: &[Range<usize>],
+    word_bg: Color,
+) {
+    if highlights.is_empty() {
+        push_syntax_spans(spans, code, language);
+        return;
+    }
+
+    let raw_spans = syntax_spans_for_language(code, language);
+    let mut code_offset = 0usize;
+    let mut column = 0usize;
+
+    for span in raw_spans {
+        let span_len = span.content.len();
+        let span_start = code_offset;
+        let span_end = span_start + span_len;
+        code_offset = span_end;
+
+        let mut sub_start = span_start;
+        while sub_start < span_end {
+            let matching_hl = highlights
+                .iter()
+                .find(|hl| hl.start <= sub_start && sub_start < hl.end);
+            let (sub_end, is_hl) = if let Some(hl) = matching_hl {
+                (hl.end.min(span_end), true)
+            } else {
+                let next_start = highlights
+                    .iter()
+                    .map(|hl| hl.start)
+                    .filter(|&start| start > sub_start)
+                    .min()
+                    .unwrap_or(span_end);
+                (next_start.min(span_end), false)
+            };
+
+            let local_start = sub_start - span_start;
+            let local_end = sub_end - span_start;
+            let sub_content = &span.content[local_start..local_end];
+            let sub_style = if is_hl {
+                span.style.bg(word_bg).add_modifier(Modifier::BOLD)
+            } else {
+                span.style
+            };
+
+            if sub_content.contains('\t') {
+                let mut expanded = String::with_capacity(sub_content.len());
+                for grapheme in sub_content.graphemes(true) {
+                    if grapheme != "\t" {
+                        expanded.push_str(grapheme);
+                        column = column.saturating_add(UnicodeWidthStr::width(grapheme));
+                        continue;
+                    }
+                    let width = crate::app::TAB_WIDTH - column % crate::app::TAB_WIDTH;
+                    expanded.extend(std::iter::repeat_n(' ', width));
+                    column = column.saturating_add(width);
+                }
+                push_merged_span(spans, Span::styled(expanded, sub_style));
+            } else {
+                column = column.saturating_add(UnicodeWidthStr::width(sub_content));
+                push_merged_span(spans, Span::styled(sub_content.to_owned(), sub_style));
+            }
+
+            sub_start = sub_end;
+        }
+    }
+}
+
 pub(super) fn styled_diff_window(
     diff: &DiffDocument,
     path: &str,
@@ -478,18 +551,19 @@ pub(super) fn styled_diff_window(
         let Some(line) = diff.display_line(row, show_initial_header) else {
             continue;
         };
-        let (old_line, new_line) = diff.line_numbers_at_display_row(row, show_initial_header);
+        let (_old_line, new_line) = diff.line_numbers_at_display_row(row, show_initial_header);
         let row_path = diff
             .display_path(row, show_initial_header)
             .map(RepoPath::display);
         let language = Language::from_path(row_path.as_deref().unwrap_or(path));
+        let highlights = diff.display_highlights(row, show_initial_header);
         lines.push(styled_diff_line(
             line,
             diff.display_kind(row, show_initial_header),
+            highlights,
             language,
             width,
             numbered,
-            old_line,
             new_line,
         ));
     }
@@ -499,10 +573,10 @@ pub(super) fn styled_diff_window(
 fn styled_diff_line(
     line: &str,
     kind: Option<DiffLineKind>,
+    highlights: &[Range<usize>],
     language: Language,
     width: usize,
     numbered: bool,
-    _old_line: Option<u32>,
     new_line: Option<u32>,
 ) -> Line<'static> {
     if kind == Some(DiffLineKind::Hunk) {
@@ -574,10 +648,28 @@ fn styled_diff_line(
         );
     }
 
-    let (marker, payload, background, new_number) = match kind {
-        Some(DiffLineKind::Addition) => ("+", &line[1..], palette().add_bg, new_line),
-        Some(DiffLineKind::Deletion) => ("-", &line[1..], palette().remove_bg, None),
-        Some(DiffLineKind::Context) => (" ", &line[1..], palette().panel, new_line),
+    let (marker, payload, background, word_background, new_number) = match kind {
+        Some(DiffLineKind::Addition) => (
+            "+",
+            &line[1..],
+            palette().add_bg,
+            palette().add_word_bg,
+            new_line,
+        ),
+        Some(DiffLineKind::Deletion) => (
+            "-",
+            &line[1..],
+            palette().remove_bg,
+            palette().remove_word_bg,
+            None,
+        ),
+        Some(DiffLineKind::Context) => (
+            " ",
+            &line[1..],
+            palette().panel,
+            palette().panel,
+            new_line,
+        ),
         _ => return finish_line(owned_syntax_spans(line, language), width, palette().panel),
     };
 
@@ -598,7 +690,7 @@ fn styled_diff_line(
             })
             .add_modifier(Modifier::BOLD),
     ));
-    push_syntax_spans(&mut spans, payload, language);
+    push_styled_syntax_spans(&mut spans, payload, language, highlights, word_background);
     finish_line(spans, width, background)
 }
 
@@ -955,5 +1047,52 @@ mod tests {
             );
         }
         assert_eq!(word_wrapped_height("word committing", 11), 2);
+    }
+
+    #[test]
+    fn styles_inline_word_diff_highlights_for_paired_modifications() {
+        let diff = concat!(
+            "diff --git a/doc.md b/doc.md\n",
+            "--- a/doc.md\n",
+            "+++ b/doc.md\n",
+            "@@ -1 +1 @@\n",
+            "-  - **Account and sign-in information** is deleted or de-identified when you delete your account.\n",
+            "+  - **Account profile and sign-in information** is removed when account deletion completes.\n",
+        );
+        let document = DiffDocument::parse(diff.to_owned());
+        let lines = styled_diff(&document, "doc.md", 120, false);
+
+        assert_eq!(lines.len(), 3);
+        let del_line = &lines[1];
+        let add_line = &lines[2];
+
+        assert_eq!(del_line.style.bg, Some(palette().remove_bg));
+        assert_eq!(add_line.style.bg, Some(palette().add_bg));
+
+        // Added line has "profile" highlighted with add_word_bg and BOLD modifier
+        let profile_span = add_line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "profile")
+            .expect("profile span present");
+        assert_eq!(profile_span.style.bg, Some(palette().add_word_bg));
+        assert!(profile_span.style.add_modifier.contains(Modifier::BOLD));
+
+        // Common text like "Account" on the added line should NOT have add_word_bg
+        let account_span = add_line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("Account"))
+            .expect("Account span present");
+        assert_ne!(account_span.style.bg, Some(palette().add_word_bg));
+
+        // Deleted line has "deleted or de-identified" highlighted with remove_word_bg and BOLD modifier
+        let deleted_span = del_line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("deleted"))
+            .expect("deleted span present");
+        assert_eq!(deleted_span.style.bg, Some(palette().remove_word_bg));
+        assert!(deleted_span.style.add_modifier.contains(Modifier::BOLD));
     }
 }

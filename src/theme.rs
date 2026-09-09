@@ -20,7 +20,9 @@ pub struct Palette {
     pub cyan: Color,
     pub orange: Color,
     pub add_bg: Color,
+    pub add_word_bg: Color,
     pub remove_bg: Color,
+    pub remove_word_bg: Color,
     pub graph_colors: [Color; 8],
 }
 
@@ -51,7 +53,9 @@ pub fn load_theme() -> Palette {
         cyan: rgb(0x8b, 0xd5, 0xca),
         orange: rgb(0xf5, 0xa9, 0x7f),
         add_bg: rgb(0x29, 0x34, 0x2b),
+        add_word_bg: rgb(0x34, 0x4f, 0x38),
         remove_bg: rgb(0x3a, 0x2a, 0x31),
+        remove_word_bg: rgb(0x54, 0x32, 0x3c),
         graph_colors: [
             accent,
             rgb(0xc6, 0xa0, 0xf6),

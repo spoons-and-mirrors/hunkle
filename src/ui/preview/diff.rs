@@ -18,15 +18,16 @@ pub(crate) enum DiffLineKind {
 }
 
 #[derive(Clone, Debug)]
-struct DiffLine {
-    range: Range<usize>,
-    payload: Range<usize>,
-    kind: DiffLineKind,
-    old_line: Option<u32>,
-    new_line: Option<u32>,
-    new_cursor: Option<u32>,
-    path: Option<u32>,
-    first_new_line: u32,
+pub(super) struct DiffLine {
+    pub(super) range: Range<usize>,
+    pub(super) payload: Range<usize>,
+    pub(super) kind: DiffLineKind,
+    pub(super) old_line: Option<u32>,
+    pub(super) new_line: Option<u32>,
+    pub(super) new_cursor: Option<u32>,
+    pub(super) path: Option<u32>,
+    pub(super) first_new_line: u32,
+    pub(super) highlights: Vec<Range<usize>>,
 }
 
 #[derive(Clone, Debug)]
@@ -105,6 +106,7 @@ impl DiffDocument {
                 new_cursor: new_line,
                 path: None,
                 first_new_line: 1,
+                highlights: Vec::new(),
             });
             match kind {
                 DiffLineKind::Addition => new_line = new_line.map(|line| line.saturating_add(1)),
@@ -118,6 +120,7 @@ impl DiffDocument {
         }
 
         let paths = assign_file_paths(&raw, &mut lines);
+        super::word_diff::assign_word_diff_highlights(&raw, &mut lines);
         let has_hunks = hunk_count > 0;
         let compact = project(&lines, has_hunks, false, truncated);
         let with_headers = project(&lines, has_hunks, true, truncated);
@@ -153,6 +156,13 @@ impl DiffDocument {
     pub(crate) fn display_kind(&self, row: usize, show_headers: bool) -> Option<DiffLineKind> {
         let index = self.line_index(row, show_headers)?;
         Some(self.lines[index].kind)
+    }
+
+    pub(crate) fn display_highlights(&self, row: usize, show_headers: bool) -> &[Range<usize>] {
+        let Some(index) = self.line_index(row, show_headers) else {
+            return &[];
+        };
+        &self.lines[index].highlights
     }
 
     pub(crate) fn display_path(&self, row: usize, show_headers: bool) -> Option<&RepoPath> {

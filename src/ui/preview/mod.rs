@@ -41,6 +41,7 @@ pub(super) use super::text::{
 };
 
 mod diff;
+mod word_diff;
 pub(crate) use diff::{DiffDocument, DiffLineKind};
 mod wrap;
 pub(super) use wrap::hard_wrap_lines as hard_wrap_preview_lines;
