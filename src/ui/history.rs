@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Rect},
+    layout::{Alignment, Constraint, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState},
@@ -9,8 +9,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        AuthorFilter, CommitSummaryCache, GraphColumn, GraphColumnRegion, GraphHitTarget,
-        GraphSearch, HitTarget, Settings, ShortcutAction, Shortcuts,
+        AuthorFilter, BranchFilter, CommitSummaryCache, GraphColumn, GraphColumnRegion,
+        GraphHitTarget, GraphSearch, HitTarget, Settings, ShortcutAction, Shortcuts,
     },
     git::{Commit, RepositoryData},
 };
@@ -27,12 +27,15 @@ pub(super) struct GraphView<'a> {
     pub repo: Option<&'a RepositoryData>,
     pub summaries: &'a CommitSummaryCache,
     pub author_filter: &'a AuthorFilter,
+    pub branch_filter: &'a BranchFilter,
+    pub branch_hide_open: bool,
     pub search: &'a GraphSearch,
     pub search_focused: bool,
     pub state: &'a mut TableState,
     pub scroll_to_selection: &'a mut bool,
     pub settings: &'a Settings,
     pub dragging_column: Option<GraphColumn>,
+    pub hovered_target: Option<HitTarget>,
 }
 
 pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>) -> GraphRegions {
@@ -40,12 +43,15 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         repo,
         summaries,
         author_filter,
+        branch_filter,
+        branch_hide_open,
         search,
         search_focused,
         state,
         scroll_to_selection,
         settings,
         dragging_column,
+        hovered_target,
     } = view;
     let Some(repo) = repo else {
         draw_empty(frame, area, "Open a repository to inspect its graph");
@@ -91,7 +97,15 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         commit_table_area.width,
         commit_table_area.height.saturating_sub(2),
     );
-    draw_graph_search(frame, search_area, search, search_focused);
+    let (search_box_area, hide_button_area) = draw_graph_search(
+        frame,
+        search_area,
+        search,
+        search_focused,
+        branch_filter,
+        branch_hide_open,
+        hovered_target,
+    );
 
     let column_widths = graph_column_widths(table_area.width, repo.graph_width, settings);
     let widths = column_widths.map(Constraint::Length);
@@ -125,6 +139,7 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
             summaries.get(&commit.oid),
             changes_width,
             search_active,
+            branch_filter,
         )
     });
     let author_label = if author_filter.active_count() == author_filter.entries().len() {
@@ -203,7 +218,7 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
         .collect::<Vec<_>>();
     if visible.is_empty() {
         frame.render_widget(
-            Paragraph::new("No commits match the author filter")
+            Paragraph::new("No commits match the current filters")
                 .style(Style::default().fg(palette().faint)),
             graph_region,
         );
@@ -214,7 +229,8 @@ pub(super) fn draw_graph(frame: &mut Frame<'_>, area: Rect, view: GraphView<'_>)
     GraphRegions {
         table: Some(graph_region),
         targets: vec![
-            (HitTarget::Graph(GraphHitTarget::Search), search_area),
+            (HitTarget::Graph(GraphHitTarget::Search), search_box_area),
+            (HitTarget::Graph(GraphHitTarget::HideButton), hide_button_area),
             (
                 HitTarget::Graph(GraphHitTarget::AuthorHeader),
                 author_header,
@@ -245,7 +261,53 @@ fn graph_scroll_offset(
     }
 }
 
-fn draw_graph_search(frame: &mut Frame<'_>, area: Rect, search: &GraphSearch, focused: bool) {
+fn draw_graph_search(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    search: &GraphSearch,
+    focused: bool,
+    branch_filter: &BranchFilter,
+    branch_hide_open: bool,
+    hovered_target: Option<HitTarget>,
+) -> (Rect, Rect) {
+    let hidden_count = branch_filter.hidden_branches().len();
+    let hide_label = if hidden_count > 0 {
+        format!(" Hide ({hidden_count}) ▾ ")
+    } else {
+        " Hide ▾ ".to_owned()
+    };
+    let button_width =
+        (UnicodeWidthStr::width(hide_label.as_str()) as u16).min(area.width.saturating_sub(10));
+    let hide_button_area = Rect::new(
+        area.right().saturating_sub(button_width),
+        area.y,
+        button_width,
+        1,
+    );
+    let is_hide_hovered = hovered_target == Some(HitTarget::Graph(GraphHitTarget::HideButton));
+    let button_style = if branch_hide_open || is_hide_hovered {
+        Style::default()
+            .fg(palette().canvas)
+            .bg(palette().accent)
+            .add_modifier(Modifier::BOLD)
+    } else if hidden_count > 0 {
+        Style::default()
+            .fg(palette().accent)
+            .bg(palette().surface_alt)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette().ink)
+            .bg(palette().panel)
+    };
+    frame.render_widget(
+        Paragraph::new(hide_label).style(button_style),
+        hide_button_area,
+    );
+
+    let search_width = area.width.saturating_sub(button_width).saturating_sub(1);
+    let search_area = Rect::new(area.x, area.y, search_width, 1);
+
     let input = &search.input;
     let mut text = input.text().to_owned();
     if focused && input.cursor_visible() {
@@ -272,38 +334,40 @@ fn draw_graph_search(frame: &mut Frame<'_>, area: Rect, search: &GraphSearch, fo
     };
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(background)),
-        area,
+        search_area,
     );
     let status = search
         .match_status()
         .map(|(current, total)| format!("{current}/{total}"));
     let status_width = status
         .as_ref()
-        .map_or(0, |status| status.len().min(usize::from(area.width)) as u16);
+        .map_or(0, |status| status.len().min(usize::from(search_area.width)) as u16);
     let status_right_padding = u16::from(status.is_some())
         .saturating_mul(2)
-        .min(area.width.saturating_sub(status_width));
-    let input_width = area.width.saturating_sub(
+        .min(search_area.width.saturating_sub(status_width));
+    let input_width = search_area.width.saturating_sub(
         status_width
             .saturating_add(status_right_padding)
             .saturating_add(u16::from(status.is_some())),
     );
     frame.render_widget(
         Paragraph::new(line),
-        Rect::new(area.x, area.y, input_width, 1),
+        Rect::new(search_area.x, search_area.y, input_width, 1),
     );
     if let Some(status) = status {
         frame.render_widget(
             Paragraph::new(status).style(Style::default().fg(palette().muted)),
             Rect::new(
-                area.right()
+                search_area
+                    .right()
                     .saturating_sub(status_width.saturating_add(status_right_padding)),
-                area.y,
+                search_area.y,
                 status_width,
                 1,
             ),
         );
     }
+    (search_area, hide_button_area)
 }
 
 fn graph_column_widths(width: u16, graph_width: usize, settings: &Settings) -> [u16; 6] {
@@ -463,13 +527,206 @@ pub(super) fn draw_author_filter(
     targets
 }
 
+pub(super) fn draw_branch_hide_popper(
+    frame: &mut Frame<'_>,
+    anchor: Rect,
+    filter: &mut BranchFilter,
+    hovered: Option<HitTarget>,
+) -> Vec<(HitTarget, Rect)> {
+    let width = 36_u16
+        .min(frame.area().width.saturating_sub(2))
+        .max(28);
+    let list_items_len = filter.hidden_branches().len();
+    let list_height = if list_items_len == 0 {
+        1
+    } else {
+        (list_items_len as u16).clamp(1, 8)
+    };
+    let height = 4_u16.saturating_add(list_height);
+    let minimum_x = frame.area().x.saturating_add(1);
+    let maximum_x = frame
+        .area()
+        .right()
+        .saturating_sub(width.saturating_add(1))
+        .max(minimum_x);
+    let x = anchor
+        .right()
+        .saturating_sub(width)
+        .clamp(minimum_x, maximum_x);
+    let below = anchor.y.saturating_add(1);
+    let y = if below.saturating_add(height) <= frame.area().bottom() {
+        below
+    } else {
+        anchor.y.saturating_sub(height)
+    };
+    let area = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().raised);
+
+    let mut targets = vec![(HitTarget::Graph(GraphHitTarget::BranchHideOverlay), area)];
+
+    // Title
+    frame.render_widget(
+        Paragraph::new(" HIDE BRANCHES").style(
+            Style::default()
+                .fg(palette().accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x.saturating_add(1), area.y, area.width.saturating_sub(2), 1),
+    );
+
+    // Input row
+    let add_btn_width = 5_u16;
+    let input_width = area
+        .width
+        .saturating_sub(add_btn_width.saturating_add(3));
+    let input_rect = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        input_width,
+        1,
+    );
+    let add_rect = Rect::new(
+        input_rect.right().saturating_add(1),
+        area.y.saturating_add(1),
+        add_btn_width,
+        1,
+    );
+
+    let mut text = filter.input.text().to_owned();
+    if filter.input.cursor_visible() {
+        text.insert(filter.input.cursor(), '▌');
+    }
+    let input_line = if text.is_empty() {
+        Span::styled(" Branch to hide...", Style::default().fg(palette().faint))
+    } else {
+        Span::styled(format!(" {text}"), Style::default().fg(palette().ink))
+    };
+    frame.render_widget(
+        Paragraph::new(input_line).style(Style::default().bg(palette().selected)),
+        input_rect,
+    );
+    targets.push((HitTarget::Graph(GraphHitTarget::BranchHideInput), input_rect));
+
+    let add_hovered = hovered == Some(HitTarget::Graph(GraphHitTarget::BranchHideAdd));
+    frame.render_widget(
+        Paragraph::new(" Add ")
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(if add_hovered {
+                        palette().canvas
+                    } else {
+                        palette().accent
+                    })
+                    .bg(if add_hovered {
+                        palette().accent
+                    } else {
+                        palette().surface_alt
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        add_rect,
+    );
+    targets.push((HitTarget::Graph(GraphHitTarget::BranchHideAdd), add_rect));
+
+    // Section header
+    frame.render_widget(
+        Paragraph::new(" Hidden branches:").style(Style::default().fg(palette().muted)),
+        Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(2),
+            area.width.saturating_sub(2),
+            1,
+        ),
+    );
+
+    // List of hidden branches
+    let list_rect = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(3),
+        area.width.saturating_sub(2),
+        list_height,
+    );
+    if filter.hidden_branches().is_empty() {
+        frame.render_widget(
+            Paragraph::new("   (none)").style(Style::default().fg(palette().faint)),
+            list_rect,
+        );
+    } else {
+        let offset = filter.state.offset();
+        for row in 0..usize::from(list_rect.height) {
+            let index = offset + row;
+            let Some(branch) = filter.hidden_branches().get(index) else {
+                break;
+            };
+            let row_y = list_rect.y.saturating_add(row as u16);
+            let remove_width = 3_u16;
+            let branch_width = list_rect.width.saturating_sub(remove_width);
+            let branch_rect = Rect::new(list_rect.x, row_y, branch_width, 1);
+            let remove_rect = Rect::new(branch_rect.right(), row_y, remove_width, 1);
+
+            let is_selected = filter.state.selected() == Some(index);
+            let is_remove_hovered =
+                hovered == Some(HitTarget::Graph(GraphHitTarget::BranchHideRemove(index)));
+
+            let name = truncate_width(branch, usize::from(branch_width).saturating_sub(3));
+            frame.render_widget(
+                Paragraph::new(format!(" • {name}")).style(Style::default().fg(
+                    if is_selected {
+                        palette().ink
+                    } else {
+                        palette().muted
+                    },
+                )),
+                branch_rect,
+            );
+            frame.render_widget(
+                Paragraph::new(" ✕ ").style(Style::default().fg(if is_remove_hovered {
+                    palette().red
+                } else {
+                    palette().faint
+                })),
+                remove_rect,
+            );
+
+            targets.push((
+                HitTarget::Graph(GraphHitTarget::BranchHideItem(index)),
+                branch_rect,
+            ));
+            targets.push((
+                HitTarget::Graph(GraphHitTarget::BranchHideRemove(index)),
+                remove_rect,
+            ));
+        }
+    }
+
+    // Footer
+    frame.render_widget(
+        Paragraph::new(" Enter add · Esc close").style(Style::default().fg(palette().faint)),
+        Rect::new(
+            area.x.saturating_add(1),
+            area.bottom().saturating_sub(1),
+            area.width.saturating_sub(2),
+            1,
+        ),
+    );
+
+    targets
+}
+
 fn graph_row(
     commit: &Commit,
     summary: Option<&crate::git::DiffSummary>,
     changes_width: u16,
     search_active: bool,
+    branch_filter: &BranchFilter,
 ) -> Row<'static> {
-    let is_head = commit_is_head(commit);
+    let is_head = commit_is_head(commit)
+        && !commit
+            .refs
+            .iter()
+            .any(|reference| branch_filter.is_ref_hidden(reference));
     let graph = Line::from(
         commit
             .graph
@@ -491,6 +748,9 @@ fn graph_row(
     }
     let branch_color = commit_graph_color(commit);
     for reference in &commit.refs {
+        if branch_filter.is_ref_hidden(reference) {
+            continue;
+        }
         let (label, color) = if let Some(tag) = reference.strip_prefix("tag: ") {
             (tag, palette().yellow)
         } else if let Some(branch) = reference.strip_prefix("HEAD -> ") {
@@ -658,18 +918,49 @@ mod tests {
             }],
         };
 
+        let branch_filter = BranchFilter::default();
         assert_eq!(
-            Styled::style(&graph_row(&commit, None, 11, false)).bg,
+            Styled::style(&graph_row(&commit, None, 11, false, &branch_filter)).bg,
             Some(commit_graph_highlight(&commit))
         );
         assert_ne!(commit_graph_highlight(&commit), palette().add_bg);
 
         commit.refs = vec!["main".to_owned()];
-        assert_eq!(Styled::style(&graph_row(&commit, None, 11, false)).bg, None);
         assert_eq!(
-            Styled::style(&graph_row(&commit, None, 11, true)).bg,
+            Styled::style(&graph_row(&commit, None, 11, false, &branch_filter)).bg,
+            None
+        );
+        assert_eq!(
+            Styled::style(&graph_row(&commit, None, 11, true, &branch_filter)).bg,
             Some(palette().surface_alt)
         );
+    }
+
+    #[test]
+    fn graph_row_hides_refs_matching_hidden_branches() {
+        let commit = Commit {
+            oid: "abc".to_owned(),
+            parents: Vec::new(),
+            refs: vec!["HEAD -> feature".to_owned(), "feature".to_owned(), "tag: v1.0".to_owned()],
+            author: "Ada".to_owned(),
+            date: "today".to_owned(),
+            subject: "Feature commit".to_owned(),
+            message: String::new(),
+            graph: vec![GraphCell {
+                symbol: '●',
+                color: 1,
+            }],
+        };
+        let mut filter = BranchFilter::default();
+        let commits = vec![commit.clone()];
+        filter.open(std::path::Path::new("/tmp"), &commits);
+        filter.add_hidden_branch("feature", &commits);
+
+        let row = graph_row(&commit, None, 11, false, &filter);
+        // HEAD is on feature which is hidden, so HEAD badge is hidden and feature badge is hidden.
+        // Only tag: v1.0 and subject remain in description.
+        let style = Styled::style(&row);
+        assert_eq!(style.bg, None);
     }
 
     #[test]

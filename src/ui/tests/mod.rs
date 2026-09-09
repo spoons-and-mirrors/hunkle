@@ -1278,8 +1278,13 @@ fn renders_every_primary_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(screen_text(&terminal).contains("1/1"));
     let graph = app.regions.graph_table.unwrap();
+    let hide_button = app
+        .regions
+        .hit_target_rect(HitTarget::Graph(GraphHitTarget::HideButton))
+        .unwrap();
     assert_eq!(graph_search.x + 1, graph.x);
-    assert_eq!(graph_search.right(), graph.right() + 1);
+    assert_eq!(hide_button.right(), graph.right() + 1);
+    assert_eq!(graph_search.right() + 1, hide_button.x);
     assert_eq!(
         terminal.backend().buffer()[(graph_search.right() - 3, graph_search.y)].symbol(),
         "1"
@@ -1478,6 +1483,61 @@ fn renders_every_primary_surface() {
     assert_eq!(app.visible_graph_indices().len(), 1);
     app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
     assert_eq!(app.visible_graph_indices().len(), 2);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+
+    click(&mut app, hide_button.x + 1, hide_button.y);
+    assert_eq!(app.mode, Mode::BranchHide);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let overlay = app
+        .regions
+        .hit_target_rect(HitTarget::Graph(GraphHitTarget::BranchHideOverlay))
+        .unwrap();
+    assert_eq!(
+        app.regions
+            .scroll_target_at(Position::new(overlay.x + 2, overlay.y + 2)),
+        Some(ScrollTarget::BranchHide)
+    );
+
+    app.handle_paste("feature-branch");
+    assert_eq!(app.branch_filter.input.text(), "feature-branch");
+
+    let add_btn = app
+        .regions
+        .hit_target_rect(HitTarget::Graph(GraphHitTarget::BranchHideAdd))
+        .unwrap();
+    click(&mut app, add_btn.x + 1, add_btn.y);
+    assert_eq!(app.branch_filter.hidden_branches(), &["feature-branch"]);
+    assert_eq!(app.branch_filter.input.text(), "");
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("feature-branch"));
+
+    let remove_btn = app
+        .regions
+        .hit_target_rect(HitTarget::Graph(GraphHitTarget::BranchHideRemove(0)))
+        .unwrap();
+    click(&mut app, remove_btn.x, remove_btn.y);
+    assert!(app.branch_filter.hidden_branches().is_empty());
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let empty_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(empty_screen.contains("(none)"));
+
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
 

@@ -16,17 +16,83 @@ impl App {
         self.mode = Mode::AuthorFilter;
     }
 
+    pub(crate) fn open_branch_hide(&mut self) {
+        let Some(repo) = self
+            .session
+            .data()
+            .filter(|repo| !repo.is_local() && repo.details_ready)
+        else {
+            if self.git_repository().is_some() {
+                self.notice = Some("Repository details are still loading".to_owned());
+            }
+            return;
+        };
+        self.branch_filter.open(&repo.root, &repo.commits);
+        self.mode = Mode::BranchHide;
+    }
+
     pub(crate) fn handle_author_filter(&mut self, key: KeyEvent) {
         let key = self.settings.shortcuts.remap_author_filter(key);
         match self.author_filter.handle_key(key) {
             Some(AuthorFilterEffect::Close) => self.mode = Mode::Normal,
             Some(AuthorFilterEffect::Changed) => {
-                self.graph_search
-                    .apply(self.author_filter.visible_indices());
-                self.select_current_graph_search_match();
+                self.apply_graph_filters();
             }
             None => {}
         }
+    }
+
+    pub(crate) fn handle_branch_hide(&mut self, key: KeyEvent) {
+        let Some(repo) = self.session.data() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        match self.branch_filter.handle_key(key, &repo.commits) {
+            Some(BranchFilterEffect::Close) => self.mode = Mode::Normal,
+            Some(BranchFilterEffect::Changed) => {
+                self.apply_graph_filters();
+            }
+            None => {}
+        }
+    }
+
+    pub(crate) fn add_hidden_branch(&mut self) {
+        let Some(repo) = self.session.data() else {
+            return;
+        };
+        let branch = self.branch_filter.input.text().trim().to_owned();
+        if self.branch_filter.add_hidden_branch(&branch, &repo.commits) {
+            self.apply_graph_filters();
+        }
+    }
+
+    pub(crate) fn remove_hidden_branch(&mut self, index: usize) {
+        let Some(repo) = self.session.data() else {
+            return;
+        };
+        if self.branch_filter.remove_hidden_branch(index, &repo.commits) {
+            self.apply_graph_filters();
+        }
+    }
+
+    pub(crate) fn graph_visible_indices(&self) -> Vec<usize> {
+        let author_visible = self.author_filter.visible_indices();
+        let branch_visible = self.branch_filter.visible_indices();
+        if self.branch_filter.hidden_branches().is_empty() {
+            return author_visible.to_vec();
+        }
+        let branch_set: std::collections::HashSet<usize> = branch_visible.iter().copied().collect();
+        author_visible
+            .iter()
+            .copied()
+            .filter(|idx| branch_set.contains(idx))
+            .collect()
+    }
+
+    pub(crate) fn apply_graph_filters(&mut self) {
+        let visible = self.graph_visible_indices();
+        self.graph_search.apply(&visible);
+        self.select_current_graph_search_match();
     }
 
     pub(crate) fn focus_graph_search(&mut self) {
@@ -40,8 +106,8 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.graph_search.input.clear();
-                self.graph_search
-                    .apply(self.author_filter.visible_indices());
+                let visible = self.graph_visible_indices();
+                self.graph_search.apply(&visible);
                 self.graph_search_focused = false;
                 self.reconcile_graph_selection();
             }
@@ -52,9 +118,7 @@ impl App {
             KeyCode::Tab | KeyCode::Down => self.cycle_graph_search_match(true),
             KeyCode::BackTab | KeyCode::Up => self.cycle_graph_search_match(false),
             _ if self.graph_search.input.handle_edit_key(key) == EditOutcome::Edited => {
-                self.graph_search
-                    .apply(self.author_filter.visible_indices());
-                self.select_current_graph_search_match();
+                self.apply_graph_filters();
             }
             _ => {}
         }

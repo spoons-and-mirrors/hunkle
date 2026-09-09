@@ -148,6 +148,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::Explorer
             | Mode::Settings
             | Mode::AuthorFilter
+            | Mode::BranchHide
             | Mode::ActionMenu
             | Mode::Command
             | Mode::Editor
@@ -229,6 +230,29 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 if target == HitTarget::Graph(GraphHitTarget::FilterOverlay) {
                     app.regions
                         .register_scroll_target(ScrollTarget::AuthorFilter, rect);
+                }
+                app.regions.register_hit_target(target, rect);
+            }
+        }
+        Mode::BranchHide => {
+            let anchor = app
+                .regions
+                .hit_target_rect(HitTarget::Graph(GraphHitTarget::HideButton))
+                .unwrap_or(Rect::new(
+                    main_content.right().saturating_sub(10),
+                    main_content.y,
+                    10,
+                    1,
+                ));
+            for (target, rect) in history::draw_branch_hide_popper(
+                frame,
+                anchor,
+                &mut app.branch_filter,
+                app.hovered_hit_target.clone(),
+            ) {
+                if target == HitTarget::Graph(GraphHitTarget::BranchHideOverlay) {
+                    app.regions
+                        .register_scroll_target(ScrollTarget::BranchHide, rect);
                 }
                 app.regions.register_hit_target(target, rect);
             }

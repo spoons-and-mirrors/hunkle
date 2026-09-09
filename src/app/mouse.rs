@@ -291,6 +291,10 @@ impl App {
             self.handle_author_filter_mouse(mouse);
             return;
         }
+        if self.mode == Mode::BranchHide {
+            self.handle_branch_hide_mouse(mouse);
+            return;
+        }
         if self.mode == Mode::Explorer {
             self.handle_explorer_mouse(mouse);
             return;
@@ -488,6 +492,7 @@ impl App {
             }
             ScrollTarget::ActionMenu => self.actions.move_selection(delta),
             ScrollTarget::AuthorFilter => self.author_filter.move_selection(delta),
+            ScrollTarget::BranchHide => self.branch_filter.move_selection(delta),
             ScrollTarget::WorkspaceExplorer => {
                 if self.workspace_explorer.editing_path {
                     self.workspace_explorer.move_match_selection(delta);
@@ -742,6 +747,8 @@ impl App {
             self.regions.action_menu,
             self.regions
                 .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterOverlay)),
+            self.regions
+                .hit_target_rect(HitTarget::Graph(GraphHitTarget::BranchHideOverlay)),
             self.regions.diff,
             self.regions.worktree,
             self.regions.graph_table,
@@ -768,6 +775,7 @@ impl App {
             Mode::Explorer => self.handle_explorer_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::AuthorFilter => self.handle_author_filter_mouse(mouse),
+            Mode::BranchHide => self.handle_branch_hide_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
@@ -829,6 +837,10 @@ impl App {
             }
             Some(HitTarget::Graph(GraphHitTarget::AuthorHeader)) => {
                 self.open_author_filter();
+                return;
+            }
+            Some(HitTarget::Graph(GraphHitTarget::HideButton)) => {
+                self.open_branch_hide();
                 return;
             }
             _ => {}
@@ -1165,12 +1177,41 @@ impl App {
                 Some(HitTarget::Graph(GraphHitTarget::FilterItem(index))) => {
                     self.author_filter.select(index);
                     if self.author_filter.toggle(index) {
-                        self.graph_search
-                            .apply(self.author_filter.visible_indices());
-                        self.select_current_graph_search_match();
+                        self.apply_graph_filters();
                     }
                 }
                 Some(HitTarget::Graph(GraphHitTarget::FilterOverlay)) => {}
+                _ => self.mode = Mode::Normal,
+            },
+            _ => {}
+        }
+    }
+
+    fn handle_branch_hide_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                if let Some(HitTarget::Graph(GraphHitTarget::BranchHideItem(index))) =
+                    self.regions.hit_target_at(point)
+                {
+                    self.branch_filter.select(index);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+                Some(HitTarget::Graph(GraphHitTarget::HideButton)) => {
+                    self.mode = Mode::Normal;
+                }
+                Some(HitTarget::Graph(GraphHitTarget::BranchHideAdd)) => {
+                    self.add_hidden_branch();
+                }
+                Some(HitTarget::Graph(GraphHitTarget::BranchHideRemove(index))) => {
+                    self.remove_hidden_branch(index);
+                }
+                Some(HitTarget::Graph(GraphHitTarget::BranchHideItem(index))) => {
+                    self.branch_filter.select(index);
+                }
+                Some(HitTarget::Graph(GraphHitTarget::BranchHideInput)) => {}
+                Some(HitTarget::Graph(GraphHitTarget::BranchHideOverlay)) => {}
                 _ => self.mode = Mode::Normal,
             },
             _ => {}

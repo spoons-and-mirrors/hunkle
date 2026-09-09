@@ -309,6 +309,66 @@ fn dirty_inline_editor_blocks_restart_and_workspace_switch() {
     );
 }
 
+#[test]
+fn branch_hide_filters_git_graph_end_to_end() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    initialize_repository(root);
+
+    // Create feature branch with a commit
+    run_git(root, &["checkout", "-b", "feature-secret"]);
+    fs::write(root.join("secret.txt"), "secret\n").unwrap();
+    run_git(root, &["add", "secret.txt"]);
+    run_git(root, &["commit", "-m", "secret feature commit"]);
+
+    // Go back to main and make a commit
+    run_git(root, &["checkout", "main"]);
+    fs::write(root.join("main.txt"), "main update\n").unwrap();
+    run_git(root, &["add", "main.txt"]);
+    run_git(root, &["commit", "-m", "main branch commit"]);
+
+    let mut app = App::new(root.to_path_buf());
+    wait_for_state(&mut app, |app| {
+        app.repository()
+            .map_or(false, |repo| repo.details_ready && repo.commits.len() >= 3)
+    });
+
+    let commits = app.repository().unwrap().commits.clone();
+    assert_eq!(commits.len(), 3);
+    assert_eq!(app.visible_graph_indices().len(), 3);
+
+    // Open branch hide mode
+    app.open_branch_hide();
+    assert_eq!(app.mode, Mode::BranchHide);
+
+    // Type the branch to hide
+    app.handle_paste("feature-secret");
+    assert_eq!(app.branch_filter.input.text(), "feature-secret");
+
+    // Add to hidden branches
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.branch_filter.hidden_branches(), &["feature-secret"]);
+    assert_eq!(app.branch_filter.input.text(), "");
+
+    // Verify Git graph visible indices now only show the 2 main commits
+    let visible = app.visible_graph_indices();
+    assert_eq!(visible.len(), 2);
+    let secret_commit_idx = commits
+        .iter()
+        .position(|c| c.subject.contains("secret feature commit"))
+        .unwrap();
+    assert!(!visible.contains(&secret_commit_idx));
+
+    // Remove the branch from hidden branches
+    app.remove_hidden_branch(0);
+    assert!(app.branch_filter.hidden_branches().is_empty());
+    assert_eq!(app.visible_graph_indices().len(), 3);
+
+    // Close branch hide
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+}
+
 fn initialize_repository(root: &Path) {
     for args in [
         &["init", "-b", "main"][..],

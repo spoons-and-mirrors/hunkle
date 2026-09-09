@@ -270,6 +270,7 @@ pub enum Mode {
     Settings,
     Help,
     AuthorFilter,
+    BranchHide,
     ActionMenu,
     Command,
     FileEdit,
@@ -408,6 +409,12 @@ pub(crate) enum GraphHitTarget {
     AuthorHeader,
     FilterOverlay,
     FilterItem(usize),
+    HideButton,
+    BranchHideOverlay,
+    BranchHideInput,
+    BranchHideAdd,
+    BranchHideRemove(usize),
+    BranchHideItem(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,6 +479,7 @@ pub(crate) enum ScrollTarget {
     HeaderPicker,
     ActionMenu,
     AuthorFilter,
+    BranchHide,
     WorkspaceExplorer,
     WorkspaceExplorerSurroundings,
     CommandOutput,

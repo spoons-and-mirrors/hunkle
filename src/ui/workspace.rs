@@ -185,12 +185,15 @@ fn draw_graph(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             repo: app.session.data(),
             summaries: &app.commit_summaries,
             author_filter: &app.author_filter,
+            branch_filter: &app.branch_filter,
+            branch_hide_open: app.mode == Mode::BranchHide,
             search: &app.graph_search,
             search_focused: app.graph_search_focused,
             state: &mut app.graph_state,
             scroll_to_selection: &mut app.graph_scroll_to_selection,
             settings: &app.settings,
             dragging_column: app.dragging_graph_column.map(|drag| drag.right),
+            hovered_target: app.hovered_hit_target.clone(),
         },
     );
     app.regions.graph_table = graph_regions.table;

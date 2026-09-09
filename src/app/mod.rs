@@ -1,5 +1,6 @@
 mod actions;
 mod author_filter;
+mod branch_filter;
 mod changes;
 mod commit_summary;
 mod explorer;
@@ -27,6 +28,7 @@ pub(crate) use actions::{
     ACTION_ITEMS, ActionsState, CommandLayout, CommandLineSource, CommandStatus,
 };
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
+pub(crate) use branch_filter::{BranchFilter, BranchFilterEffect};
 pub(crate) use changes::{
     ChangesHitTarget, LocationMemory, PreviewOrigin, PullRequestPreview, SqliteFocus, SqlitePage,
 };
@@ -106,6 +108,7 @@ pub struct App {
     pub graph_state: TableState,
     pub(crate) graph_scroll_to_selection: bool,
     pub(crate) author_filter: AuthorFilter,
+    pub(crate) branch_filter: BranchFilter,
     pub(crate) graph_search: GraphSearch,
     pub(crate) graph_search_focused: bool,
     pub(crate) commit_summaries: CommitSummaryCache,
@@ -243,10 +246,25 @@ impl App {
         let norm_presence = NormPresence::new().disabled_for_test();
         linked_worktrees.refresh();
         let mut author_filter = AuthorFilter::default();
+        let mut branch_filter = BranchFilter::default();
         let mut graph_search = GraphSearch::default();
         if let Some(repo) = session.data() {
             author_filter.sync(&repo.root, &repo.commits);
-            graph_search.sync(&repo.root, &repo.commits, author_filter.visible_indices());
+            branch_filter.sync(&repo.root, &repo.commits);
+            let author_visible = author_filter.visible_indices();
+            let branch_visible = branch_filter.visible_indices();
+            let initial_visible: Vec<usize> = if branch_filter.hidden_branches().is_empty() {
+                author_visible.to_vec()
+            } else {
+                let branch_set: std::collections::HashSet<usize> =
+                    branch_visible.iter().copied().collect();
+                author_visible
+                    .iter()
+                    .copied()
+                    .filter(|idx| branch_set.contains(idx))
+                    .collect()
+            };
+            graph_search.sync(&repo.root, &repo.commits, &initial_visible);
         }
         let mut workspace_explorer = Explorer::with_favorites(start, explorer_favorites_path);
         workspace_explorer.left_pane_width = settings.explorer_left_pane_width;
@@ -261,6 +279,7 @@ impl App {
             graph_state,
             graph_scroll_to_selection: true,
             author_filter,
+            branch_filter,
             graph_search,
             graph_search_focused: false,
             commit_summaries: CommitSummaryCache::default(),
@@ -613,6 +632,7 @@ impl App {
             Mode::Explorer => self.handle_explorer(key),
             Mode::Settings => self.handle_settings(key),
             Mode::AuthorFilter => self.handle_author_filter(key),
+            Mode::BranchHide => self.handle_branch_hide(key),
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
             Mode::FileEdit => unreachable!("file editor keys are handled first"),
@@ -661,14 +681,16 @@ impl App {
             }
             return;
         }
+        if self.mode == Mode::BranchHide {
+            self.branch_filter.input.insert_single_line(text);
+            return;
+        }
         if self.mode == Mode::Normal
             && self.visible_view() == View::Graph
             && self.graph_search_focused
         {
             self.graph_search.input.insert_single_line(text);
-            self.graph_search
-                .apply(self.author_filter.visible_indices());
-            self.select_current_graph_search_match();
+            self.apply_graph_filters();
             return;
         }
         match self.mode {
@@ -742,7 +764,8 @@ impl App {
         changed |= self.mode == Mode::Explorer && explorer_changed;
         changed |= self.file_search.poll(self.session.data());
         if self.session.data().is_some() {
-            changed |= self.graph_search.poll(self.author_filter.visible_indices());
+            let visible = self.graph_visible_indices();
+            changed |= self.graph_search.poll(&visible);
         }
         changed |= self.follow_norm_workspace_changes();
         let active_repository = self.git_repository().and_then(|repository| {
@@ -803,6 +826,10 @@ impl App {
             changed = true;
         }
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        changed |= self
+            .branch_filter
+            .input
+            .poll_blink(self.mode == Mode::BranchHide);
         changed |= self
             .file_search
             .query
@@ -1075,10 +1102,12 @@ impl App {
                     self.graph_search_focused = false;
                     if let Some(repo) = self.session.data() {
                         self.author_filter.sync(&repo.root, &repo.commits);
+                        self.branch_filter.sync(&repo.root, &repo.commits);
+                        let visible = self.graph_visible_indices();
                         self.graph_search.sync(
                             &repo.root,
                             &repo.commits,
-                            self.author_filter.visible_indices(),
+                            &visible,
                         );
                     }
                     self.changes
@@ -1147,10 +1176,12 @@ impl App {
                         let repo = self.session.data().expect("reloaded repository");
                         if refresh_scope.includes_graph() {
                             self.author_filter.sync(&repo.root, &repo.commits);
+                            self.branch_filter.sync(&repo.root, &repo.commits);
+                            let visible = self.graph_visible_indices();
                             self.graph_search.sync(
                                 &repo.root,
                                 &repo.commits,
-                                self.author_filter.visible_indices(),
+                                &visible,
                             );
                             let visible = self.graph_search.visible_indices();
                             let commit_index =
