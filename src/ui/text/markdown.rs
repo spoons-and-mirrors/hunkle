@@ -689,7 +689,7 @@ impl MarkdownRenderer {
                 }
                 self.push_block_line(spans);
             }
-            if row_index.saturating_add(1) == table.header_rows {
+            if row_index.saturating_add(1) < table.rows.len() {
                 self.push_table_border(&widths, '├', '┼', '┤');
             }
         }
@@ -1118,8 +1118,28 @@ mod tests {
             text.iter().any(|line| line.contains("│ apples │    12 │")),
             "{text:#?}"
         );
-        assert!(text.iter().any(|line| line.starts_with('├')));
+        assert_eq!(text.iter().filter(|line| line.starts_with('├')).count(), 2);
         assert!(text.last().is_some_and(|line| line.starts_with('└')));
+    }
+
+    #[test]
+    fn separates_table_rows_with_horizontal_borders() {
+        let lines = styled_markdown(
+            "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |\n",
+            20,
+            false,
+        );
+        let text = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(text.iter().filter(|line| line.starts_with('├')).count(), 3);
     }
 
     #[test]
