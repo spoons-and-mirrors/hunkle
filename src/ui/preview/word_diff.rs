@@ -1,6 +1,9 @@
 use std::ops::Range;
 
-use super::diff::DiffLineKind;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+use super::diff::{DiffLineKind, InlineDiff};
 
 const MAX_TOKENS_PER_LINE: usize = 600;
 const MAX_LINE_BYTE_LEN: usize = 4000;
@@ -269,6 +272,16 @@ pub(super) fn pair_block(
                 extract_highlight_ranges(&del_tokens, &common_del, del_payload);
             lines[additions[0]].highlights =
                 extract_highlight_ranges(&add_tokens, &common_add, add_payload);
+            assign_inline_diff(
+                raw,
+                lines,
+                deletions[0],
+                additions[0],
+                &del_tokens,
+                &add_tokens,
+                &common_del,
+                &common_add,
+            );
         }
         return;
     }
@@ -294,6 +307,16 @@ pub(super) fn pair_block(
                     extract_highlight_ranges(&del_tokens[k], &common_del, del_payload);
                 lines[additions[k]].highlights =
                     extract_highlight_ranges(&add_tokens[k], &common_add, add_payload);
+                assign_inline_diff(
+                    raw,
+                    lines,
+                    deletions[k],
+                    additions[k],
+                    &del_tokens[k],
+                    &add_tokens[k],
+                    &common_del,
+                    &common_add,
+                );
             }
         }
         return;
@@ -346,9 +369,7 @@ pub(super) fn pair_block(
     while i > 0 && j > 0 {
         let current = dp[i * stride + j];
         let s = sim[(i - 1) * a_count + (j - 1)];
-        if s >= MIN_SIMILARITY
-            && (current - (dp[(i - 1) * stride + (j - 1)] + s)).abs() < 1e-4
-        {
+        if s >= MIN_SIMILARITY && (current - (dp[(i - 1) * stride + (j - 1)] + s)).abs() < 1e-4 {
             let lcs_idx = (i - 1) * a_count + (j - 1);
             let (_, ref common_del, ref common_add) = lcs_results[lcs_idx];
             let del_payload = &raw[lines[deletions[i - 1]].payload.clone()];
@@ -357,6 +378,16 @@ pub(super) fn pair_block(
                 extract_highlight_ranges(&del_tokens[i - 1], common_del, del_payload);
             lines[additions[j - 1]].highlights =
                 extract_highlight_ranges(&add_tokens[j - 1], common_add, add_payload);
+            assign_inline_diff(
+                raw,
+                lines,
+                deletions[i - 1],
+                additions[j - 1],
+                &del_tokens[i - 1],
+                &add_tokens[j - 1],
+                common_del,
+                common_add,
+            );
             i -= 1;
             j -= 1;
         } else if (current - dp[(i - 1) * stride + j]).abs() < 1e-4 {
@@ -365,6 +396,188 @@ pub(super) fn pair_block(
             j -= 1;
         }
     }
+}
+
+fn assign_inline_diff(
+    raw: &str,
+    lines: &mut [super::diff::DiffLine],
+    deletion: usize,
+    addition: usize,
+    old_tokens: &[Token<'_>],
+    new_tokens: &[Token<'_>],
+    common_old: &[bool],
+    common_new: &[bool],
+) {
+    let old = &raw[lines[deletion].payload.clone()];
+    let new = &raw[lines[addition].payload.clone()];
+    let old_anchors = old_tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (common_old[index] && !token.is_whitespace).then_some(token));
+    let new_anchors = new_tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (common_new[index] && !token.is_whitespace).then_some(token));
+    let anchors = old_anchors.zip(new_anchors).collect::<Vec<_>>();
+    if anchors.is_empty()
+        || anchors
+            .iter()
+            .any(|(old_token, new_token)| old_token.text != new_token.text)
+    {
+        return;
+    }
+
+    let mut builder = InlineDiffBuilder::new(new);
+    let mut old_cursor = 0;
+    let mut new_cursor = 0;
+    for (old_anchor, new_anchor) in anchors {
+        builder.push_interval(
+            &old[old_cursor..old_anchor.range.start],
+            new_cursor..new_anchor.range.start,
+        );
+        builder.push_new(new_anchor.range.clone(), None);
+        old_cursor = old_anchor.range.end;
+        new_cursor = new_anchor.range.end;
+    }
+    builder.push_interval(&old[old_cursor..], new_cursor..new.len());
+
+    lines[deletion].hidden = true;
+    lines[addition].kind = DiffLineKind::Modification;
+    lines[addition].inline = Some(builder.finish());
+}
+
+#[derive(Clone, Copy)]
+enum InlineChange {
+    Removal,
+    Addition,
+}
+
+struct InlineDiffBuilder<'a> {
+    new: &'a str,
+    text: String,
+    removals: Vec<Range<usize>>,
+    additions: Vec<Range<usize>>,
+    new_columns: Vec<(usize, usize)>,
+    display_column: usize,
+}
+
+impl<'a> InlineDiffBuilder<'a> {
+    fn new(new: &'a str) -> Self {
+        Self {
+            new,
+            text: String::from(" "),
+            removals: Vec::new(),
+            additions: Vec::new(),
+            new_columns: vec![(0, 0)],
+            display_column: 0,
+        }
+    }
+
+    fn push_interval(&mut self, old: &str, new_range: Range<usize>) {
+        let new = &self.new[new_range.clone()];
+        if old == new {
+            self.push_new(new_range, None);
+            return;
+        }
+
+        let insertion = new_range.start;
+        let leading = new.len().saturating_sub(new.trim_start().len());
+        let trailing = new.len().saturating_sub(new.trim_end().len());
+        let core_end = new.len().saturating_sub(trailing).max(leading);
+        self.push_new(new_range.start..new_range.start + leading, None);
+
+        let old_core = old.trim();
+        if !old_core.is_empty() {
+            self.push_old(old_core, insertion, Some(InlineChange::Removal));
+        }
+        if leading == core_end && old_core.is_empty() {
+            self.push_new(
+                new_range.start + leading..new_range.end,
+                Some(InlineChange::Addition),
+            );
+            return;
+        }
+        self.push_new(
+            new_range.start + leading..new_range.start + core_end,
+            Some(InlineChange::Addition),
+        );
+        self.push_new(new_range.start + core_end..new_range.end, None);
+
+        if new.is_empty() && old.len() > old.trim_end().len() {
+            self.push_old(" ", insertion, None);
+        }
+    }
+
+    fn push_new(&mut self, range: Range<usize>, change: Option<InlineChange>) {
+        if range.is_empty() {
+            return;
+        }
+        let content = &self.new[range.clone()];
+        let start = self.text.len().saturating_sub(1);
+        let mut source_column = display_width(&self.new[..range.start], 0);
+        self.push_mapped(content, &mut source_column);
+        let end = self.text.len().saturating_sub(1);
+        match change {
+            Some(InlineChange::Removal) => self.removals.push(start..end),
+            Some(InlineChange::Addition) => self.additions.push(start..end),
+            None => {}
+        }
+    }
+
+    fn push_old(&mut self, content: &str, insertion: usize, change: Option<InlineChange>) {
+        if content.is_empty() {
+            return;
+        }
+        let start = self.text.len().saturating_sub(1);
+        let source_column = display_width(&self.new[..insertion], 0);
+        for grapheme in content.graphemes(true) {
+            self.new_columns.push((self.display_column, source_column));
+            self.text.push_str(grapheme);
+            self.display_column = self
+                .display_column
+                .saturating_add(display_width(grapheme, self.display_column));
+            self.new_columns.push((self.display_column, source_column));
+        }
+        let end = self.text.len().saturating_sub(1);
+        match change {
+            Some(InlineChange::Removal) => self.removals.push(start..end),
+            Some(InlineChange::Addition) => self.additions.push(start..end),
+            None => {}
+        }
+    }
+
+    fn push_mapped(&mut self, content: &str, source_column: &mut usize) {
+        for grapheme in content.graphemes(true) {
+            self.new_columns.push((self.display_column, *source_column));
+            self.text.push_str(grapheme);
+            let rendered_width = display_width(grapheme, self.display_column);
+            let source_width = display_width(grapheme, *source_column);
+            self.display_column = self.display_column.saturating_add(rendered_width);
+            *source_column = source_column.saturating_add(source_width);
+            self.new_columns.push((self.display_column, *source_column));
+        }
+    }
+
+    fn finish(self) -> InlineDiff {
+        InlineDiff {
+            text: self.text,
+            removals: self.removals,
+            additions: self.additions,
+            new_columns: self.new_columns,
+        }
+    }
+}
+
+fn display_width(content: &str, column: usize) -> usize {
+    let mut current = column;
+    for grapheme in content.graphemes(true) {
+        current = current.saturating_add(if grapheme == "\t" {
+            crate::app::TAB_WIDTH - current % crate::app::TAB_WIDTH
+        } else {
+            UnicodeWidthStr::width(grapheme)
+        });
+    }
+    current.saturating_sub(column)
 }
 
 pub(super) fn assign_word_diff_highlights(raw: &str, lines: &mut [super::diff::DiffLine]) {
@@ -402,7 +615,9 @@ mod tests {
         let texts: Vec<&str> = tokens.iter().map(|t| t.text).collect();
         assert_eq!(
             texts,
-            vec!["Account", " ", "profile", " ", "and", " ", "sign", "-", "in"]
+            vec![
+                "Account", " ", "profile", " ", "and", " ", "sign", "-", "in"
+            ]
         );
         assert!(!tokens[0].is_whitespace);
         assert!(tokens[1].is_whitespace);
@@ -486,44 +701,37 @@ mod tests {
             "+  - **Account profile and sign-in information** is removed when account deletion completes.\n",
         );
         let document = DiffDocument::parse(diff.to_owned());
-        // Row 0 is the hunk header (@@ -1 +1 @@) when show_headers is false.
-        // Row 1 is the deletion line (-  - **Account...).
-        // Row 2 is the addition line (+  - **Account profile...).
-        let del_highlights = document.display_highlights(1, false);
-        let add_highlights = document.display_highlights(2, false);
+        assert_eq!(document.display_len(false), 2);
+        assert_eq!(
+            document.display_kind(1, false),
+            Some(DiffLineKind::Modification)
+        );
 
-        assert!(!del_highlights.is_empty());
-        assert!(!add_highlights.is_empty());
-
-        let del_line = document.display_line(1, false).unwrap();
-        let add_line = document.display_line(2, false).unwrap();
-
-        // Check that "profile" is in the added highlights (line starts with '+')
-        let add_payload = &add_line[1..];
-        let highlighted_words: Vec<&str> = add_highlights
+        let line = document.display_line(1, false).unwrap();
+        let payload = &line[1..];
+        let (removals, additions) = document.display_inline_changes(1, false).unwrap();
+        let added_text: Vec<&str> = additions
             .iter()
-            .map(|r| &add_payload[r.clone()])
+            .map(|range| &payload[range.clone()])
             .collect();
-        assert!(highlighted_words.contains(&"profile"));
-        assert!(highlighted_words.contains(&"removed"));
-        assert!(highlighted_words.contains(&"deletion completes"));
-
-        let del_payload = &del_line[1..];
-        let del_highlighted_words: Vec<&str> = del_highlights
+        let removed_text: Vec<&str> = removals
             .iter()
-            .map(|r| &del_payload[r.clone()])
+            .map(|range| &payload[range.clone()])
             .collect();
-        assert!(del_highlighted_words.contains(&"deleted or de-identified"));
-        assert!(del_highlighted_words.contains(&"you delete your"));
 
-        // Check that "Account" and "when" are NOT highlighted in either
-        for hl in add_highlights {
-            assert_ne!(&add_payload[hl.clone()], "Account");
-            assert_ne!(&add_payload[hl.clone()], "when");
-        }
-        for hl in del_highlights {
-            assert_ne!(&del_payload[hl.clone()], "Account");
-            assert_ne!(&del_payload[hl.clone()], "when");
-        }
+        assert!(added_text.contains(&"profile"));
+        assert!(added_text.contains(&"removed"));
+        assert!(added_text.contains(&"deletion completes"));
+        assert!(removed_text.contains(&"deleted or de-identified"));
+        assert!(removed_text.contains(&"you delete your"));
+        assert!(payload.contains("Account"));
+        assert!(payload.contains("when"));
+
+        let deleted_start = payload.find("deleted").unwrap();
+        let source_column = document.new_column_at_display_column(1, false, deleted_start);
+        assert_eq!(
+            source_column,
+            "  - **Account profile and sign-in information** is ".len()
+        );
     }
 }

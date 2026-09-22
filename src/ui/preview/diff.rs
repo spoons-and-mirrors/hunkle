@@ -13,8 +13,17 @@ pub(crate) enum DiffLineKind {
     Hunk,
     Addition,
     Deletion,
+    Modification,
     Context,
     Other,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct InlineDiff {
+    pub(super) text: String,
+    pub(super) removals: Vec<Range<usize>>,
+    pub(super) additions: Vec<Range<usize>>,
+    pub(super) new_columns: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +37,8 @@ pub(super) struct DiffLine {
     pub(super) path: Option<u32>,
     pub(super) first_new_line: u32,
     pub(super) highlights: Vec<Range<usize>>,
+    pub(super) inline: Option<InlineDiff>,
+    pub(super) hidden: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +118,8 @@ impl DiffDocument {
                 path: None,
                 first_new_line: 1,
                 highlights: Vec::new(),
+                inline: None,
+                hidden: false,
             });
             match kind {
                 DiffLineKind::Addition => new_line = new_line.map(|line| line.saturating_add(1)),
@@ -165,6 +178,16 @@ impl DiffDocument {
         &self.lines[index].highlights
     }
 
+    pub(crate) fn display_inline_changes(
+        &self,
+        row: usize,
+        show_headers: bool,
+    ) -> Option<(&[Range<usize>], &[Range<usize>])> {
+        let index = self.line_index(row, show_headers)?;
+        let inline = self.lines[index].inline.as_ref()?;
+        Some((&inline.removals, &inline.additions))
+    }
+
     pub(crate) fn display_path(&self, row: usize, show_headers: bool) -> Option<&RepoPath> {
         let index = self.line_index(row, show_headers)?;
         self.lines[index]
@@ -179,13 +202,46 @@ impl DiffDocument {
     ) -> Option<(usize, &str)> {
         let index = self.line_index(row, show_headers)?;
         let line = &self.lines[index];
-        if !matches!(line.kind, DiffLineKind::Addition | DiffLineKind::Context) {
+        if !matches!(
+            line.kind,
+            DiffLineKind::Addition | DiffLineKind::Modification | DiffLineKind::Context
+        ) {
             return None;
         }
         Some((
             line.new_line?.max(1) as usize,
             &self.raw[line.payload.clone()],
         ))
+    }
+
+    pub(crate) fn display_payload(&self, row: usize, show_headers: bool) -> Option<&str> {
+        let index = self.line_index(row, show_headers)?;
+        let line = &self.lines[index];
+        match line.kind {
+            DiffLineKind::Addition
+            | DiffLineKind::Deletion
+            | DiffLineKind::Modification
+            | DiffLineKind::Context => self.line_text(index).get(1..),
+            _ => Some(self.line_text(index)),
+        }
+    }
+
+    pub(crate) fn new_column_at_display_column(
+        &self,
+        row: usize,
+        show_headers: bool,
+        column: usize,
+    ) -> usize {
+        let Some(index) = self.line_index(row, show_headers) else {
+            return column;
+        };
+        self.lines[index].inline.as_ref().map_or(column, |inline| {
+            inline
+                .new_columns
+                .iter()
+                .min_by_key(|(display, _)| display.abs_diff(column))
+                .map_or(column, |(_, source)| *source)
+        })
     }
 
     pub(crate) fn display_file_position(
@@ -198,15 +254,18 @@ impl DiffDocument {
         }
         let index = self.line_index(row, true)?;
         let line = &self.lines[index];
-        matches!(line.kind, DiffLineKind::Addition | DiffLineKind::Context)
-            .then(|| {
-                Some((
-                    self.paths.get(line.path? as usize)?.clone(),
-                    line.new_line?.max(1) as usize,
-                    &self.raw[line.payload.clone()],
-                ))
-            })
-            .flatten()
+        matches!(
+            line.kind,
+            DiffLineKind::Addition | DiffLineKind::Modification | DiffLineKind::Context
+        )
+        .then(|| {
+            Some((
+                self.paths.get(line.path? as usize)?.clone(),
+                line.new_line?.max(1) as usize,
+                &self.raw[line.payload.clone()],
+            ))
+        })
+        .flatten()
     }
 
     pub(crate) fn display_file_header(
@@ -239,7 +298,12 @@ impl DiffDocument {
             let kind = self.display_kind(row, show_headers);
             let prefix = if matches!(
                 kind,
-                Some(DiffLineKind::Addition | DiffLineKind::Deletion | DiffLineKind::Context)
+                Some(
+                    DiffLineKind::Addition
+                        | DiffLineKind::Deletion
+                        | DiffLineKind::Modification
+                        | DiffLineKind::Context
+                )
             ) {
                 usize::from(numbered) * 6 + 1
             } else {
@@ -377,6 +441,12 @@ impl DiffDocument {
                     deletion_pending = false;
                     pending_line = None;
                 }
+                DiffLineKind::Modification => {
+                    let number = line.new_line.unwrap_or(1).saturating_sub(1) as usize;
+                    markers.push((number, '~'));
+                    deletion_pending = false;
+                    pending_line = None;
+                }
                 DiffLineKind::Context => {
                     if deletion_pending {
                         markers.push((line.new_line.unwrap_or(1).saturating_sub(1) as usize, '-'));
@@ -417,7 +487,10 @@ impl DiffDocument {
     }
 
     fn line_text(&self, index: usize) -> &str {
-        &self.raw[self.lines[index].range.clone()]
+        self.lines[index].inline.as_ref().map_or_else(
+            || &self.raw[self.lines[index].range.clone()],
+            |inline| &inline.text,
+        )
     }
 
     fn line_index(&self, row: usize, show_headers: bool) -> Option<usize> {
@@ -471,6 +544,9 @@ fn project(lines: &[DiffLine], has_hunks: bool, show_headers: bool, truncated: b
                 rows.push(SEPARATOR_ROW);
             }
             in_hunk = true;
+        }
+        if line.hidden {
+            continue;
         }
         rows.push(index as u32);
     }
@@ -722,6 +798,20 @@ mod tests {
         assert_eq!(
             document.new_line_markers(&RepoPath::from("any.rs")),
             vec![(0, '~')]
+        );
+    }
+
+    #[test]
+    fn maps_each_compact_modification_to_an_editor_marker() {
+        let document = DiffDocument::parse(
+            "@@ -1,2 +1,2 @@\n-let first = 1;\n-let second = 2;\n+let first = 3;\n+let second = 4;\n"
+                .to_owned(),
+        );
+
+        assert_eq!(document.display_len(false), 3);
+        assert_eq!(
+            document.new_line_markers(&RepoPath::from("any.rs")),
+            vec![(0, '~'), (1, '~')]
         );
     }
 

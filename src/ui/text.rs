@@ -536,6 +536,82 @@ fn push_styled_syntax_spans(
     }
 }
 
+fn push_inline_diff_spans(
+    spans: &mut Vec<Span<'static>>,
+    code: &str,
+    language: Language,
+    removals: &[Range<usize>],
+    additions: &[Range<usize>],
+) {
+    let raw_spans = syntax_spans_for_language(code, language);
+    let mut code_offset = 0usize;
+    let mut column = 0usize;
+
+    for span in raw_spans {
+        let span_start = code_offset;
+        let span_end = span_start.saturating_add(span.content.len());
+        code_offset = span_end;
+
+        let mut sub_start = span_start;
+        while sub_start < span_end {
+            let removal = removals
+                .iter()
+                .find(|range| range.start <= sub_start && sub_start < range.end);
+            let addition = additions
+                .iter()
+                .find(|range| range.start <= sub_start && sub_start < range.end);
+            let sub_end = removal
+                .map(|range| range.end)
+                .or_else(|| addition.map(|range| range.end))
+                .unwrap_or_else(|| {
+                    removals
+                        .iter()
+                        .chain(additions)
+                        .map(|range| range.start)
+                        .filter(|start| *start > sub_start)
+                        .min()
+                        .unwrap_or(span_end)
+                })
+                .min(span_end);
+            let local_start = sub_start.saturating_sub(span_start);
+            let local_end = sub_end.saturating_sub(span_start);
+            let sub_content = &span.content[local_start..local_end];
+            let sub_style = if removal.is_some() {
+                span.style
+                    .fg(palette().red)
+                    .bg(palette().remove_word_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else if addition.is_some() {
+                span.style
+                    .fg(palette().green)
+                    .bg(palette().add_word_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                span.style
+            };
+
+            if sub_content.contains('\t') {
+                let mut expanded = String::with_capacity(sub_content.len());
+                for grapheme in sub_content.graphemes(true) {
+                    if grapheme != "\t" {
+                        expanded.push_str(grapheme);
+                        column = column.saturating_add(UnicodeWidthStr::width(grapheme));
+                        continue;
+                    }
+                    let width = crate::app::TAB_WIDTH - column % crate::app::TAB_WIDTH;
+                    expanded.extend(std::iter::repeat_n(' ', width));
+                    column = column.saturating_add(width);
+                }
+                push_merged_span(spans, Span::styled(expanded, sub_style));
+            } else {
+                column = column.saturating_add(UnicodeWidthStr::width(sub_content));
+                push_merged_span(spans, Span::styled(sub_content.to_owned(), sub_style));
+            }
+            sub_start = sub_end;
+        }
+    }
+}
+
 pub(super) fn styled_diff_window(
     diff: &DiffDocument,
     path: &str,
@@ -557,10 +633,12 @@ pub(super) fn styled_diff_window(
             .map(RepoPath::display);
         let language = Language::from_path(row_path.as_deref().unwrap_or(path));
         let highlights = diff.display_highlights(row, show_initial_header);
+        let inline_changes = diff.display_inline_changes(row, show_initial_header);
         lines.push(styled_diff_line(
             line,
             diff.display_kind(row, show_initial_header),
             highlights,
+            inline_changes,
             language,
             width,
             numbered,
@@ -574,6 +652,7 @@ fn styled_diff_line(
     line: &str,
     kind: Option<DiffLineKind>,
     highlights: &[Range<usize>],
+    inline_changes: Option<(&[Range<usize>], &[Range<usize>])>,
     language: Language,
     width: usize,
     numbered: bool,
@@ -663,13 +742,12 @@ fn styled_diff_line(
             palette().remove_word_bg,
             None,
         ),
-        Some(DiffLineKind::Context) => (
-            " ",
-            &line[1..],
-            palette().panel,
-            palette().panel,
-            new_line,
-        ),
+        Some(DiffLineKind::Modification) => {
+            ("~", &line[1..], palette().panel, palette().panel, new_line)
+        }
+        Some(DiffLineKind::Context) => {
+            (" ", &line[1..], palette().panel, palette().panel, new_line)
+        }
         _ => return finish_line(owned_syntax_spans(line, language), width, palette().panel),
     };
 
@@ -690,7 +768,11 @@ fn styled_diff_line(
             })
             .add_modifier(Modifier::BOLD),
     ));
-    push_styled_syntax_spans(&mut spans, payload, language, highlights, word_background);
+    if let Some((removals, additions)) = inline_changes {
+        push_inline_diff_spans(&mut spans, payload, language, removals, additions);
+    } else {
+        push_styled_syntax_spans(&mut spans, payload, language, highlights, word_background);
+    }
     finish_line(spans, width, background)
 }
 
@@ -905,18 +987,23 @@ mod tests {
         );
         let lines = styled_diff(&document, "src/main.rs", 100, false);
 
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].style.bg, Some(palette().surface_alt));
-        assert_eq!(lines[1].style.bg, Some(palette().remove_bg));
-        assert_eq!(lines[2].style.bg, Some(palette().add_bg));
-        assert!(lines[1].spans[0].content.trim().is_empty());
-        assert_eq!(lines[2].spans[0].content.trim(), "1");
+        assert_eq!(lines[1].style.bg, Some(palette().panel));
+        assert_eq!(lines[1].spans[0].content.trim(), "1");
+        assert_eq!(lines[1].spans[1].content, "~");
         assert!(
-            lines[2]
+            lines[1]
                 .spans
                 .iter()
                 .any(|span| span.content == "let" && span.style.fg == Some(palette().purple))
         );
+        assert!(lines[1].spans.iter().any(|span| {
+            span.content == "old_value" && span.style.bg == Some(palette().remove_word_bg)
+        }));
+        assert!(lines[1].spans.iter().any(|span| {
+            span.content == "new_value" && span.style.bg == Some(palette().add_word_bg)
+        }));
     }
 
     #[test]
@@ -933,7 +1020,7 @@ mod tests {
         let document = DiffDocument::parse(diff.to_owned());
         let lines = styled_diff(&document, "", 100, true);
 
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 3);
         assert!(lines[0].spans[0].content.starts_with("diff --git"));
         assert_eq!(document.display_len(true), lines.len());
         assert_eq!(
@@ -1062,15 +1149,12 @@ mod tests {
         let document = DiffDocument::parse(diff.to_owned());
         let lines = styled_diff(&document, "doc.md", 120, false);
 
-        assert_eq!(lines.len(), 3);
-        let del_line = &lines[1];
-        let add_line = &lines[2];
-
-        assert_eq!(del_line.style.bg, Some(palette().remove_bg));
-        assert_eq!(add_line.style.bg, Some(palette().add_bg));
+        assert_eq!(lines.len(), 2);
+        let change_line = &lines[1];
+        assert_eq!(change_line.style.bg, Some(palette().panel));
 
         // Added line has "profile" highlighted with add_word_bg and BOLD modifier
-        let profile_span = add_line
+        let profile_span = change_line
             .spans
             .iter()
             .find(|span| span.content.as_ref() == "profile")
@@ -1079,7 +1163,7 @@ mod tests {
         assert!(profile_span.style.add_modifier.contains(Modifier::BOLD));
 
         // Common text like "Account" on the added line should NOT have add_word_bg
-        let account_span = add_line
+        let account_span = change_line
             .spans
             .iter()
             .find(|span| span.content.contains("Account"))
@@ -1087,7 +1171,7 @@ mod tests {
         assert_ne!(account_span.style.bg, Some(palette().add_word_bg));
 
         // Deleted line has "deleted or de-identified" highlighted with remove_word_bg and BOLD modifier
-        let deleted_span = del_line
+        let deleted_span = change_line
             .spans
             .iter()
             .find(|span| span.content.contains("deleted"))

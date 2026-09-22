@@ -1414,11 +1414,12 @@ impl PreviewPresentation {
     ) -> Option<(usize, usize)> {
         let cache = self.cache.as_ref()?;
         let (display_line, wrapped_row) = self.display_position_at_rendered_row(row)?;
-        let (source_line, payload) = diff.display_new_position(display_line, false)?;
+        let (source_line, _) = diff.display_new_position(display_line, false)?;
+        let display_payload = diff.display_payload(display_line, false)?;
         let column = column.saturating_sub(gutter);
         let source_column = if cache.wrapped_line_starts.is_some() {
             super::text::word_wrapped_column_at(
-                payload,
+                display_payload,
                 cache.width.saturating_sub(gutter).max(1),
                 wrapped_row,
                 column,
@@ -1426,6 +1427,7 @@ impl PreviewPresentation {
         } else {
             column
         };
+        let source_column = diff.new_column_at_display_column(display_line, false, source_column);
         Some((source_line, source_column))
     }
 
@@ -1438,12 +1440,13 @@ impl PreviewPresentation {
     ) -> Option<(crate::repo_path::RepoPath, usize, usize)> {
         let cache = self.cache.as_ref()?;
         let (display_line, wrapped_row) = self.display_position_at_rendered_row(row)?;
-        let (path, source_line, payload) =
+        let (path, source_line, _) =
             diff.display_file_position(display_line, cache.show_initial_diff_header)?;
+        let display_payload = diff.display_payload(display_line, cache.show_initial_diff_header)?;
         let column = column.saturating_sub(gutter);
         let source_column = if cache.wrapped_line_starts.is_some() {
             super::text::word_wrapped_column_at(
-                payload,
+                display_payload,
                 cache.width.saturating_sub(gutter).max(1),
                 wrapped_row,
                 column,
@@ -1451,6 +1454,11 @@ impl PreviewPresentation {
         } else {
             column
         };
+        let source_column = diff.new_column_at_display_column(
+            display_line,
+            cache.show_initial_diff_header,
+            source_column,
+        );
         Some((path, source_line, source_column))
     }
 
