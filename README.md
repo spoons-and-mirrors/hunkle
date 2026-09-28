@@ -62,6 +62,23 @@ Norm TUI.
 
 These are Hunkle's only Norm responsibilities.
 
+## OpenCode V2 tabs
+
+To follow OpenCode V2 CLI tabs, add the local CLI-only plugin to your V2
+`cli.json` (for the `oc2` launcher, `~/.config/opencode-v2/opencode/cli.json`;
+keep any existing settings):
+
+```json
+"plugins": [{ "package": "/absolute/path/to/hunkle/plugins/opencode-hunkle" }]
+```
+
+With OpenCode tabs enabled, switching to a session tab publishes its workspace
+to `$XDG_RUNTIME_DIR/hunkle/opencode-active.json` (or
+`/tmp/hunkle-<euid>/hunkle/opencode-active.json`). Hunkle follows later changes
+through its usual workspace-open queue. An existing snapshot at Hunkle startup
+is only a baseline. This is a one-way local handoff: Hunkle does not inspect or
+manage OpenCode sessions, transcripts, models, or terminal layouts.
+
 ## Keys
 
 Defaults can be changed under **Settings > Shortcuts**. Structural text-editing

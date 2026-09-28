@@ -1,0 +1,8 @@
+{
+  "name": "opencode-hunkle",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./tui": "./tui.ts"
+  }
+}

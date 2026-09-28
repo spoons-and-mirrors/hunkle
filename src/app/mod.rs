@@ -20,6 +20,11 @@ mod norm_presence;
 #[cfg(not(unix))]
 #[path = "norm_presence_non_unix.rs"]
 mod norm_presence;
+#[cfg(unix)]
+mod opencode_presence;
+#[cfg(not(unix))]
+#[path = "opencode_presence_non_unix.rs"]
+mod opencode_presence;
 mod settings;
 mod shortcuts;
 mod text_input;
@@ -47,6 +52,7 @@ pub(crate) use header_picker::{
 pub(crate) use issues::{IssueCatalog, IssueScope};
 pub(crate) use linked_worktrees::{LinkedWorktreeCatalog, RepositoryPickerItem};
 pub(crate) use norm_presence::NormPresence;
+use opencode_presence::OpenCodePresence;
 pub use settings::Settings;
 pub(crate) use settings::{SettingsEffect, SettingsState, SettingsStore};
 pub(crate) use shortcuts::{KeyChord, ShortcutAction, Shortcuts};
@@ -131,6 +137,7 @@ pub struct App {
     pub(crate) header_picker: HeaderPicker,
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) norm_presence: NormPresence,
+    opencode_presence: OpenCodePresence,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
     pub(crate) settings_state: SettingsState,
@@ -302,6 +309,7 @@ impl App {
             header_picker: HeaderPicker::default(),
             linked_worktrees,
             norm_presence,
+            opencode_presence: OpenCodePresence::new(),
             hovered_hit_target: None,
             settings,
             settings_state: SettingsState::default(),
@@ -768,6 +776,14 @@ impl App {
             changed |= self.graph_search.poll(&visible);
         }
         changed |= self.follow_norm_workspace_changes();
+        if let Some(path) = self.opencode_presence.poll() {
+            diagnostics::event(format!(
+                "following OpenCode workspace path={}",
+                path.display()
+            ));
+            self.queue_workspace_open(path);
+            changed = true;
+        }
         let active_repository = self.git_repository().and_then(|repository| {
             repository
                 .details_ready

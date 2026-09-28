@@ -261,6 +261,44 @@ fn norm_tab_switch_follows_the_active_workspace_directly() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn opencode_tab_switch_uses_the_normal_workspace_open_queue() {
+    let current = tempfile::tempdir().unwrap();
+    let next = tempfile::tempdir().unwrap();
+    let handoff = tempfile::tempdir().unwrap();
+    fs::set_permissions(
+        handoff.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    initialize_repository(current.path());
+    initialize_repository(next.path());
+    let path = handoff.path().join("opencode-active.json");
+    fs::write(
+        &path,
+        serde_json::json!({"version": 1, "directory": current.path()}).to_string(),
+    )
+    .unwrap();
+    let mut app = App::new(current.path().to_path_buf());
+    app.opencode_presence = OpenCodePresence::at_for_test(path.clone());
+    assert_eq!(app.opencode_presence.poll(), None);
+
+    let temporary = handoff.path().join("next");
+    fs::write(
+        &temporary,
+        serde_json::json!({"version": 1, "directory": next.path()}).to_string(),
+    )
+    .unwrap();
+    fs::rename(temporary, path).unwrap();
+    wait_for_state(&mut app, |app| {
+        !app.session.open_running()
+            && app
+                .repository()
+                .is_some_and(|repo| repo.root == fs::canonicalize(next.path()).unwrap())
+    });
+}
+
 #[test]
 fn restores_commit_drafts_and_removes_them_after_commit() {
     let directory = tempfile::tempdir().unwrap();
