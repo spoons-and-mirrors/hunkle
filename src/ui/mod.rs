@@ -2,6 +2,7 @@ mod changes;
 mod header_card;
 mod history;
 mod location_picker;
+mod opencode_tabs;
 mod overlays;
 pub(crate) mod preview;
 mod sqlite;
@@ -118,14 +119,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    let footer_height = 1;
-    let layout = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(6),
-        Constraint::Length(footer_height),
-        Constraint::Length(footer_height),
-    ])
-    .split(frame.area());
+    let [tabs_area, header, content, padding, navigation] =
+        workspace::frame_areas(frame.area(), !app.opencode_presence.tabs.items.is_empty());
+    opencode_tabs::draw(frame, app, tabs_area);
+    let layout = [header, content, padding, navigation];
 
     draw_header(frame, app, layout[0], profile);
     draw_workspace_bottom_padding(frame, layout[2]);
@@ -323,6 +320,35 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .capture_scroll_target(ScrollTarget::HeaderPicker);
     }
     finish_selection(frame, app);
+}
+
+pub fn draw_tabs_only(frame: &mut Frame<'_>, app: &mut App) {
+    app.begin_render_frame(frame.area());
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette().canvas).fg(palette().ink)),
+        frame.area(),
+    );
+    let area = workspace::tabs_widget_area(frame.area());
+    if area.width < 20 || area.height < 6 {
+        frame.render_widget(
+            Paragraph::new("Tabs need at least 20 columns and 6 rows")
+                .style(Style::default().fg(palette().muted)),
+            frame.area(),
+        );
+        return;
+    }
+    opencode_tabs::draw(frame, app, area);
+    if let Some(notice) = app
+        .notice
+        .as_deref()
+        .filter(|notice| notice_is_error(notice))
+    {
+        frame.render_widget(
+            Paragraph::new(truncate_width(notice, usize::from(area.width)))
+                .style(Style::default().fg(palette().red)),
+            Rect::new(area.x, area.y + 1, area.width, 1),
+        );
+    }
 }
 
 fn finish_selection(frame: &mut Frame<'_>, app: &mut App) {

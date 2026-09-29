@@ -20,14 +20,15 @@ pub(super) use crate::app::{
 pub(super) use crate::repo_path::RepoPath;
 
 pub(super) use super::{
-    BranchPickerStep, changes, display_path, draw, marquee_window, palette, selected_display_range,
-    text, wrapped_editor_cursor,
+    BranchPickerStep, changes, display_path, draw, draw_tabs_only, marquee_window, palette,
+    selected_display_range, text, wrapped_editor_cursor,
 };
 
 mod editor;
 mod files;
 mod header;
 mod media;
+mod opencode_tabs;
 mod sqlite;
 
 fn assert_black_underlay(terminal: &Terminal<TestBackend>) {

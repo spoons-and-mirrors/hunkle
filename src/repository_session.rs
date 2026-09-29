@@ -275,6 +275,10 @@ pub(crate) struct RepositorySession {
 }
 
 impl RepositorySession {
+    pub(crate) fn inactive(fetch_interval: Duration) -> Self {
+        Self::with_data(None, fetch_interval)
+    }
+
     pub(crate) fn new(path: &Path, fetch_interval: Duration) -> Self {
         Self::with_data(git::load_or_local(path).ok(), fetch_interval)
     }

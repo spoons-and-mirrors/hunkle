@@ -228,6 +228,14 @@ impl Explorer {
     }
 
     pub(super) fn with_favorites(directory: PathBuf, favorites_path: Option<PathBuf>) -> Self {
+        Self::build(directory, favorites_path, true)
+    }
+
+    pub(super) fn idle(directory: PathBuf) -> Self {
+        Self::build(directory, None, false)
+    }
+
+    fn build(directory: PathBuf, favorites_path: Option<PathBuf>, load: bool) -> Self {
         let (favorite_store, favorites) = FavoriteStore::new(favorites_path);
         let favorite_load_error = favorite_store.load_error().map(str::to_owned);
         let index_roots = search_roots(&directory);
@@ -336,7 +344,9 @@ impl Explorer {
             favorite_store,
             favorite_generation: 0,
         };
-        picker.reload();
+        if load {
+            picker.reload();
+        }
         picker.error = favorite_load_error;
         picker
     }

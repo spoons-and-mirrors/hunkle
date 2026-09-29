@@ -6,6 +6,24 @@
 
 use super::*;
 
+/// Global chrome and content allocation share the workspace composition owner.
+pub(super) fn frame_areas(area: Rect, show_opencode_tabs: bool) -> [Rect; 5] {
+    let layout = Layout::vertical([
+        Constraint::Length(if show_opencode_tabs { 6 } else { 0 }),
+        Constraint::Length(2),
+        Constraint::Min(6),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    [layout[0], layout[1], layout[2], layout[3], layout[4]]
+}
+
+/// The compact composition contains only the OpenCode strip, through its divider.
+pub(super) fn tabs_widget_area(area: Rect) -> Rect {
+    Rect::new(area.x, area.y, area.width, area.height.min(6))
+}
+
 enum WorkspacePlan {
     Search,
     Single(SingleSurface),

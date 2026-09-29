@@ -319,6 +319,16 @@ pub(crate) struct DiffFileHeaderRegion {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HitTarget {
+    OpenCodeGroup(u64),
+    OpenCodeGroupAdd,
+    OpenCodeGroupName,
+    OpenCodeGroupSave,
+    OpenCodeGroupCancel,
+    OpenCodeGroupScroll(isize),
+    OpenCodeTab {
+        instance_id: String,
+        session_id: String,
+    },
     HeaderRepository,
     HeaderWorktrees,
     HeaderBranch,
@@ -476,6 +486,8 @@ pub(crate) enum MobileDragAxis {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ScrollTarget {
     Header,
+    OpenCodeTabs,
+    OpenCodeGroups,
     HeaderPicker,
     ActionMenu,
     AuthorFilter,

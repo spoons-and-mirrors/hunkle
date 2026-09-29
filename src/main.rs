@@ -16,6 +16,7 @@ mod tree;
 mod ui;
 
 use std::{
+    ffi::OsStr,
     io::{self, Write},
     path::PathBuf,
     process::Command,
@@ -54,15 +55,22 @@ const UI_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const FAST_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn main() -> Result<()> {
-    let path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir()?);
+    let mut arguments = std::env::args_os().skip(1);
+    let requested = arguments.next();
+    let tabs_only = requested.as_deref() == Some(OsStr::new("--tabs"));
+    if tabs_only && arguments.next().is_some() {
+        anyhow::bail!("usage: hunkle --tabs");
+    }
+    let path = match (tabs_only, requested) {
+        (false, Some(path)) => PathBuf::from(path),
+        _ => std::env::current_dir()?,
+    };
 
     if let Ok(log_path) = diagnostics::init() {
         diagnostics::event(format!(
-            "startup pid={} path={} log={}",
+            "startup pid={} mode={} path={} log={}",
             std::process::id(),
+            if tabs_only { "tabs" } else { "workspace" },
             path.display(),
             log_path.display()
         ));
@@ -79,9 +87,15 @@ fn main() -> Result<()> {
     };
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
-    let mut app = App::opening(path.clone());
-    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
-    app.configure_media_picker(picker, auto_kitty_supported());
+    let mut app = if tabs_only {
+        App::tabs_only(path.clone())
+    } else {
+        App::opening(path.clone())
+    };
+    if !tabs_only {
+        let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+        app.configure_media_picker(picker, auto_kitty_supported());
+    }
     #[cfg(unix)]
     let mut stdin_nonblocking = NonblockingStdin::enable()?;
     let mut dirty = true;
@@ -91,7 +105,11 @@ fn main() -> Result<()> {
     while !app.should_quit {
         dirty |= {
             let _activity = diagnostics::activity("poll-workers", app.diagnostic_context());
-            app.poll_worker()
+            if tabs_only {
+                app.poll_tabs_only()
+            } else {
+                app.poll_worker()
+            }
         };
         if restart_request.is_none() {
             restart_request = app.take_restart_request();
@@ -128,15 +146,21 @@ fn main() -> Result<()> {
             let _activity = diagnostics::activity("draw", app.diagnostic_context());
             let mut cleanup_error = None;
             terminal.draw(|frame| {
-                ui::draw(frame, &mut app);
-                if let Err(error) = write_media_terminal_cleanup(&mut app) {
-                    cleanup_error = Some(error);
+                if tabs_only {
+                    ui::draw_tabs_only(frame, &mut app);
+                } else {
+                    ui::draw(frame, &mut app);
+                    if let Err(error) = write_media_terminal_cleanup(&mut app) {
+                        cleanup_error = Some(error);
+                    }
                 }
             })?;
             if let Some(error) = cleanup_error {
                 return Err(error);
             }
-            write_media_terminal_output(&mut app)?;
+            if !tabs_only {
+                write_media_terminal_output(&mut app)?;
+            }
             dirty = false;
         }
         let ready = {
@@ -152,7 +176,7 @@ fn main() -> Result<()> {
                     ready = true;
                     break;
                 }
-                if app.poll_norm_presence() {
+                if !tabs_only && app.poll_norm_presence() {
                     dirty = true;
                     break;
                 }
@@ -166,7 +190,11 @@ fn main() -> Result<()> {
             let _activity = diagnostics::activity("input", app.diagnostic_context());
             let (changed, render_before_next_event) = match event::read()? {
                 Event::Key(key) if key.is_press() => {
-                    app.handle_key(key);
+                    if tabs_only {
+                        app.handle_tabs_key(key)
+                    } else {
+                        app.handle_key(key)
+                    }
                     (true, false)
                 }
                 Event::Mouse(mouse) => {
@@ -177,7 +205,11 @@ fn main() -> Result<()> {
                         app.author_filter.state.selected(),
                         app.hovered_hit_target.clone(),
                     );
-                    app.handle_mouse(mouse);
+                    if tabs_only {
+                        app.handle_tabs_mouse(mouse)
+                    } else {
+                        app.handle_mouse(mouse)
+                    }
                     let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
                         || hover_before
                             != (
@@ -190,11 +222,17 @@ fn main() -> Result<()> {
                     (changed, false)
                 }
                 Event::Paste(text) => {
-                    app.handle_paste(&text);
+                    if tabs_only {
+                        app.handle_tabs_paste(&text)
+                    } else {
+                        app.handle_paste(&text)
+                    }
                     (true, false)
                 }
                 Event::Resize(_, _) => {
-                    app.reset_media_presentation();
+                    if !tabs_only {
+                        app.reset_media_presentation();
+                    }
                     (true, true)
                 }
                 _ => (false, false),
@@ -214,7 +252,7 @@ fn main() -> Result<()> {
             });
             dirty = true;
         }
-        if let Some(request) = app.take_editor_request() {
+        if !tabs_only && let Some(request) = app.take_editor_request() {
             restore_terminal();
             let result = run_editor(request);
             terminal = start_terminal()?;
@@ -225,38 +263,50 @@ fn main() -> Result<()> {
         }
     }
 
-    for _ in 0..3 {
-        app.flush_commit_draft();
-        if !app.commit_draft_pending() {
-            break;
+    if !tabs_only {
+        for _ in 0..3 {
+            app.flush_commit_draft();
+            if !app.commit_draft_pending() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
         }
-        thread::sleep(Duration::from_millis(100));
     }
     app.shutdown();
     diagnostics::event("shutdown clean".to_owned());
 
     if restarting && let Some(executable) = restart_request {
-        let workspace = app
-            .repository()
-            .map(|repository| repository.root.clone())
-            .unwrap_or(path);
+        let workspace = if tabs_only {
+            None
+        } else {
+            Some(
+                app.repository()
+                    .map(|repository| repository.root.clone())
+                    .unwrap_or(path),
+            )
+        };
         diagnostics::event(format!(
-            "restarting executable={} workspace={}",
+            "restarting executable={} argument={}",
             executable.display(),
-            workspace.display()
+            workspace
+                .as_deref()
+                .map_or("--tabs".to_owned(), |path| path.display().to_string())
         ));
+        let argument = workspace
+            .as_deref()
+            .unwrap_or(std::path::Path::new("--tabs"));
         #[cfg(unix)]
         stdin_nonblocking.restore()?;
         diagnostics::shutdown();
         restore_terminal();
         #[cfg(unix)]
         {
-            let error = Command::new(executable).arg(workspace).exec();
+            let error = Command::new(executable).arg(argument).exec();
             return Err(error.into());
         }
         #[cfg(not(unix))]
         {
-            Command::new(executable).arg(workspace).spawn()?;
+            Command::new(executable).arg(argument).spawn()?;
             return Ok(());
         }
     }

@@ -20,11 +20,13 @@ mod norm_presence;
 #[cfg(not(unix))]
 #[path = "norm_presence_non_unix.rs"]
 mod norm_presence;
+mod opencode_groups;
 #[cfg(unix)]
 mod opencode_presence;
 #[cfg(not(unix))]
 #[path = "opencode_presence_non_unix.rs"]
 mod opencode_presence;
+mod opencode_tabs;
 mod settings;
 mod shortcuts;
 mod text_input;
@@ -137,7 +139,8 @@ pub struct App {
     pub(crate) header_picker: HeaderPicker,
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
     pub(crate) norm_presence: NormPresence,
-    opencode_presence: OpenCodePresence,
+    pub(crate) opencode_presence: OpenCodePresence,
+    pub(crate) opencode_groups: opencode_groups::OpenCodeGroups,
     pub(crate) hovered_hit_target: Option<HitTarget>,
     pub settings: Settings,
     pub(crate) settings_state: SettingsState,
@@ -170,12 +173,17 @@ pub struct App {
     recent_fetches: HashMap<PathBuf, Instant>,
     workspace_fetch_pending: bool,
     footer_marquee: Option<FooterMarquee>,
+    tabs_only: bool,
 }
 
 impl App {
     #[cfg(test)]
     pub fn new(path: PathBuf) -> Self {
-        Self::build(path, false)
+        Self::build(path, false, false)
+    }
+
+    pub fn tabs_only(path: PathBuf) -> Self {
+        Self::build(path, false, true)
     }
 
     pub fn opening(path: PathBuf) -> Self {
@@ -183,14 +191,14 @@ impl App {
             && let Ok(path) = fs::canonicalize(&path)
             && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
         {
-            let mut app = Self::build(parent.to_path_buf(), true);
+            let mut app = Self::build(parent.to_path_buf(), true, false);
             app.pending_file_selection = Some(RepoPath::from(PathBuf::from(name)));
             return app;
         }
-        Self::build(path, true)
+        Self::build(path, true, false)
     }
 
-    fn build(path: PathBuf, open_in_background: bool) -> Self {
+    fn build(path: PathBuf, open_in_background: bool, tabs_only: bool) -> Self {
         #[cfg(not(test))]
         let (settings_store, settings) = SettingsStore::discover();
         #[cfg(test)]
@@ -201,22 +209,31 @@ impl App {
         #[cfg(not(test))]
         let workspace_config_dir = settings_store.config_dir();
         #[cfg(not(test))]
-        let known_repositories_path =
-            workspace_config_dir.map(|path| path.join("known-repositories.json"));
+        let known_repositories_path = workspace_config_dir
+            .filter(|_| !tabs_only)
+            .map(|path| path.join("known-repositories.json"));
         #[cfg(test)]
         let known_repositories_path = None;
         #[cfg(not(test))]
-        let explorer_favorites_path =
-            workspace_config_dir.map(|path| path.join("explorer-favorites.json"));
+        let explorer_favorites_path = workspace_config_dir
+            .filter(|_| !tabs_only)
+            .map(|path| path.join("explorer-favorites.json"));
         #[cfg(test)]
         let explorer_favorites_path = None;
+        #[cfg(not(test))]
+        let opencode_groups_path =
+            workspace_config_dir.map(|path| path.join("opencode-groups.json"));
+        #[cfg(test)]
+        let opencode_groups_path = None;
         let interval = settings.fetch_interval();
-        let session = if open_in_background {
+        let session = if tabs_only {
+            RepositorySession::inactive(interval)
+        } else if open_in_background {
             RepositorySession::opening(path.clone(), interval)
         } else {
             RepositorySession::new(&path, interval)
         };
-        let mode = if open_in_background || session.data().is_some() {
+        let mode = if tabs_only || open_in_background || session.data().is_some() {
             Mode::Normal
         } else {
             Mode::Explorer
@@ -251,7 +268,9 @@ impl App {
         let norm_presence = NormPresence::new();
         #[cfg(test)]
         let norm_presence = NormPresence::new().disabled_for_test();
-        linked_worktrees.refresh();
+        if !tabs_only {
+            linked_worktrees.refresh();
+        }
         let mut author_filter = AuthorFilter::default();
         let mut branch_filter = BranchFilter::default();
         let mut graph_search = GraphSearch::default();
@@ -273,7 +292,11 @@ impl App {
             };
             graph_search.sync(&repo.root, &repo.commits, &initial_visible);
         }
-        let mut workspace_explorer = Explorer::with_favorites(start, explorer_favorites_path);
+        let mut workspace_explorer = if tabs_only {
+            Explorer::idle(start)
+        } else {
+            Explorer::with_favorites(start, explorer_favorites_path)
+        };
         workspace_explorer.left_pane_width = settings.explorer_left_pane_width;
         let mut app = Self {
             session,
@@ -310,6 +333,7 @@ impl App {
             linked_worktrees,
             norm_presence,
             opencode_presence: OpenCodePresence::new(),
+            opencode_groups: opencode_groups::OpenCodeGroups::load(opencode_groups_path),
             hovered_hit_target: None,
             settings,
             settings_state: SettingsState::default(),
@@ -342,9 +366,12 @@ impl App {
             recent_fetches: HashMap::new(),
             workspace_fetch_pending: false,
             footer_marquee: None,
+            tabs_only,
         };
-        app.restore_commit_draft();
-        app.queue_local_build_restart();
+        if !tabs_only {
+            app.restore_commit_draft();
+            app.queue_local_build_restart();
+        }
         app
     }
 
@@ -586,6 +613,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.handle_opencode_group_key(key) {
+            return;
+        }
         if self.mode == Mode::FileEdit {
             self.handle_file_editor(key);
             return;
@@ -660,6 +690,10 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
+        if let Some(edit) = &mut self.opencode_groups.edit {
+            edit.input.insert_single_line(text);
+            return;
+        }
         if self.header_picker.naming_branch() {
             self.header_picker.branch_name.insert_single_line(text);
             self.header_picker.message = None;
@@ -747,6 +781,51 @@ impl App {
         self.norm_presence.poll()
     }
 
+    pub fn poll_tabs_only(&mut self) -> bool {
+        debug_assert!(self.tabs_only);
+        let update = self.opencode_presence.poll();
+        let mut changed = update.changed;
+        if self.opencode_presence.tabs.items.is_empty() {
+            changed |= self.opencode_groups.edit.take().is_some();
+            changed |= self.opencode_groups.drag.take().is_some();
+        }
+        if let Some(edit) = &mut self.opencode_groups.edit {
+            changed |= edit.input.poll_blink(true);
+        }
+        changed
+    }
+
+    pub fn handle_tabs_key(&mut self, key: KeyEvent) {
+        debug_assert!(self.tabs_only);
+        if self.handle_opencode_group_key(key) {
+            return;
+        }
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c')
+            || key.modifiers.is_empty() && key.code == KeyCode::Char('q')
+        {
+            self.request_quit();
+        }
+    }
+
+    pub fn handle_tabs_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        debug_assert!(self.tabs_only);
+        if self.handle_opencode_strip_mouse(mouse) {
+            return;
+        }
+        if mouse.kind == crossterm::event::MouseEventKind::Moved {
+            self.hovered_hit_target = self
+                .regions
+                .hit_target_at(Position::new(mouse.column, mouse.row));
+        }
+    }
+
+    pub fn handle_tabs_paste(&mut self, text: &str) {
+        debug_assert!(self.tabs_only);
+        if let Some(edit) = &mut self.opencode_groups.edit {
+            edit.input.insert_single_line(text);
+        }
+    }
+
     pub fn workspace_open_running(&self) -> bool {
         self.session.open_running()
     }
@@ -776,7 +855,13 @@ impl App {
             changed |= self.graph_search.poll(&visible);
         }
         changed |= self.follow_norm_workspace_changes();
-        if let Some(path) = self.opencode_presence.poll() {
+        let opencode = self.opencode_presence.poll();
+        changed |= opencode.changed;
+        if self.opencode_presence.tabs.items.is_empty() {
+            changed |= self.opencode_groups.edit.take().is_some();
+            changed |= self.opencode_groups.drag.take().is_some();
+        }
+        if let Some(path) = opencode.workspace {
             diagnostics::event(format!(
                 "following OpenCode workspace path={}",
                 path.display()
@@ -842,6 +927,9 @@ impl App {
             changed = true;
         }
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        if let Some(edit) = &mut self.opencode_groups.edit {
+            changed |= edit.input.poll_blink(true);
+        }
         changed |= self
             .branch_filter
             .input
@@ -1120,11 +1208,7 @@ impl App {
                         self.author_filter.sync(&repo.root, &repo.commits);
                         self.branch_filter.sync(&repo.root, &repo.commits);
                         let visible = self.graph_visible_indices();
-                        self.graph_search.sync(
-                            &repo.root,
-                            &repo.commits,
-                            &visible,
-                        );
+                        self.graph_search.sync(&repo.root, &repo.commits, &visible);
                     }
                     self.changes
                         .reset_repository(self.session.data(), prepared_file_tree);
@@ -1194,11 +1278,7 @@ impl App {
                             self.author_filter.sync(&repo.root, &repo.commits);
                             self.branch_filter.sync(&repo.root, &repo.commits);
                             let visible = self.graph_visible_indices();
-                            self.graph_search.sync(
-                                &repo.root,
-                                &repo.commits,
-                                &visible,
-                            );
+                            self.graph_search.sync(&repo.root, &repo.commits, &visible);
                             let visible = self.graph_search.visible_indices();
                             let commit_index =
                                 self.graph_search.current_match_position().or_else(|| {

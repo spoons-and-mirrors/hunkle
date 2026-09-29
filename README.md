@@ -25,6 +25,7 @@ A recent Rust toolchain and Git are required.
 cargo run -p hunkle
 cargo run -p hunkle -- /path/to/repository
 cargo run -p hunkle -- /path/to/file.json
+cargo run -p hunkle -- --tabs
 ```
 
 Hunkle opens exactly the requested path. A Git repository root enables status,
@@ -32,6 +33,15 @@ history, graph, and repository actions. Any other directory opens as a local
 workspace with file browsing, search, editing, and previews; Hunkle does not
 climb into an enclosing repository. Passing a file opens its parent workspace
 and selects the file.
+
+`hunkle --tabs` opens a compact OpenCode tab-manager widget: group labels, a blank
+row, cards and session names, and the active separator—no repository header,
+workspace, or footer. Give its terminal pane at least **20 columns × 6 rows**;
+the widget uses only the first six rows if the pane is taller. It mirrors the
+same CLI and saved groups as full Hunkle, including click-to-focus, drag/drop,
+group isolation, and hover + F2 rename. It waits for OpenCode if no tabs are
+open, never opens a repository or starts an OpenCode server, and ignores
+workspace-follow events. Press `q` or `Ctrl+C` to exit.
 
 Install a development build for the current checkout with:
 
@@ -64,9 +74,8 @@ These are Hunkle's only Norm responsibilities.
 
 ## OpenCode V2 tabs
 
-To follow OpenCode V2 CLI tabs, add the local CLI-only plugin to your V2
-`cli.json` (for the `oc2` launcher, `~/.config/opencode-v2/opencode/cli.json`;
-keep any existing settings):
+To follow OpenCode V2 CLI tabs, add the local CLI-only plugin to
+`~/.config/opencode/cli.json` (keep any existing settings):
 
 ```json
 "plugins": [{ "package": "/home/spoon/code/ocplugins/hunkle-sync" }]
@@ -75,12 +84,57 @@ keep any existing settings):
 `~/code/ocplugins/hunkle-sync` is a symlink to this repository's
 `plugins/opencode-hunkle`, which is the source of truth for the plugin.
 
-With OpenCode tabs enabled, switching to a session tab publishes its workspace
-to `$XDG_RUNTIME_DIR/hunkle/opencode-active.json` (or
-`/tmp/hunkle-<euid>/hunkle/opencode-active.json`). Hunkle follows later changes
-through its usual workspace-open queue. An existing snapshot at Hunkle startup
-is only a baseline. This is a one-way local handoff: Hunkle does not inspect or
-manage OpenCode sessions, transcripts, models, or terminal layouts.
+With OpenCode tabs enabled, Hunkle shows two-row cards with repository and branch,
+with the OpenCode session title beneath each card,
+active highlight, and busy/attention/unread indicators. Cards follow group order;
+within a group they initially follow OpenCode's tab order until rearranged locally.
+Scroll over the strip (or swipe horizontally on narrow screens) to see more tabs;
+switching tabs in OpenCode brings the active card into view (if its group is visible)
+and opens its project.
+Click a card to focus that tab in OpenCode; Hunkle follows its confirmed selection.
+Hover a card and press **F2** to rename the actual OpenCode session. The editor
+starts with its current title; Enter/✓ sends the rename to OpenCode, Esc/× cancels,
+and empty names are rejected. Older Hunkle-only session labels remain preserved
+in the group catalog but are no longer displayed. The separator below the cards
+highlights the visible portion of the active session.
+Activity and title updates redraw without reopening
+the workspace, and the strip disappears when its OpenCode CLI exits.
+
+The strip has one flat layer of named groups, initially **General**:
+
+- Click **[+]** to create a group; hover a group and press **F2** to rename it
+  (right-click also works). Enter/✓ saves, Esc/× cancels.
+- Drag a card onto another card in the same group to reorder it, or onto a group
+  chip to move it. Both arrangements are saved only in Hunkle; OpenCode's native
+  tab order stays unchanged. Releasing without dragging focuses the OpenCode tab.
+  Drag over empty strip space or scroll while holding to reach off-screen cards.
+- Drag a group label onto another to reorder groups. The order is saved, and
+  cards follow it. Drag over the group-row arrows or scroll while holding to reach
+  off-screen groups; Esc cancels a drag.
+- Click a group to hide/show its cards. Double-click to isolate it; while isolated,
+  click another group to switch isolation, or double-click any group to restore
+  your previous hide/show choices.
+- Scroll over the group row, or use its arrows, to reach more groups.
+
+Group names, card assignments, card order, and visibility are saved in Hunkle's config directory
+as `opencode-groups.json`. They survive workspace switches and OpenCode restarts.
+Grouping only organizes Hunkle's strip; OpenCode continues to own the tabs.
+
+Herdr normally reserves right-click for its pane menu. To forward Ctrl+right-click
+to Hunkle, set `right_click_passthrough_modifier = "ctrl"` under `[ui]` in
+`~/.config/herdr/config.toml`. Hover + F2 needs no right-click passthrough.
+
+The plugin publishes only changed tab snapshots to
+`$XDG_RUNTIME_DIR/hunkle/opencode-active.json` (or
+`/tmp/hunkle-<euid>/hunkle/opencode-active.json`). Existing cards appear at Hunkle
+startup without moving its workspace; later tab switches use the usual workspace-open
+queue. With multiple OpenCode CLIs, the latest tab switch selects which CLI is mirrored;
+background activity from another CLI does not claim the handoff. Hunkle does not own
+OpenCode sessions, transcripts, models, or terminal layouts.
+
+Clicks use the publishing plugin's local Unix socket beside the snapshot. The
+plugin handles requests without polling and focuses only an already-open tab
+in the addressed CLI. Stale clicks cannot reopen a closed tab or target another CLI.
 
 ## Keys
 

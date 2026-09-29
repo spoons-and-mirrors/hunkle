@@ -15,6 +15,9 @@ const HEADER_SCROLL_THRESHOLD: u16 = 2;
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.handle_opencode_strip_mouse(mouse) {
+            return;
+        }
         if self.handle_mobile_scroll_gesture(mouse) {
             return;
         }
@@ -221,14 +224,15 @@ impl App {
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
-        ) && self.regions.scroll_target_at(point) == Some(ScrollTarget::Header)
+        ) && let Some(target @ (ScrollTarget::Header | ScrollTarget::OpenCodeTabs)) =
+            self.regions.scroll_target_at(point)
         {
             let delta = if mouse.kind == MouseEventKind::ScrollRight {
                 1
             } else {
                 -1
             };
-            self.scroll_target(ScrollTarget::Header, delta, true);
+            self.scroll_target(target, delta, true);
             return;
         }
 
@@ -386,7 +390,10 @@ impl App {
                     if point != drag.previous {
                         let horizontal = drag.start.x.abs_diff(point.x);
                         let vertical = drag.start.y.abs_diff(point.y);
-                        let header = drag.scroll_target == Some(ScrollTarget::Header);
+                        let header = matches!(
+                            drag.scroll_target,
+                            Some(ScrollTarget::Header | ScrollTarget::OpenCodeTabs)
+                        );
                         let vertical_threshold = if header { HEADER_SCROLL_THRESHOLD } else { 1 };
                         if drag.axis.is_none() {
                             drag.axis = if header
@@ -410,19 +417,23 @@ impl App {
                             if drag.axis == Some(MobileDragAxis::Vertical) {
                                 let delta = drag.previous.y as isize - point.y as isize;
                                 if delta != 0
-                                    && let Some(target) = drag
-                                        .scroll_target
-                                        .clone()
-                                        .filter(|target| *target != ScrollTarget::Header)
+                                    && let Some(target) = drag.scroll_target.clone().filter(|target| {
+                                        !matches!(
+                                            target,
+                                            ScrollTarget::Header | ScrollTarget::OpenCodeTabs
+                                        )
+                                    })
                                 {
                                     self.scroll_target(target, delta, false);
                                 }
-                            } else if drag.axis == Some(MobileDragAxis::Horizontal)
-                                && drag.scroll_target == Some(ScrollTarget::Header)
-                            {
+                            } else if drag.axis == Some(MobileDragAxis::Horizontal) && header {
                                 let delta = drag.previous.x as isize - point.x as isize;
                                 if delta != 0 {
-                                    self.scroll_target(ScrollTarget::Header, delta, false);
+                                    self.scroll_target(
+                                        drag.scroll_target.clone().unwrap(),
+                                        delta,
+                                        false,
+                                    );
                                 }
                             }
                             drag.previous = point;
@@ -477,9 +488,26 @@ impl App {
         true
     }
 
-    fn scroll_target(&mut self, target: ScrollTarget, delta: isize, wheel: bool) {
+    pub(super) fn scroll_target(&mut self, target: ScrollTarget, delta: isize, wheel: bool) {
         let wheel_amount = |amount: isize| amount.saturating_mul(if wheel { 3 } else { 1 });
         match target {
+            ScrollTarget::OpenCodeGroups => {
+                if let Some(state) = self.regions.scroll_state(&ScrollTarget::OpenCodeGroups) {
+                    self.opencode_groups.scroll = self.opencode_groups.scroll
+                        .saturating_add_signed(wheel_amount(delta)).min(state.maximum);
+                }
+            }
+            ScrollTarget::OpenCodeTabs => {
+                if let Some(state) = self.regions.scroll_state(&ScrollTarget::OpenCodeTabs) {
+                    self.opencode_presence.tabs.scroll = self
+                        .opencode_presence
+                        .tabs
+                        .scroll
+                        .saturating_add_signed(wheel_amount(delta))
+                        .min(state.maximum);
+                    self.opencode_presence.tabs.reveal_active = false;
+                }
+            }
             ScrollTarget::Header => {
                 self.header_scroll = self
                     .header_scroll
