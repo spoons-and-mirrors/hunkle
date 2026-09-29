@@ -15,14 +15,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .filter(|&index| groups.visible(groups.group_for(&tabs.items[index].session_id)))
         .collect::<Vec<_>>();
     let viewport = Rect::new(area.x + 4, area.y + 2, area.width - 5, 3);
-    let divider_y = viewport.bottom();
-    if area.height >= 6 {
-        frame.render_widget(
-            Paragraph::new("─".repeat(usize::from(area.width)))
-                .style(Style::default().fg(palette().faint)),
-            Rect::new(area.x, divider_y, area.width, 1),
-        );
-    }
     tabs.reveal_active |= tabs.viewport_width != viewport.width;
     tabs.viewport_width = viewport.width;
     let mut total = 0usize;
@@ -181,13 +173,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .scroll((0, (left - start) as u16)),
             Rect::new(rect.x, viewport.bottom() - 1, rect.width, 1),
         );
-        if tab.active && area.height >= 6 {
-            frame.render_widget(
-                Paragraph::new("─".repeat(usize::from(rect.width)))
-                    .style(Style::default().fg(palette().orange)),
-                Rect::new(rect.x, divider_y, rect.width, 1),
-            );
-        }
     }
     for (x, symbol, visible) in [
         (viewport.x - 1, "‹", tabs.scroll > 0),

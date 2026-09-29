@@ -132,6 +132,7 @@ export function createTabs(context: Plugin.Context, effect: typeof createEffect)
   })
 
   context.keymap.layer(() => ({
+    mode: "global",
     enabled: () => !context.ui.tabs.enabled(),
     commands: [
       { id: "hunkle.tab.next", title: "Next Hunkle tab", group: "Hunkle", bind: "ctrl+tab,alt+down", palette: true, run: () => cycle(1) },

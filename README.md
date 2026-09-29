@@ -36,8 +36,7 @@ and selects the file.
 
 `hunkle --tabs` opens a compact OpenCode tab-manager widget: group labels, a blank
 row, cards, and session names—no repository header, workspace, or footer. Give
-its terminal pane at least **20 columns × 5 rows**. A sixth row shows the active
-separator; at five rows only that separator is cropped. Taller panes leave the
+its terminal pane at least **20 columns × 5 rows**. Taller panes leave the
 remaining space blank. The widget mirrors the same CLI and saved groups as full
 Hunkle, including click-to-focus, drag/drop, group isolation, and hover + F2
 rename. It waits for OpenCode if no tabs are open, never opens a repository or
@@ -98,8 +97,7 @@ leave your group visibility choices alone.
 Click a card to focus that tab in OpenCode; Hunkle follows its confirmed selection.
 Hover a card and press **F2** to rename the actual OpenCode session. The editor
 starts with its current title; Enter/✓ sends the rename to OpenCode, Esc/× cancels,
-and empty names are rejected. The separator below the cards
-highlights the visible portion of the active session.
+and empty names are rejected.
 Activity and title updates redraw without reopening
 the workspace, and the strip disappears when its OpenCode CLI exits.
 

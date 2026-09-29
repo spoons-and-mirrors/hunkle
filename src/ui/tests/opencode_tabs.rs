@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn tabs_widget_keeps_the_group_gap_and_crops_only_the_divider_at_five_rows() {
+fn tabs_widget_uses_five_rows_with_a_group_gap_and_no_divider() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::tabs_only(directory.path().to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(49, 5)).unwrap();
@@ -49,10 +49,9 @@ fn tabs_widget_keeps_the_group_gap_and_crops_only_the_divider_at_five_rows() {
                 .is_none()
         );
         if height >= 6 {
-            assert_eq!(terminal.backend().buffer()[(0, 5)].symbol(), "─");
-        }
-        if height > 6 {
-            assert_eq!(terminal.backend().buffer()[(0, 6)].symbol(), " ");
+            for x in 0..width {
+                assert_eq!(terminal.backend().buffer()[(x, 5)].symbol(), " ");
+            }
         }
     }
     terminal.backend_mut().resize(49, 4);
@@ -101,7 +100,7 @@ fn workspace_defaults_to_no_strip_and_tabs_mono_restores_it() {
         .hit_target_rect(HitTarget::HeaderRepository)
         .unwrap()
         .y;
-    assert_eq!(with_strip, without_strip + 6);
+    assert_eq!(with_strip, without_strip + 5);
     assert!(screen_text(&terminal).contains("Important task"));
     app.show_opencode_tabs = false;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -116,21 +115,10 @@ fn workspace_defaults_to_no_strip_and_tabs_mono_restores_it() {
 
 #[test]
 fn opencode_strip_tracks_active_cards_and_scrolls_in_both_compositions() {
-    fn assert_divider(terminal: &Terminal<TestBackend>) {
+    fn assert_group_gap(terminal: &Terminal<TestBackend>) {
         let buffer = terminal.backend().buffer();
         for x in 0..buffer.area.width {
             assert_eq!(buffer[(x, 1)].symbol(), " ", "gap below groups stays blank");
-            assert_eq!(buffer[(x, 5)].symbol(), "─");
-            let expected = if buffer[(x, 2)].bg == palette().raised {
-                palette().orange
-            } else {
-                palette().faint
-            };
-            assert_eq!(
-                buffer[(x, 5)].fg,
-                expected,
-                "divider matches visible active card at {x}"
-            );
         }
     }
     let directory = tempfile::tempdir().unwrap();
@@ -151,7 +139,7 @@ fn opencode_strip_tracks_active_cards_and_scrolls_in_both_compositions() {
     app.opencode_presence.tabs.reveal_active = true;
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_divider(&terminal);
+    assert_group_gap(&terminal);
     assert!(screen_text(&terminal).contains("Task 7"));
     assert!(screen_text(&terminal).contains("Repository"));
     assert!(screen_text(&terminal).contains("feature/7"));
@@ -173,13 +161,13 @@ fn opencode_strip_tracks_active_cards_and_scrolls_in_both_compositions() {
 
     terminal.backend_mut().resize(49, 24);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_divider(&terminal);
+    assert_group_gap(&terminal);
     assert!(screen_text(&terminal).contains("Task 7"));
     app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 8, 2));
     app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 35, 2));
     app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 2));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_divider(&terminal);
+    assert_group_gap(&terminal);
     assert!(!app.header_picker.is_open());
     assert!(screen_text(&terminal).contains("Task 5"));
     let offset = app.opencode_presence.tabs.scroll;
@@ -193,14 +181,14 @@ fn opencode_strip_tracks_active_cards_and_scrolls_in_both_compositions() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.opencode_presence.tabs.scroll, 0);
     assert!(screen_text(&terminal).contains("Task 0"));
-    assert_divider(&terminal);
-    // Scroll into the active card: only its visible segment is highlighted.
+    assert_group_gap(&terminal);
+    // Scroll into the active card while preserving the group gap.
     app.opencode_presence.tabs.scroll = 10;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_divider(&terminal);
+    assert_group_gap(&terminal);
     app.opencode_groups.catalog.hidden.insert(1);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_divider(&terminal);
+    assert_group_gap(&terminal);
     let with_strip = app
         .regions
         .hit_target_rect(HitTarget::HeaderRepository)
@@ -213,7 +201,7 @@ fn opencode_strip_tracks_active_cards_and_scrolls_in_both_compositions() {
             .hit_target_rect(HitTarget::HeaderRepository)
             .unwrap()
             .y
-            + 6,
+            + 5,
         with_strip
     );
     assert!(
