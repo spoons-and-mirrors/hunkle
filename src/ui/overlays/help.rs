@@ -64,11 +64,6 @@ pub(crate) fn draw_help(frame: &mut Frame<'_>, shortcuts: &Shortcuts) {
         shortcut_help(shortcuts, ShortcutAction::OpenSettings, "Settings"),
         shortcut_help(shortcuts, ShortcutAction::OpenActions, "Git actions"),
         shortcut_help(shortcuts, ShortcutAction::OpenGitCommand, "Git command"),
-        shortcut_help(
-            shortcuts,
-            ShortcutAction::OpenNormTab,
-            "Start agent in Norm",
-        ),
         shortcut_pair_help(
             shortcuts,
             ShortcutAction::EditFile,

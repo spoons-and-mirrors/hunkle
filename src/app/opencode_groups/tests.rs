@@ -460,11 +460,11 @@ fn opencode_groups_support_creation_rename_drop_and_filters_at_both_widths() {
             .unwrap();
         let card = point(&app, tab_target(0));
         send(&mut app, MouseEventKind::Moved, card);
-        app.opencode_groups
-            .catalog
-            .session_names
-            .insert("tab-0".into(), "Old local name".into());
-        app.opencode_groups.save().unwrap();
+        let mut old_catalog: serde_json::Value =
+            serde_json::from_slice(&fs::read(&groups_path).unwrap()).unwrap();
+        old_catalog["session_names"] = serde_json::json!({"tab-0": "Old local name"});
+        atomic_write(&groups_path, old_catalog.to_string().as_bytes()).unwrap();
+        app.opencode_groups = OpenCodeGroups::load(Some(groups_path.clone()));
         app.handle_key(rename);
         assert_eq!(
             app.opencode_groups.edit.as_ref().unwrap().target,
@@ -505,12 +505,6 @@ fn opencode_groups_support_creation_rename_drop_and_filters_at_both_widths() {
         assert!(label.contains("My 🦀") && label.contains("task"), "{label}");
         assert_eq!(app.opencode_presence.tabs.items[0].title, "My 🦀 task");
         assert!(listener.accept().is_err(), "naming must not focus a tab");
-        assert_eq!(
-            OpenCodeGroups::load(Some(groups_path.clone()))
-                .catalog
-                .session_names["tab-0"],
-            "Old local name"
-        );
 
         // The session title remains a hover target; empty names are not sent to OpenCode.
         send(
@@ -627,10 +621,12 @@ fn opencode_groups_support_creation_rename_drop_and_filters_at_both_widths() {
         );
         assert!(app.pending_workspace_open.is_none());
         assert!(app.opencode_presence.tabs.items[0].active);
-        let saved = OpenCodeGroups::load(Some(groups_path));
+        let saved = OpenCodeGroups::load(Some(groups_path.clone()));
         assert_eq!(saved.group_for("tab-0"), 2);
         assert_eq!(saved.catalog.groups[1].name, "Build 🦀");
-        assert_eq!(saved.catalog.session_names["tab-0"], "Old local name");
+        let saved_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&groups_path).unwrap()).unwrap();
+        assert!(saved_json.get("session_names").is_none());
         assert!(!saved.catalog.card_order[&1].contains(&"tab-0".to_owned()));
 
         // A fresh publisher/order must not reset Hunkle's stable session assignments.

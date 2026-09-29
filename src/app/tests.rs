@@ -144,18 +144,6 @@ fn local_workspaces_reload_files_and_reject_git_actions() {
 }
 
 #[test]
-fn local_workspaces_can_start_norm_tabs_from_their_root() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::write(directory.path().join("notes.txt"), "notes\n").unwrap();
-    let app = App::new(directory.path().to_path_buf());
-
-    assert_eq!(
-        app.norm_destination().unwrap(),
-        fs::canonicalize(directory.path()).unwrap()
-    );
-}
-
-#[test]
 fn graph_visibility_survives_repository_refresh() {
     let directory = tempfile::tempdir().unwrap();
     initialize_repository(directory.path());
@@ -216,48 +204,6 @@ fn shortcut_settings_rebind_reset_and_persist_commands() {
     assert_eq!(
         app.settings.shortcuts.label(ShortcutAction::OpenExplorer),
         "o"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn norm_tab_switch_follows_the_active_workspace_directly() {
-    fn presence(active_tab_id: u64, first: &Path, second: &Path) -> String {
-        serde_json::json!({
-            "Presence": {
-                "version": 2,
-                "daemon_epoch": "epoch-a",
-                "revision": active_tab_id,
-                "instances": [{
-                    "instance_id": "terminal-a",
-                    "active_tab_id": active_tab_id,
-                    "tabs": [
-                        { "tab_id": 1, "workspace": first },
-                        { "tab_id": 2, "workspace": second }
-                    ]
-                }]
-            }
-        })
-        .to_string()
-    }
-
-    let current = tempfile::tempdir().unwrap();
-    let next = tempfile::tempdir().unwrap();
-    initialize_repository(current.path());
-    initialize_repository(next.path());
-    let mut app = App::new(current.path().to_path_buf());
-
-    app.norm_presence
-        .set_snapshot_for_test(&presence(1, current.path(), next.path()));
-    assert!(!app.follow_norm_workspace_changes());
-    app.norm_presence
-        .set_snapshot_for_test(&presence(2, current.path(), next.path()));
-    assert!(app.follow_norm_workspace_changes());
-    wait_for_state(&mut app, |app| !app.session.open_running());
-
-    assert_eq!(
-        app.repository().unwrap().root,
-        fs::canonicalize(next.path()).unwrap()
     );
 }
 

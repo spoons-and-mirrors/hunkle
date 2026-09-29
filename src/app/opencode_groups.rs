@@ -28,8 +28,6 @@ pub(crate) struct Group {
 pub(crate) struct GroupCatalog {
     pub groups: Vec<Group>,
     pub assignments: BTreeMap<String, u64>,
-    // Preserve older local labels in existing catalogs; OpenCode now owns session titles.
-    pub session_names: BTreeMap<String, String>,
     pub card_order: BTreeMap<u64, Vec<String>>,
     pub hidden: BTreeSet<u64>,
     pub solo: Option<u64>,
@@ -43,7 +41,6 @@ impl Default for GroupCatalog {
                 name: "General".into(),
             }],
             assignments: BTreeMap::new(),
-            session_names: BTreeMap::new(),
             card_order: BTreeMap::new(),
             hidden: BTreeSet::new(),
             solo: None,

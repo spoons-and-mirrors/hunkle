@@ -2,8 +2,7 @@
 
 ## Dependency Boundaries
 
-- Hunkle's only Norm integration is opening a tab for the active workspace and following active Norm-tab workspace changes.
-- Keep Norm presence and CLI interaction in `src/app/norm_presence.rs`; UI and general application code must not query or manage Norm sessions independently.
+- OpenCode owns its tabs and sessions. Hunkle mirrors and focuses existing tabs through the OpenCode plugin and follows active-tab workspace changes.
 - Hunkle does not own agent sessions, transcripts, models, scheduling, delivery, or terminal layouts. Do not add those responsibilities back to Hunkle.
 
 ## Established Systems

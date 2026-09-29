@@ -382,7 +382,6 @@ fn dim_except_header_controls(frame: &mut Frame<'_>, app: &App) {
         HitTarget::HeaderBranch,
         HitTarget::HeaderDiff,
         HitTarget::HeaderIssue,
-        HitTarget::HeaderAgent,
     ] {
         let Some(rect) = app.regions.hit_target_rect(target) else {
             continue;

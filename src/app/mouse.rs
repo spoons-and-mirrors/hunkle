@@ -115,10 +115,6 @@ impl App {
                     self.toggle_header_picker(HeaderPickerKind::Issues);
                     return;
                 }
-                Some(HitTarget::HeaderAgent) => {
-                    self.open_norm_tab();
-                    return;
-                }
                 _ => {}
             }
         }

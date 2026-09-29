@@ -226,19 +226,7 @@ pub(crate) struct SettingsStore {
 impl SettingsStore {
     pub(crate) fn discover() -> (Self, Settings) {
         let path = config_path("hunkle");
-        let settings = path
-            .as_deref()
-            .map(|path| {
-                if path.exists() {
-                    load(path)
-                } else {
-                    config_path("gitui")
-                        .as_deref()
-                        .map(load)
-                        .unwrap_or_default()
-                }
-            })
-            .unwrap_or_default();
+        let settings = path.as_deref().map(load).unwrap_or_default();
         (Self { path }, settings)
     }
 

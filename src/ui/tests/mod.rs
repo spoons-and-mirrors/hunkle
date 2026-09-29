@@ -294,7 +294,7 @@ fn narrow_explorer_splitter_drag_stays_owned_by_the_modal() {
 }
 
 #[test]
-fn repository_only_surfaces_keep_the_norm_creation_action() {
+fn repository_only_surfaces_keep_help_and_settings() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
@@ -304,14 +304,15 @@ fn repository_only_surfaces_keep_the_norm_creation_action() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
-            .hit_target_rect(HitTarget::HeaderAgent)
+            .hit_target_rect(HitTarget::HeaderRepository)
             .is_some()
     );
 
     app.mode = Mode::Help;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let screen = screen_text(&terminal);
-    assert!(screen.contains("Start agent in Norm"));
+    assert!(screen.contains("Git actions"));
+    assert!(!screen.contains("Start agent"));
 
     app.mode = Mode::Settings;
     app.settings_state.page = SettingsPage::General;
@@ -372,6 +373,7 @@ fn renders_every_primary_surface() {
     fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
+    wait_for(&mut app, |app| app.repository().is_some_and(|repo| repo.details_ready));
     app.settings.graph_lane_width = 0;
     app.settings.graph_description_width = 0;
     app.settings.graph_changes_width = 12;
@@ -472,10 +474,17 @@ fn renders_every_primary_surface() {
         terminal.backend().buffer()[(commit.right() - 1, commit.y)].symbol(),
         "▌"
     );
-    let commit_text: String = (commit.y..commit.bottom())
-        .flat_map(|y| (commit.x..commit.right()).map(move |x| (x, y)))
-        .map(|position| terminal.backend().buffer()[position].symbol())
-        .collect();
+    let commit_text = (commit.y..commit.bottom())
+        .map(|y| {
+            (commit.x + 1..commit.right() - 1)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(commit_text.contains("Write a commit message"));
     click(&mut app, graph_toggle.x, graph_toggle.y);
     assert_eq!(app.view(), View::Changes);

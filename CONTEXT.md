@@ -40,19 +40,6 @@ The complete filesystem tree inside the workspace, including Git-ignored content
 
 The `o` interaction for finding and opening another workspace. Confirming a file path opens the file's parent directory as a workspace and selects the file.
 
-## Norm destination
-
-The active Repository, Linked worktree, or Local workspace where Hunkle asks
-Norm to open a tab. The header cards define this filesystem destination;
-clicking Agent or pressing `Ctrl+Space` uses it directly.
-
-## Norm workspace following
-
-Hunkle treats the first Norm presence snapshot as a baseline. A later active-tab
-change from the same Norm daemon opens that tab's workspace in Hunkle. Hunkle
-does not inspect or manage the tab's agent, model, conversation, process, or
-terminal layout.
-
 ## Interaction
 
 A focused user flow that owns its transient state and interprets input. An interaction may emit an application effect, such as opening a selected workspace.

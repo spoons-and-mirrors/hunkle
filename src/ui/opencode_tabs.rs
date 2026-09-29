@@ -1,6 +1,6 @@
 use super::*;
 
-/// Norm-style cards with local grouping; OpenCode owns their identity and active state.
+/// Tab cards with local grouping; OpenCode owns their identity and active state.
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width < 20 || area.height < 5 {
         return;

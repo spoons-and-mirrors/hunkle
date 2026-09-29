@@ -58,23 +58,15 @@ fn main() -> Result<()> {
     let mut arguments = std::env::args_os().skip(1);
     let requested = arguments.next();
     let tabs_only = requested.as_deref() == Some(OsStr::new("--tabs"));
-    let no_tabs = requested.as_deref() == Some(OsStr::new("--no-tabs"));
     let tabs_mono = requested.as_deref() == Some(OsStr::new("--tabs-mono"));
     if tabs_only && arguments.next().is_some() {
         anyhow::bail!("usage: hunkle --tabs");
     }
-    let path = match (tabs_only, no_tabs || tabs_mono, requested) {
+    let path = match (tabs_only, tabs_mono, requested) {
         (false, true, _) => {
             let path = arguments.next().map(PathBuf::from);
             if arguments.next().is_some() {
-                anyhow::bail!(
-                    "usage: hunkle {} [path]",
-                    if tabs_mono {
-                        "--tabs-mono"
-                    } else {
-                        "--no-tabs"
-                    }
-                );
+                anyhow::bail!("usage: hunkle --tabs-mono [path]");
             }
             path.map_or_else(std::env::current_dir, Ok)?
         }
@@ -197,10 +189,6 @@ fn main() -> Result<()> {
             for _ in 0..poll_interval.as_millis() / FAST_POLL_INTERVAL.as_millis() {
                 if event::poll(FAST_POLL_INTERVAL)? {
                     ready = true;
-                    break;
-                }
-                if !tabs_only && app.poll_norm_presence() {
-                    dirty = true;
                     break;
                 }
             }
@@ -328,8 +316,6 @@ fn main() -> Result<()> {
         } else {
             if tabs_mono {
                 command.arg("--tabs-mono");
-            } else if no_tabs {
-                command.arg("--no-tabs");
             }
             command.arg(workspace.as_deref().expect("workspace mode has a path"));
         }

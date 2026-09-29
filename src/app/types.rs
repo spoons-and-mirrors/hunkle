@@ -334,7 +334,6 @@ pub(crate) enum HitTarget {
     HeaderBranch,
     HeaderDiff,
     HeaderIssue,
-    HeaderAgent,
     HeaderPickerOverlay,
     HeaderPickerNewBranch,
     HeaderPickerOpenExplorer,

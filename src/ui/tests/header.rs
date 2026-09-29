@@ -2,7 +2,7 @@ use super::*;
 use crate::app::WorktreePickerStep;
 
 #[test]
-fn local_workspace_keeps_the_agent_action() {
+fn local_workspace_header_shows_repository_without_agent_action() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -12,18 +12,20 @@ fn local_workspace_keeps_the_agent_action() {
     assert!(app.repository().unwrap().is_local());
     assert!(
         app.regions
-            .hit_target_rect(HitTarget::HeaderAgent)
+            .hit_target_rect(HitTarget::HeaderRepository)
             .is_some()
     );
-    assert!(screen_text(&terminal).contains("AGENT"));
+    assert!(screen_text(&terminal).contains("LOCAL"));
+    assert!(!screen_text(&terminal).contains("AGENT"));
 }
 
 #[test]
 fn mobile_header_cards_scroll_horizontally_without_losing_taps() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["init", "-b", "feature/header-cards-scroll-past-the-edge"]);
     let mut app = App::new(root.to_path_buf());
+    wait_for(&mut app, |app| app.repository().is_some_and(|repo| repo.details_ready));
     let mut terminal = Terminal::new(TestBackend::new(49, 24)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -75,11 +77,9 @@ fn mobile_header_cards_scroll_horizontally_without_losing_taps() {
     assert!(!app.header_picker.is_open());
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(
-        app.regions
-            .hit_target_rect(HitTarget::HeaderAgent)
-            .is_some()
-    );
+    let issue = app.regions.hit_target_rect(HitTarget::HeaderIssue).unwrap();
+    click(&mut app, issue.x, issue.y);
+    assert_eq!(app.header_picker.kind, Some(HeaderPickerKind::Issues));
 }
 
 #[test]
@@ -736,7 +736,6 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .unwrap();
     let diff = app.regions.hit_target_rect(HitTarget::HeaderDiff).unwrap();
     let issue = app.regions.hit_target_rect(HitTarget::HeaderIssue).unwrap();
-    let agent = app.regions.hit_target_rect(HitTarget::HeaderAgent).unwrap();
     assert_eq!(repository.x, 2);
     assert_eq!(terminal.backend().buffer()[(0, 2)].symbol(), " ");
     assert_eq!(
@@ -763,7 +762,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
     assert!(worktrees.right() <= branch.x);
     assert_eq!(branch.right().saturating_add(2), diff.x);
     assert_eq!(diff.right().saturating_add(2), issue.x);
-    assert_eq!(issue.right().saturating_add(2), agent.x);
+    assert!(!screen_text(&terminal).contains("AGENT"));
     assert_eq!(
         terminal.backend().buffer()[(repository.x - 1, repository.y)].symbol(),
         "▌"
@@ -796,11 +795,7 @@ fn header_cards_open_pickers_and_checkout_branches() {
         terminal.backend().buffer()[(issue.x - 1, issue.y)].fg,
         super::palette().cyan
     );
-    assert_eq!(
-        terminal.backend().buffer()[(agent.x - 1, agent.y)].fg,
-        super::palette().green
-    );
-    for card in [repository, worktrees, branch, diff, issue, agent] {
+    for card in [repository, worktrees, branch, diff, issue] {
         assert_eq!(
             terminal.backend().buffer()[(card.x + 1, card.y)].bg,
             super::palette().panel
@@ -878,19 +873,6 @@ fn header_cards_open_pickers_and_checkout_branches() {
         .map(|x| terminal.backend().buffer()[(x, branch.y)].symbol())
         .collect::<String>();
     assert_eq!(branch_text, format!(" {long_branch} ↑1 "));
-
-    click(&mut app, agent.x, agent.y);
-    assert_eq!(app.header_picker.kind, None);
-    assert_eq!(
-        app.notice.as_deref(),
-        Some("No running Norm TUI is available")
-    );
-
-    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
-    assert_eq!(
-        app.notice.as_deref(),
-        Some("No running Norm TUI is available")
-    );
 
     click(&mut app, diff.x, diff.y);
     assert_eq!(app.mode, Mode::Normal);
@@ -1129,7 +1111,6 @@ fn header_cards_open_pickers_and_checkout_branches() {
         (HitTarget::HeaderWorktrees, true),
         (HitTarget::HeaderBranch, true),
         (HitTarget::HeaderDiff, true),
-        (HitTarget::HeaderAgent, true),
     ] {
         let control = app.regions.hit_target_rect(target).unwrap();
         assert_eq!(

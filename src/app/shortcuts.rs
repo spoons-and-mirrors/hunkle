@@ -14,7 +14,6 @@ pub(crate) enum ShortcutAction {
     OpenSettings,
     OpenActions,
     OpenGitCommand,
-    OpenNormTab,
     OpenHelp,
     ToggleWrap,
     ToggleRenderedPreview,
@@ -265,15 +264,6 @@ pub(crate) static SHORTCUTS: &[ShortcutDefinition] = &[
         MAIN,
         KeyCode::Char('g'),
         KeyModifiers::SHIFT
-    ),
-    shortcut!(
-        OpenNormTab,
-        "start-agent",
-        "Start agent",
-        "Navigation",
-        MAIN,
-        KeyCode::Char(' '),
-        KeyModifiers::CONTROL
     ),
     shortcut!(
         OpenHelp,
@@ -607,15 +597,13 @@ mod tests {
     }
 
     #[test]
-    fn control_space_opens_a_norm_tab_by_default() {
-        let shortcuts = Shortcuts::default();
+    fn removed_agent_shortcut_is_not_bound_or_restored_from_settings() {
+        let mut shortcuts = Shortcuts::default();
         let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
 
-        assert_eq!(
-            shortcuts.main_action(key),
-            Some(ShortcutAction::OpenNormTab)
-        );
-        assert_eq!(shortcuts.label(ShortcutAction::OpenNormTab), "Ctrl+Space");
+        shortcuts.load_override("start-agent", "Ctrl+Space");
+        assert_eq!(shortcuts.main_action(key), None);
+        assert!(!shortcuts.serialized().any(|(id, _)| id == "start-agent"));
     }
 
     #[test]

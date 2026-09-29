@@ -13,8 +13,7 @@ directories.
 - Run push, fetch, pull-with-rebase, and non-interactive Git commands.
 - Open and create linked Git worktrees from the header.
 - Search or open repositories, directories, and files through Explorer.
-- Open a Norm tab for the active workspace and follow active Norm-tab workspace
-  changes.
+- Follow active OpenCode-tab workspace changes and show existing tabs in an optional strip.
 - Use the same repository and preview state across narrow and wide layouts.
 
 ## Run
@@ -27,7 +26,6 @@ cargo run -p hunkle -- /path/to/repository
 cargo run -p hunkle -- /path/to/file.json
 cargo run -p hunkle -- --tabs
 cargo run -p hunkle -- --tabs-mono
-cargo run -p hunkle -- --no-tabs
 ```
 
 Hunkle opens exactly the requested path. A Git repository root enables status,
@@ -47,8 +45,8 @@ starts an OpenCode server, and ignores workspace-follow events. Press `q` or
 `Ctrl+C` to exit.
 
 By default, `hunkle` (or `hunkle /path/to/repository`) opens the normal workspace
-without the OpenCode strip. `--no-tabs [path]` remains an explicit alias.
-`hunkle --tabs-mono [path]` opens the workspace **with** the strip above it. Both
+without the OpenCode strip. `hunkle --tabs-mono [path]` opens the workspace
+**with** the strip above it. Both
 workspace modes still follow OpenCode tab switches, so `hunkle --tabs` and a
 plain `hunkle` can live in separate panes.
 
@@ -64,23 +62,6 @@ independent from other Hunkle worktrees. It is offline by default. Use
 `cargo hunkle-install-global` only for an explicitly requested global release
 install.
 
-## Norm
-
-Click the green **AGENT** header card or press `Ctrl+Space` to ask a running Norm
-TUI to open a tab at Hunkle's active workspace. Hunkle passes the workspace path
-to `norm open`; it does not create or manage the tab's session, process, model,
-conversation, transcript, or terminal layout.
-
-Hunkle passively watches the same-user Norm presence socket at
-`$XDG_RUNTIME_DIR/norm/daemon.sock`, falling back to
-`/tmp/norm-<euid>/norm/daemon.sock`. The first snapshot establishes a baseline.
-When an existing Norm instance changes its active tab within the same daemon
-epoch, Hunkle opens that tab's workspace. A daemon replacement establishes a new
-baseline instead of moving Hunkle. Hunkle does not start, attach to, or control a
-Norm TUI.
-
-These are Hunkle's only Norm responsibilities.
-
 ## OpenCode V2 tabs
 
 To follow OpenCode V2 CLI tabs, add the local CLI-only plugin to
@@ -92,6 +73,18 @@ To follow OpenCode V2 CLI tabs, add the local CLI-only plugin to
 
 `~/code/ocplugins/hunkle-sync` is a symlink to this repository's
 `plugins/opencode-hunkle`, which is the source of truth for the plugin.
+
+For Hunkle-only tabs, set `"tabs": { "mode": "off" }` in the same CLI config.
+The plugin imports OpenCode's saved tabs once, then remembers visited sessions
+in durable plugin storage and navigates through OpenCode's public router API.
+This works with the official OpenCode build. The external list is global across
+local CLI instances and survives restarts. With native tabs enabled, their list
+continues to be mirrored instead.
+
+With native tabs off, **Ctrl+Tab / Alt+Down** and **Ctrl+Shift+Tab / Alt+Up** cycle
+the external list in OpenCode. Use **Close Hunkle tab** in its command palette
+or `/hunkle-close` to remove a card without deleting or stopping the session.
+Visiting that session again restores its card.
 
 In `--tabs` or `--tabs-mono` mode, Hunkle shows two-row cards with repository and branch,
 with the OpenCode session title beneath each card,
@@ -105,8 +98,7 @@ leave your group visibility choices alone.
 Click a card to focus that tab in OpenCode; Hunkle follows its confirmed selection.
 Hover a card and press **F2** to rename the actual OpenCode session. The editor
 starts with its current title; Enter/✓ sends the rename to OpenCode, Esc/× cancels,
-and empty names are rejected. Older Hunkle-only session labels remain preserved
-in the group catalog but are no longer displayed. The separator below the cards
+and empty names are rejected. The separator below the cards
 highlights the visible portion of the active session.
 Activity and title updates redraw without reopening
 the workspace, and the strip disappears when its OpenCode CLI exits.
@@ -129,7 +121,7 @@ The strip has one flat layer of named groups, initially **General**:
 
 Group names, card assignments, card order, and visibility are saved in Hunkle's config directory
 as `opencode-groups.json`. They survive workspace switches and OpenCode restarts.
-Grouping only organizes Hunkle's strip; OpenCode continues to own the tabs.
+Grouping only organizes Hunkle's strip; the OpenCode plugin supplies the open-tab list.
 
 Herdr normally reserves right-click for its pane menu. To forward Ctrl+right-click
 to Hunkle, set `right_click_passthrough_modifier = "ctrl"` under `[ui]` in
@@ -178,7 +170,6 @@ the emergency quit command elsewhere.
 | `s` | Open Settings |
 | `x` | Open repository Actions |
 | `G` | Open Git command input |
-| `Ctrl+Space` | Open a Norm tab for the active workspace |
 | `?` | Open Help |
 | `q` | Quit |
 
@@ -255,7 +246,7 @@ log rotates at 4 MiB.
 | `app::explorer` | Workspace discovery, fuzzy search, and navigation |
 | `app::file_editor` | Inline editing and safe atomic persistence |
 | `app::linked_worktrees` | Git-authoritative linked-worktree catalog |
-| `app::norm_presence` | Norm tab opening and active-workspace following |
+| `app::opencode_presence` | Existing OpenCode tabs and active-workspace following |
 | `app::settings` | Settings validation and persistence |
 | `app::shortcuts` | Named commands, conflicts, and overrides |
 | `repository_session` | Workspace lifecycle, background work, and stale-result rejection |

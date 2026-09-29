@@ -41,9 +41,6 @@ pub(super) fn draw_header(
     let diff_width = UnicodeWidthStr::width(diff_badge) as u16;
     let issue_badge = " ISSUE ";
     let issue_width = UnicodeWidthStr::width(issue_badge) as u16;
-    let agent_badge = " AGENT ";
-    let agent_width = UnicodeWidthStr::width(agent_badge) as u16;
-    let local_agent_width = usize::from(card_gap_width) + usize::from(agent_width);
     let comparison = app
         .changes
         .branch_comparison()
@@ -66,9 +63,7 @@ pub(super) fn draw_header(
                 + usize::from(card_gap_width)
                 + usize::from(diff_width)
                 + usize::from(card_gap_width)
-                + usize::from(issue_width)
-                + usize::from(card_gap_width)
-                + usize::from(agent_width),
+                + usize::from(issue_width),
         ))
     };
     let repository_width = UnicodeWidthStr::width(repository.as_str())
@@ -81,11 +76,10 @@ pub(super) fn draw_header(
         + usize::from(diff_width)
         + usize::from(card_gap_width)
         + usize::from(issue_width)
-        + usize::from(card_gap_width)
-        + usize::from(agent_width)
+        + usize::from(card_gap_width) * usize::from(comparison.is_some())
         + comparison_width;
     let badge_width = if is_local {
-        2 + repository_width + usize::from(card_gap_width) + "LOCAL".len() + local_agent_width
+        2 + repository_width + usize::from(card_gap_width) + "LOCAL".len()
     } else {
         2 + repository_width
             + usize::from(card_gap_width)
@@ -210,7 +204,6 @@ pub(super) fn draw_header(
             branch_width
                 .saturating_add(diff_width)
                 .saturating_add(issue_width)
-                .saturating_add(agent_width)
                 .saturating_add(comparison_width as u16)
                 .saturating_add(10)
         })
@@ -232,21 +225,6 @@ pub(super) fn draw_header(
             Style::default().fg(palette().muted),
             room,
         );
-        let room = remaining(x);
-        let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-        let room = remaining(x);
-        let agent_rect = render_card(
-            frame,
-            &mut x,
-            agent_badge.to_owned(),
-            palette().green,
-            app.hovered_hit_target == Some(HitTarget::HeaderAgent),
-            room,
-        );
-        if let Some(rect) = agent_rect {
-            app.regions
-                .register_hit_target(HitTarget::HeaderAgent, rect);
-        }
     } else {
         let room = remaining(x);
         let worktree_rect = render_card(
@@ -259,7 +237,6 @@ pub(super) fn draw_header(
                 branch_width
                     .saturating_add(diff_width)
                     .saturating_add(issue_width)
-                    .saturating_add(agent_width)
                     .saturating_add(comparison_width as u16)
                     .saturating_add(4u16.saturating_sub(card_gap_width.saturating_sub(1))),
             )
@@ -275,7 +252,6 @@ pub(super) fn draw_header(
         let branch_limit = room.saturating_sub(
             diff_width
                 .saturating_add(issue_width)
-                .saturating_add(agent_width)
                 .saturating_add(comparison_width as u16)
                 .saturating_add(2 + card_gap_width.saturating_sub(1).saturating_mul(3)),
         );
@@ -300,11 +276,7 @@ pub(super) fn draw_header(
             diff_badge.to_owned(),
             palette().purple,
             app.hovered_hit_target == Some(HitTarget::HeaderDiff),
-            room.saturating_sub(
-                issue_width
-                    .saturating_add(agent_width)
-                    .saturating_add(card_gap_width.saturating_mul(2)),
-            ),
+            room.saturating_sub(issue_width.saturating_add(card_gap_width)),
         );
         if let Some(rect) = diff_rect {
             app.regions.register_hit_target(HitTarget::HeaderDiff, rect);
@@ -319,28 +291,15 @@ pub(super) fn draw_header(
             palette().cyan,
             app.hovered_hit_target == Some(HitTarget::HeaderIssue)
                 || app.header_picker.kind == Some(HeaderPickerKind::Issues),
-            room.saturating_sub(agent_width.saturating_add(card_gap_width)),
+            room,
         );
         if let Some(rect) = issue_rect {
             app.regions
                 .register_hit_target(HitTarget::HeaderIssue, rect);
         }
-        let room = remaining(x);
-        let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
-        let room = remaining(x);
-        let agent_rect = render_card(
-            frame,
-            &mut x,
-            agent_badge.to_owned(),
-            palette().green,
-            app.hovered_hit_target == Some(HitTarget::HeaderAgent),
-            room,
-        );
-        if let Some(rect) = agent_rect {
-            app.regions
-                .register_hit_target(HitTarget::HeaderAgent, rect);
-        }
         if let Some(comparison) = comparison {
+            let room = remaining(x);
+            let _ = render(frame, &mut x, card_gap.to_owned(), Style::default(), room);
             let room = remaining(x);
             let _ = render(
                 frame,
@@ -432,7 +391,6 @@ pub(super) fn draw_header_card_bottom_padding(frame: &mut Frame<'_>, app: &App) 
         (HitTarget::HeaderBranch, palette().accent),
         (HitTarget::HeaderDiff, palette().purple),
         (HitTarget::HeaderIssue, palette().cyan),
-        (HitTarget::HeaderAgent, palette().green),
     ] {
         let Some(rect) = app.regions.hit_target_rect(target.clone()) else {
             continue;

@@ -15,11 +15,6 @@ mod issues;
 pub(crate) mod layout_configuration;
 mod linked_worktrees;
 mod mouse;
-#[cfg(unix)]
-mod norm_presence;
-#[cfg(not(unix))]
-#[path = "norm_presence_non_unix.rs"]
-mod norm_presence;
 mod opencode_groups;
 #[cfg(unix)]
 mod opencode_presence;
@@ -53,7 +48,6 @@ pub(crate) use header_picker::{
 };
 pub(crate) use issues::{IssueCatalog, IssueScope};
 pub(crate) use linked_worktrees::{LinkedWorktreeCatalog, RepositoryPickerItem};
-pub(crate) use norm_presence::NormPresence;
 use opencode_presence::OpenCodePresence;
 pub use settings::Settings;
 pub(crate) use settings::{SettingsEffect, SettingsState, SettingsStore};
@@ -138,7 +132,6 @@ pub struct App {
     pub(crate) actions: ActionsState,
     pub(crate) header_picker: HeaderPicker,
     pub(crate) linked_worktrees: LinkedWorktreeCatalog,
-    pub(crate) norm_presence: NormPresence,
     pub(crate) opencode_presence: OpenCodePresence,
     pub(crate) opencode_groups: opencode_groups::OpenCodeGroups,
     pub(crate) hovered_hit_target: Option<HitTarget>,
@@ -265,10 +258,6 @@ impl App {
             let _ = linked_worktrees
                 .remember_workspace(repository.common_dir.as_deref(), &repository.root);
         }
-        #[cfg(not(test))]
-        let norm_presence = NormPresence::new();
-        #[cfg(test)]
-        let norm_presence = NormPresence::new().disabled_for_test();
         if !tabs_only {
             linked_worktrees.refresh();
         }
@@ -332,7 +321,6 @@ impl App {
             actions: ActionsState::default(),
             header_picker: HeaderPicker::default(),
             linked_worktrees,
-            norm_presence,
             opencode_presence: OpenCodePresence::new(),
             opencode_groups: opencode_groups::OpenCodeGroups::load(opencode_groups_path),
             hovered_hit_target: None,
@@ -606,7 +594,6 @@ impl App {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.norm_presence.shutdown();
         self.file_search.shutdown();
         self.changes.shutdown();
         self.commit_summaries.shutdown();
@@ -779,10 +766,6 @@ impl App {
         self.copy_request.take()
     }
 
-    pub fn poll_norm_presence(&mut self) -> bool {
-        self.norm_presence.poll()
-    }
-
     pub fn poll_tabs_only(&mut self) -> bool {
         debug_assert!(self.tabs_only);
         let update = self.opencode_presence.poll();
@@ -838,14 +821,6 @@ impl App {
     pub fn poll_worker(&mut self) -> bool {
         let now = Instant::now();
         let mut changed = false;
-        changed |= self.poll_norm_presence();
-        if let Some(result) = self.norm_presence.take_open_tab_completion() {
-            self.notice = Some(match result {
-                Ok(()) => "Started agent in a new Norm tab".to_owned(),
-                Err(error) => format!("Norm agent creation failed: {error}"),
-            });
-            changed = true;
-        }
         if let Some(marquee) = &mut self.footer_marquee
             && now >= marquee.next_frame
         {
@@ -859,7 +834,6 @@ impl App {
             let visible = self.graph_visible_indices();
             changed |= self.graph_search.poll(&visible);
         }
-        changed |= self.follow_norm_workspace_changes();
         let opencode = self.opencode_presence.poll();
         if opencode.active_session_changed && self.show_opencode_tabs {
             self.follow_active_opencode_group();
@@ -1407,21 +1381,6 @@ impl App {
         changed
     }
 
-    fn follow_norm_workspace_changes(&mut self) -> bool {
-        let changes = self.norm_presence.take_workspace_changes();
-        let mut followed = false;
-        for change in changes {
-            diagnostics::event(format!(
-                "following Norm workspace instance={} path={}",
-                change.instance_id,
-                change.workspace.display()
-            ));
-            self.queue_workspace_open(change.workspace);
-            followed = true;
-        }
-        followed
-    }
-
     pub(crate) fn reset_media_presentation(&mut self) {
         self.changes.preview_presentation.hide_media();
     }
@@ -1678,7 +1637,6 @@ impl App {
                 self.notice = Some("A Git operation is still running".to_owned());
             }
             ShortcutAction::Quit => self.request_quit(),
-            ShortcutAction::OpenNormTab => self.open_norm_tab(),
             ShortcutAction::Refresh => self.reload(RefreshScope::ALL),
             ShortcutAction::OpenExplorer => self.open_explorer(),
             ShortcutAction::OpenSettings => self.open_settings(),

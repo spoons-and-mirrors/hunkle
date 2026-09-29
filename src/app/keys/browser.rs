@@ -294,26 +294,6 @@ impl App {
         self.header_picker.message = message;
     }
 
-    pub(crate) fn open_norm_tab(&mut self) {
-        if self.mode != Mode::Normal || self.session.open_running() {
-            return;
-        }
-        self.header_picker.close();
-        let Some(path) = self.norm_destination() else {
-            self.notice = Some("Open a workspace first".to_owned());
-            return;
-        };
-        if let Err(error) = self.norm_presence.open_tab(path) {
-            self.notice = Some(error);
-        } else {
-            self.notice = Some("Starting agent in a new Norm tab".to_owned());
-        }
-    }
-
-    pub(crate) fn norm_destination(&self) -> Option<PathBuf> {
-        Some(self.repository()?.root.clone())
-    }
-
     pub(crate) fn handle_header_picker(&mut self, key: KeyEvent) {
         if self.header_picker.naming_branch() {
             self.handle_new_branch_name(key);
