@@ -119,8 +119,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    let [tabs_area, header, content, padding, navigation] =
-        workspace::frame_areas(frame.area(), !app.opencode_presence.tabs.items.is_empty());
+    let [tabs_area, header, content, padding, navigation] = workspace::frame_areas(
+        frame.area(),
+        app.show_opencode_tabs && !app.opencode_presence.tabs.items.is_empty(),
+    );
     opencode_tabs::draw(frame, app, tabs_area);
     let layout = [header, content, padding, navigation];
 
@@ -329,9 +331,9 @@ pub fn draw_tabs_only(frame: &mut Frame<'_>, app: &mut App) {
         frame.area(),
     );
     let area = workspace::tabs_widget_area(frame.area());
-    if area.width < 20 || area.height < 6 {
+    if area.width < 20 || area.height < 5 {
         frame.render_widget(
-            Paragraph::new("Tabs need at least 20 columns and 6 rows")
+            Paragraph::new("Tabs need at least 20 columns and 5 rows")
                 .style(Style::default().fg(palette().muted)),
             frame.area(),
         );

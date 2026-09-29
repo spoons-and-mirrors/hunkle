@@ -249,6 +249,24 @@ impl OpenCodeGroups {
 }
 
 impl App {
+    pub(super) fn follow_active_opencode_group(&mut self) {
+        let Some(tab) = self.opencode_presence.tabs.items.iter().find(|tab| tab.active) else {
+            return;
+        };
+        let group = self.opencode_groups.group_for(&tab.session_id);
+        if self.opencode_groups.visible(group) {
+            return;
+        }
+        if self.opencode_groups.catalog.solo.is_some() {
+            self.opencode_groups.catalog.solo = Some(group);
+        } else {
+            self.opencode_groups.catalog.hidden.remove(&group);
+        }
+        self.opencode_groups.last_click = None;
+        self.opencode_presence.tabs.reveal_active = true;
+        self.persist_opencode_groups();
+    }
+
     fn persist_opencode_groups(&mut self) {
         if let Err(error) = self.opencode_groups.save() {
             self.notice = Some(format!("Could not save tab groups: {error}"));

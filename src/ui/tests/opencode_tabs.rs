@@ -1,15 +1,16 @@
 use super::*;
 
 #[test]
-fn tabs_widget_renders_only_the_six_row_strip_and_waits_for_opencode() {
+fn tabs_widget_keeps_the_group_gap_and_crops_only_the_divider_at_five_rows() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::tabs_only(directory.path().to_path_buf());
-    let mut terminal = Terminal::new(TestBackend::new(49, 6)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(49, 5)).unwrap();
     terminal
         .draw(|frame| draw_tabs_only(frame, &mut app))
         .unwrap();
     assert!(screen_text(&terminal).contains("Waiting for OpenCode tabs"));
-    assert_eq!(terminal.backend().buffer()[(0, 5)].symbol(), "─");
+    assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), " ");
+    assert_eq!(terminal.backend().buffer()[(4, 2)].symbol(), "W");
     assert!(
         app.regions
             .hit_target_rect(HitTarget::HeaderRepository)
@@ -25,7 +26,7 @@ fn tabs_widget_renders_only_the_six_row_strip_and_waits_for_opencode() {
         }))
         .unwrap(),
     );
-    for (width, height) in [(20, 6), (49, 6), (120, 20)] {
+    for (width, height) in [(20, 5), (49, 5), (49, 6), (120, 20)] {
         terminal.backend_mut().resize(width, height);
         terminal
             .draw(|frame| draw_tabs_only(frame, &mut app))
@@ -35,17 +36,26 @@ fn tabs_widget_renders_only_the_six_row_strip_and_waits_for_opencode() {
             text.contains("Important"),
             "session title in {width} columns"
         );
-        assert_eq!(terminal.backend().buffer()[(0, 5)].symbol(), "─");
+        assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), " ");
+        assert_eq!(terminal.backend().buffer()[(4, 2)].symbol(), "▌");
+        assert_eq!(terminal.backend().buffer()[(5, 4)].symbol(), "I");
+        assert_eq!(
+            app.regions.scroll_target_at(Position::new(8, 2)),
+            Some(ScrollTarget::OpenCodeTabs)
+        );
         assert!(
             app.regions
                 .hit_target_rect(HitTarget::HeaderRepository)
                 .is_none()
         );
+        if height >= 6 {
+            assert_eq!(terminal.backend().buffer()[(0, 5)].symbol(), "─");
+        }
         if height > 6 {
             assert_eq!(terminal.backend().buffer()[(0, 6)].symbol(), " ");
         }
     }
-    terminal.backend_mut().resize(49, 5);
+    terminal.backend_mut().resize(49, 4);
     terminal
         .draw(|frame| draw_tabs_only(frame, &mut app))
         .unwrap();
@@ -55,6 +65,53 @@ fn tabs_widget_renders_only_the_six_row_strip_and_waits_for_opencode() {
             .scroll_state(&ScrollTarget::OpenCodeTabs)
             .is_none()
     );
+}
+
+#[test]
+fn workspace_defaults_to_no_strip_and_tabs_mono_restores_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.mode = Mode::Normal;
+    app.opencode_presence.tabs.items.push(
+        serde_json::from_value(serde_json::json!({
+            "sessionID": "tab", "title": "Important task", "project": "Hunkle",
+            "branch": "feature/widget", "directory": directory.path(), "active": true,
+            "busy": false, "attention": false
+        }))
+        .unwrap(),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    assert!(!app.show_opencode_tabs);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let without_strip = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderRepository)
+        .unwrap()
+        .y;
+    assert!(
+        app.regions
+            .scroll_state(&ScrollTarget::OpenCodeTabs)
+            .is_none()
+    );
+    assert!(!screen_text(&terminal).contains("Important task"));
+    app.show_opencode_tabs = true;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let with_strip = app
+        .regions
+        .hit_target_rect(HitTarget::HeaderRepository)
+        .unwrap()
+        .y;
+    assert_eq!(with_strip, without_strip + 6);
+    assert!(screen_text(&terminal).contains("Important task"));
+    app.show_opencode_tabs = false;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .scroll_state(&ScrollTarget::OpenCodeTabs)
+            .is_none()
+    );
+    assert!(!screen_text(&terminal).contains("Important task"));
+    assert!(!app.opencode_presence.tabs.items.is_empty());
 }
 
 #[test]
@@ -78,6 +135,7 @@ fn opencode_strip_tracks_active_cards_and_scrolls_in_both_compositions() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
+    app.show_opencode_tabs = true;
     app.mode = Mode::Normal;
     app.opencode_presence.tabs.items = (0..8)
         .map(|index| {
@@ -123,7 +181,7 @@ fn opencode_strip_tracks_active_cards_and_scrolls_in_both_compositions() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_divider(&terminal);
     assert!(!app.header_picker.is_open());
-    assert!(screen_text(&terminal).contains("Task 6"));
+    assert!(screen_text(&terminal).contains("Task 5"));
     let offset = app.opencode_presence.tabs.scroll;
     app.opencode_presence.tabs.items[7].busy = true;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

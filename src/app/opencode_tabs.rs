@@ -45,5 +45,6 @@ impl OpenCodeTabs {
 #[derive(Default)]
 pub(crate) struct OpenCodeUpdate {
     pub changed: bool,
+    pub active_session_changed: bool,
     pub workspace: Option<PathBuf>,
 }

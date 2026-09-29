@@ -2,7 +2,7 @@ use super::*;
 
 /// Norm-style cards with local grouping; OpenCode owns their identity and active state.
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    if area.width < 20 || area.height < 6 {
+    if area.width < 20 || area.height < 5 {
         return;
     }
     draw_groups(frame, app, Rect::new(area.x, area.y, area.width, 1));
@@ -16,20 +16,49 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .collect::<Vec<_>>();
     let viewport = Rect::new(area.x + 4, area.y + 2, area.width - 5, 3);
     let divider_y = viewport.bottom();
-    frame.render_widget(
-        Paragraph::new("─".repeat(usize::from(area.width)))
-            .style(Style::default().fg(palette().faint)),
-        Rect::new(area.x, divider_y, area.width, 1),
-    );
+    if area.height >= 6 {
+        frame.render_widget(
+            Paragraph::new("─".repeat(usize::from(area.width)))
+                .style(Style::default().fg(palette().faint)),
+            Rect::new(area.x, divider_y, area.width, 1),
+        );
+    }
     tabs.reveal_active |= tabs.viewport_width != viewport.width;
     tabs.viewport_width = viewport.width;
-    let width = 24usize.min(usize::from(viewport.width));
-    let stride = width + 1;
-    let total = (visible.len() * stride).saturating_sub(1);
+    let mut total = 0usize;
+    let cards = visible
+        .into_iter()
+        .map(|index| {
+            let tab = &tabs.items[index];
+            let project = tab.project.clone().unwrap_or_else(|| {
+                tab.directory
+                    .as_deref()
+                    .map(|path| path.file_name().unwrap_or(path.as_os_str()))
+                    .map(|name| {
+                        name.to_string_lossy()
+                            .chars()
+                            .filter(|character| !character.is_control())
+                            .collect::<String>()
+                    })
+                    .unwrap_or_else(|| "Loading…".to_owned())
+            });
+            let width = (project.width() + 5)
+                .max(tab.branch.as_deref().unwrap_or("—").width() + 3)
+                .max(tab.title.width() + 2)
+                .clamp(10, 24)
+                .min(usize::from(viewport.width));
+            let start = total;
+            total += width + 1;
+            (index, project, start, width)
+        })
+        .collect::<Vec<_>>();
+    let total = total.saturating_sub(1);
     let maximum = total.saturating_sub(usize::from(viewport.width));
     if tabs.reveal_active {
-        if let Some(index) = visible.iter().position(|&index| tabs.items[index].active) {
-            let left = index * stride;
+        if let Some(&(_, _, left, width)) = cards
+            .iter()
+            .find(|&&(index, _, _, _)| tabs.items[index].active)
+        {
             let right = left + width;
             if left < tabs.scroll {
                 tabs.scroll = left;
@@ -50,7 +79,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Paragraph::new("OC").style(Style::default().fg(palette().muted)),
         Rect::new(area.x, viewport.y, 2, 1),
     );
-    if visible.is_empty() {
+    if cards.is_empty() {
         frame.render_widget(
             Paragraph::new(if tabs.items.is_empty() {
                 "Waiting for OpenCode tabs…"
@@ -61,9 +90,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             viewport,
         );
     }
-    for (index, &tab_index) in visible.iter().enumerate() {
+    for (tab_index, project, start, width) in cards {
         let tab = &tabs.items[tab_index];
-        let start = index * stride;
         let end = start + width;
         let left = start.max(tabs.scroll);
         let right = end.min(tabs.scroll + usize::from(viewport.width));
@@ -90,21 +118,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         } else {
             ("●", palette().green)
         };
-        let fallback = tab
-            .directory
-            .as_deref()
-            .map(|path| path.file_name().unwrap_or(path.as_os_str()))
-            .map(|name| {
-                name.to_string_lossy()
-                    .chars()
-                    .filter(|character| !character.is_control())
-                    .collect::<String>()
-            })
-            .unwrap_or_else(|| "Loading…".to_owned());
-        let title = truncate_width(
-            tab.project.as_deref().unwrap_or(&fallback),
-            width.saturating_sub(5),
-        );
+        let title = truncate_width(&project, width.saturating_sub(5));
         let title_style = Style::default().fg(if tab.active {
             palette().ink
         } else {
@@ -167,7 +181,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .scroll((0, (left - start) as u16)),
             Rect::new(rect.x, viewport.bottom() - 1, rect.width, 1),
         );
-        if tab.active {
+        if tab.active && area.height >= 6 {
             frame.render_widget(
                 Paragraph::new("─".repeat(usize::from(rect.width)))
                     .style(Style::default().fg(palette().orange)),

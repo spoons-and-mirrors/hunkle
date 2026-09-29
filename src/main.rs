@@ -58,11 +58,27 @@ fn main() -> Result<()> {
     let mut arguments = std::env::args_os().skip(1);
     let requested = arguments.next();
     let tabs_only = requested.as_deref() == Some(OsStr::new("--tabs"));
+    let no_tabs = requested.as_deref() == Some(OsStr::new("--no-tabs"));
+    let tabs_mono = requested.as_deref() == Some(OsStr::new("--tabs-mono"));
     if tabs_only && arguments.next().is_some() {
         anyhow::bail!("usage: hunkle --tabs");
     }
-    let path = match (tabs_only, requested) {
-        (false, Some(path)) => PathBuf::from(path),
+    let path = match (tabs_only, no_tabs || tabs_mono, requested) {
+        (false, true, _) => {
+            let path = arguments.next().map(PathBuf::from);
+            if arguments.next().is_some() {
+                anyhow::bail!(
+                    "usage: hunkle {} [path]",
+                    if tabs_mono {
+                        "--tabs-mono"
+                    } else {
+                        "--no-tabs"
+                    }
+                );
+            }
+            path.map_or_else(std::env::current_dir, Ok)?
+        }
+        (false, false, Some(path)) => PathBuf::from(path),
         _ => std::env::current_dir()?,
     };
 
@@ -70,7 +86,13 @@ fn main() -> Result<()> {
         diagnostics::event(format!(
             "startup pid={} mode={} path={} log={}",
             std::process::id(),
-            if tabs_only { "tabs" } else { "workspace" },
+            if tabs_only {
+                "tabs"
+            } else if tabs_mono {
+                "workspace-with-tabs"
+            } else {
+                "workspace"
+            },
             path.display(),
             log_path.display()
         ));
@@ -92,6 +114,7 @@ fn main() -> Result<()> {
     } else {
         App::opening(path.clone())
     };
+    app.show_opencode_tabs = tabs_only || tabs_mono;
     if !tabs_only {
         let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
         app.configure_media_picker(picker, auto_kitty_supported());
@@ -286,27 +309,42 @@ fn main() -> Result<()> {
             )
         };
         diagnostics::event(format!(
-            "restarting executable={} argument={}",
+            "restarting executable={} mode={} argument={}",
             executable.display(),
+            if tabs_only {
+                "tabs"
+            } else if tabs_mono {
+                "workspace-with-tabs"
+            } else {
+                "workspace"
+            },
             workspace
                 .as_deref()
                 .map_or("--tabs".to_owned(), |path| path.display().to_string())
         ));
-        let argument = workspace
-            .as_deref()
-            .unwrap_or(std::path::Path::new("--tabs"));
+        let mut command = Command::new(executable);
+        if tabs_only {
+            command.arg("--tabs");
+        } else {
+            if tabs_mono {
+                command.arg("--tabs-mono");
+            } else if no_tabs {
+                command.arg("--no-tabs");
+            }
+            command.arg(workspace.as_deref().expect("workspace mode has a path"));
+        }
         #[cfg(unix)]
         stdin_nonblocking.restore()?;
         diagnostics::shutdown();
         restore_terminal();
         #[cfg(unix)]
         {
-            let error = Command::new(executable).arg(argument).exec();
+            let error = command.exec();
             return Err(error.into());
         }
         #[cfg(not(unix))]
         {
-            Command::new(executable).arg(argument).spawn()?;
+            command.spawn()?;
             return Ok(());
         }
     }

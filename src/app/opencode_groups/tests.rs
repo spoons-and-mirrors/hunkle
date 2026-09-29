@@ -1,5 +1,131 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn opencode_tab_switch_follows_groups_without_status_updates_resetting_filters() {
+    use super::super::{Mode, opencode_presence::OpenCodePresence};
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::os::unix::fs::PermissionsExt;
+
+    for (tabs_only, show_tabs, width) in [(true, true, 49), (false, true, 120), (false, false, 120)]
+    {
+        for isolated in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let publication = directory.path().join("opencode-active.json");
+            let groups_path = directory.path().join("groups.json");
+            let mut snapshot = serde_json::json!({
+                "version": 1, "instanceID": "cli-a", "pid": std::process::id(),
+                "activeSessionID": "first", "directory": directory.path(),
+                "focusSocket": directory.path().join("focus.sock"),
+                "tabs": (["first", "second"].map(|id| serde_json::json!({
+                    "sessionID": id, "title": id, "directory": directory.path(),
+                    "active": id == "first", "busy": false, "attention": false,
+                }))),
+            });
+            atomic_write(&publication, snapshot.to_string().as_bytes()).unwrap();
+            let mut app = if tabs_only {
+                App::tabs_only(directory.path().to_path_buf())
+            } else {
+                App::new(directory.path().to_path_buf())
+            };
+            app.mode = Mode::Normal;
+            app.show_opencode_tabs = show_tabs;
+            app.opencode_presence = OpenCodePresence::at_for_test(publication.clone());
+            app.opencode_groups = OpenCodeGroups::load(Some(groups_path.clone()));
+            app.opencode_groups.catalog.groups.extend([
+                Group {
+                    id: 2,
+                    name: "Build".into(),
+                },
+                Group {
+                    id: 3,
+                    name: "Review".into(),
+                },
+            ]);
+            app.opencode_groups
+                .catalog
+                .assignments
+                .insert("second".into(), 2);
+            app.opencode_groups.catalog.hidden = BTreeSet::from([2, 3]);
+            app.opencode_groups.catalog.solo = isolated.then_some(1);
+            app.opencode_groups.save().unwrap();
+            let poll = |app: &mut App| {
+                if tabs_only {
+                    app.poll_tabs_only()
+                } else {
+                    app.poll_worker()
+                }
+            };
+            let draw = |terminal: &mut Terminal<TestBackend>, app: &mut App| {
+                terminal
+                    .draw(|frame| {
+                        if tabs_only {
+                            crate::ui::draw_tabs_only(frame, app)
+                        } else {
+                            crate::ui::draw(frame, app)
+                        }
+                    })
+                    .unwrap();
+            };
+            let target = HitTarget::OpenCodeTab {
+                instance_id: "cli-a".into(),
+                session_id: "second".into(),
+            };
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, if tabs_only { 5 } else { 24 })).unwrap();
+            draw(&mut terminal, &mut app);
+            assert!(app.regions.hit_target_rect(target.clone()).is_none());
+
+            // A tab switch between sessions in the same directory must follow the group too.
+            snapshot["activeSessionID"] = "second".into();
+            snapshot["tabs"][0]["active"] = false.into();
+            snapshot["tabs"][1]["active"] = true.into();
+            atomic_write(&publication, snapshot.to_string().as_bytes()).unwrap();
+            assert!(poll(&mut app));
+            draw(&mut terminal, &mut app);
+            assert_eq!(app.regions.hit_target_rect(target).is_some(), show_tabs);
+            assert_eq!(app.opencode_groups.visible(2), show_tabs);
+            assert!(!app.opencode_groups.visible(3));
+            assert_eq!(
+                app.opencode_groups.catalog.solo,
+                isolated.then_some(if show_tabs { 2 } else { 1 })
+            );
+            let saved = OpenCodeGroups::load(Some(groups_path.clone()));
+            assert_eq!(saved.visible(2), show_tabs);
+            assert_eq!(saved.catalog.hidden.contains(&2), isolated || !show_tabs);
+            if tabs_only {
+                assert!(app.repository().is_none());
+                assert!(app.pending_workspace_open.is_none());
+            }
+
+            // Browsing another group must survive redraws, status/title changes and tab reorders.
+            app.opencode_groups.catalog.solo = isolated.then_some(1);
+            app.opencode_groups.catalog.hidden.insert(2);
+            snapshot["tabs"][1]["title"] = "Renamed".into();
+            snapshot["tabs"][1]["busy"] = true.into();
+            snapshot["tabs"].as_array_mut().unwrap().reverse();
+            atomic_write(&publication, snapshot.to_string().as_bytes()).unwrap();
+            poll(&mut app);
+            draw(&mut terminal, &mut app);
+            assert!(!app.opencode_groups.visible(2));
+            assert_eq!(app.opencode_groups.catalog.solo, isolated.then_some(1));
+
+            // Selection follows even before OpenCode has hydrated the destination directory.
+            snapshot["directory"] = serde_json::Value::Null;
+            snapshot["activeSessionID"] = "first".into();
+            snapshot["tabs"][0]["active"] = false.into();
+            snapshot["tabs"][1]["active"] = true.into();
+            app.opencode_groups.catalog.solo = isolated.then_some(2);
+            app.opencode_groups.catalog.hidden.insert(1);
+            atomic_write(&publication, snapshot.to_string().as_bytes()).unwrap();
+            poll(&mut app);
+            assert_eq!(app.opencode_groups.visible(1), show_tabs);
+            app.shutdown();
+        }
+    }
+}
+
 #[test]
 fn opencode_groups_reorder_by_drag_without_changing_identity_or_filters() {
     use super::super::{Mode, opencode_tabs::OpenCodeTab};
@@ -31,6 +157,7 @@ fn opencode_groups_reorder_by_drag_without_changing_identity_or_filters() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("groups.json");
         let mut app = App::new(directory.path().to_path_buf());
+        app.show_opencode_tabs = true;
         app.mode = Mode::Normal;
         app.opencode_groups = OpenCodeGroups::load(Some(path.clone()));
         app.opencode_groups.catalog.groups.extend([
@@ -294,6 +421,7 @@ fn opencode_groups_support_creation_rename_drop_and_filters_at_both_widths() {
         atomic_write(&publication, snapshot.to_string().as_bytes()).unwrap();
         let groups_path = directory.path().join("groups.json");
         let mut app = App::new(directory.path().to_path_buf());
+        app.show_opencode_tabs = true;
         app.mode = super::super::Mode::Normal;
         app.opencode_presence = OpenCodePresence::at_for_test(publication.clone());
         app.opencode_groups = OpenCodeGroups::load(Some(groups_path.clone()));

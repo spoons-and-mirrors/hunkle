@@ -26,6 +26,8 @@ cargo run -p hunkle
 cargo run -p hunkle -- /path/to/repository
 cargo run -p hunkle -- /path/to/file.json
 cargo run -p hunkle -- --tabs
+cargo run -p hunkle -- --tabs-mono
+cargo run -p hunkle -- --no-tabs
 ```
 
 Hunkle opens exactly the requested path. A Git repository root enables status,
@@ -35,13 +37,20 @@ climb into an enclosing repository. Passing a file opens its parent workspace
 and selects the file.
 
 `hunkle --tabs` opens a compact OpenCode tab-manager widget: group labels, a blank
-row, cards and session names, and the active separator—no repository header,
-workspace, or footer. Give its terminal pane at least **20 columns × 6 rows**;
-the widget uses only the first six rows if the pane is taller. It mirrors the
-same CLI and saved groups as full Hunkle, including click-to-focus, drag/drop,
-group isolation, and hover + F2 rename. It waits for OpenCode if no tabs are
-open, never opens a repository or starts an OpenCode server, and ignores
-workspace-follow events. Press `q` or `Ctrl+C` to exit.
+row, cards, and session names—no repository header, workspace, or footer. Give
+its terminal pane at least **20 columns × 5 rows**. A sixth row shows the active
+separator; at five rows only that separator is cropped. Taller panes leave the
+remaining space blank. The widget mirrors the same CLI and saved groups as full
+Hunkle, including click-to-focus, drag/drop, group isolation, and hover + F2
+rename. It waits for OpenCode if no tabs are open, never opens a repository or
+starts an OpenCode server, and ignores workspace-follow events. Press `q` or
+`Ctrl+C` to exit.
+
+By default, `hunkle` (or `hunkle /path/to/repository`) opens the normal workspace
+without the OpenCode strip. `--no-tabs [path]` remains an explicit alias.
+`hunkle --tabs-mono [path]` opens the workspace **with** the strip above it. Both
+workspace modes still follow OpenCode tab switches, so `hunkle --tabs` and a
+plain `hunkle` can live in separate panes.
 
 Install a development build for the current checkout with:
 
@@ -84,13 +93,15 @@ To follow OpenCode V2 CLI tabs, add the local CLI-only plugin to
 `~/code/ocplugins/hunkle-sync` is a symlink to this repository's
 `plugins/opencode-hunkle`, which is the source of truth for the plugin.
 
-With OpenCode tabs enabled, Hunkle shows two-row cards with repository and branch,
+In `--tabs` or `--tabs-mono` mode, Hunkle shows two-row cards with repository and branch,
 with the OpenCode session title beneath each card,
 active highlight, and busy/attention/unread indicators. Cards follow group order;
 within a group they initially follow OpenCode's tab order until rearranged locally.
 Scroll over the strip (or swipe horizontally on narrow screens) to see more tabs;
-switching tabs in OpenCode brings the active card into view (if its group is visible)
-and opens its project.
+switching tabs in OpenCode reveals the active card's group, brings the card into view,
+and opens its project. When a group is isolated, isolation follows the active session's
+group; otherwise, a hidden destination group is shown. Activity and title updates
+leave your group visibility choices alone.
 Click a card to focus that tab in OpenCode; Hunkle follows its confirmed selection.
 Hover a card and press **F2** to rename the actual OpenCode session. The editor
 starts with its current title; Enter/✓ sends the rename to OpenCode, Esc/× cancels,

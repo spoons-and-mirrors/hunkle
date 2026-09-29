@@ -19,7 +19,7 @@ pub(super) fn frame_areas(area: Rect, show_opencode_tabs: bool) -> [Rect; 5] {
     [layout[0], layout[1], layout[2], layout[3], layout[4]]
 }
 
-/// The compact composition contains only the OpenCode strip, through its divider.
+/// The compact composition keeps the full strip when possible and crops its divider at five rows.
 pub(super) fn tabs_widget_area(area: Rect) -> Rect {
     Rect::new(area.x, area.y, area.width, area.height.min(6))
 }

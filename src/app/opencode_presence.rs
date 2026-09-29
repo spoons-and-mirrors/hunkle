@@ -78,7 +78,7 @@ impl OpenCodePresence {
                     self.snapshot = None;
                     return OpenCodeUpdate {
                         changed: self.tabs.replace(Vec::new()),
-                        workspace: None,
+                        ..Default::default()
                     };
                 }
             }
@@ -86,6 +86,15 @@ impl OpenCodePresence {
         }
         self.seen = current;
         let mut snapshot = current.and_then(|_| self.read_snapshot());
+        let active_session = |snapshot: &Snapshot| {
+            (
+                snapshot.instance_id.clone(),
+                snapshot.active_session_id.clone(),
+            )
+        };
+        let active_session_changed = snapshot.as_ref().is_some_and(|next| {
+            self.snapshot.as_ref().map(active_session) != Some(active_session(next))
+        });
         let selection = |snapshot: &Snapshot| {
             (
                 snapshot.instance_id.clone(),
@@ -107,7 +116,11 @@ impl OpenCodePresence {
             self.snapshot.as_ref().map(publisher) != snapshot.as_ref().map(publisher);
         let changed = self.tabs.replace(items) || publisher_changed;
         self.snapshot = snapshot;
-        OpenCodeUpdate { changed, workspace }
+        OpenCodeUpdate {
+            changed,
+            active_session_changed,
+            workspace,
+        }
     }
 
     pub(crate) fn instance_id(&self) -> Option<&str> {

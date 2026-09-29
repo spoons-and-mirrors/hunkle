@@ -174,6 +174,7 @@ pub struct App {
     workspace_fetch_pending: bool,
     footer_marquee: Option<FooterMarquee>,
     tabs_only: bool,
+    pub(crate) show_opencode_tabs: bool,
 }
 
 impl App {
@@ -367,6 +368,7 @@ impl App {
             workspace_fetch_pending: false,
             footer_marquee: None,
             tabs_only,
+            show_opencode_tabs: tabs_only,
         };
         if !tabs_only {
             app.restore_commit_draft();
@@ -784,6 +786,9 @@ impl App {
     pub fn poll_tabs_only(&mut self) -> bool {
         debug_assert!(self.tabs_only);
         let update = self.opencode_presence.poll();
+        if update.active_session_changed {
+            self.follow_active_opencode_group();
+        }
         let mut changed = update.changed;
         if self.opencode_presence.tabs.items.is_empty() {
             changed |= self.opencode_groups.edit.take().is_some();
@@ -856,6 +861,9 @@ impl App {
         }
         changed |= self.follow_norm_workspace_changes();
         let opencode = self.opencode_presence.poll();
+        if opencode.active_session_changed && self.show_opencode_tabs {
+            self.follow_active_opencode_group();
+        }
         changed |= opencode.changed;
         if self.opencode_presence.tabs.items.is_empty() {
             changed |= self.opencode_groups.edit.take().is_some();
