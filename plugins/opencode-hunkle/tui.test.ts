@@ -1,5 +1,7 @@
 import { afterAll, expect, mock, test } from "bun:test"
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises"
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { readFileSync } from "node:fs"
+import type { Plugin } from "@opencode/plugin/tui"
 import { randomUUID } from "node:crypto"
 import { createConnection } from "node:net"
 import { tmpdir } from "node:os"
@@ -31,10 +33,13 @@ async function until(check: () => Promise<boolean>) {
 
 const snapshot = () => readFile(target, "utf8").then(JSON.parse).catch(() => undefined)
 
-function host(prefix: string) {
+function host(prefix: string, enabled = true) {
+  const start = effects.length
+  let end: number | undefined
+  const update = () => effects.slice(start, end).forEach((effect) => effect())
   const state = {
     active: `${prefix}-a`,
-    enabled: true,
+    enabled,
     tabs: [
       { sessionID: `${prefix}-a`, title: "First", active: true, busy: false, attention: false },
       { sessionID: `${prefix}-b`, title: "Second", active: false, busy: true, attention: false },
@@ -42,39 +47,93 @@ function host(prefix: string) {
     titles: {} as Record<string, string>,
     branches: { [`${prefix}-a`]: "main", [`${prefix}-b`]: "feature/b" } as Record<string, string>,
     renameError: false,
+    running: new Set<string>(),
+    permissions: new Set<string>(),
+    forms: new Set<string>(),
+    pending: {} as Record<string, Array<{ type: string }>>,
+    parents: {} as Record<string, string>,
+    time: {} as Record<string, { idle?: number; viewed?: number }>,
+    failed: new Set<string>(),
+    missing: new Set<string>(),
+    offline: false,
   }
-  const focused: string[] = []
-  const renamed: Array<{ sessionID: string; title: string }> = []
-  const errors: string[] = []
-  const cleanup = plugin.setup({
-    ui: {
-      slot: ({ render }: { render: () => void }) => { render(); return () => {} },
-      toast: { show: ({ message }: { message: string }) => errors.push(message) },
-      router: { current: () => state.active ? { type: "session", sessionID: state.active } : { type: "home" } },
-      tabs: {
-        enabled: () => state.enabled, list: () => state.tabs,
-        focus: (id: string) => { focused.push(id); select(id) },
-      },
-    },
-    client: { session: { update: async ({ sessionID, title }: { sessionID: string; title: string }) => {
-      if (state.renameError) throw new Error("server rejected rename")
-      renamed.push({ sessionID, title })
-      state.titles[sessionID] = title
-      update()
-    } } },
-    data: { session: {
-      get: (id: string) => ({ projectID: "project", title: state.titles[id], location: { directory: `/projects/${id}` } }),
-      sync: () => Promise.reject(new Error("Cached tabs should not trigger API calls")),
-    }, project: { get: () => ({ name: "Repository", canonical: "/projects/repository" }) },
-    location: { vcs: { info: ({ directory }: { directory: string }) => ({ branch: { current: state.branches[directory.split("/").at(-1)!] } }) } } },
-  })
-  const update = effects.at(-1)!
   const select = (id: string) => {
     state.active = id
     state.tabs.forEach((tab) => { tab.active = tab.sessionID === id })
     update()
   }
-  return { state, update, select, cleanup, focused, renamed, errors }
+  const focused: string[] = []
+  const renamed: Array<{ sessionID: string; title: string }> = []
+  const errors: string[] = []
+  const synced: string[] = []
+  const commands: Array<{ id: string; run: () => void }> = []
+  const events = new Map<string, (event: { data: { sessionID: string } }) => void>()
+  const catalogPath = join(runtime, `${prefix}-tabs.json`)
+  let writes = Promise.resolve()
+  const catalog = (() => {
+    try { return JSON.parse(readFileSync(catalogPath, "utf8")) }
+    catch { return { initialized: false, tabs: [] } }
+  })()
+  const cleanup = plugin.setup({
+    storage: { store: () => [catalog, (mutation: (draft: typeof catalog) => void) => {
+      writes = writes.then(async () => {
+        const draft = await readFile(catalogPath, "utf8").then(JSON.parse).catch(() => ({ initialized: false, tabs: [] }))
+        mutation(draft)
+        await writeFile(catalogPath, JSON.stringify(draft))
+        Object.assign(catalog, draft)
+        update()
+      })
+      return writes
+    }] },
+    keymap: { layer: (get: () => { commands: typeof commands }) => commands.push(...get().commands) },
+    ui: {
+      slot: ({ render }: { render: () => void }) => { render(); return () => {} },
+      toast: { show: ({ message }: { message: string }) => errors.push(message) },
+      router: {
+        current: () => state.active ? { type: "session", sessionID: state.active } : { type: "home" },
+        navigate: (route: { type: string; sessionID?: string }) => {
+          if (route.sessionID) focused.push(route.sessionID)
+          select(route.sessionID ?? "")
+        },
+      },
+      tabs: {
+        enabled: () => state.enabled, list: () => state.tabs,
+        focus: () => { throw new Error("Use the public router, not the gated tabs API") },
+      },
+    },
+    client: { session: { list: async () => ({ data: [] }), update: async ({ sessionID, title }: { sessionID: string; title: string }) => {
+      if (state.renameError) throw new Error("server rejected rename")
+      renamed.push({ sessionID, title })
+      state.titles[sessionID] = title
+      update()
+    } } },
+    data: { on: (type: string, fn: (event: { data: { sessionID: string } }) => void) => {
+      events.set(type, fn)
+      return () => { events.delete(type) }
+    }, session: {
+      get: (id: string) => state.missing.has(id) ? undefined : ({ projectID: "project", title: state.titles[id],
+        location: { directory: `/projects/${id}` }, time: state.time[id] ?? {}, outcome: state.failed.has(id) ? "failed" : "completed" }),
+      root: (id: string) => state.parents[id] ?? id,
+      family: (id: string) => Object.keys(state.parents).filter((child) => state.parents[child] === id),
+      status: (id: string) => state.running.has(id) ? "running" : "idle",
+      pending: { list: (id: string) => state.pending[id] ?? [], sync: async () => {} },
+      permission: { list: (id: string) => state.permissions.has(id) ? [{}] : [], sync: async () => {} },
+      form: { list: (id: string) => state.forms.has(id) ? [{}] : [], sync: async () => {} },
+      sync: async (id: string) => {
+        synced.push(id)
+        if (state.offline) throw new Error("Disconnected")
+        if (state.missing.has(id)) throw { _tag: "SessionNotFoundError" }
+      },
+    }, project: { get: () => ({ name: "Repository", canonical: "/projects/repository" }) },
+    location: { sync: async () => {}, vcs: { sync: async () => {}, info: ({ directory }: { directory: string }) => ({ branch: { current: state.branches[directory.split("/").at(-1)!] } }) } } },
+  } as unknown as Plugin.Context) as () => void
+  end = effects.length
+  return { state, update, select, cleanup, focused, renamed, errors, synced, catalogPath, commands,
+    emit: (type: string, sessionID = "") => { events.get(type)?.({ data: { sessionID } }); update() },
+    command: (id: string) => commands.find((command) => command.id === id)!.run(),
+    flush: async () => { await writes },
+    reload: async () => { Object.assign(catalog, await readFile(catalogPath, "utf8").then(JSON.parse)); update() },
+  }
 }
 
 test("mirrors tab changes, coalesces switches, respects the selected CLI, and cleans up", async () => {
@@ -125,7 +184,8 @@ test("mirrors tab changes, coalesces switches, respects the selected CLI, and cl
     await until(async () => (await snapshot())?.tabs.length === 1)
     first.state.enabled = false
     first.update()
-    await until(async () => (await snapshot())?.tabs.length === 0)
+    await until(async () => (await readFile(first.catalogPath, "utf8").then(JSON.parse).catch(() => undefined))?.initialized)
+    expect((await snapshot()).tabs.length).toBe(1)
 
     second.cleanup()
     expect(await snapshot()).toBeDefined()
@@ -198,15 +258,145 @@ test("tab requests target one CLI, rename sessions, and never reopen closed tabs
     await Bun.sleep(25)
     expect(second.renamed).toEqual([])
     second.state.enabled = false
+    second.update()
+    await until(async () => (await readFile(second!.catalogPath, "utf8").then(JSON.parse).catch(() => undefined))?.initialized)
     await publish(request(secondID, "click-a"))
-    await Bun.sleep(25)
-    expect(second.focused).toEqual(["click-b"])
+    await until(async () => second!.focused.length === 2)
+    expect(second.focused).toEqual(["click-b", "click-a"])
 
     second.cleanup()
     await expect(publish(request(secondID, "click-a"))).rejects.toThrow()
-    expect(second.focused).toEqual(["click-b"])
+    expect(second.focused).toEqual(["click-b", "click-a"])
   } finally {
     first.cleanup()
     second?.cleanup()
   }
+})
+
+test("external tabs follow routes, survive restart, close without deletion, and publish family status", async () => {
+  let cli = host("external", false)
+  try {
+    await until(async () => (await snapshot())?.tabs.length === 2)
+    cli.select("external-c")
+    await until(async () => (await snapshot())?.tabs.length === 3)
+    expect((await snapshot()).tabs.map((tab: { sessionID: string }) => tab.sessionID)).toEqual(["external-a", "external-b", "external-c"])
+    expect(cli.state.tabs.length).toBe(2) // Native tabs are disabled and never updated.
+
+    cli.state.parents["child"] = "external-b"
+    cli.state.running.add("child")
+    cli.state.forms.add("child")
+    cli.state.time["external-b"] = { idle: 20, viewed: 10 }
+    cli.state.failed.add("external-b")
+    cli.update()
+    await until(async () => (await snapshot())?.tabs[1]?.unread === "error")
+    expect((await snapshot()).tabs[1]).toMatchObject({ busy: true, attention: true, active: false })
+    cli.state.running.clear()
+    cli.state.forms.clear()
+    cli.state.permissions.add("external-b")
+    cli.state.pending["external-b"] = [{ type: "synthetic" }]
+    cli.state.time["external-b"] = { idle: 20, viewed: 20 }
+    cli.update()
+    await until(async () => (await snapshot())?.tabs[1]?.busy === false)
+    expect((await snapshot()).tabs[1]).toMatchObject({ attention: true })
+    expect((await snapshot()).tabs[1].unread).toBeUndefined()
+    cli.state.pending["external-b"] = [{ type: "user" }]
+    cli.update()
+    await until(async () => (await snapshot())?.tabs[1]?.busy === true)
+
+    cli.select("child")
+    await until(async () => (await snapshot())?.activeSessionID === "child")
+    expect((await snapshot()).tabs.length).toBe(3)
+    expect((await snapshot()).tabs[1].active).toBe(true)
+    cli.command("hunkle.tab.next")
+    await until(async () => (await snapshot())?.activeSessionID === "external-c")
+    cli.command("hunkle.tab.previous")
+    await until(async () => (await snapshot())?.activeSessionID === "external-b")
+    cli.command("hunkle.tab.close")
+    await until(async () => (await snapshot())?.tabs.length === 2)
+    expect((await snapshot()).activeSessionID).toBe("external-c")
+    cli.update()
+    await cli.flush()
+    cli.cleanup()
+
+    cli = host("external", false)
+    await until(async () => (await snapshot())?.directory === "/projects/external-a")
+    expect((await snapshot()).tabs.map((tab: { sessionID: string }) => tab.sessionID)).toEqual(["external-a", "external-c"])
+    // The old native saved list must not resurrect the closed external-b card.
+    cli.select("external-b")
+    await until(async () => (await snapshot())?.tabs.length === 3)
+    cli.emit("session.deleted", "external-b")
+    await until(async () => (await snapshot())?.tabs.length === 2)
+    expect((await snapshot()).activeSessionID).toBe("external-c")
+
+    cli.state.missing.add("external-a")
+    cli.state.offline = true
+    cli.emit("server.connected")
+    await Bun.sleep(25)
+    expect((await snapshot()).tabs.length).toBe(2)
+    cli.state.offline = false
+    cli.emit("server.connected")
+    await until(async () => (await snapshot())?.tabs.length === 1)
+    cli.command("hunkle.tab.close")
+    await until(async () => (await snapshot())?.tabs.length === 0)
+    expect((await snapshot()).activeSessionID).toBeUndefined()
+    expect(cli.errors).toEqual([])
+  } finally { await cli.flush(); cli.cleanup() }
+})
+
+test("external socket focus and rename validate membership and publisher identity", async () => {
+  const cli = host("external-socket", false)
+  try {
+    await until(async () => (await snapshot())?.directory === "/projects/external-socket-a" && (await snapshot())?.tabs.length === 2)
+    const publication = await snapshot()
+    const request = async (sessionID: string, extra = {}) => {
+      await new Promise<void>((resolve, reject) => {
+        const socket = createConnection(publication.focusSocket)
+        socket.on("connect", () => socket.end(JSON.stringify({ version: 1, instanceID: publication.instanceID, sessionID, requestID: randomUUID(), ...extra }) + "\n"))
+        socket.on("close", resolve)
+        socket.on("error", reject)
+      })
+    }
+    await request("external-socket-b")
+    await until(async () => (await snapshot())?.activeSessionID === "external-socket-b")
+    await request("external-socket-b", { action: "rename", title: "External title" })
+    await until(async () => (await snapshot())?.tabs[1]?.title === "External title")
+    cli.command("hunkle.tab.close")
+    await until(async () => (await snapshot())?.tabs.length === 1)
+    const count = cli.focused.length
+    await request("external-socket-b")
+    await request("external-socket-b", { action: "rename", title: "Closed" })
+    await request("external-socket-a", { instanceID: "stale" })
+    await Bun.sleep(25)
+    expect(cli.focused.length).toBe(count)
+    expect(cli.renamed).toEqual([{ sessionID: "external-socket-b", title: "External title" }])
+  } finally { await cli.flush(); cli.cleanup() }
+})
+
+test("shared external storage can reopen cards without route watchers undoing remote closes", async () => {
+  const cli = host("shared", false)
+  try {
+    await until(async () => (await snapshot())?.tabs.length === 2)
+    cli.command("hunkle.tab.close")
+    await until(async () => (await snapshot())?.tabs.length === 1)
+    await cli.flush()
+    const saved = await readFile(cli.catalogPath, "utf8").then(JSON.parse)
+    saved.tabs.push({ sessionID: "shared-a" })
+    await writeFile(cli.catalogPath, JSON.stringify(saved))
+    await cli.reload() // OpenCode's storage watcher delivers another CLI's edit.
+    await until(async () => (await snapshot())?.tabs.length === 2)
+    expect((await snapshot()).tabs.map((tab: { sessionID: string }) => tab.sessionID)).toEqual(["shared-b", "shared-a"])
+
+    saved.tabs = saved.tabs.filter((tab: { sessionID: string }) => tab.sessionID !== "shared-b")
+    await writeFile(cli.catalogPath, JSON.stringify(saved))
+    await cli.reload()
+    await until(async () => (await snapshot())?.tabs.length === 1)
+    expect((await snapshot()).activeSessionID).toBe("shared-b")
+    cli.state.running.add("shared-b")
+    cli.update()
+    await cli.flush()
+    expect((await readFile(cli.catalogPath, "utf8").then(JSON.parse)).tabs.length).toBe(1)
+    cli.select("shared-a")
+    cli.select("shared-b")
+    await until(async () => (await snapshot())?.tabs.length === 2)
+  } finally { await cli.flush(); cli.cleanup() }
 })

@@ -5,6 +5,7 @@ import { readFileSync, unlinkSync } from "node:fs"
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
+import { createTabs } from "./tabs"
 
 // Display-only tab data and the active workspace, published only when they change.
 const uid = process.geteuid?.() ?? process.getuid?.() ?? 0
@@ -26,14 +27,15 @@ export default Plugin.define({
     let listener: ReturnType<typeof Bun.listen<string>> | undefined
     let lastFocus: string | undefined
     let lastRename: string | undefined
+    let tabs: ReturnType<typeof createTabs> | undefined
 
     function handleTabRequest(json: string) {
       if (disposed || json === lastFocus || json === lastRename) return
       let request: { version?: number; instanceID?: string; sessionID?: string; action?: string; title?: string }
       try { request = JSON.parse(json) } catch { return }
-      if (request.version !== 1 || request.instanceID !== instanceID || !context.ui.tabs.enabled()) return
+      if (request.version !== 1 || request.instanceID !== instanceID) return
       // Never open or rename a tab that is no longer in this CLI.
-      if (typeof request.sessionID !== "string" || !context.ui.tabs.list().some((tab) => tab.sessionID === request.sessionID)) return
+      if (typeof request.sessionID !== "string" || !tabs?.list().some((tab) => tab.sessionID === request.sessionID)) return
       try {
         if (request.action === "rename") {
           lastRename = json
@@ -42,7 +44,7 @@ export default Plugin.define({
             .catch((error: unknown) => context.ui.toast.show({ message: `Could not rename session: ${error}`, variant: "error" }))
         } else if (request.action === "focus" || request.action === undefined) {
           lastFocus = json
-          context.ui.tabs.focus(request.sessionID)
+          context.ui.router.navigate({ type: "session", sessionID: request.sessionID })
         }
       } catch (error) {
         context.ui.toast.show({ message: `Could not handle Hunkle tab request: ${error}`, variant: "error" })
@@ -114,27 +116,29 @@ export default Plugin.define({
     const remove = context.ui.slot({
       append: "app",
       render: () => {
+        tabs?.dispose()
+        const openTabs = tabs = createTabs(context, createEffect)
         createEffect(() => {
           const route = context.ui.router.current()
           const activeSessionID = route.type === "session" ? route.sessionID : undefined
           const path = activeSessionID ? workspace(activeSessionID) : undefined
-           const tabs = context.ui.tabs.enabled() ? context.ui.tabs.list().map((tab) => {
-             const path = workspace(tab.sessionID)
-             const session = context.data.session.get(tab.sessionID)
-             const project = session && context.data.project.get(session.projectID)
-             return {
-               sessionID: tab.sessionID,
-               title: session?.title || tab.title || "New session",
-               directory: path,
-               project: project?.name || (project?.canonical ? basename(project.canonical) : path ? basename(path) : undefined),
-               branch: session && context.data.location.vcs.info(session.location)?.branch.current,
-               active: Boolean(activeSessionID) && tab.active,
-               busy: tab.busy,
-               attention: tab.attention,
-               unread: tab.unread,
-             }
-           }) : []
-          const json = JSON.stringify({ version: 1, instanceID, pid: process.pid, focusSocket, activeSessionID, directory: path, tabs })
+          const cards = openTabs.list().map((tab) => {
+            const path = workspace(tab.sessionID)
+            const session = context.data.session.get(tab.sessionID)
+            const project = session && context.data.project.get(session.projectID)
+            return {
+              sessionID: tab.sessionID,
+              title: session?.title || tab.title || "New session",
+              directory: path,
+              project: project?.name || (project?.canonical ? basename(project.canonical) : path ? basename(path) : undefined),
+              branch: session && context.data.location.vcs.info(session.location)?.branch.current,
+              active: Boolean(activeSessionID) && tab.active,
+              busy: tab.busy,
+              attention: tab.attention,
+              unread: tab.unread,
+            }
+          })
+          const json = JSON.stringify({ version: 1, instanceID, pid: process.pid, focusSocket, activeSessionID, directory: path, tabs: cards })
           if (json !== desired?.json) {
             desired = { json, selection: `${activeSessionID ?? ""}\0${path ?? ""}` }
             void flush()
@@ -145,6 +149,7 @@ export default Plugin.define({
     })
     return () => {
       disposed = true
+      tabs?.dispose()
       listener?.stop(true)
       try { unlinkSync(focusSocket) } catch {}
       remove()
