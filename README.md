@@ -69,8 +69,11 @@ To follow OpenCode V2 CLI tabs, add the local CLI-only plugin to your V2
 keep any existing settings):
 
 ```json
-"plugins": [{ "package": "/absolute/path/to/hunkle/plugins/opencode-hunkle" }]
+"plugins": [{ "package": "/home/spoon/code/ocplugins/hunkle-sync" }]
 ```
+
+`~/code/ocplugins/hunkle-sync` is a symlink to this repository's
+`plugins/opencode-hunkle`, which is the source of truth for the plugin.
 
 With OpenCode tabs enabled, switching to a session tab publishes its workspace
 to `$XDG_RUNTIME_DIR/hunkle/opencode-active.json` (or
